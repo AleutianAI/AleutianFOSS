@@ -417,6 +417,35 @@ func (p *ReflectPhase) looksComplete(input *ReflectionInput) bool {
 		}
 	}
 
+	// Phase 11C: Fix "tool-only mode" detection (Feb 14, 2026)
+	// Original P0-1 incorrectly checked tool results instead of LLM responses.
+	// Now checks LastResponse for tool call patterns with minimal narrative.
+	if input.LastResponse != "" && len(input.RecentResults) >= 2 {
+		// Check if last LLM response has tool calls but minimal explanatory text
+		lastRespLower := strings.ToLower(input.LastResponse)
+
+		// Tool call indicators in LLM response
+		hasToolCall := strings.Contains(lastRespLower, "<tool_call>") ||
+					   strings.Contains(lastRespLower, "</tool_call>") ||
+					   strings.Contains(lastRespLower, "tool_calls")
+
+		// Remove tool call XML to count actual narrative text
+		narrativeText := input.LastResponse
+		if idx := strings.Index(narrativeText, "<tool_call>"); idx >= 0 {
+			narrativeText = narrativeText[:idx]
+		}
+		narrativeText = strings.TrimSpace(narrativeText)
+
+		// If LLM has tool calls but <20 chars of narrative, it's tool-only mode
+		if hasToolCall && len(narrativeText) < 20 {
+			slog.Debug("Phase 11C: Detected tool-only mode - LLM calling tools with minimal narrative",
+				slog.Int("narrative_chars", len(narrativeText)),
+				slog.Int("response_chars", len(input.LastResponse)),
+				slog.String("narrative_preview", narrativeText))
+			return true
+		}
+	}
+
 	// If all recent results are successful and there's substantial progress
 	if len(input.RecentResults) >= 3 {
 		allSuccessful := true

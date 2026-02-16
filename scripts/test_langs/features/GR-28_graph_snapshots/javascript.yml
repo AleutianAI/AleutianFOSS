@@ -1,0 +1,51 @@
+# GR-28: Graph Snapshots Tests (JavaScript Language)
+#
+# Verifies that graph state is captured correctly in CRS events for JavaScript code.
+# Tests graph provider snapshot, event context, and generation tracking.
+
+metadata:
+  feature: GR-28
+  title: "Graph Snapshots"
+  language: javascript
+  project: express
+  ticket: tickets/merged/GR-28_graph_snapshots.md
+  description: >
+    Tests CRS graph snapshot functionality on JavaScript code. Verifies that
+    call graphs for JS modules, exports, and require statements are captured
+    in CRS events and can be reused without rebuilding.
+
+tests:
+  - id: 207
+    name: js_snapshot_create
+    category: GRAPH
+    description: >
+      Build JavaScript call graph and verify snapshot is created.
+      This query should trigger graph construction for Express codebase
+      and create a snapshot in CRS event context.
+    query: |
+      Find all callers of the express() application factory
+    expected_state: COMPLETE
+    validations: []
+
+  - id: 208
+    name: js_event_context
+    category: GRAPH
+    description: >
+      Verify graph context in events for JavaScript code.
+      This internal test checks that CRS events contain JS-specific
+      graph snapshots (modules, exports, middleware).
+    query: INTERNAL:verify_event_graph_context
+    expected_state: COMPLETE
+    validations: []
+
+  - id: 209
+    name: js_generation_track
+    category: GRAPH
+    description: >
+      Verify graph generation tracking for JavaScript module.exports.
+      Each graph modification should increment the generation counter.
+    query: |
+      Find which modules require the Router from express
+    expected_state: COMPLETE
+    validations:
+      - type: generation_incremented

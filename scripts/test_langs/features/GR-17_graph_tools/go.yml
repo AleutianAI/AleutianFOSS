@@ -1,0 +1,200 @@
+# GR-17: Graph Tools Tests (Go Language)
+#
+# Verifies that graph analysis tools are properly exposed and integrated.
+# Tests tool invocation, parameters, and CRS recording.
+
+metadata:
+  feature: GR-17
+  title: "Graph Analysis Tools"
+  language: go
+  project: orchestrator
+  ticket: tickets/merged/GR-17_graph_tools.md
+  description: >
+    Tests CRS graph tool integration for Go code. Verifies that specialized
+    graph analysis tools (find_articulation_points, find_dominators,
+    find_merge_points, find_loops, find_common_dependency,
+    find_control_dependencies, find_extractable_regions) are properly
+    exposed and work correctly.
+
+tests:
+  - id: 91
+    name: find_articulation_basic
+    category: FIND_ARTICULATION
+    description: >
+      Basic find_articulation_points tool query.
+      This tool should identify single points of failure in the call graph
+      using Tarjan's articulation point algorithm.
+    query: |
+      What are the single points of failure in this codebase?
+    expected_state: COMPLETE
+    validations:
+      - type: find_articulation_points_tool_used
+
+  - id: 92
+    name: find_articulation_bridges
+    category: FIND_ARTICULATION
+    description: >
+      find_articulation_points with include_bridges parameter.
+      Should find both articulation points (nodes) and bridges (edges)
+      whose removal would disconnect the graph.
+    query: |
+      Find critical bottleneck functions and the critical edges connecting them
+    expected_state: COMPLETE
+    validations:
+      - type: find_articulation_points_bridges
+
+  - id: 94
+    name: find_dominators_basic
+    category: FIND_DOMINATORS
+    description: >
+      Basic find_dominators tool query.
+      This tool should find all functions that dominate a target function
+      using the Cooper-Harvey-Kennedy algorithm.
+    query: |
+      What functions dominate the NewUploadFromAPI function?
+    expected_state: COMPLETE
+    validations:
+      - type: find_dominators_tool_used
+
+  - id: 95
+    name: find_dominators_tree
+    category: FIND_DOMINATORS
+    description: >
+      find_dominators with show_tree parameter.
+      Should return the dominator tree structure starting from the
+      specified entry point.
+    query: |
+      Show the dominator tree starting from main
+    expected_state: COMPLETE
+    validations:
+      - type: find_dominators_tree
+
+  - id: 97
+    name: find_merge_points_basic
+    category: FIND_MERGE_POINTS
+    description: >
+      Basic find_merge_points tool query.
+      This tool should find convergence points where different control
+      flow paths merge (dominance frontier).
+    query: |
+      Where do different code paths converge in this codebase?
+    expected_state: COMPLETE
+    validations:
+      - type: find_merge_points_tool_used
+
+  - id: 98
+    name: find_merge_points_sources
+    category: FIND_MERGE_POINTS
+    description: >
+      find_merge_points with specific sources.
+      Should find merge points for specific starting functions
+      (e.g., where Handler and Middleware converge).
+    query: |
+      Find merge points for Handler and Middleware functions
+    expected_state: COMPLETE
+    validations:
+      - type: find_merge_points_sources
+
+  - id: 100
+    name: find_loops_basic
+    category: FIND_LOOPS
+    description: >
+      Basic find_loops tool query.
+      This tool should detect natural loops (back edges in the CFG)
+      and recursive call patterns.
+    query: |
+      Find recursive functions and call loops in this codebase
+    expected_state: COMPLETE
+    validations:
+      - type: find_loops_tool_used
+
+  - id: 101
+    name: find_loops_min_size
+    category: FIND_LOOPS
+    description: >
+      find_loops with min_size parameter.
+      Should find mutual recursion patterns with at least N functions
+      involved in the cycle.
+    query: |
+      Find mutual recursion patterns with at least 2 functions involved
+    expected_state: COMPLETE
+    validations:
+      - type: find_loops_min_size
+
+  - id: 103
+    name: find_common_dependency_basic
+    category: FIND_COMMON_DEPENDENCY
+    description: >
+      Basic find_common_dependency tool query.
+      This tool should find the lowest common dominator (LCD) of two
+      functions, representing their shared dependency.
+    query: |
+      What is the common dependency between Handler and Middleware functions?
+    expected_state: COMPLETE
+    validations:
+      - type: find_common_dependency_tool_used
+
+  - id: 104
+    name: find_common_dependency_entry
+    category: FIND_COMMON_DEPENDENCY
+    description: >
+      find_common_dependency with entry point.
+      Should find the LCD relative to a specific entry point
+      (e.g., main) rather than the global entry.
+    query: |
+      Find the lowest common dominator of Parser and Writer from main
+    expected_state: COMPLETE
+    validations:
+      - type: find_common_dependency_entry
+
+  - id: 106
+    name: find_control_deps_basic
+    category: FIND_CONTROL_DEPS
+    description: >
+      Basic find_control_dependencies tool query.
+      This tool should identify which conditionals control whether
+      a target function executes.
+    query: |
+      What conditionals control whether HandleRequest executes
+    expected_state: COMPLETE
+    validations:
+      - type: find_control_deps_tool_used
+
+  - id: 107
+    name: find_control_deps_depth
+    category: FIND_CONTROL_DEPS
+    description: >
+      find_control_dependencies with depth parameter.
+      Should limit the search depth for control dependencies
+      (useful for large codebases).
+    query: |
+      Show control dependencies for Process function with depth 3
+    expected_state: COMPLETE
+    validations:
+      - type: find_control_deps_depth
+
+  - id: 109
+    name: find_extractable_basic
+    category: FIND_EXTRACTABLE
+    description: >
+      Basic find_extractable_regions tool query.
+      This tool should find Single-Entry Single-Exit (SESE) regions
+      that can be safely extracted into separate functions.
+    query: |
+      Find code regions that can be safely extracted into separate functions
+    expected_state: COMPLETE
+    validations:
+      - type: find_extractable_tool_used
+
+  - id: 110
+    name: find_extractable_size
+    category: FIND_EXTRACTABLE
+    description: >
+      find_extractable_regions with size parameters.
+      Should find SESE regions within a specific size range
+      (e.g., 5-30 nodes for reasonable refactoring candidates).
+    query: |
+      Find extractable regions between 5 and 30 nodes in size
+    expected_state: COMPLETE
+    validations:
+      - type: find_extractable_size

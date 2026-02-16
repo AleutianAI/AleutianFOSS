@@ -1,0 +1,547 @@
+# TOOL-HAPPY-EXPRESS: Tool Happy Path Tests (JavaScript - Express)
+#
+# One happy-path test per registered tool against the Express.js web framework.
+# Tests 7000-7022: Registered tools (expected_state: COMPLETE)
+# Tests 7023-7039: Unregistered/TODO tools (expected_state: COMPLETE)
+
+metadata:
+  feature: TOOL-HAPPY-EXPRESS
+  title: "Tool Happy Path - Express"
+  language: javascript
+  project: express
+  ticket: tickets/in_progress/integration_testing_outcomes_results_1a.md
+  description: >
+    Validates every registered graph tool against the Express.js web framework.
+    Express is a minimal Node.js web framework with routing and middleware.
+
+tests:
+  # ── Registered Tools (00-22) ── expected_state: COMPLETE ──
+
+  - id: 7000
+    name: express_find_callers
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callers tool against Express. Target: Router.handle function in lib/router/index.js.
+    query: |
+      Who calls the Router.handle function in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      Router.handle is called from the main application dispatch in lib/application.js
+      when incoming requests are routed through the middleware stack.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7001
+    name: express_find_callees
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against Express. Target: app.listen in lib/application.js.
+    query: |
+      What functions does app.listen call in lib/application.js?
+    expected_state: COMPLETE
+    reference_answer: |
+      app.listen creates an HTTP server via http.createServer and binds it
+      to the specified port, delegating to Node's net.Server.listen.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7002
+    name: express_find_implementations
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_implementations tool against Express. Target: Router prototype.
+    query: |
+      What prototypes extend the Router prototype?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Router prototype in lib/router/index.js is extended with route matching,
+      param handling, and middleware dispatch methods.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7003
+    name: express_find_symbol
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_symbol tool against Express. Target: Application prototype in lib/application.js.
+    query: |
+      Where is the Application prototype defined in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Application prototype (app) is defined in lib/application.js. It is the
+      core object that provides routing, middleware registration, and server lifecycle.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7004
+    name: express_find_references
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_references tool against Express. Target: Request object in lib/request.js.
+    query: |
+      Where is the Request object used across the codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Request object from lib/request.js is used throughout the middleware
+      pipeline, router, and application modules for handling HTTP request data.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7005
+    name: express_get_call_chain
+    category: TOOL_HAPPY_PATH
+    description: >
+      get_call_chain tool against Express. From app.listen to route handler execution.
+    query: |
+      Show the call chain from app.listen to route handler execution
+    expected_state: COMPLETE
+    reference_answer: |
+      app.listen -> http.createServer -> app.handle -> Router.handle ->
+      Route.dispatch -> layer.handle_request -> user route handler.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7006
+    name: express_find_path
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_path tool against Express. Between createApplication and Router.handle.
+    query: |
+      Find the shortest path between createApplication and Router.handle
+    expected_state: COMPLETE
+    reference_answer: |
+      createApplication in lib/express.js creates the app object which delegates
+      to Router.handle through the app.handle dispatch path.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7007
+    name: express_find_hotspots
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_hotspots tool against Express.
+    query: |
+      What are the most connected functions (hotspots) in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      Top hotspots include Router.handle, app.use, and Layer.handle in the
+      middleware dispatch pipeline due to high fan-in and fan-out.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7008
+    name: express_find_dead_code
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dead_code tool against Express.
+    query: |
+      Find unused or dead code in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Dead code analysis finds functions with zero incoming edges that are
+      not entry points, test helpers, or exported API methods.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7009
+    name: express_find_cycles
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_cycles tool against Express.
+    query: |
+      Find circular call dependencies in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Express has circular dependencies in areas like middleware dispatch where
+      next() callbacks can re-enter the router processing pipeline.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7010
+    name: express_find_important
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_important tool (PageRank) against Express.
+    query: |
+      What are the most important functions by PageRank in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      PageRank identifies central functions in the router dispatch pipeline,
+      middleware handling, and application configuration methods.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7011
+    name: express_find_communities
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_communities tool (Leiden) against Express.
+    query: |
+      Find natural code communities and module boundaries in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Communities align with Express's module structure: application (lib/application.js),
+      router (lib/router/), request/response handling, and middleware utilities.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7012
+    name: express_find_articulation_points
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_articulation_points tool against Express.
+    query: |
+      Find single points of failure in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Articulation points include key dispatch functions in Router.handle and
+      app.handle that bridge between request intake and route execution.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7013
+    name: express_find_dominators
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dominators tool against Express. Target: route handler execution.
+    query: |
+      What functions must be called before a route handler executes?
+    expected_state: COMPLETE
+    reference_answer: |
+      Dominators of route handler execution include app.handle, Router.handle,
+      and Route.dispatch which must complete the middleware chain first.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7014
+    name: express_find_loops
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_loops tool against Express. Target: middleware stack.
+    query: |
+      Find recursive functions in the middleware stack
+    expected_state: COMPLETE
+    reference_answer: |
+      Recursive patterns exist in the middleware dispatch where next() triggers
+      sequential iteration through the layer stack in Router.handle.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7015
+    name: express_find_merge_points
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_merge_points tool against Express.
+    query: |
+      Where do different middleware chains converge?
+    expected_state: COMPLETE
+    reference_answer: |
+      Merge points include the final response sending stage where different
+      middleware branches converge into res.send and res.end.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7016
+    name: express_find_common_dependency
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_common_dependency tool against Express.
+    query: |
+      What shared dependency do app.get and app.post have?
+    expected_state: COMPLETE
+    reference_answer: |
+      Both app.get and app.post share the Router.route method and the
+      underlying Route constructor for registering method-specific handlers.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7017
+    name: express_find_control_dependencies
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_control_dependencies tool against Express.
+    query: |
+      What conditionals control whether next() is called in middleware?
+    expected_state: COMPLETE
+    reference_answer: |
+      next() invocation is controlled by error checks, route matching conditions,
+      and method matching logic within the Layer and Route dispatch.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7018
+    name: express_find_extractable_regions
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_extractable_regions tool against Express.
+    query: |
+      Find functions that could be safely extracted into separate functions
+    expected_state: COMPLETE
+    reference_answer: |
+      SESE regions in large functions like Router.handle and app.render
+      that have clear entry/exit points for extraction.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7019
+    name: express_check_reducibility
+    category: TOOL_HAPPY_PATH
+    description: >
+      check_reducibility tool against Express.
+    query: |
+      Check the control flow structure quality of this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Reducibility analysis shows the overall control flow graph structure,
+      identifying any irreducible regions that complicate analysis.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7020
+    name: express_find_critical_path
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_critical_path tool against Express.
+    query: |
+      What is the mandatory call sequence to reach the response send?
+    expected_state: COMPLETE
+    reference_answer: |
+      The critical path goes through app.handle -> Router.handle -> Route.dispatch
+      -> handler -> res.send, representing the mandatory execution sequence.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7021
+    name: express_find_module_api
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_module_api tool against Express. Target: lib/router package.
+    query: |
+      What is the public API of the lib/router module?
+    expected_state: COMPLETE
+    reference_answer: |
+      lib/router exports the Router constructor with methods for route matching,
+      param handling, middleware dispatch, and HTTP method registration.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7022
+    name: express_find_weighted_criticality
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_weighted_criticality tool against Express.
+    query: |
+      What are the most critical functions by weighted importance?
+    expected_state: COMPLETE
+    reference_answer: |
+      Weighted criticality combines PageRank, betweenness, and degree
+      centrality to identify functions critical across multiple dimensions.
+    validations:
+      - type: graph_tool_used
+
+  # ── Unregistered/TODO Tools (23-39) ── expected_state: COMPLETE ──
+
+  - id: 7023
+    name: express_find_entry_points
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_entry_points tool (not yet registered as standalone tool).
+    query: |
+      What are the entry points into this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone. Entry points include
+      createApplication in lib/express.js and the exported app factory.
+    validations: []
+
+  - id: 7024
+    name: express_trace_data_flow
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: trace_data_flow tool (not yet registered as standalone tool).
+    query: |
+      Trace how request data flows through the middleware pipeline
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7025
+    name: express_trace_error_flow
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: trace_error_flow tool (not yet registered as standalone tool).
+    query: |
+      Trace how errors propagate through the middleware error handling system
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7026
+    name: express_find_config_usage
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_config_usage tool (not yet registered as standalone tool).
+    query: |
+      How is the app.settings configuration used across Express?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7027
+    name: express_find_similar_code
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_similar_code tool (not yet registered as standalone tool).
+    query: |
+      Find code similar to the middleware dispatch logic
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7028
+    name: express_build_minimal_context
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: build_minimal_context tool (not yet registered as standalone tool).
+    query: |
+      Build minimal context needed to understand the Router.handle function
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7029
+    name: express_summarize_file
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: summarize_file tool (not yet registered as standalone tool).
+    query: |
+      Summarize the lib/application.js file
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7030
+    name: express_summarize_package
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: summarize_package tool (not yet registered as standalone tool).
+    query: |
+      Summarize the lib/router module and its files
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7031
+    name: express_analyze_change_impact
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: analyze_change_impact tool (not yet registered as standalone tool).
+    query: |
+      What would be the impact of changing the Request prototype?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7032
+    name: express_check_breaking_changes
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: check_breaking_changes tool (not yet registered as standalone tool).
+    query: |
+      Would removing the app.render method be a breaking change?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7033
+    name: express_simulate_change
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: simulate_change tool (not yet registered as standalone tool).
+    query: |
+      Simulate the impact of refactoring Router.handle into smaller methods
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7034
+    name: express_find_test_coverage
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_test_coverage tool (not yet registered as standalone tool).
+    query: |
+      Which functions in lib/router lack test coverage?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7035
+    name: express_detect_side_effects
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: detect_side_effects tool (not yet registered as standalone tool).
+    query: |
+      What side effects does the app.use function have?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7036
+    name: express_detect_patterns
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: detect_patterns tool (not yet registered as standalone tool).
+    query: |
+      What design patterns are used in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7037
+    name: express_find_code_smells
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_code_smells tool (not yet registered as standalone tool).
+    query: |
+      Find code smells in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7038
+    name: express_find_duplication
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_duplication tool (not yet registered as standalone tool).
+    query: |
+      Find duplicated code patterns in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7039
+    name: express_extract_conventions
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: extract_conventions tool (not yet registered as standalone tool).
+    query: |
+      What coding conventions does this codebase follow?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []

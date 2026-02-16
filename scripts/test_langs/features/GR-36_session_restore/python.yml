@@ -1,0 +1,51 @@
+# GR-36: Session Restore Tests (Python Language)
+#
+# Verifies that learned state persists across sessions via CRS checkpoint/restore.
+# Tests using Flask web framework codebase.
+
+metadata:
+  feature: GR-36
+  title: "Session Restore"
+  language: python
+  project: flask
+  ticket: tickets/merged/GR-36_session_restore.md
+  description: >
+    Tests CRS session persistence on Python code. Session 2 should restore
+    learned state from session 1, providing speedup through cached reasoning.
+
+tests:
+  - id: 101
+    name: py_session1_baseline
+    category: SESSION_RESTORE
+    description: >
+      Python-specific session restore test. Learn Flask app structure
+      in session 1 and verify state is persisted.
+    query: |
+      What is the main application factory function in this Flask app?
+    expected_state: COMPLETE
+    validations: []
+
+  - id: 102
+    name: py_session2_restore
+    category: SESSION_RESTORE
+    description: >
+      Verify session restore works across Python module structure.
+      Should remember Flask app details from previous query without re-parsing.
+    query: |
+      Based on our previous conversation about the application factory, what blueprints does it register?
+    expected_state: COMPLETE
+    validations: []
+
+  - id: 103
+    name: py_session2_speedup
+    category: SESSION_RESTORE
+    description: >
+      Verify CRS speedup for Python code analysis.
+      Should be 30%+ faster due to restored MCTS proof numbers.
+    query: |
+      What database models are defined in the models directory?
+    expected_state: COMPLETE
+    validations:
+      - type: faster_than_first
+        baseline_test: 101
+        min_speedup_percent: 30

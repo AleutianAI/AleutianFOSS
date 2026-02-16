@@ -448,8 +448,9 @@ func (idx *SymbolIndex) Search(ctx context.Context, query string, limit int) ([]
 	defer idx.mu.RUnlock()
 
 	type scoredSymbol struct {
-		symbol *ast.Symbol
-		score  int // Lower is better: 0=exact, 1=prefix, 2=contains, 3=fuzzy
+		symbol    *ast.Symbol
+		score     int    // Lower is better - composite score
+		matchType string // For debugging: "exact", "prefix", "camelCase", "substring", "fuzzy"
 	}
 
 	var results []scoredSymbol
@@ -466,30 +467,20 @@ func (idx *SymbolIndex) Search(ctx context.Context, query string, limit int) ([]
 		}
 
 		nameLower := strings.ToLower(sym.Name)
-		score := -1
-
-		// Check match types in priority order
-		if nameLower == queryLower {
-			score = 0 // Exact match
-		} else if strings.HasPrefix(nameLower, queryLower) {
-			score = 1 // Prefix match
-		} else if strings.Contains(nameLower, queryLower) {
-			score = 2 // Contains
-		} else if levenshteinDistance(nameLower, queryLower) < 3 {
-			score = 3 // Fuzzy match
-		}
+		score, matchType := computeMatchScore(query, queryLower, sym.Name, nameLower, sym.Kind)
 
 		if score >= 0 {
-			results = append(results, scoredSymbol{symbol: sym, score: score})
+			results = append(results, scoredSymbol{
+				symbol:    sym,
+				score:     score,
+				matchType: matchType,
+			})
 		}
 	}
 
-	// Sort by score (lower is better), then by name for stability
+	// Sort by score (lower is better)
 	sort.Slice(results, func(i, j int) bool {
-		if results[i].score != results[j].score {
-			return results[i].score < results[j].score
-		}
-		return results[i].symbol.Name < results[j].symbol.Name
+		return results[i].score < results[j].score
 	})
 
 	// Apply limit
@@ -509,6 +500,180 @@ func (idx *SymbolIndex) Search(ctx context.Context, query string, limit int) ([]
 
 	return symbols, nil
 }
+
+// computeMatchScore calculates a detailed match score for fuzzy search.
+//
+// Enhanced scoring system (Feb 14, 2026):
+//
+//	Score = base_score * 10000 +
+//	        position_penalty * 100 +
+//	        length_penalty * 10 +
+//	        kind_penalty
+//
+// Where lower scores are better. This provides much finer granularity than
+// the old 0-3 system, allowing proper ranking of match quality.
+//
+// Inputs:
+//
+//	query - Original query string (preserves case).
+//	queryLower - Lowercase version of query.
+//	name - Symbol name (preserves case).
+//	nameLower - Lowercase version of name.
+//	kind - Symbol kind (function, type, etc.).
+//
+// Outputs:
+//
+//	score - Composite score (lower is better). -1 means no match.
+//	matchType - String describing match type for debugging.
+//
+// Match Types (base_score):
+//
+//	0 = Exact match (case-insensitive)
+//	1 = Prefix match
+//	2 = CamelCase word boundary match
+//	3 = Substring match
+//	4 = Fuzzy match (Levenshtein)
+//	-1 = No match
+//
+// Thread Safety: Safe for concurrent use (stateless function).
+func computeMatchScore(query, queryLower, name, nameLower string, kind ast.SymbolKind) (int, string) {
+	// Base score determines primary match type
+	var baseScore int
+	var matchType string
+	var matchPos int // Position of match in name
+
+	// 1. Exact match (highest priority)
+	if nameLower == queryLower {
+		return 0, "exact" // Perfect match, no need for further scoring
+	}
+
+	// 2. Prefix match
+	if strings.HasPrefix(nameLower, queryLower) {
+		baseScore = 1
+		matchType = "prefix"
+		matchPos = 0
+	} else if pos := findCamelCaseWordMatch(name, query); pos >= 0 {
+		// 3. CamelCase word boundary match (e.g., "Process" matches "ProcessData" or "getDatesToProcess")
+		baseScore = 2
+		matchType = "camelCase"
+		matchPos = pos
+	} else if pos := strings.Index(nameLower, queryLower); pos >= 0 {
+		// 4. Substring match
+		baseScore = 3
+		matchType = "substring"
+		matchPos = pos
+	} else {
+		// 5. Fuzzy match (Levenshtein distance)
+		// Scale threshold with query length: allow 30% error rate
+		threshold := max(2, len(queryLower)/3)
+		distance := levenshteinDistance(nameLower, queryLower)
+		if distance <= threshold {
+			baseScore = 4
+			matchType = "fuzzy"
+			matchPos = 0 // Not applicable for fuzzy
+		} else {
+			return -1, "no_match" // No match found
+		}
+	}
+
+	// Position penalty: Earlier matches are better (0-99)
+	// Scale to 0-99 based on name length
+	positionPenalty := 0
+	if len(name) > 0 && matchPos > 0 {
+		positionPenalty = min(99, (matchPos*100)/len(name))
+	}
+
+	// Length penalty: Prefer shorter names (0-99)
+	// Difference in length, capped at 99
+	lengthDiff := abs(len(name) - len(query))
+	lengthPenalty := min(99, lengthDiff)
+
+	// Kind penalty: Prefer functions/methods over types/variables (0-9)
+	kindPenalty := getKindPenalty(kind)
+
+	// Composite score: lower is better
+	// Format: BMMPPLK where B=base, MM=matchPos, PP=length, L=kind
+	score := baseScore*10000 +
+		positionPenalty*100 +
+		lengthPenalty*10 +
+		kindPenalty
+
+	return score, matchType
+}
+
+// findCamelCaseWordMatch finds if query matches a word boundary in camelCase/PascalCase name.
+//
+// Examples:
+//
+//	"Process" matches "ProcessData" at position 0
+//	"Process" matches "getDatesToProcess" at position 11
+//	"Data" matches "ProcessData" at position 7
+//	"process" does not match "Unprocessed" (not a word boundary)
+//
+// Returns: Position of match, or -1 if no word boundary match.
+func findCamelCaseWordMatch(name, query string) int {
+	if len(query) == 0 || len(name) == 0 {
+		return -1
+	}
+
+	// Find all word boundaries (uppercase letters or start of string)
+	queryLower := strings.ToLower(query)
+
+	for i := 0; i < len(name); i++ {
+		// Check if this is a word boundary
+		isWordBoundary := i == 0 || (i > 0 && isUpper(name[i]) && !isUpper(name[i-1]))
+
+		if isWordBoundary {
+			// Check if query matches starting here (case-insensitive)
+			if i+len(query) <= len(name) {
+				if strings.ToLower(name[i:i+len(query)]) == queryLower {
+					// Verify next char is either end of string or uppercase (true word boundary)
+					if i+len(query) == len(name) || isUpper(name[i+len(query)]) || !isLetter(name[i+len(query)]) {
+						return i
+					}
+				}
+			}
+		}
+	}
+
+	return -1
+}
+
+// getKindPenalty returns a penalty based on symbol kind.
+// Lower penalty for more important symbol types.
+func getKindPenalty(kind ast.SymbolKind) int {
+	switch kind {
+	case ast.SymbolKindFunction, ast.SymbolKindMethod:
+		return 0 // Functions and methods are most important
+	case ast.SymbolKindType, ast.SymbolKindInterface, ast.SymbolKindStruct:
+		return 1 // Types are important but less than functions
+	case ast.SymbolKindVariable, ast.SymbolKindConstant:
+		return 2 // Variables/constants are least important
+	case ast.SymbolKindField, ast.SymbolKindParameter:
+		return 3 // Fields and parameters even less
+	default:
+		return 5 // Unknown kinds get low priority
+	}
+}
+
+// Helper functions for character classification
+func isUpper(c byte) bool {
+	return c >= 'A' && c <= 'Z'
+}
+
+func isLetter(c byte) bool {
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+}
+
+// abs returns the absolute value of x.
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+// Note: min() and max() are Go 1.21+ built-ins, no need to define them
 
 // levenshteinDistance calculates the edit distance between two strings.
 // This is a simple implementation for fuzzy matching.

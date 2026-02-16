@@ -1,0 +1,92 @@
+# GR-01: Graph Index Tests (TypeScript Language)
+#
+# Verifies that graph index optimization works correctly for TypeScript code.
+# Tests graph tool execution, performance, and edge cases.
+
+metadata:
+  feature: GR-01
+  title: "Graph Index Optimization"
+  language: typescript
+  project: nest
+  ticket: tickets/merged/GR-01_graph_index.md
+  description: >
+    Tests CRS graph index functionality on TypeScript code. Verifies that
+    find_callers, find_callees, and find_implementations use the graph
+    index efficiently for TypeScript decorators, interfaces, and dependency injection.
+
+tests:
+  - id: 316
+    name: ts_find_callers_basic
+    category: GRAPH_INDEX
+    description: >
+      Verify find_callers returns results correctly for TypeScript code.
+      This query should trigger the graph index and find all callers
+      of NestJS's NestFactory.create() method.
+    query: |
+      Find all callers of the NestFactory.create method
+    expected_state: COMPLETE
+    validations:
+      - type: graph_tool_used
+
+  - id: 317
+    name: ts_find_callees_basic
+    category: GRAPH_INDEX
+    description: >
+      Verify find_callees returns results correctly for TypeScript code.
+      This query should use the graph index to find all functions
+      called during NestJS application bootstrap.
+    query: |
+      Find all functions called by the bootstrap function
+    expected_state: COMPLETE
+    validations:
+      - type: graph_tool_used
+
+  - id: 318
+    name: ts_find_impls_basic
+    category: GRAPH_INDEX
+    description: >
+      Verify find_implementations returns results correctly for TypeScript.
+      This query should use the graph index to find implementations
+      of TypeScript interfaces and abstract classes.
+    query: |
+      Find all implementations of the NestModule interface
+    expected_state: COMPLETE
+    validations:
+      - type: graph_tool_used
+
+  - id: 319
+    name: ts_perf_warm
+    category: GRAPH_INDEX
+    description: >
+      Performance test - second query should be fast (index warmed).
+      After initial index build for TypeScript modules, subsequent queries
+      should benefit from the cached graph index.
+    query: |
+      Find callers of the @Module decorator in this codebase
+    expected_state: COMPLETE
+    validations:
+      - type: fast_execution
+
+  - id: 320
+    name: ts_otel_trace
+    category: GRAPH_INDEX
+    description: >
+      Verify OTel spans capture index usage for TypeScript code.
+      This internal test checks that CRS events contain index_used=true
+      attribute in OpenTelemetry spans.
+    query: INTERNAL:verify_index_span_attribute
+    expected_state: COMPLETE
+    validations: []
+
+  - id: 321
+    name: ts_not_found_fast
+    category: GRAPH_INDEX
+    description: >
+      Edge case - symbol not found should return quickly (O(1) fail fast).
+      When a TypeScript symbol doesn't exist, the index should detect this
+      quickly without scanning all modules.
+    query: |
+      Find callers of NonExistentTypeScriptFunctionXYZ123
+    expected_state: COMPLETE
+    validations:
+      - type: fast_not_found

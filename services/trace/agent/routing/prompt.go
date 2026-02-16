@@ -82,6 +82,38 @@ Category: {{.Category}}
 
 {{end}}
 
+## Common Patterns - Caller vs Callee Distinction
+
+**CB-31d Item 6: Critical disambiguation examples**
+
+Understanding direction is crucial for graph queries:
+
+**CALLEES (what X calls, downstream):**
+- "What functions does X call?"
+- "What does X invoke?"
+- "Show me X's dependencies"
+- "What functions are called BY X?"
+→ Tool: find_callees
+
+**CALLERS (who calls X, upstream):**
+- "What calls X?"
+- "Who invokes X?"
+- "What depends ON X?"
+- "What functions call X?"
+→ Tool: find_callers
+
+**Examples:**
+- Query: "What functions does main call?" → find_callees (main calls them)
+- Query: "What functions call validateInput?" → find_callers (they call validateInput)
+- Query: "Show dependencies of Handler" → find_callees (Handler depends on them)
+- Query: "What depends on the config module?" → find_callers (they depend on config)
+
+**Key phrase patterns:**
+- "does X call" / "X calls" → find_callees (downstream from X)
+- "calls X" / "call X" / "invoke X" → find_callers (upstream to X)
+- "from X" / "starting at X" → find_callees (traverse down from X)
+- "to X" / "reaching X" → find_callers (traverse up to X)
+
 ## Current Context
 {{- if .Context}}
 {{- if .Context.Language}}

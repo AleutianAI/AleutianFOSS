@@ -1,0 +1,79 @@
+# GR-12: PageRank Algorithm Tests (Go Language)
+#
+# Verifies that PageRank-based importance ranking works correctly for Go code.
+# Tests find_important tool, convergence, and performance.
+
+metadata:
+  feature: GR-12
+  title: "PageRank Algorithm"
+  language: go
+  project: orchestrator
+  ticket: tickets/merged/GR-12_pagerank.md
+  description: >
+    Tests CRS PageRank functionality on Go code. Verifies that
+    find_important uses PageRank algorithm (not simple degree centrality)
+    to rank symbol importance in the call graph.
+
+tests:
+  - id: 31
+    name: basic
+    category: PAGERANK
+    description: >
+      Basic find_important query - should use PageRank not degree-based.
+      This query should trigger PageRank calculation and rank functions
+      by their structural importance in the call graph.
+    query: |
+      What are the most important functions in this codebase?
+    expected_state: COMPLETE
+    validations:
+      - type: pagerank_used
+
+  - id: 32
+    name: top_param
+    category: PAGERANK
+    description: >
+      find_important with top parameter.
+      This query should use the top parameter to limit results
+      to the 5 most important symbols.
+    query: |
+      Find the top 5 most important symbols
+    expected_state: COMPLETE
+    validations:
+      - type: pagerank_used
+
+  - id: 33
+    name: compare
+    category: PAGERANK
+    description: >
+      Comparison query - should mention PageRank vs degree difference.
+      This query should explicitly reference PageRank scores and
+      demonstrate why PageRank is better than simple degree centrality.
+    query: |
+      Which functions have the highest PageRank score?
+    expected_state: COMPLETE
+    validations:
+      - type: pagerank_used
+
+  - id: 34
+    name: convergence
+    category: PAGERANK
+    description: >
+      Verify PageRank converges (internal check).
+      This internal test checks that the PageRank algorithm converges
+      within the expected number of iterations and tolerance threshold.
+    query: INTERNAL:verify_pagerank_convergence
+    expected_state: COMPLETE
+    validations: []
+
+  - id: 35
+    name: perf_check
+    category: PAGERANK
+    description: >
+      Performance - PageRank should complete within reasonable time.
+      PageRank calculation should complete efficiently even for
+      large call graphs (O(E*k) where k is iteration count).
+    query: |
+      Find the most architecturally important functions using PageRank
+    expected_state: COMPLETE
+    validations:
+      - type: fast_pagerank

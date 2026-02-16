@@ -1,0 +1,144 @@
+# GR-16: Control Flow Analysis Tests (Go Language)
+#
+# Verifies that control flow graph algorithms work correctly for Go code.
+# Tests articulation points, dominators, post-dominators, dominance frontier,
+# control dependence, loop detection, LCD, and SESE regions.
+
+metadata:
+  feature: GR-16
+  title: "Control Flow Analysis"
+  language: go
+  project: orchestrator
+  ticket: tickets/merged/GR-16_control_flow.md
+  description: >
+    Tests CRS control flow graph algorithms on Go code. Verifies that
+    advanced CFG algorithms (dominators, articulation points, loop detection)
+    work correctly for Go function call graphs.
+
+tests:
+  - id: 70
+    name: articulation_basic
+    category: ARTICULATION
+    description: >
+      Basic articulation point detection.
+      This query should identify single points of failure in the call graph
+      (functions whose removal would disconnect the graph).
+    query: |
+      Find the single points of failure in this codebase
+    expected_state: COMPLETE
+    validations:
+      - type: articulation_points_found
+
+  - id: 72
+    name: articulation_perf
+    category: ARTICULATION
+    description: >
+      Performance check - articulation point detection should be fast.
+      The algorithm should run in O(V+E) time using Tarjan's algorithm.
+    query: |
+      Find architectural bottlenecks that are single points of failure
+    expected_state: COMPLETE
+    validations:
+      - type: fast_articulation_detection
+
+  - id: 73
+    name: dominator_basic
+    category: DOMINATOR
+    description: >
+      Basic dominator query - find all dominators of a function.
+      A dominator is a node that must be traversed to reach the target.
+      Uses Cooper-Harvey-Kennedy algorithm.
+    query: |
+      What functions must be called before reaching the main function?
+    expected_state: COMPLETE
+    validations:
+      - type: dominators_found
+
+  - id: 76
+    name: dominator_perf
+    category: DOMINATOR
+    description: >
+      Performance check - dominator computation should be fast.
+      The Cooper-Harvey-Kennedy algorithm should converge quickly
+      for well-structured code.
+    query: |
+      Find the mandatory call sequence from entry to the Handler
+    expected_state: COMPLETE
+    validations:
+      - type: fast_dominator_detection
+
+  - id: 77
+    name: post_dominator_basic
+    category: POST_DOMINATOR
+    description: >
+      Basic post-dominator query - find what must happen after a function.
+      A post-dominator is a node that must be traversed when returning
+      from the target (dual of dominators).
+    query: |
+      What functions must be called after the Handler function returns?
+    expected_state: COMPLETE
+    validations:
+      - type: post_dominators_found
+
+  - id: 79
+    name: dominance_frontier_basic
+    category: DOMINANCE_FRONTIER
+    description: >
+      Basic dominance frontier query - find merge points.
+      The dominance frontier consists of merge points where different
+      control flow paths converge.
+    query: |
+      Find the merge points in the control flow where different paths converge
+    expected_state: COMPLETE
+    validations:
+      - type: merge_points_found
+
+  - id: 81
+    name: control_dependence_basic
+    category: CONTROL_DEPENDENCE
+    description: >
+      Basic control dependence query - find what controls execution.
+      Control dependence identifies which conditionals determine whether
+      a function executes.
+    query: |
+      Find what conditionals control whether the Handler function executes
+    expected_state: COMPLETE
+    validations:
+      - type: control_dependencies_found
+
+  - id: 83
+    name: loop_detection_basic
+    category: LOOP_DETECTION
+    description: >
+      Basic loop detection - find recursive patterns and back edges.
+      Natural loops are identified via back edges in the dominator tree.
+    query: |
+      Find all recursive call patterns and loops in this codebase
+    expected_state: COMPLETE
+    validations:
+      - type: loops_found
+
+  - id: 86
+    name: lcd_basic
+    category: LCD
+    description: >
+      Basic LCD query - find common dominator of two functions.
+      The Lowest Common Dominator represents shared mandatory dependencies.
+    query: |
+      What is the common dependency between the Handler and Middleware functions?
+    expected_state: COMPLETE
+    validations:
+      - type: lcd_found
+
+  - id: 88
+    name: sese_basic
+    category: SESE
+    description: >
+      Basic SESE detection - find extractable code regions.
+      Single-Entry Single-Exit regions can be safely extracted into
+      separate functions for refactoring.
+    query: |
+      What code regions can be safely extracted into separate functions?
+    expected_state: COMPLETE
+    validations:
+      - type: sese_regions_found

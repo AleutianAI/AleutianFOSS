@@ -1,0 +1,79 @@
+# GR-12: PageRank Algorithm Tests (TypeScript Language)
+#
+# Verifies that PageRank-based importance ranking works correctly for TypeScript code.
+# Tests find_important tool, convergence, and performance.
+
+metadata:
+  feature: GR-12
+  title: "PageRank Algorithm"
+  language: typescript
+  project: nest
+  ticket: tickets/merged/GR-12_pagerank.md
+  description: >
+    Tests CRS PageRank functionality on TypeScript code. Verifies that
+    find_important uses PageRank algorithm to rank symbol importance
+    in TypeScript module graphs with decorators and dependency injection.
+
+tests:
+  - id: 331
+    name: ts_basic
+    category: PAGERANK
+    description: >
+      Basic find_important query for TypeScript code.
+      This query should trigger PageRank calculation and rank TypeScript
+      classes/services by their structural importance in the DI graph.
+    query: |
+      What are the most important services in this NestJS application?
+    expected_state: COMPLETE
+    validations:
+      - type: pagerank_used
+
+  - id: 332
+    name: ts_top_param
+    category: PAGERANK
+    description: >
+      find_important with top parameter for TypeScript code.
+      This query should limit results to the top 5 most important
+      TypeScript symbols (controllers, services, or modules).
+    query: |
+      Find the top 5 most important modules and controllers
+    expected_state: COMPLETE
+    validations:
+      - type: pagerank_used
+
+  - id: 333
+    name: ts_compare
+    category: PAGERANK
+    description: >
+      Comparison query for TypeScript - PageRank vs degree difference.
+      This query should demonstrate PageRank's advantage for identifying
+      central services in NestJS dependency injection graphs.
+    query: |
+      Which TypeScript classes have the highest PageRank score?
+    expected_state: COMPLETE
+    validations:
+      - type: pagerank_used
+
+  - id: 334
+    name: ts_convergence
+    category: PAGERANK
+    description: >
+      Verify PageRank converges for TypeScript call graphs.
+      This internal test checks that PageRank converges correctly
+      for TypeScript module structures (with decorators and generics).
+    query: INTERNAL:verify_pagerank_convergence
+    expected_state: COMPLETE
+    validations: []
+
+  - id: 335
+    name: ts_perf_check
+    category: PAGERANK
+    description: >
+      Performance - PageRank should complete within reasonable time.
+      PageRank calculation should be efficient for TypeScript codebases
+      with complex decorator chains and dependency injection.
+    query: |
+      Find the most architecturally important classes in this NestJS app using PageRank
+    expected_state: COMPLETE
+    validations:
+      - type: fast_pagerank

@@ -1,0 +1,51 @@
+# GR-36: Session Restore Tests (JavaScript Language)
+#
+# Verifies that learned state persists across sessions via CRS checkpoint/restore.
+# Tests using Express web framework codebase.
+
+metadata:
+  feature: GR-36
+  title: "Session Restore"
+  language: javascript
+  project: express
+  ticket: tickets/merged/GR-36_session_restore.md
+  description: >
+    Tests CRS session persistence on JavaScript code. Session 2 should restore
+    learned state from session 1, providing speedup through cached reasoning.
+
+tests:
+  - id: 201
+    name: js_session1_baseline
+    category: SESSION_RESTORE
+    description: >
+      JavaScript-specific session restore test. Learn Express app structure
+      in session 1 and verify state is persisted.
+    query: |
+      What is the main application setup function in this Express app?
+    expected_state: COMPLETE
+    validations: []
+
+  - id: 202
+    name: js_session2_restore
+    category: SESSION_RESTORE
+    description: >
+      Verify session restore works across JavaScript module structure.
+      Should remember Express app details from previous query without re-parsing.
+    query: |
+      Based on our previous conversation about the application setup, what middleware does it use?
+    expected_state: COMPLETE
+    validations: []
+
+  - id: 203
+    name: js_session2_speedup
+    category: SESSION_RESTORE
+    description: >
+      Verify CRS speedup for JavaScript code analysis.
+      Should be 30%+ faster due to restored MCTS proof numbers.
+    query: |
+      What route handlers are defined in the routes directory?
+    expected_state: COMPLETE
+    validations:
+      - type: faster_than_first
+        baseline_test: 201
+        min_speedup_percent: 30

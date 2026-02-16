@@ -1,0 +1,55 @@
+# GR-36: Session Restore Tests (Go Language)
+#
+# Verifies that learned state persists across sessions via CRS checkpoint/restore.
+# Session 2+ should be faster due to restored proof numbers and clause database.
+
+metadata:
+  feature: GR-36
+  title: "Session Restore"
+  language: go
+  project: orchestrator
+  ticket: tickets/merged/GR-36_session_restore.md
+  description: >
+    Tests CRS session persistence - learned state from session 1 should be
+    available in session 2, providing speedup through restored proof numbers
+    and cached reasoning.
+
+tests:
+  - id: 1
+    name: session1_baseline
+    category: SESSION_RESTORE
+    description: >
+      Learn something in session 1, verify state is created.
+      This establishes the baseline for session restore testing.
+      The agent should analyze the main function and remember its location.
+    query: |
+      What is the main function in this codebase?
+    expected_state: COMPLETE
+    validations: []
+
+  - id: 2
+    name: session2_restore
+    category: SESSION_RESTORE
+    description: >
+      Session 2 should restore state from session 1 and remember
+      previous context about the main function without re-analyzing.
+      Should answer based on remembered context, not fresh analysis.
+    query: |
+      Based on our previous conversation about main, what does it import?
+    expected_state: COMPLETE
+    validations: []
+
+  - id: 3
+    name: session2_speedup
+    category: SESSION_RESTORE
+    description: >
+      Verify proof numbers are restored, making subsequent queries
+      faster due to CRS learning (30%+ speedup expected).
+      This tests that the MCTS tree state persists across sessions.
+    query: |
+      What functions does main call?
+    expected_state: COMPLETE
+    validations:
+      - type: faster_than_first
+        baseline_test: 1
+        min_speedup_percent: 30

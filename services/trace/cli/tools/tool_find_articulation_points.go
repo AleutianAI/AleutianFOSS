@@ -286,13 +286,13 @@ func (t *findArticulationPointsTool) parseParams(params map[string]any) (FindArt
 	if topRaw, ok := params["top"]; ok {
 		if top, ok := parseIntParam(topRaw); ok {
 			if top < 1 {
-				t.logger.Warn("top below minimum, clamping to 1",
+				t.logger.Debug("top below minimum, clamping to 1",
 					slog.String("tool", "find_articulation_points"),
 					slog.Int("requested", top),
 				)
 				top = 1
 			} else if top > 100 {
-				t.logger.Warn("top above maximum, clamping to 100",
+				t.logger.Debug("top above maximum, clamping to 100",
 					slog.String("tool", "find_articulation_points"),
 					slog.Int("requested", top),
 				)

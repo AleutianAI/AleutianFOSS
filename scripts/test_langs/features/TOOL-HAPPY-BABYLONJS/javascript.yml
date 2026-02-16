@@ -1,0 +1,547 @@
+# TOOL-HAPPY-BABYLONJS: Tool Happy Path Tests (JavaScript - Babylon.js)
+#
+# One happy-path test per registered tool against the Babylon.js 3D engine.
+# Tests 7100-7122: Registered tools (expected_state: COMPLETE)
+# Tests 7123-7139: Unregistered/TODO tools (expected_state: COMPLETE)
+
+metadata:
+  feature: TOOL-HAPPY-BABYLONJS
+  title: "Tool Happy Path - Babylon.js"
+  language: javascript
+  project: babylonjs
+  ticket: tickets/in_progress/integration_testing_outcomes_results_1a.md
+  description: >
+    Validates every registered graph tool against Babylon.js 3D engine.
+    Babylon.js is a JavaScript 3D rendering framework with scene graph management.
+
+tests:
+  # ── Registered Tools (00-22) ── expected_state: COMPLETE ──
+
+  - id: 7100
+    name: babylonjs_find_callers
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callers tool against Babylon.js. Target: Scene.render method.
+    query: |
+      Who calls the Scene.render method in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      Scene.render is called from Engine.runRenderLoop and related rendering
+      pipeline entry points that drive the per-frame rendering cycle.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7101
+    name: babylonjs_find_callees
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against Babylon.js. Target: Engine.runRenderLoop.
+    query: |
+      What functions does Engine.runRenderLoop call?
+    expected_state: COMPLETE
+    reference_answer: |
+      Engine.runRenderLoop sets up the animation frame loop and invokes the
+      registered render function, which typically calls Scene.render.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7102
+    name: babylonjs_find_implementations
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_implementations tool against Babylon.js. Target: AbstractMesh class.
+    query: |
+      What classes extend the AbstractMesh class?
+    expected_state: COMPLETE
+    reference_answer: |
+      AbstractMesh is extended by Mesh, InstancedMesh, GroundMesh, LinesMesh,
+      and other specialized mesh types in the scene graph hierarchy.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7103
+    name: babylonjs_find_symbol
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_symbol tool against Babylon.js. Target: Scene class.
+    query: |
+      Where is the Scene class defined in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Scene class is defined in src/scene.ts (or equivalent). It is the
+      central container for all 3D objects, lights, cameras, and materials.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7104
+    name: babylonjs_find_references
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_references tool against Babylon.js. Target: Engine type.
+    query: |
+      Where is the Engine type used across the codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Engine type is used throughout the rendering pipeline, scene management,
+      texture loading, shader compilation, and WebGL context management.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7105
+    name: babylonjs_get_call_chain
+    category: TOOL_HAPPY_PATH
+    description: >
+      get_call_chain tool against Babylon.js. From Engine.runRenderLoop to mesh rendering.
+    query: |
+      Show the call chain from Engine.runRenderLoop to mesh rendering
+    expected_state: COMPLETE
+    reference_answer: |
+      Engine.runRenderLoop -> render callback -> Scene.render ->
+      RenderingManager -> mesh._render -> SubMesh.render -> material draw.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7106
+    name: babylonjs_find_path
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_path tool against Babylon.js. Between Scene constructor and material application.
+    query: |
+      Find the shortest path between Scene constructor and material application
+    expected_state: COMPLETE
+    reference_answer: |
+      Scene constructor initializes the rendering manager which connects through
+      mesh rendering to material bind and shader application.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7107
+    name: babylonjs_find_hotspots
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_hotspots tool against Babylon.js.
+    query: |
+      What are the most connected functions (hotspots) in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      Top hotspots include Scene.render, Engine methods, and AbstractMesh
+      functions due to high fan-in from the rendering and scene graph pipeline.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7108
+    name: babylonjs_find_dead_code
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dead_code tool against Babylon.js.
+    query: |
+      Find unused or dead code in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Dead code analysis finds functions with zero incoming edges that are
+      not entry points, test helpers, or public API surface methods.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7109
+    name: babylonjs_find_cycles
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_cycles tool against Babylon.js.
+    query: |
+      Find circular call dependencies in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Babylon.js has circular dependencies in the scene graph where Scene
+      references meshes and meshes reference back to Scene for context.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7110
+    name: babylonjs_find_important
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_important tool (PageRank) against Babylon.js.
+    query: |
+      What are the most important functions by PageRank in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      PageRank identifies central functions in the rendering loop, scene management,
+      and material/shader pipeline as most structurally important.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7111
+    name: babylonjs_find_communities
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_communities tool (Leiden) against Babylon.js.
+    query: |
+      Find natural code communities and module boundaries in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Communities align with Babylon.js module structure: engine (rendering),
+      scene (graph management), materials (shaders), meshes (geometry), math (vectors).
+    validations:
+      - type: graph_tool_used
+
+  - id: 7112
+    name: babylonjs_find_articulation_points
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_articulation_points tool against Babylon.js.
+    query: |
+      Find single points of failure in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Articulation points include key orchestration functions in Scene.render
+      and Engine that bridge between input handling, scene graph, and GPU output.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7113
+    name: babylonjs_find_dominators
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dominators tool against Babylon.js. Target: mesh rendering.
+    query: |
+      What functions must be called before a mesh renders?
+    expected_state: COMPLETE
+    reference_answer: |
+      Dominators of mesh rendering include Engine.runRenderLoop, Scene.render,
+      and RenderingManager dispatch that must complete before mesh draw calls.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7114
+    name: babylonjs_find_loops
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_loops tool against Babylon.js. Target: scene graph traversal.
+    query: |
+      Find recursive functions in the scene graph traversal
+    expected_state: COMPLETE
+    reference_answer: |
+      Recursive patterns exist in node hierarchy traversal where parent-child
+      relationships are walked recursively for transforms and visibility.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7115
+    name: babylonjs_find_merge_points
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_merge_points tool against Babylon.js.
+    query: |
+      Where do different rendering paths converge in the pipeline?
+    expected_state: COMPLETE
+    reference_answer: |
+      Merge points include the final draw call stage where different material
+      types and mesh categories converge into GPU submission.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7116
+    name: babylonjs_find_common_dependency
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_common_dependency tool against Babylon.js.
+    query: |
+      What shared dependency do Mesh and Light have?
+    expected_state: COMPLETE
+    reference_answer: |
+      Both Mesh and Light share the Scene as a common dependency and both
+      extend Node, sharing transform and hierarchy management.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7117
+    name: babylonjs_find_control_dependencies
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_control_dependencies tool against Babylon.js.
+    query: |
+      What conditionals control whether a mesh is rendered?
+    expected_state: COMPLETE
+    reference_answer: |
+      Mesh rendering is controlled by visibility checks, frustum culling,
+      isEnabled flags, and material readiness conditions.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7118
+    name: babylonjs_find_extractable_regions
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_extractable_regions tool against Babylon.js.
+    query: |
+      Find functions that could be safely extracted into separate functions
+    expected_state: COMPLETE
+    reference_answer: |
+      SESE regions in large functions like Scene.render and Engine initialization
+      that have clear entry/exit points for extraction.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7119
+    name: babylonjs_check_reducibility
+    category: TOOL_HAPPY_PATH
+    description: >
+      check_reducibility tool against Babylon.js.
+    query: |
+      Check the control flow structure quality of this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Reducibility analysis shows the overall control flow graph structure,
+      identifying any irreducible regions that complicate analysis.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7120
+    name: babylonjs_find_critical_path
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_critical_path tool against Babylon.js.
+    query: |
+      What is the mandatory call sequence to reach a GPU draw call?
+    expected_state: COMPLETE
+    reference_answer: |
+      The critical path goes through Engine.runRenderLoop -> Scene.render ->
+      mesh evaluation -> material bind -> GPU draw, the mandatory render sequence.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7121
+    name: babylonjs_find_module_api
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_module_api tool against Babylon.js. Target: materials module.
+    query: |
+      What is the public API of the materials module?
+    expected_state: COMPLETE
+    reference_answer: |
+      The materials module exports Material, StandardMaterial, PBRMaterial,
+      ShaderMaterial, and related types for surface appearance and shader binding.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7122
+    name: babylonjs_find_weighted_criticality
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_weighted_criticality tool against Babylon.js.
+    query: |
+      What are the most critical functions by weighted importance?
+    expected_state: COMPLETE
+    reference_answer: |
+      Weighted criticality combines PageRank, betweenness, and degree
+      centrality to identify functions critical across multiple dimensions.
+    validations:
+      - type: graph_tool_used
+
+  # ── Unregistered/TODO Tools (23-39) ── expected_state: COMPLETE ──
+
+  - id: 7123
+    name: babylonjs_find_entry_points
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_entry_points tool (not yet registered as standalone tool).
+    query: |
+      What are the entry points into this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone. Entry points include
+      Engine constructor, Scene constructor, and module index exports.
+    validations: []
+
+  - id: 7124
+    name: babylonjs_trace_data_flow
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: trace_data_flow tool (not yet registered as standalone tool).
+    query: |
+      Trace how vertex data flows through the rendering pipeline
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7125
+    name: babylonjs_trace_error_flow
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: trace_error_flow tool (not yet registered as standalone tool).
+    query: |
+      Trace how errors propagate through the shader compilation system
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7126
+    name: babylonjs_find_config_usage
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_config_usage tool (not yet registered as standalone tool).
+    query: |
+      How is the engine configuration used across Babylon.js?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7127
+    name: babylonjs_find_similar_code
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_similar_code tool (not yet registered as standalone tool).
+    query: |
+      Find code similar to the mesh rendering logic
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7128
+    name: babylonjs_build_minimal_context
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: build_minimal_context tool (not yet registered as standalone tool).
+    query: |
+      Build minimal context needed to understand the Scene.render function
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7129
+    name: babylonjs_summarize_file
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: summarize_file tool (not yet registered as standalone tool).
+    query: |
+      Summarize the scene.ts file
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7130
+    name: babylonjs_summarize_package
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: summarize_package tool (not yet registered as standalone tool).
+    query: |
+      Summarize the materials module and its files
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7131
+    name: babylonjs_analyze_change_impact
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: analyze_change_impact tool (not yet registered as standalone tool).
+    query: |
+      What would be the impact of changing the AbstractMesh class?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7132
+    name: babylonjs_check_breaking_changes
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: check_breaking_changes tool (not yet registered as standalone tool).
+    query: |
+      Would removing the Scene.render method be a breaking change?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7133
+    name: babylonjs_simulate_change
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: simulate_change tool (not yet registered as standalone tool).
+    query: |
+      Simulate the impact of refactoring Scene.render into smaller methods
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7134
+    name: babylonjs_find_test_coverage
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_test_coverage tool (not yet registered as standalone tool).
+    query: |
+      Which functions in the rendering pipeline lack test coverage?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7135
+    name: babylonjs_detect_side_effects
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: detect_side_effects tool (not yet registered as standalone tool).
+    query: |
+      What side effects does the Scene.render function have?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7136
+    name: babylonjs_detect_patterns
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: detect_patterns tool (not yet registered as standalone tool).
+    query: |
+      What design patterns are used in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7137
+    name: babylonjs_find_code_smells
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_code_smells tool (not yet registered as standalone tool).
+    query: |
+      Find code smells in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7138
+    name: babylonjs_find_duplication
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_duplication tool (not yet registered as standalone tool).
+    query: |
+      Find duplicated code patterns in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 7139
+    name: babylonjs_extract_conventions
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: extract_conventions tool (not yet registered as standalone tool).
+    query: |
+      What coding conventions does this codebase follow?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []

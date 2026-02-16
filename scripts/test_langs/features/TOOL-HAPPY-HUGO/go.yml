@@ -1,0 +1,548 @@
+# TOOL-HAPPY-HUGO: Tool Happy Path Tests (Go - Hugo)
+#
+# One happy-path test per registered tool against the Hugo static site generator.
+# Tests 5000-5022: Registered tools (expected_state: COMPLETE)
+# Tests 5023-5039: Unregistered/TODO tools (expected_state: CLARIFY)
+
+metadata:
+  feature: TOOL-HAPPY-HUGO
+  title: "Tool Happy Path - Hugo"
+  language: go
+  project: hugo
+  ticket: tickets/in_progress/integration_testing_outcomes_results_1a.md
+  description: >
+    Validates every registered graph tool against the Hugo static site generator.
+    Each test exercises one tool with a project-specific query using real symbols.
+    Hugo is a Go static site generator with ~19k nodes and ~52k edges.
+
+tests:
+  # ── Registered Tools (00-22) ── expected_state: COMPLETE ──
+
+  - id: 5000
+    name: hugo_find_callers
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callers tool against Hugo. Target: Publish function in hugolib.
+    query: |
+      Who calls the Publish function in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Publish function in hugolib is called from commands/hugobuilder.go
+      during site building. It orchestrates the full build and publish pipeline.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5001
+    name: hugo_find_callees
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against Hugo. Target: Build function in hugolib.
+    query: |
+      What functions does the Build method call in hugolib?
+    expected_state: COMPLETE
+    reference_answer: |
+      Build calls multiple functions including process, assemble, render steps
+      and site initialization. It orchestrates the full Hugo build pipeline.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5002
+    name: hugo_find_implementations
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_implementations tool against Hugo. Target: page.Page interface.
+    query: |
+      What types implement the Page interface in the resources/page package?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Page interface in resources/page/page.go has implementations including
+      pageState in hugolib/page.go and other page-related types.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5003
+    name: hugo_find_symbol
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_symbol tool against Hugo. Target: HugoSites struct.
+    query: |
+      Where is HugoSites defined in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      HugoSites is defined in hugolib/hugo_sites.go. It is the top-level
+      struct that manages all Hugo sites during a build.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5004
+    name: hugo_find_references
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_references tool against Hugo. Target: Config type.
+    query: |
+      Where is the Config type used across the Hugo codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Config type is used extensively across hugolib, commands, config,
+      and resources packages for site configuration management.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5005
+    name: hugo_get_call_chain
+    category: TOOL_HAPPY_PATH
+    description: >
+      get_call_chain tool against Hugo. From main to render.
+    query: |
+      Show the call chain from the main function to the page rendering logic
+    expected_state: COMPLETE
+    reference_answer: |
+      main -> commands.Execute -> hugobuilder.build -> HugoSites.Build ->
+      site rendering pipeline through pageOutput and template execution.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5006
+    name: hugo_find_path
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_path tool against Hugo. Between commands and tpl packages.
+    query: |
+      Find the shortest path between the server command and template execution
+    expected_state: COMPLETE
+    reference_answer: |
+      commands/server.go -> hugobuilder -> HugoSites.Build -> site.render ->
+      tpl execution pipeline.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5007
+    name: hugo_find_hotspots
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_hotspots tool against Hugo.
+    query: |
+      What are the most connected functions (hotspots) in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      Top hotspots include functions in hugolib related to page rendering,
+      template execution in tpl, and resource transformation functions.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5008
+    name: hugo_find_dead_code
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dead_code tool against Hugo.
+    query: |
+      Find unused or dead code in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Dead code analysis finds functions with zero incoming edges that are
+      not entry points, test helpers, or init functions.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5009
+    name: hugo_find_cycles
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_cycles tool against Hugo.
+    query: |
+      Find circular call dependencies in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Hugo has circular dependencies in areas like page rendering where
+      pages reference site and site references pages.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5010
+    name: hugo_find_important
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_important tool (PageRank) against Hugo.
+    query: |
+      What are the most important functions by PageRank in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      PageRank identifies central functions in hugolib (site building),
+      tpl (template execution), and resources (asset pipeline).
+    validations:
+      - type: graph_tool_used
+
+  - id: 5011
+    name: hugo_find_communities
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_communities tool (Leiden) against Hugo.
+    query: |
+      Find natural code communities and module boundaries in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Communities align with Hugo's package structure: hugolib (core),
+      tpl (templates), resources (assets), commands (CLI), config.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5012
+    name: hugo_find_articulation_points
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_articulation_points tool against Hugo.
+    query: |
+      Find single points of failure in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Articulation points include key orchestration functions in hugolib
+      that bridge between configuration, rendering, and output.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5013
+    name: hugo_find_dominators
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dominators tool against Hugo. Target: render function.
+    query: |
+      What functions must be called before the page rendering executes?
+    expected_state: COMPLETE
+    reference_answer: |
+      Dominators of rendering include Build, site initialization,
+      and page assembly functions that must complete first.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5014
+    name: hugo_find_loops
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_loops tool against Hugo.
+    query: |
+      Find recursive functions and natural loops in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Recursive patterns exist in template execution (nested templates),
+      page tree traversal, and taxonomy hierarchy processing.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5015
+    name: hugo_find_merge_points
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_merge_points tool against Hugo.
+    query: |
+      Where do different code paths converge in the build pipeline?
+    expected_state: COMPLETE
+    reference_answer: |
+      Merge points include the output writing stage where different
+      content types (pages, taxonomies, static files) converge.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5016
+    name: hugo_find_common_dependency
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_common_dependency tool against Hugo.
+    query: |
+      What shared dependency do the server command and the deploy command have?
+    expected_state: COMPLETE
+    reference_answer: |
+      Both server and deploy depend on the HugoSites.Build pipeline
+      and the shared configuration system.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5017
+    name: hugo_find_control_dependencies
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_control_dependencies tool against Hugo.
+    query: |
+      What conditionals control whether template rendering executes?
+    expected_state: COMPLETE
+    reference_answer: |
+      Template rendering is controlled by content type checks,
+      layout resolution logic, and output format configuration.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5018
+    name: hugo_find_extractable_regions
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_extractable_regions tool against Hugo.
+    query: |
+      Find functions that could be safely extracted into separate functions
+    expected_state: COMPLETE
+    reference_answer: |
+      SESE regions in large functions like Build() and render methods
+      that have clear entry/exit points for extraction.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5019
+    name: hugo_check_reducibility
+    category: TOOL_HAPPY_PATH
+    description: >
+      check_reducibility tool against Hugo.
+    query: |
+      Check the control flow structure quality of this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Reducibility analysis shows the overall control flow graph structure,
+      identifying any irreducible regions that complicate analysis.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5020
+    name: hugo_find_critical_path
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_critical_path tool against Hugo.
+    query: |
+      What is the mandatory call sequence to reach the page output writer?
+    expected_state: COMPLETE
+    reference_answer: |
+      The critical path goes through Build -> render -> page output
+      generation, representing the mandatory execution sequence.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5021
+    name: hugo_find_module_api
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_module_api tool against Hugo. Target: hugolib package.
+    query: |
+      What is the public API of the hugolib package?
+    expected_state: COMPLETE
+    reference_answer: |
+      hugolib exports HugoSites, Site, and related types for building
+      and managing Hugo sites. Key methods include Build, Assemble, Render.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5022
+    name: hugo_find_weighted_criticality
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_weighted_criticality tool against Hugo.
+    query: |
+      What are the most critical functions by weighted importance?
+    expected_state: COMPLETE
+    reference_answer: |
+      Weighted criticality combines PageRank, betweenness, and degree
+      centrality to identify functions critical across multiple dimensions.
+    validations:
+      - type: graph_tool_used
+
+  # ── Unregistered/TODO Tools (23-39) ── expected_state: CLARIFY ──
+
+  - id: 5023
+    name: hugo_find_entry_points
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_entry_points tool (not yet registered as standalone tool).
+    query: |
+      What are the entry points into this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone. Entry points include
+      main(), init() functions, and HTTP handler registrations.
+    validations: []
+
+  - id: 5024
+    name: hugo_trace_data_flow
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: trace_data_flow tool (not yet registered as standalone tool).
+    query: |
+      Trace how configuration data flows through the build pipeline
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5025
+    name: hugo_trace_error_flow
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: trace_error_flow tool (not yet registered as standalone tool).
+    query: |
+      Trace how errors propagate through the template rendering system
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5026
+    name: hugo_find_config_usage
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_config_usage tool (not yet registered as standalone tool).
+    query: |
+      How is the site configuration used across Hugo?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5027
+    name: hugo_find_similar_code
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_similar_code tool (not yet registered as standalone tool).
+    query: |
+      Find code similar to the page rendering logic
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5028
+    name: hugo_build_minimal_context
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: build_minimal_context tool (not yet registered as standalone tool).
+    query: |
+      Build minimal context needed to understand the Build function
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5029
+    name: hugo_summarize_file
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: summarize_file tool (not yet registered as standalone tool).
+    query: |
+      Summarize the hugolib/hugo_sites.go file
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5030
+    name: hugo_summarize_package
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: summarize_package tool (not yet registered as standalone tool).
+    query: |
+      Summarize the tpl package and its subpackages
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5031
+    name: hugo_analyze_change_impact
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: analyze_change_impact tool (not yet registered as standalone tool).
+    query: |
+      What would be the impact of changing the Page interface?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5032
+    name: hugo_check_breaking_changes
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: check_breaking_changes tool (not yet registered as standalone tool).
+    query: |
+      Would removing the Publish method be a breaking change?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5033
+    name: hugo_simulate_change
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: simulate_change tool (not yet registered as standalone tool).
+    query: |
+      Simulate the impact of refactoring HugoSites.Build into smaller methods
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5034
+    name: hugo_find_test_coverage
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_test_coverage tool (not yet registered as standalone tool).
+    query: |
+      Which functions in hugolib lack test coverage?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5035
+    name: hugo_detect_side_effects
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: detect_side_effects tool (not yet registered as standalone tool).
+    query: |
+      What side effects does the Build function have?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5036
+    name: hugo_detect_patterns
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: detect_patterns tool (not yet registered as standalone tool).
+    query: |
+      What design patterns are used in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5037
+    name: hugo_find_code_smells
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_code_smells tool (not yet registered as standalone tool).
+    query: |
+      Find code smells in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5038
+    name: hugo_find_duplication
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_duplication tool (not yet registered as standalone tool).
+    query: |
+      Find duplicated code patterns in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5039
+    name: hugo_extract_conventions
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: extract_conventions tool (not yet registered as standalone tool).
+    query: |
+      What coding conventions does this codebase follow?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []

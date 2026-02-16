@@ -1,0 +1,145 @@
+# GR-16: Control Flow Analysis Tests (JavaScript Language)
+#
+# Verifies that control flow graph algorithms work correctly for JavaScript code.
+# Tests articulation points, dominators, post-dominators, dominance frontier,
+# control dependence, loop detection, LCD, and SESE regions.
+
+metadata:
+  feature: GR-16
+  title: "Control Flow Analysis"
+  language: javascript
+  project: express
+  ticket: tickets/merged/GR-16_control_flow.md
+  description: >
+    Tests CRS control flow graph algorithms on JavaScript code. Verifies that
+    advanced CFG algorithms work correctly for JavaScript module.exports,
+    require() chains, and middleware patterns.
+
+tests:
+  - id: 270
+    name: js_articulation_basic
+    category: ARTICULATION
+    description: >
+      Basic articulation point detection for JavaScript code.
+      This query should identify critical middleware functions in Express
+      whose removal would break the application flow.
+    query: |
+      Find the single points of failure in this Express application
+    expected_state: COMPLETE
+    validations:
+      - type: articulation_points_found
+
+  - id: 272
+    name: js_articulation_perf
+    category: ARTICULATION
+    description: >
+      Performance check - articulation point detection should be fast
+      even for JavaScript codebases with complex middleware chains.
+    query: |
+      Find architectural bottlenecks that are single points of failure
+    expected_state: COMPLETE
+    validations:
+      - type: fast_articulation_detection
+
+  - id: 273
+    name: js_dominator_basic
+    category: DOMINATOR
+    description: >
+      Basic dominator query for JavaScript code.
+      Find middleware that must be executed before reaching a target
+      route handler in Express.
+    query: |
+      What middleware must be called before reaching the main router?
+    expected_state: COMPLETE
+    validations:
+      - type: dominators_found
+
+  - id: 276
+    name: js_dominator_perf
+    category: DOMINATOR
+    description: >
+      Performance check - dominator computation should be fast
+      for JavaScript module dependency graphs.
+    query: |
+      Find the mandatory middleware sequence from entry to the API routes
+    expected_state: COMPLETE
+    validations:
+      - type: fast_dominator_detection
+
+  - id: 277
+    name: js_post_dominator_basic
+    category: POST_DOMINATOR
+    description: >
+      Basic post-dominator query for JavaScript code.
+      Find error handlers that must be called after a route handler
+      completes.
+    query: |
+      What error handlers must be called after the request handler returns?
+    expected_state: COMPLETE
+    validations:
+      - type: post_dominators_found
+
+  - id: 279
+    name: js_dominance_frontier_basic
+    category: DOMINANCE_FRONTIER
+    description: >
+      Basic dominance frontier query for JavaScript code.
+      Find merge points where different middleware chains converge
+      in the Express request lifecycle.
+    query: |
+      Find the merge points in the control flow where different middleware paths converge
+    expected_state: COMPLETE
+    validations:
+      - type: merge_points_found
+
+  - id: 281
+    name: js_control_dependence_basic
+    category: CONTROL_DEPENDENCE
+    description: >
+      Basic control dependence query for JavaScript code.
+      Identify which conditionals determine whether an Express
+      middleware executes.
+    query: |
+      Find what conditionals control whether the authentication middleware executes
+    expected_state: COMPLETE
+    validations:
+      - type: control_dependencies_found
+
+  - id: 283
+    name: js_loop_detection_basic
+    category: LOOP_DETECTION
+    description: >
+      Basic loop detection for JavaScript code.
+      Find recursive patterns and back edges in JavaScript function calls
+      and middleware chains.
+    query: |
+      Find all recursive call patterns and loops in this Express application
+    expected_state: COMPLETE
+    validations:
+      - type: loops_found
+
+  - id: 286
+    name: js_lcd_basic
+    category: LCD
+    description: >
+      Basic LCD query for JavaScript code.
+      Find the lowest common dominator representing shared dependencies
+      between two Express route handlers.
+    query: |
+      What is the common dependency between the user router and the product router?
+    expected_state: COMPLETE
+    validations:
+      - type: lcd_found
+
+  - id: 288
+    name: js_sese_basic
+    category: SESE
+    description: >
+      Basic SESE detection for JavaScript code.
+      Find Single-Entry Single-Exit regions that can be safely extracted
+      into separate middleware functions for refactoring.
+    query: |
+      What code regions in this Express app can be safely extracted into separate middleware?
+    expected_state: COMPLETE
+    validations:
+      - type: sese_regions_found

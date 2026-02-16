@@ -1,0 +1,548 @@
+# TOOL-HAPPY-PLOTTABLE: Tool Happy Path Tests (TypeScript - Plottable)
+#
+# One happy-path test per registered tool against the Plottable charting library.
+# Tests 8100-8122: Registered tools (expected_state: COMPLETE)
+# Tests 8123-8139: Unregistered/TODO tools (expected_state: COMPLETE)
+
+metadata:
+  feature: TOOL-HAPPY-PLOTTABLE
+  title: "Tool Happy Path - Plottable"
+  language: typescript
+  project: plottable
+  ticket: tickets/in_progress/integration_testing_outcomes_results_1a.md
+  description: >
+    Validates every registered graph tool against the Plottable charting library.
+    Plottable is a TypeScript library for creating flexible, interactive charts
+    built on top of D3.js.
+
+tests:
+  # ── Registered Tools (00-22) ── expected_state: COMPLETE ──
+
+  - id: 8100
+    name: plottable_find_callers
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callers tool against Plottable. Target: Plot.render method.
+    query: |
+      Who calls the Plot.render method?
+    expected_state: COMPLETE
+    reference_answer: |
+      Plot.render is called from Component.renderTo and internal layout
+      computations when the chart is attached to a DOM element.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8101
+    name: plottable_find_callees
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against Plottable. Target: Component.anchor method.
+    query: |
+      What functions does Component.anchor call?
+    expected_state: COMPLETE
+    reference_answer: |
+      Component.anchor calls DOM element creation, event listener setup,
+      and triggers the anchored lifecycle callback on the component.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8102
+    name: plottable_find_implementations
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_implementations tool against Plottable. Target: Scale base class.
+    query: |
+      What classes extend the Scale base class?
+    expected_state: COMPLETE
+    reference_answer: |
+      Scale subclasses include LinearScale, LogScale, CategoryScale,
+      ColorScale, TimeScale, and InterpolatedColorScale.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8103
+    name: plottable_find_symbol
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_symbol tool against Plottable. Target: Plot class.
+    query: |
+      Where is the Plot class defined?
+    expected_state: COMPLETE
+    reference_answer: |
+      Plot is defined in src/plots/plot.ts. It is the base class for all
+      chart types providing rendering, dataset management, and animation.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8104
+    name: plottable_find_references
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_references tool against Plottable. Target: Component type.
+    query: |
+      Where is the Component type used across the codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Component type is used extensively across plots, axes, legends,
+      and layout components as the base class for all visual elements.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8105
+    name: plottable_get_call_chain
+    category: TOOL_HAPPY_PATH
+    description: >
+      get_call_chain tool against Plottable. From Plot.render to SVG element creation.
+    query: |
+      Show the call chain from Plot.render to SVG element creation
+    expected_state: COMPLETE
+    reference_answer: |
+      Plot.render -> renderImmediately -> Drawer.draw -> D3 selection calls ->
+      SVG element creation and attribute setting via the rendering pipeline.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8106
+    name: plottable_find_path
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_path tool against Plottable. Between Table layout and Axis rendering.
+    query: |
+      Find the shortest path between Table layout and Axis rendering
+    expected_state: COMPLETE
+    reference_answer: |
+      Table.renderTo -> Component layout allocation -> Axis.renderImmediately ->
+      tick mark generation and label rendering.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8107
+    name: plottable_find_hotspots
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_hotspots tool against Plottable.
+    query: |
+      What are the most connected functions (hotspots) in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      Top hotspots include functions in Component (base rendering), Plot
+      (dataset binding), and Scale (domain/range transformations).
+    validations:
+      - type: graph_tool_used
+
+  - id: 8108
+    name: plottable_find_dead_code
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dead_code tool against Plottable.
+    query: |
+      Find unused or dead code in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Dead code analysis finds functions with zero incoming edges that are
+      not entry points, exported utilities, or test helpers.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8109
+    name: plottable_find_cycles
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_cycles tool against Plottable.
+    query: |
+      Find circular call dependencies in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Plottable has circular dependencies in areas like scale-plot binding
+      where plots listen to scale changes and scales reference plot extents.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8110
+    name: plottable_find_important
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_important tool (PageRank) against Plottable.
+    query: |
+      What are the most important functions by PageRank in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      PageRank identifies central functions in Component (lifecycle),
+      Plot (rendering), and Scale (data transformation) hierarchies.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8111
+    name: plottable_find_communities
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_communities tool (Leiden) against Plottable.
+    query: |
+      Find natural code communities and module boundaries in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Communities align with Plottable's package structure: plots (chart types),
+      scales (data mapping), axes (labels/ticks), components (layout), interactions.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8112
+    name: plottable_find_articulation_points
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_articulation_points tool against Plottable.
+    query: |
+      Find single points of failure in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Articulation points include key functions in Component and Plot
+      that bridge between layout computation, rendering, and interaction handling.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8113
+    name: plottable_find_dominators
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dominators tool against Plottable. Target: chart rendering.
+    query: |
+      What functions must be called before a chart renders?
+    expected_state: COMPLETE
+    reference_answer: |
+      Dominators of rendering include Component.anchor, computeLayout,
+      and requestedSpace which must complete before renderImmediately executes.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8114
+    name: plottable_find_loops
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_loops tool against Plottable. Target: layout computation.
+    query: |
+      Find recursive functions in the layout computation
+    expected_state: COMPLETE
+    reference_answer: |
+      Recursive patterns exist in Table and Group layout calculations
+      where nested components recursively compute space requests.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8115
+    name: plottable_find_merge_points
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_merge_points tool against Plottable.
+    query: |
+      Where do different rendering pipelines converge?
+    expected_state: COMPLETE
+    reference_answer: |
+      Merge points include the Drawer where different plot types
+      converge their data into SVG path generation and element updates.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8116
+    name: plottable_find_common_dependency
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_common_dependency tool against Plottable. Target: LinePlot and BarPlot.
+    query: |
+      What shared dependency do LinePlot and BarPlot have?
+    expected_state: COMPLETE
+    reference_answer: |
+      Both LinePlot and BarPlot depend on the Plot base class, the Drawer
+      for SVG rendering, and Scale for data-to-pixel transformations.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8117
+    name: plottable_find_control_dependencies
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_control_dependencies tool against Plottable. Target: animation execution.
+    query: |
+      What conditionals control whether an animation runs during rendering?
+    expected_state: COMPLETE
+    reference_answer: |
+      Animation execution is controlled by the animated property flag,
+      whether the component is anchored, and the animation duration setting.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8118
+    name: plottable_find_extractable_regions
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_extractable_regions tool against Plottable.
+    query: |
+      Find functions that could be safely extracted into separate functions
+    expected_state: COMPLETE
+    reference_answer: |
+      SESE regions in large functions like Plot.renderImmediately and
+      Table.computeLayout that have clear entry/exit points for extraction.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8119
+    name: plottable_check_reducibility
+    category: TOOL_HAPPY_PATH
+    description: >
+      check_reducibility tool against Plottable.
+    query: |
+      Check the control flow structure quality of this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Reducibility analysis shows the overall control flow graph structure,
+      identifying any irreducible regions that complicate analysis.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8120
+    name: plottable_find_critical_path
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_critical_path tool against Plottable.
+    query: |
+      What is the mandatory call sequence to render a chart to the DOM?
+    expected_state: COMPLETE
+    reference_answer: |
+      The critical path goes through anchor -> computeLayout -> render ->
+      Drawer.draw, representing the mandatory execution sequence.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8121
+    name: plottable_find_module_api
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_module_api tool against Plottable. Target: plots module.
+    query: |
+      What is the public API of the plots module?
+    expected_state: COMPLETE
+    reference_answer: |
+      The plots module exports Plot, LinePlot, BarPlot, AreaPlot, ScatterPlot,
+      PiePlot, and related types for creating different chart visualizations.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8122
+    name: plottable_find_weighted_criticality
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_weighted_criticality tool against Plottable.
+    query: |
+      What are the most critical functions by weighted importance?
+    expected_state: COMPLETE
+    reference_answer: |
+      Weighted criticality combines PageRank, betweenness, and degree
+      centrality to identify functions critical across multiple dimensions.
+    validations:
+      - type: graph_tool_used
+
+  # ── Unregistered/TODO Tools (23-39) ── expected_state: COMPLETE ──
+
+  - id: 8123
+    name: plottable_find_entry_points
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_entry_points tool (not yet registered as standalone tool).
+    query: |
+      What are the entry points into this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone. Entry points include
+      the Plottable namespace exports and Component.renderTo calls.
+    validations: []
+
+  - id: 8124
+    name: plottable_trace_data_flow
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: trace_data_flow tool (not yet registered as standalone tool).
+    query: |
+      Trace how dataset values flow through the rendering pipeline
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8125
+    name: plottable_trace_error_flow
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: trace_error_flow tool (not yet registered as standalone tool).
+    query: |
+      Trace how errors propagate through the scale domain computation
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8126
+    name: plottable_find_config_usage
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_config_usage tool (not yet registered as standalone tool).
+    query: |
+      How is the plot configuration used across Plottable?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8127
+    name: plottable_find_similar_code
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_similar_code tool (not yet registered as standalone tool).
+    query: |
+      Find code similar to the LinePlot rendering logic
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8128
+    name: plottable_build_minimal_context
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: build_minimal_context tool (not yet registered as standalone tool).
+    query: |
+      Build minimal context needed to understand the Plot.render method
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8129
+    name: plottable_summarize_file
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: summarize_file tool (not yet registered as standalone tool).
+    query: |
+      Summarize the src/plots/plot.ts file
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8130
+    name: plottable_summarize_package
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: summarize_package tool (not yet registered as standalone tool).
+    query: |
+      Summarize the src/scales module and its submodules
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8131
+    name: plottable_analyze_change_impact
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: analyze_change_impact tool (not yet registered as standalone tool).
+    query: |
+      What would be the impact of changing the Scale interface?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8132
+    name: plottable_check_breaking_changes
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: check_breaking_changes tool (not yet registered as standalone tool).
+    query: |
+      Would removing the animate method be a breaking change?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8133
+    name: plottable_simulate_change
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: simulate_change tool (not yet registered as standalone tool).
+    query: |
+      Simulate the impact of refactoring Component into smaller classes
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8134
+    name: plottable_find_test_coverage
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_test_coverage tool (not yet registered as standalone tool).
+    query: |
+      Which functions in src/plots lack test coverage?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8135
+    name: plottable_detect_side_effects
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: detect_side_effects tool (not yet registered as standalone tool).
+    query: |
+      What side effects does the Plot.render method have?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8136
+    name: plottable_detect_patterns
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: detect_patterns tool (not yet registered as standalone tool).
+    query: |
+      What design patterns are used in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8137
+    name: plottable_find_code_smells
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_code_smells tool (not yet registered as standalone tool).
+    query: |
+      Find code smells in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8138
+    name: plottable_find_duplication
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_duplication tool (not yet registered as standalone tool).
+    query: |
+      Find duplicated code patterns in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8139
+    name: plottable_extract_conventions
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: extract_conventions tool (not yet registered as standalone tool).
+    query: |
+      What coding conventions does this codebase follow?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []

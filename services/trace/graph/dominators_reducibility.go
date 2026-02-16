@@ -430,7 +430,7 @@ func (a *GraphAnalytics) findIrreducibleRegions(
 
 		// Cap regions
 		if len(regions) >= maxIrreducibleRegions {
-			logger.Warn("maximum irreducible regions reached",
+			logger.Debug("maximum irreducible regions reached",
 				slog.Int("max", maxIrreducibleRegions),
 				slog.Int("remaining_cross_edges", len(crossEdges)-i),
 			)
@@ -455,7 +455,7 @@ func (a *GraphAnalytics) findIrreducibleRegions(
 				visitedNodes[nodeID] = true
 			}
 
-			logger.Warn("irreducible region detected",
+			logger.Debug("irreducible region detected",
 				slog.Int("region_id", region.ID),
 				slog.Int("size", region.Size),
 				slog.Int("entry_count", len(region.EntryNodes)),

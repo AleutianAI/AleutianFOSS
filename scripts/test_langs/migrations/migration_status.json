@@ -1,0 +1,107 @@
+{
+  "migration_version": "1.0",
+  "last_updated": "2026-02-14T11:45:00Z",
+  "features": {
+    "GR-36_session_restore": {
+      "status": "complete",
+      "legacy_tests": [1, 2, 3],
+      "yaml_tests": {
+        "go": [1, 2, 3],
+        "python": [101, 102, 103],
+        "javascript": [201, 202, 203],
+        "typescript": [301, 302, 303]
+      },
+      "total_tests": 12,
+      "completed_date": "2026-02-14"
+    },
+    "GR-33_disk_persistence": {
+      "status": "complete",
+      "legacy_tests": [4, 5, 6],
+      "yaml_tests": {
+        "go": [4, 5, 6]
+      },
+      "total_tests": 3,
+      "completed_date": "2026-02-14",
+      "notes": "Go-only feature (internal CRS persistence)"
+    },
+    "GR-28_graph_snapshots": {
+      "status": "complete",
+      "legacy_tests": [7, 8, 9],
+      "yaml_tests": {
+        "go": [7, 8, 9],
+        "python": [107, 108, 109],
+        "javascript": [207, 208, 209],
+        "typescript": [307, 308, 309]
+      },
+      "total_tests": 12,
+      "completed_date": "2026-02-14"
+    },
+    "GR-01_graph_index": {
+      "status": "complete",
+      "legacy_tests": [16, 17, 18, 19, 20, 21],
+      "yaml_tests": {
+        "go": [16, 17, 18, 19, 20, 21],
+        "python": [116, 117, 118, 119, 120, 121],
+        "javascript": [216, 217, 218, 219, 220, 221],
+        "typescript": [316, 317, 318, 319, 320, 321]
+      },
+      "total_tests": 24,
+      "completed_date": "2026-02-14"
+    },
+    "GR-12_pagerank": {
+      "status": "complete",
+      "legacy_tests": [31, 32, 33, 34, 35],
+      "yaml_tests": {
+        "go": [31, 32, 33, 34, 35],
+        "python": [131, 132, 133, 134, 135],
+        "javascript": [231, 232, 233, 234, 235],
+        "typescript": [331, 332, 333, 334, 335]
+      },
+      "total_tests": 20,
+      "completed_date": "2026-02-14"
+    },
+    "GR-16_control_flow": {
+      "status": "complete",
+      "legacy_tests": [70, 72, 73, 76, 77, 79, 81, 83, 86, 88],
+      "yaml_tests": {
+        "go": [70, 72, 73, 76, 77, 79, 81, 83, 86, 88],
+        "python": [170, 172, 173, 176, 177, 179, 181, 183, 186, 188],
+        "javascript": [270, 272, 273, 276, 277, 279, 281, 283, 286, 288],
+        "typescript": [370, 372, 373, 376, 377, 379, 381, 383, 386, 388]
+      },
+      "total_tests": 40,
+      "completed_date": "2026-02-14",
+      "notes": "Selected subset of control flow tests (articulation, dominator, post-dominator, dominance frontier, control dependence, loop detection, LCD, SESE)"
+    },
+    "GR-40_go_interfaces": {
+      "status": "complete",
+      "legacy_tests": [22, 23, 24, 25, 26, 27],
+      "yaml_tests": {
+        "go": [22, 23, 24, 25, 26, 27]
+      },
+      "total_tests": 6,
+      "completed_date": "2026-02-14",
+      "notes": "Go-only feature (interface implementation detection via EdgeTypeImplements)"
+    },
+    "GR-17_graph_tools": {
+      "status": "complete",
+      "legacy_tests": [91, 92, 94, 95, 97, 98, 100, 101, 103, 104, 106, 107, 109, 110],
+      "yaml_tests": {
+        "go": [91, 92, 94, 95, 97, 98, 100, 101, 103, 104, 106, 107, 109, 110],
+        "python": [191, 192, 194, 195, 197, 198, 200, 201, 203, 204, 206, 207, 209, 210],
+        "javascript": [291, 292, 294, 295, 297, 298, 300, 301, 303, 304, 306, 307, 309, 310],
+        "typescript": [391, 392, 394, 395, 397, 398, 400, 401, 403, 404, 406, 407, 409, 410]
+      },
+      "total_tests": 56,
+      "completed_date": "2026-02-14",
+      "notes": "Selected subset of graph tool tests (skipped INTERNAL CRS trace tests to hit ~60 target)"
+    }
+  },
+  "summary": {
+    "total_features_migrated": 8,
+    "total_legacy_tests_migrated": 50,
+    "total_yaml_tests_created": 173,
+    "languages_supported": ["go", "python", "javascript", "typescript"],
+    "yaml_files_created": 26
+  }
+}

@@ -1,0 +1,548 @@
+# TOOL-HAPPY-NESTJS: Tool Happy Path Tests (TypeScript - NestJS)
+#
+# One happy-path test per registered tool against the NestJS framework.
+# Tests 8000-8022: Registered tools (expected_state: COMPLETE)
+# Tests 8023-8039: Unregistered/TODO tools (expected_state: COMPLETE)
+
+metadata:
+  feature: TOOL-HAPPY-NESTJS
+  title: "Tool Happy Path - NestJS"
+  language: typescript
+  project: nest
+  ticket: tickets/in_progress/integration_testing_outcomes_results_1a.md
+  description: >
+    Validates every registered graph tool against the NestJS framework.
+    NestJS is a TypeScript framework for building server-side applications
+    with decorators and dependency injection.
+
+tests:
+  # ── Registered Tools (00-22) ── expected_state: COMPLETE ──
+
+  - id: 8000
+    name: nestjs_find_callers
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callers tool against NestJS. Target: NestFactory.create method.
+    query: |
+      Who calls the NestFactory.create method?
+    expected_state: COMPLETE
+    reference_answer: |
+      NestFactory.create is called from application bootstrap functions and
+      test setup utilities to instantiate a new NestJS application instance.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8001
+    name: nestjs_find_callees
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against NestJS. Target: NestApplication.listen method.
+    query: |
+      What functions does NestApplication.listen call?
+    expected_state: COMPLETE
+    reference_answer: |
+      NestApplication.listen calls HTTP adapter listen, runs lifecycle hooks
+      including onModuleInit and onApplicationBootstrap, and logs the listening address.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8002
+    name: nestjs_find_implementations
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_implementations tool against NestJS. Target: NestInterceptor interface.
+    query: |
+      What classes implement the NestInterceptor interface?
+    expected_state: COMPLETE
+    reference_answer: |
+      NestInterceptor implementations include built-in interceptors for
+      logging, caching, and timeout handling across the framework.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8003
+    name: nestjs_find_symbol
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_symbol tool against NestJS. Target: NestFactory class.
+    query: |
+      Where is the NestFactory class defined?
+    expected_state: COMPLETE
+    reference_answer: |
+      NestFactory is defined in packages/core/nest-factory.ts. It is the
+      main entry point for creating NestJS application instances.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8004
+    name: nestjs_find_references
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_references tool against NestJS. Target: Injectable decorator.
+    query: |
+      Where is the Injectable decorator used across the codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Injectable decorator is used extensively across packages/core and
+      packages/common to mark classes for dependency injection resolution.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8005
+    name: nestjs_get_call_chain
+    category: TOOL_HAPPY_PATH
+    description: >
+      get_call_chain tool against NestJS. From NestFactory.create to module initialization.
+    query: |
+      Show the call chain from NestFactory.create to module initialization
+    expected_state: COMPLETE
+    reference_answer: |
+      NestFactory.create -> NestApplication constructor -> DependenciesScanner.scan ->
+      InstanceLoader.createInstances -> module initialization and provider resolution.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8006
+    name: nestjs_find_path
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_path tool against NestJS. Between NestApplication.init and controller registration.
+    query: |
+      Find the shortest path between NestApplication.init and controller registration
+    expected_state: COMPLETE
+    reference_answer: |
+      NestApplication.init -> RoutesResolver.resolve -> RouterExplorer.explore ->
+      controller method registration on the underlying HTTP adapter.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8007
+    name: nestjs_find_hotspots
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_hotspots tool against NestJS.
+    query: |
+      What are the most connected functions (hotspots) in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      Top hotspots include functions in the dependency injection container,
+      the module compiler, and the routes resolver handling request routing.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8008
+    name: nestjs_find_dead_code
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dead_code tool against NestJS.
+    query: |
+      Find unused or dead code in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Dead code analysis finds functions with zero incoming edges that are
+      not entry points, decorators, or lifecycle hook implementations.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8009
+    name: nestjs_find_cycles
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_cycles tool against NestJS.
+    query: |
+      Find circular call dependencies in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      NestJS has circular dependencies in areas like the injector and module
+      system where modules can forward-reference each other.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8010
+    name: nestjs_find_important
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_important tool (PageRank) against NestJS.
+    query: |
+      What are the most important functions by PageRank in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      PageRank identifies central functions in the Injector (dependency resolution),
+      NestApplication (lifecycle), and RoutesResolver (request handling).
+    validations:
+      - type: graph_tool_used
+
+  - id: 8011
+    name: nestjs_find_communities
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_communities tool (Leiden) against NestJS.
+    query: |
+      Find natural code communities and module boundaries in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Communities align with NestJS package structure: core (DI container),
+      common (decorators/pipes), platform-express, platform-fastify, microservices.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8012
+    name: nestjs_find_articulation_points
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_articulation_points tool against NestJS.
+    query: |
+      Find single points of failure in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Articulation points include key orchestration functions in the Injector
+      that bridge between module scanning, instance creation, and provider resolution.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8013
+    name: nestjs_find_dominators
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dominators tool against NestJS. Target: controller handler execution.
+    query: |
+      What functions must be called before a controller handler executes?
+    expected_state: COMPLETE
+    reference_answer: |
+      Dominators of handler execution include RoutesResolver.resolve,
+      RouterExplorer.explore, and middleware/guard/interceptor pipeline setup.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8014
+    name: nestjs_find_loops
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_loops tool against NestJS. Target: dependency injection container.
+    query: |
+      Find recursive functions in the dependency injection container
+    expected_state: COMPLETE
+    reference_answer: |
+      Recursive patterns exist in the Injector for resolving nested dependencies,
+      scanning module imports, and traversing provider dependency trees.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8015
+    name: nestjs_find_merge_points
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_merge_points tool against NestJS. Target: middleware pipelines.
+    query: |
+      Where do different middleware pipelines converge?
+    expected_state: COMPLETE
+    reference_answer: |
+      Merge points include the request handler execution where guards,
+      interceptors, and pipes converge before the controller method runs.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8016
+    name: nestjs_find_common_dependency
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_common_dependency tool against NestJS. Target: Guards and Interceptors.
+    query: |
+      What shared dependency do Guards and Interceptors have?
+    expected_state: COMPLETE
+    reference_answer: |
+      Both Guards and Interceptors depend on the ExecutionContext and
+      the Reflector for reading metadata set by decorators.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8017
+    name: nestjs_find_control_dependencies
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_control_dependencies tool against NestJS. Target: pipe transformation.
+    query: |
+      What conditionals control whether a pipe transformation runs?
+    expected_state: COMPLETE
+    reference_answer: |
+      Pipe execution is controlled by parameter decorator metadata,
+      the UsePipes decorator presence, and global pipe configuration.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8018
+    name: nestjs_find_extractable_regions
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_extractable_regions tool against NestJS.
+    query: |
+      Find functions that could be safely extracted into separate functions
+    expected_state: COMPLETE
+    reference_answer: |
+      SESE regions in large functions like Injector.loadProvider and
+      RoutesResolver.resolve that have clear entry/exit points for extraction.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8019
+    name: nestjs_check_reducibility
+    category: TOOL_HAPPY_PATH
+    description: >
+      check_reducibility tool against NestJS.
+    query: |
+      Check the control flow structure quality of this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Reducibility analysis shows the overall control flow graph structure,
+      identifying any irreducible regions that complicate analysis.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8020
+    name: nestjs_find_critical_path
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_critical_path tool against NestJS.
+    query: |
+      What is the mandatory call sequence to handle an incoming HTTP request?
+    expected_state: COMPLETE
+    reference_answer: |
+      The critical path goes through middleware -> guards -> interceptors ->
+      pipes -> controller handler, representing the mandatory execution sequence.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8021
+    name: nestjs_find_module_api
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_module_api tool against NestJS. Target: core package.
+    query: |
+      What is the public API of the core package?
+    expected_state: COMPLETE
+    reference_answer: |
+      The core package exports NestFactory, NestApplication, Injector,
+      and related types for creating and managing NestJS applications.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8022
+    name: nestjs_find_weighted_criticality
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_weighted_criticality tool against NestJS.
+    query: |
+      What are the most critical functions by weighted importance?
+    expected_state: COMPLETE
+    reference_answer: |
+      Weighted criticality combines PageRank, betweenness, and degree
+      centrality to identify functions critical across multiple dimensions.
+    validations:
+      - type: graph_tool_used
+
+  # ── Unregistered/TODO Tools (23-39) ── expected_state: COMPLETE ──
+
+  - id: 8023
+    name: nestjs_find_entry_points
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_entry_points tool (not yet registered as standalone tool).
+    query: |
+      What are the entry points into this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone. Entry points include
+      NestFactory.create(), bootstrap functions, and module initializers.
+    validations: []
+
+  - id: 8024
+    name: nestjs_trace_data_flow
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: trace_data_flow tool (not yet registered as standalone tool).
+    query: |
+      Trace how request data flows through the middleware pipeline
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8025
+    name: nestjs_trace_error_flow
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: trace_error_flow tool (not yet registered as standalone tool).
+    query: |
+      Trace how errors propagate through the exception filter system
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8026
+    name: nestjs_find_config_usage
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_config_usage tool (not yet registered as standalone tool).
+    query: |
+      How is the module metadata configuration used across NestJS?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8027
+    name: nestjs_find_similar_code
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_similar_code tool (not yet registered as standalone tool).
+    query: |
+      Find code similar to the guard execution logic
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8028
+    name: nestjs_build_minimal_context
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: build_minimal_context tool (not yet registered as standalone tool).
+    query: |
+      Build minimal context needed to understand the Injector class
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8029
+    name: nestjs_summarize_file
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: summarize_file tool (not yet registered as standalone tool).
+    query: |
+      Summarize the packages/core/nest-factory.ts file
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8030
+    name: nestjs_summarize_package
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: summarize_package tool (not yet registered as standalone tool).
+    query: |
+      Summarize the packages/common package and its submodules
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8031
+    name: nestjs_analyze_change_impact
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: analyze_change_impact tool (not yet registered as standalone tool).
+    query: |
+      What would be the impact of changing the NestInterceptor interface?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8032
+    name: nestjs_check_breaking_changes
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: check_breaking_changes tool (not yet registered as standalone tool).
+    query: |
+      Would removing the forwardRef function be a breaking change?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8033
+    name: nestjs_simulate_change
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: simulate_change tool (not yet registered as standalone tool).
+    query: |
+      Simulate the impact of refactoring the Injector into smaller classes
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8034
+    name: nestjs_find_test_coverage
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_test_coverage tool (not yet registered as standalone tool).
+    query: |
+      Which functions in packages/core lack test coverage?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8035
+    name: nestjs_detect_side_effects
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: detect_side_effects tool (not yet registered as standalone tool).
+    query: |
+      What side effects does the NestFactory.create method have?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8036
+    name: nestjs_detect_patterns
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: detect_patterns tool (not yet registered as standalone tool).
+    query: |
+      What design patterns are used in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8037
+    name: nestjs_find_code_smells
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_code_smells tool (not yet registered as standalone tool).
+    query: |
+      Find code smells in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8038
+    name: nestjs_find_duplication
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_duplication tool (not yet registered as standalone tool).
+    query: |
+      Find duplicated code patterns in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 8039
+    name: nestjs_extract_conventions
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: extract_conventions tool (not yet registered as standalone tool).
+    query: |
+      What coding conventions does this codebase follow?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []

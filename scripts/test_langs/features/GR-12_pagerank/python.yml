@@ -1,0 +1,79 @@
+# GR-12: PageRank Algorithm Tests (Python Language)
+#
+# Verifies that PageRank-based importance ranking works correctly for Python code.
+# Tests find_important tool, convergence, and performance.
+
+metadata:
+  feature: GR-12
+  title: "PageRank Algorithm"
+  language: python
+  project: flask
+  ticket: tickets/merged/GR-12_pagerank.md
+  description: >
+    Tests CRS PageRank functionality on Python code. Verifies that
+    find_important uses PageRank algorithm to rank symbol importance
+    in Python module call graphs.
+
+tests:
+  - id: 131
+    name: py_basic
+    category: PAGERANK
+    description: >
+      Basic find_important query for Python code.
+      This query should trigger PageRank calculation and rank Python
+      functions/classes by their structural importance.
+    query: |
+      What are the most important functions in this Flask application?
+    expected_state: COMPLETE
+    validations:
+      - type: pagerank_used
+
+  - id: 132
+    name: py_top_param
+    category: PAGERANK
+    description: >
+      find_important with top parameter for Python code.
+      This query should limit results to the top 5 most important
+      Python symbols (functions, classes, or methods).
+    query: |
+      Find the top 5 most important classes and functions
+    expected_state: COMPLETE
+    validations:
+      - type: pagerank_used
+
+  - id: 133
+    name: py_compare
+    category: PAGERANK
+    description: >
+      Comparison query for Python - PageRank vs degree difference.
+      This query should demonstrate PageRank's advantage over
+      simple call count for identifying architectural importance.
+    query: |
+      Which Python functions have the highest PageRank score?
+    expected_state: COMPLETE
+    validations:
+      - type: pagerank_used
+
+  - id: 134
+    name: py_convergence
+    category: PAGERANK
+    description: >
+      Verify PageRank converges for Python call graphs.
+      This internal test checks that PageRank converges correctly
+      for Python module structures (with imports and decorators).
+    query: INTERNAL:verify_pagerank_convergence
+    expected_state: COMPLETE
+    validations: []
+
+  - id: 135
+    name: py_perf_check
+    category: PAGERANK
+    description: >
+      Performance - PageRank should complete within reasonable time.
+      PageRank calculation should be efficient for Python codebases
+      with many module imports and decorator chains.
+    query: |
+      Find the most architecturally important functions in this Flask app using PageRank
+    expected_state: COMPLETE
+    validations:
+      - type: fast_pagerank

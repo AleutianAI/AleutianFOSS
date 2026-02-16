@@ -1,0 +1,548 @@
+# TOOL-HAPPY-BADGER: Tool Happy Path Tests (Go - Badger)
+#
+# One happy-path test per registered tool against the Badger key-value store.
+# Tests 5100-5122: Registered tools (expected_state: COMPLETE)
+# Tests 5123-5139: Unregistered/TODO tools (expected_state: COMPLETE)
+
+metadata:
+  feature: TOOL-HAPPY-BADGER
+  title: "Tool Happy Path - Badger"
+  language: go
+  project: badger
+  ticket: tickets/in_progress/integration_testing_outcomes_results_1a.md
+  description: >
+    Validates every registered graph tool against the Badger key-value store.
+    Each test exercises one tool with a project-specific query using real symbols.
+    Badger is a Go embeddable key-value store built on an LSM tree architecture.
+
+tests:
+  # -- Registered Tools (00-22) -- expected_state: COMPLETE --
+
+  - id: 5100
+    name: badger_find_callers
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callers tool against Badger. Target: Get method on Transaction.
+    query: |
+      Who calls the Get method on the Transaction type?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Get method on Transaction is called from various parts of the codebase
+      including user-facing read operations and internal lookup paths.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5101
+    name: badger_find_callees
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against Badger. Target: DB.Open function.
+    query: |
+      What functions does DB.Open call?
+    expected_state: COMPLETE
+    reference_answer: |
+      DB.Open calls functions for directory locking, manifest loading, memtable
+      initialization, value log opening, and compaction manager setup.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5102
+    name: badger_find_implementations
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_implementations tool against Badger. Target: Iterator interface.
+    query: |
+      What types implement the Iterator interface?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Iterator interface is implemented by types including MergeIterator,
+      table iterator, and memtable iterator for LSM tree traversal.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5103
+    name: badger_find_symbol
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_symbol tool against Badger. Target: DB struct.
+    query: |
+      Where is the DB struct defined?
+    expected_state: COMPLETE
+    reference_answer: |
+      The DB struct is defined in db.go. It is the main entry point for
+      interacting with a Badger database instance.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5104
+    name: badger_find_references
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_references tool against Badger. Target: Entry type.
+    query: |
+      Where is the Entry type used across the codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Entry type is used across transaction handling, batch writing,
+      value log operations, and the write-ahead log subsystem.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5105
+    name: badger_get_call_chain
+    category: TOOL_HAPPY_PATH
+    description: >
+      get_call_chain tool against Badger. From DB.Open to value retrieval.
+    query: |
+      Show the call chain from DB.Open to value retrieval
+    expected_state: COMPLETE
+    reference_answer: |
+      DB.Open -> initialization -> Transaction.Get -> table lookup ->
+      value log read for retrieving stored values from the LSM tree.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5106
+    name: badger_find_path
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_path tool against Badger. Between NewTransaction and Iterator.Seek.
+    query: |
+      Find the shortest path between DB.NewTransaction and Iterator.Seek
+    expected_state: COMPLETE
+    reference_answer: |
+      DB.NewTransaction -> Transaction.NewIterator -> Iterator.Seek,
+      traversing the transaction and iterator creation path.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5107
+    name: badger_find_hotspots
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_hotspots tool against Badger.
+    query: |
+      What are the most connected functions (hotspots)?
+    expected_state: COMPLETE
+    reference_answer: |
+      Top hotspots include functions in the DB type, transaction handling,
+      LSM tree operations, and value log management.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5108
+    name: badger_find_dead_code
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dead_code tool against Badger.
+    query: |
+      Find unused or dead code
+    expected_state: COMPLETE
+    reference_answer: |
+      Dead code analysis finds functions with zero incoming edges that are
+      not entry points, test helpers, or init functions.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5109
+    name: badger_find_cycles
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_cycles tool against Badger.
+    query: |
+      Find circular call dependencies
+    expected_state: COMPLETE
+    reference_answer: |
+      Badger has circular dependencies in areas like compaction where
+      level controllers reference DB and DB references level controllers.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5110
+    name: badger_find_important
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_important tool (PageRank) against Badger.
+    query: |
+      What are the most important functions by PageRank?
+    expected_state: COMPLETE
+    reference_answer: |
+      PageRank identifies central functions in DB operations, transaction
+      management, and LSM tree compaction as most important.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5111
+    name: badger_find_communities
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_communities tool (Leiden) against Badger.
+    query: |
+      Find natural code communities and module boundaries
+    expected_state: COMPLETE
+    reference_answer: |
+      Communities align with Badger's subsystems: transaction management,
+      LSM tree (table/memtable), value log, compaction, and manifest.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5112
+    name: badger_find_articulation_points
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_articulation_points tool against Badger.
+    query: |
+      Find single points of failure
+    expected_state: COMPLETE
+    reference_answer: |
+      Articulation points include key functions in DB that bridge between
+      the transaction layer, LSM tree, and value log subsystems.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5113
+    name: badger_find_dominators
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dominators tool against Badger. Target: LSM tree write path.
+    query: |
+      What functions must be called before writing a value to the LSM tree?
+    expected_state: COMPLETE
+    reference_answer: |
+      Dominators of LSM writes include transaction creation, entry
+      validation, and write-ahead log recording before memtable insertion.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5114
+    name: badger_find_loops
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_loops tool against Badger.
+    query: |
+      Find recursive functions and natural loops
+    expected_state: COMPLETE
+    reference_answer: |
+      Recursive patterns exist in LSM tree compaction (level iteration),
+      skiplist traversal, and merge iterator operations.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5115
+    name: badger_find_merge_points
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_merge_points tool against Badger.
+    query: |
+      Where do different code paths converge in the compaction pipeline?
+    expected_state: COMPLETE
+    reference_answer: |
+      Merge points include the table building stage where different
+      compaction strategies converge to produce new SST files.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5116
+    name: badger_find_common_dependency
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_common_dependency tool against Badger.
+    query: |
+      What shared dependency do Get and Set operations have?
+    expected_state: COMPLETE
+    reference_answer: |
+      Both Get and Set depend on the Transaction type and its underlying
+      oracle for timestamp management and MVCC coordination.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5117
+    name: badger_find_control_dependencies
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_control_dependencies tool against Badger.
+    query: |
+      What conditionals control whether compaction runs?
+    expected_state: COMPLETE
+    reference_answer: |
+      Compaction is controlled by level size thresholds, score calculations,
+      and the compaction priority queue determining which levels need work.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5118
+    name: badger_find_extractable_regions
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_extractable_regions tool against Badger.
+    query: |
+      Find functions that could be safely extracted
+    expected_state: COMPLETE
+    reference_answer: |
+      SESE regions in large functions like DB.Open and compaction methods
+      that have clear entry/exit points for extraction.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5119
+    name: badger_check_reducibility
+    category: TOOL_HAPPY_PATH
+    description: >
+      check_reducibility tool against Badger.
+    query: |
+      Check the control flow structure quality
+    expected_state: COMPLETE
+    reference_answer: |
+      Reducibility analysis shows the overall control flow graph structure,
+      identifying any irreducible regions that complicate analysis.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5120
+    name: badger_find_critical_path
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_critical_path tool against Badger.
+    query: |
+      What is the mandatory call sequence to commit a transaction?
+    expected_state: COMPLETE
+    reference_answer: |
+      The critical path goes through NewTransaction -> Set/Get operations ->
+      Commit -> WAL write -> memtable update as the mandatory sequence.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5121
+    name: badger_find_module_api
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_module_api tool against Badger. Target: badger package.
+    query: |
+      What is the public API of the badger package?
+    expected_state: COMPLETE
+    reference_answer: |
+      The badger package exports DB, Transaction, Entry, Iterator, and Options
+      types with methods for key-value storage operations.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5122
+    name: badger_find_weighted_criticality
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_weighted_criticality tool against Badger.
+    query: |
+      What are the most critical functions by weighted importance?
+    expected_state: COMPLETE
+    reference_answer: |
+      Weighted criticality combines PageRank, betweenness, and degree
+      centrality to identify functions critical across multiple dimensions.
+    validations:
+      - type: graph_tool_used
+
+  # -- Unregistered/TODO Tools (23-39) -- expected_state: COMPLETE --
+
+  - id: 5123
+    name: badger_find_entry_points
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_entry_points tool (not yet registered as standalone tool).
+    query: |
+      What are the entry points into this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone. Entry points include
+      DB.Open(), exported API methods, and init() functions.
+    validations: []
+
+  - id: 5124
+    name: badger_trace_data_flow
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: trace_data_flow tool (not yet registered as standalone tool).
+    query: |
+      Trace how key-value data flows through the write pipeline
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5125
+    name: badger_trace_error_flow
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: trace_error_flow tool (not yet registered as standalone tool).
+    query: |
+      Trace how errors propagate through the compaction system
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5126
+    name: badger_find_config_usage
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_config_usage tool (not yet registered as standalone tool).
+    query: |
+      How is the Options configuration used across Badger?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5127
+    name: badger_find_similar_code
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_similar_code tool (not yet registered as standalone tool).
+    query: |
+      Find code similar to the compaction logic
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5128
+    name: badger_build_minimal_context
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: build_minimal_context tool (not yet registered as standalone tool).
+    query: |
+      Build minimal context needed to understand the DB.Open function
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5129
+    name: badger_summarize_file
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: summarize_file tool (not yet registered as standalone tool).
+    query: |
+      Summarize the db.go file
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5130
+    name: badger_summarize_package
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: summarize_package tool (not yet registered as standalone tool).
+    query: |
+      Summarize the table package and its subpackages
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5131
+    name: badger_analyze_change_impact
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: analyze_change_impact tool (not yet registered as standalone tool).
+    query: |
+      What would be the impact of changing the Entry struct?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5132
+    name: badger_check_breaking_changes
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: check_breaking_changes tool (not yet registered as standalone tool).
+    query: |
+      Would removing the NewTransaction method be a breaking change?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5133
+    name: badger_simulate_change
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: simulate_change tool (not yet registered as standalone tool).
+    query: |
+      Simulate the impact of refactoring DB.Open into smaller methods
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5134
+    name: badger_find_test_coverage
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_test_coverage tool (not yet registered as standalone tool).
+    query: |
+      Which functions in the badger package lack test coverage?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5135
+    name: badger_detect_side_effects
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: detect_side_effects tool (not yet registered as standalone tool).
+    query: |
+      What side effects does the DB.Open function have?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5136
+    name: badger_detect_patterns
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: detect_patterns tool (not yet registered as standalone tool).
+    query: |
+      What design patterns are used in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5137
+    name: badger_find_code_smells
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_code_smells tool (not yet registered as standalone tool).
+    query: |
+      Find code smells in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5138
+    name: badger_find_duplication
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_duplication tool (not yet registered as standalone tool).
+    query: |
+      Find duplicated code patterns in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 5139
+    name: badger_extract_conventions
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: extract_conventions tool (not yet registered as standalone tool).
+    query: |
+      What coding conventions does this codebase follow?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []

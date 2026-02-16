@@ -1,0 +1,92 @@
+# GR-01: Graph Index Tests (Go Language)
+#
+# Verifies that graph index optimization works correctly for Go code.
+# Tests graph tool execution, performance, and edge cases.
+
+metadata:
+  feature: GR-01
+  title: "Graph Index Optimization"
+  language: go
+  project: orchestrator
+  ticket: tickets/merged/GR-01_graph_index.md
+  description: >
+    Tests CRS graph index functionality on Go code. Verifies that
+    find_callers, find_callees, and find_implementations use the graph
+    index efficiently and return correct results.
+
+tests:
+  - id: 16
+    name: find_callers_basic
+    category: GRAPH_INDEX
+    description: >
+      Verify find_callers returns results correctly.
+      This query should trigger the graph index and use graph tools
+      rather than falling back to text search.
+    query: |
+      Find all callers of the Setup function
+    expected_state: COMPLETE
+    validations:
+      - type: graph_tool_used
+
+  - id: 17
+    name: find_callees_basic
+    category: GRAPH_INDEX
+    description: >
+      Verify find_callees returns results correctly.
+      This query should use the graph index to find all functions
+      called by main.
+    query: |
+      Find all functions called by main
+    expected_state: COMPLETE
+    validations:
+      - type: graph_tool_used
+
+  - id: 18
+    name: find_impls_basic
+    category: GRAPH_INDEX
+    description: >
+      Verify find_implementations returns results correctly.
+      This query should use the graph index to find implementations
+      of Go interfaces.
+    query: |
+      Find all implementations of the Handler interface
+    expected_state: COMPLETE
+    validations:
+      - type: graph_tool_used
+
+  - id: 19
+    name: perf_warm
+    category: GRAPH_INDEX
+    description: >
+      Performance test - second query should be fast (index warmed).
+      After initial index build, subsequent queries should benefit
+      from the cached graph index.
+    query: |
+      Find callers of Execute in this codebase
+    expected_state: COMPLETE
+    validations:
+      - type: fast_execution
+
+  - id: 20
+    name: otel_trace
+    category: GRAPH_INDEX
+    description: >
+      Verify OTel spans capture index usage.
+      This internal test checks that CRS events contain index_used=true
+      attribute in OpenTelemetry spans.
+    query: INTERNAL:verify_index_span_attribute
+    expected_state: COMPLETE
+    validations: []
+
+  - id: 21
+    name: not_found_fast
+    category: GRAPH_INDEX
+    description: >
+      Edge case - symbol not found should return quickly (O(1) fail fast).
+      When a symbol doesn't exist, the index should detect this quickly
+      without scanning the entire codebase.
+    query: |
+      Find callers of NonExistentFunctionXYZ123
+    expected_state: COMPLETE
+    validations:
+      - type: fast_not_found

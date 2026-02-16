@@ -200,16 +200,42 @@ func (t *findCommonDependencyTool) Execute(ctx context.Context, params map[strin
 	// Resolve targets to node IDs
 	resolvedTargets, unresolvedTargets := t.resolveTargets(ctx, p.Targets)
 
+	// Phase 11A: Treat "not found" as successful informational result (Feb 14, 2026)
 	if len(unresolvedTargets) > 0 {
 		span.AddEvent("unresolved_targets", trace.WithAttributes(
 			attribute.StringSlice("unresolved", unresolvedTargets),
+			attribute.StringSlice("resolved", getResolvedNames(resolvedTargets)),
 		))
-		logger.Debug("find_common_dependency: unresolved targets",
+		logger.Info("find_common_dependency: some targets not found - returning informational result",
 			slog.Any("unresolved", unresolvedTargets),
+			slog.Any("resolved", getResolvedNames(resolvedTargets)),
 		)
+
+		// Build informational output text
+		var sb strings.Builder
+		sb.WriteString("## Symbol Verification Result\n\n")
+		sb.WriteString(fmt.Sprintf("Searched for: %s\n\n", strings.Join(p.Targets, ", ")))
+
+		if len(resolvedTargets) > 0 {
+			sb.WriteString(fmt.Sprintf("✓ Found: %s\n", strings.Join(getResolvedNames(resolvedTargets), ", ")))
+		}
+		sb.WriteString(fmt.Sprintf("✗ Not found: %s\n\n", strings.Join(unresolvedTargets, ", ")))
+
+		sb.WriteString("The graph has been fully indexed - this is the definitive answer.\n")
+		sb.WriteString("**Do NOT use Grep to search further** - the graph already analyzed all source files.\n\n")
+
+		if len(resolvedTargets) > 0 {
+			sb.WriteString("Since not all targets exist, common dependency analysis cannot be performed.\n")
+		} else {
+			sb.WriteString("None of the requested symbols exist in the codebase.\n")
+		}
+
+		outputText := sb.String()
 		return &Result{
-			Success: false,
-			Error:   fmt.Sprintf("target(s) not found: %s", strings.Join(unresolvedTargets, ", ")),
+			Success:    true, // Success because we definitively verified non-existence
+			Output:     outputText,
+			OutputText: outputText,
+			TokensUsed: estimateTokens(outputText),
 		}, nil
 	}
 
@@ -373,13 +399,20 @@ func (t *findCommonDependencyTool) resolveTargets(
 	unresolved := make([]string, 0)
 
 	for _, target := range targets {
-		// Try index lookup
+		// P1: Use fuzzy search helper (Feb 14, 2026)
 		if t.index != nil {
-			results, err := t.index.Search(ctx, target, 1)
-			if err == nil && len(results) > 0 {
+			symbol, fuzzy, err := ResolveFunctionWithFuzzy(ctx, t.index, target, t.logger)
+			if err == nil {
+				if fuzzy {
+					t.logger.Info("P1: Using fuzzy match for target",
+						slog.String("tool", "find_common_dependency"),
+						slog.String("query", target),
+						slog.String("matched", symbol.Name),
+					)
+				}
 				resolved = append(resolved, ResolvedTarget{
-					Name: results[0].Name,
-					ID:   results[0].ID,
+					Name: symbol.Name,
+					ID:   symbol.ID,
 				})
 				continue
 			}
@@ -390,6 +423,15 @@ func (t *findCommonDependencyTool) resolveTargets(
 	}
 
 	return resolved, unresolved
+}
+
+// getResolvedNames extracts the names from resolved targets.
+func getResolvedNames(resolved []ResolvedTarget) []string {
+	names := make([]string, 0, len(resolved))
+	for _, r := range resolved {
+		names = append(names, r.Name)
+	}
+	return names
 }
 
 // resolveEntryPoint resolves the entry point to a node ID.

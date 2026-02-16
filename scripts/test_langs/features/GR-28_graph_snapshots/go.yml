@@ -1,0 +1,52 @@
+# GR-28: Graph Snapshots Tests (Go Language)
+#
+# Verifies that graph state is captured correctly in CRS events.
+# Tests graph provider snapshot, event context, and generation tracking.
+
+metadata:
+  feature: GR-28
+  title: "Graph Snapshots"
+  language: go
+  project: orchestrator
+  ticket: tickets/merged/GR-28_graph_snapshots.md
+  description: >
+    Tests CRS graph snapshot functionality. Verifies that graph state
+    (call graph, dependency graph) is captured in CRS events and can
+    be used for subsequent queries without rebuilding.
+
+tests:
+  - id: 7
+    name: snapshot_create
+    category: GRAPH
+    description: >
+      Build graph and verify snapshot is created.
+      This query should trigger graph construction (find all callers)
+      and create a snapshot in CRS event context.
+    query: |
+      Find all callers of the main function
+    expected_state: COMPLETE
+    validations: []
+
+  - id: 8
+    name: event_context
+    category: GRAPH
+    description: >
+      Verify graph context in events.
+      This internal test checks that CRS events contain graph snapshots
+      with nodes, edges, and metadata about the graph state.
+    query: INTERNAL:verify_event_graph_context
+    expected_state: COMPLETE
+    validations: []
+
+  - id: 9
+    name: generation_track
+    category: GRAPH
+    description: >
+      Verify graph generation tracking.
+      Each graph modification should increment the generation counter,
+      allowing CRS to detect stale graph state.
+    query: |
+      Find callees of parseConfig
+    expected_state: COMPLETE
+    validations:
+      - type: generation_incremented

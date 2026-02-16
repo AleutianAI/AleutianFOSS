@@ -1,0 +1,13 @@
+# Ignore cloned repos (real-world production codebases)
+# These are cloned with --depth 1 for testing purposes
+python/flask/
+python/requests/
+javascript/express/
+javascript/axios/
+typescript/nest/
+typescript/playwright/
+
+# Keep directory structure
+!.gitignore
+!*/
+!README.md

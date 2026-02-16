@@ -1,0 +1,144 @@
+# GR-16: Control Flow Analysis Tests (Python Language)
+#
+# Verifies that control flow graph algorithms work correctly for Python code.
+# Tests articulation points, dominators, post-dominators, dominance frontier,
+# control dependence, loop detection, LCD, and SESE regions.
+
+metadata:
+  feature: GR-16
+  title: "Control Flow Analysis"
+  language: python
+  project: flask
+  ticket: tickets/merged/GR-16_control_flow.md
+  description: >
+    Tests CRS control flow graph algorithms on Python code. Verifies that
+    advanced CFG algorithms work correctly for Python module imports,
+    decorators, and function calls.
+
+tests:
+  - id: 170
+    name: py_articulation_basic
+    category: ARTICULATION
+    description: >
+      Basic articulation point detection for Python code.
+      This query should identify critical functions in the Flask app
+      whose removal would break the application structure.
+    query: |
+      Find the single points of failure in this Flask application
+    expected_state: COMPLETE
+    validations:
+      - type: articulation_points_found
+
+  - id: 172
+    name: py_articulation_perf
+    category: ARTICULATION
+    description: >
+      Performance check - articulation point detection should be fast
+      even for Python codebases with complex decorator chains.
+    query: |
+      Find architectural bottlenecks that are single points of failure
+    expected_state: COMPLETE
+    validations:
+      - type: fast_articulation_detection
+
+  - id: 173
+    name: py_dominator_basic
+    category: DOMINATOR
+    description: >
+      Basic dominator query for Python code.
+      Find functions that must be executed before reaching a target
+      in the Flask application flow.
+    query: |
+      What functions must be called before reaching the create_app factory?
+    expected_state: COMPLETE
+    validations:
+      - type: dominators_found
+
+  - id: 176
+    name: py_dominator_perf
+    category: DOMINATOR
+    description: >
+      Performance check - dominator computation should be fast
+      for Python module dependency graphs.
+    query: |
+      Find the mandatory import sequence from entry to the main Blueprint
+    expected_state: COMPLETE
+    validations:
+      - type: fast_dominator_detection
+
+  - id: 177
+    name: py_post_dominator_basic
+    category: POST_DOMINATOR
+    description: >
+      Basic post-dominator query for Python code.
+      Find cleanup functions that must be called after a target
+      function completes.
+    query: |
+      What functions must be called after the request handler returns?
+    expected_state: COMPLETE
+    validations:
+      - type: post_dominators_found
+
+  - id: 179
+    name: py_dominance_frontier_basic
+    category: DOMINANCE_FRONTIER
+    description: >
+      Basic dominance frontier query for Python code.
+      Find merge points where different control flow paths converge
+      in the Flask request lifecycle.
+    query: |
+      Find the merge points in the control flow where different request paths converge
+    expected_state: COMPLETE
+    validations:
+      - type: merge_points_found
+
+  - id: 181
+    name: py_control_dependence_basic
+    category: CONTROL_DEPENDENCE
+    description: >
+      Basic control dependence query for Python code.
+      Identify which conditionals determine whether a Flask route
+      handler executes.
+    query: |
+      Find what conditionals control whether the authentication middleware executes
+    expected_state: COMPLETE
+    validations:
+      - type: control_dependencies_found
+
+  - id: 183
+    name: py_loop_detection_basic
+    category: LOOP_DETECTION
+    description: >
+      Basic loop detection for Python code.
+      Find recursive patterns and back edges in Python function calls.
+    query: |
+      Find all recursive call patterns and loops in this Flask application
+    expected_state: COMPLETE
+    validations:
+      - type: loops_found
+
+  - id: 186
+    name: py_lcd_basic
+    category: LCD
+    description: >
+      Basic LCD query for Python code.
+      Find the lowest common dominator representing shared dependencies
+      between two Python functions.
+    query: |
+      What is the common dependency between the auth blueprint and the api blueprint?
+    expected_state: COMPLETE
+    validations:
+      - type: lcd_found
+
+  - id: 188
+    name: py_sese_basic
+    category: SESE
+    description: >
+      Basic SESE detection for Python code.
+      Find Single-Entry Single-Exit regions that can be safely extracted
+      into separate functions for refactoring.
+    query: |
+      What code regions in this Flask app can be safely extracted into separate functions?
+    expected_state: COMPLETE
+    validations:
+      - type: sese_regions_found

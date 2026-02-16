@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/grounding"
@@ -196,14 +197,17 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 				grounding.RecordCountCircuitBreaker(inv.Tool, "llm")
 
 				// Record trace step for observability
+				// CB-31d Item 3: Don't use Error field for expected circuit breaker activations.
+				// Error field causes these to be displayed at ERROR level in test output.
 				deps.Session.RecordTraceStep(crs.TraceStep{
 					Action: "circuit_breaker",
 					Tool:   inv.Tool,
-					Error:  fmt.Sprintf("GR-39b: count threshold exceeded (%d >= %d)", callCount, crs.DefaultCircuitBreakerThreshold),
 					Metadata: map[string]string{
 						"path":      "llm",
 						"count":     fmt.Sprintf("%d", callCount),
 						"threshold": fmt.Sprintf("%d", crs.DefaultCircuitBreakerThreshold),
+						"reason":    fmt.Sprintf("GR-39b: count threshold exceeded (%d >= %d)", callCount, crs.DefaultCircuitBreakerThreshold),
+						"expected":  "true", // This is expected behavior, not an error
 					},
 				})
 
@@ -318,6 +322,59 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 		errMsg := ""
 		if !result.Success {
 			errMsg = result.Error
+
+			// Phase 11B: Convert "not found" errors to successful informational results (Feb 14, 2026)
+			// When a tool definitively determines a symbol doesn't exist, that's a VALID RESULT,
+			// not an error. Convert to Success=true to prevent LLM retry loops.
+			if isNotFoundError(errMsg) {
+				slog.Info("Phase 11B: Converting 'not found' error to informational result",
+					slog.String("session_id", deps.Session.ID),
+					slog.String("tool", inv.Tool),
+					slog.String("original_error", errMsg),
+				)
+
+				// Build informational output
+				infoText := fmt.Sprintf("## Search Result: Not Found\n\n"+
+					"The requested symbol was not found in the codebase.\n\n"+
+					"Original message: %s\n\n"+
+					"The graph has been fully indexed - this is the definitive answer.\n"+
+					"**Do NOT use Grep to search further** - the graph already analyzed all source files.\n",
+					errMsg)
+
+				// Replace the failed result with a successful informational result
+				result.Success = true
+				result.Error = ""
+				result.Output = infoText
+				result.OutputText = infoText
+				if result.TokensUsed == 0 {
+					result.TokensUsed = len(infoText) / 4 // Estimate tokens (simple heuristic)
+				}
+				results[len(results)-1] = result // Update the result we just added
+				errMsg = "" // Clear error since we converted to success
+			}
+
+			// P0-3: Detect validation errors and force synthesis (Feb 14, 2026)
+			// If tool failed due to parameter validation, mark circuit breaker as active
+			// to force synthesis from existing tool results instead of retrying.
+			if strings.Contains(errMsg, "parameter validation") ||
+			   strings.Contains(errMsg, "required parameter missing") ||
+			   strings.Contains(errMsg, "validation failed") {
+				slog.Warn("P0-3: Validation error detected, will force synthesis",
+					slog.String("session_id", deps.Session.ID),
+					slog.String("tool", inv.Tool),
+					slog.String("error", errMsg),
+				)
+
+				// Set circuit breaker flag to prevent LLM from retrying with same tool
+				if deps.Session != nil {
+					deps.Session.SetCircuitBreakerActive(true)
+					slog.Debug("P0-3: Circuit breaker activated due to validation failure",
+						slog.String("session_id", deps.Session.ID),
+						slog.String("tool", inv.Tool),
+					)
+				}
+			}
+
 			// Record error for router feedback
 			if deps.Session != nil {
 				deps.Session.RecordToolError(inv.Tool, errMsg)
@@ -1697,8 +1754,16 @@ func (p *ExecutePhase) extractToolParameters(
 		// CB-31d: Extract target function
 		// Patterns: "control dependencies of X", "what controls X"
 		target := extractFunctionNameFromQuery(query)
+		slog.Info("P0 DEBUG: find_control_dependencies parameter extraction",
+			slog.String("tool", toolName),
+			slog.String("query_preview", truncateForLog(query, 100)),
+			slog.String("extracted_from_query", target),
+		)
 		if target == "" && ctx != nil {
 			target = extractFunctionNameFromContext(ctx)
+			slog.Info("P0 DEBUG: fallback to context extraction",
+				slog.String("extracted_from_context", target),
+			)
 		}
 		if target == "" {
 			slog.Debug("CB-31d: find_control_dependencies extraction failed",
@@ -1800,6 +1865,153 @@ func (p *ExecutePhase) extractToolParameters(
 		slog.Debug("CB-31d: extracted find_module_api params",
 			slog.String("tool", toolName),
 			slog.Int("top", top),
+		)
+		return params, nil
+
+	case "Grep":
+		// P0-2: Extract pattern parameter for LLM-generated Grep calls (Feb 14, 2026)
+		// When LLM calls Grep without parameters, extract search pattern from query context
+		pattern := extractSearchPatternFromQuery(query)
+		if pattern == "" {
+			// Fallback: Try to extract any capitalized word as search target
+			words := strings.Fields(query)
+			for _, word := range words {
+				cleaned := strings.Trim(word, ".,;:!?\"'")
+				// Look for capitalized words (likely symbol names)
+				if len(cleaned) > 0 && unicode.IsUpper(rune(cleaned[0])) {
+					pattern = cleaned
+					break
+				}
+			}
+		}
+
+		if pattern == "" {
+			slog.Debug("P0-2: Grep parameter extraction failed - no pattern found",
+				slog.String("tool", toolName),
+				slog.String("query_preview", truncateForLog(query, 100)),
+			)
+			return nil, fmt.Errorf("could not extract search pattern from query for Grep")
+		}
+
+		params := map[string]interface{}{
+			"pattern": pattern,
+		}
+
+		// Try to extract output_mode if specified
+		lowerQuery := strings.ToLower(query)
+		if strings.Contains(lowerQuery, "file") && (strings.Contains(lowerQuery, "list") || strings.Contains(lowerQuery, "which")) {
+			params["output_mode"] = "files_with_matches"
+		} else if strings.Contains(lowerQuery, "count") || strings.Contains(lowerQuery, "how many") {
+			params["output_mode"] = "count"
+		} else {
+			params["output_mode"] = "content" // Default to showing content
+		}
+
+		slog.Debug("P0-2: extracted Grep params",
+			slog.String("tool", toolName),
+			slog.String("pattern", pattern),
+			slog.String("output_mode", params["output_mode"].(string)),
+		)
+		return params, nil
+
+	case "check_reducibility":
+		// CB-31d Item 1: Extract show_irreducible parameter (optional, default true)
+		// Patterns: "check reducibility", "is this code reducible", "find irreducible regions"
+		// Default behavior: Show irreducible regions for debugging
+		params := map[string]interface{}{
+			"show_irreducible": true, // Default: show irreducible regions
+		}
+
+		// Check if user explicitly asks to hide irreducible regions
+		lowerQuery := strings.ToLower(query)
+		if strings.Contains(lowerQuery, "hide") || strings.Contains(lowerQuery, "without") ||
+			strings.Contains(lowerQuery, "no details") || strings.Contains(lowerQuery, "summary only") {
+			params["show_irreducible"] = false
+		}
+
+		slog.Debug("CB-31d: extracted check_reducibility params",
+			slog.String("tool", toolName),
+			slog.Bool("show_irreducible", params["show_irreducible"].(bool)),
+		)
+		return params, nil
+
+	case "get_call_chain":
+		// CB-31d Item 2: Extract function_name, direction, and max_depth parameters
+		// Patterns: "call chain for X", "downstream from X", "upstream to X", "depth 3"
+		// Required: function_name
+		// Optional: direction (default "downstream"), max_depth (default 5, range 1-10)
+
+		// Extract function name (required)
+		funcName := extractFunctionNameFromQuery(query)
+		if funcName == "" && ctx != nil {
+			funcName = extractFunctionNameFromContext(ctx)
+		}
+		if funcName == "" {
+			slog.Debug("CB-31d: get_call_chain extraction failed - no function name",
+				slog.String("tool", toolName),
+				slog.String("query_preview", truncateForLog(query, 100)),
+			)
+			return nil, fmt.Errorf("could not extract function name from query for get_call_chain")
+		}
+
+		// CB-31d: Resolve function name if possible
+		if deps != nil && deps.SymbolIndex != nil {
+			sessionID := ""
+			if deps.Session != nil {
+				sessionID = deps.Session.ID
+			}
+			resolvedFunc, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, funcName, deps)
+			if err == nil {
+				slog.Debug("CB-31d: resolved function symbol for get_call_chain",
+					slog.String("raw", funcName),
+					slog.String("resolved", resolvedFunc),
+					slog.Float64("confidence", confidence),
+				)
+				funcName = resolvedFunc
+			}
+		}
+
+		// Extract direction (default "downstream")
+		direction := "downstream"
+		lowerQuery := strings.ToLower(query)
+		if strings.Contains(lowerQuery, "upstream") || strings.Contains(lowerQuery, "caller") ||
+			strings.Contains(lowerQuery, "who calls") || strings.Contains(lowerQuery, "reverse") {
+			direction = "upstream"
+		}
+
+		// Extract max_depth (default 5, range 1-10)
+		maxDepth := extractTopNFromQuery(query, 5) // Reuse extractTopNFromQuery for "depth N" patterns
+		// Also check for explicit "depth" keyword
+		if strings.Contains(lowerQuery, "depth") {
+			parts := strings.Fields(query)
+			for i, part := range parts {
+				if strings.Contains(strings.ToLower(part), "depth") && i+1 < len(parts) {
+					// Try to parse next word as number
+					if n := parseInt(parts[i+1]); n > 0 && n <= 10 {
+						maxDepth = n
+						break
+					}
+				}
+			}
+		}
+		// Clamp to valid range
+		if maxDepth < 1 {
+			maxDepth = 1
+		} else if maxDepth > 10 {
+			maxDepth = 10
+		}
+
+		params := map[string]interface{}{
+			"function_name": funcName,
+			"direction":     direction,
+			"max_depth":     maxDepth,
+		}
+
+		slog.Debug("CB-31d: extracted get_call_chain params",
+			slog.String("tool", toolName),
+			slog.String("function_name", funcName),
+			slog.String("direction", direction),
+			slog.Int("max_depth", maxDepth),
 		)
 		return params, nil
 

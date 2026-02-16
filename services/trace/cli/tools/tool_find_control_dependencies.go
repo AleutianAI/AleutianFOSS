@@ -377,13 +377,13 @@ func (t *findControlDependenciesTool) parseParams(params map[string]any) (FindCo
 	if depthRaw, ok := params["depth"]; ok {
 		if depth, ok := parseIntParam(depthRaw); ok {
 			if depth < 1 {
-				t.logger.Warn("depth below minimum, clamping to 1",
+				t.logger.Debug("depth below minimum, clamping to 1",
 					slog.String("tool", "find_control_dependencies"),
 					slog.Int("requested", depth),
 				)
 				depth = 1
 			} else if depth > 10 {
-				t.logger.Warn("depth above maximum, clamping to 10",
+				t.logger.Debug("depth above maximum, clamping to 10",
 					slog.String("tool", "find_control_dependencies"),
 					slog.Int("requested", depth),
 				)
@@ -408,14 +408,27 @@ func (t *findControlDependenciesTool) resolveTarget(ctx context.Context, name st
 		return name, nil
 	}
 
-	matches := t.index.GetByName(name)
-	for _, sym := range matches {
-		if sym != nil && (sym.Kind == ast.SymbolKindFunction || sym.Kind == ast.SymbolKindMethod) {
-			return sym.ID, nil
-		}
+	// P1: Use fuzzy search helper (Feb 14, 2026)
+	// This enables partial matching - e.g., "Process" finds "getDatesToProcess"
+	symbol, fuzzy, err := ResolveFunctionWithFuzzy(ctx, t.index, name, t.logger)
+	if err != nil {
+		return "", err
 	}
 
-	return "", fmt.Errorf("no function named '%s' found", name)
+	// Filter by kind - only accept functions and methods
+	if symbol.Kind != ast.SymbolKindFunction && symbol.Kind != ast.SymbolKindMethod {
+		return "", fmt.Errorf("symbol '%s' is not a function or method (kind: %s)", symbol.Name, symbol.Kind)
+	}
+
+	if fuzzy {
+		t.logger.Info("P1: Using fuzzy match for target",
+			slog.String("tool", "find_control_dependencies"),
+			slog.String("query", name),
+			slog.String("matched", symbol.Name),
+		)
+	}
+
+	return symbol.ID, nil
 }
 
 // approximateControlDependence creates an approximation using dominators.

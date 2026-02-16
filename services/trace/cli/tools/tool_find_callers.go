@@ -21,6 +21,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
 )
@@ -221,6 +222,20 @@ func (t *findCallersTool) Execute(ctx context.Context, params map[string]any) (*
 	if t.index != nil {
 		// O(1) index lookup
 		symbols := t.index.GetByName(p.FunctionName)
+
+		// P1: If no exact match, try fuzzy search (Feb 14, 2026)
+		if len(symbols) == 0 {
+			symbol, fuzzy, err := ResolveFunctionWithFuzzy(ctx, t.index, p.FunctionName, t.logger)
+			if err == nil && fuzzy {
+				t.logger.Info("P1: Using fuzzy match for function",
+					slog.String("tool", "find_callers"),
+					slog.String("query", p.FunctionName),
+					slog.String("matched", symbol.Name),
+				)
+				symbols = []*ast.Symbol{symbol}
+			}
+		}
+
 		span.SetAttributes(
 			attribute.Bool("index_used", true),
 			attribute.Int("index_matches", len(symbols)),
@@ -317,7 +332,7 @@ func (t *findCallersTool) parseParams(params map[string]any) (FindCallersParams,
 			if limit < 1 {
 				limit = 1
 			} else if limit > 1000 {
-				t.logger.Warn("limit above maximum, clamping to 1000",
+				t.logger.Debug("limit above maximum, clamping to 1000",
 					slog.String("tool", "find_callers"),
 					slog.Int("requested", limit),
 				)

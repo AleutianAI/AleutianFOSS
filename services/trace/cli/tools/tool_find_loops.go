@@ -380,13 +380,13 @@ func (t *findLoopsTool) parseParams(params map[string]any) (FindLoopsParams, err
 	if topRaw, ok := params["top"]; ok {
 		if top, ok := parseIntParam(topRaw); ok {
 			if top < 1 {
-				t.logger.Warn("top below minimum, clamping to 1",
+				t.logger.Debug("top below minimum, clamping to 1",
 					slog.String("tool", "find_loops"),
 					slog.Int("requested", top),
 				)
 				top = 1
 			} else if top > 100 {
-				t.logger.Warn("top above maximum, clamping to 100",
+				t.logger.Debug("top above maximum, clamping to 100",
 					slog.String("tool", "find_loops"),
 					slog.Int("requested", top),
 				)
@@ -400,7 +400,7 @@ func (t *findLoopsTool) parseParams(params map[string]any) (FindLoopsParams, err
 	if minSizeRaw, ok := params["min_size"]; ok {
 		if minSize, ok := parseIntParam(minSizeRaw); ok {
 			if minSize < 1 {
-				t.logger.Warn("min_size below minimum, clamping to 1",
+				t.logger.Debug("min_size below minimum, clamping to 1",
 					slog.String("tool", "find_loops"),
 					slog.Int("requested", minSize),
 				)

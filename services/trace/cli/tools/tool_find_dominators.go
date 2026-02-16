@@ -459,15 +459,26 @@ func (t *findDominatorsTool) resolveTarget(ctx context.Context, name string) (st
 		return name, nil
 	}
 
-	// Search by name
-	matches := t.index.GetByName(name)
-	for _, sym := range matches {
-		if sym != nil && (sym.Kind == ast.SymbolKindFunction || sym.Kind == ast.SymbolKindMethod) {
-			return sym.ID, nil
-		}
+	// P1: Use fuzzy search helper (Feb 14, 2026)
+	symbol, fuzzy, err := ResolveFunctionWithFuzzy(ctx, t.index, name, t.logger)
+	if err != nil {
+		return "", err
 	}
 
-	return "", fmt.Errorf("no function named '%s' found", name)
+	// Filter by kind - only accept functions and methods
+	if symbol.Kind != ast.SymbolKindFunction && symbol.Kind != ast.SymbolKindMethod {
+		return "", fmt.Errorf("symbol '%s' is not a function or method (kind: %s)", symbol.Name, symbol.Kind)
+	}
+
+	if fuzzy {
+		t.logger.Info("P1: Using fuzzy match for target",
+			slog.String("tool", "find_dominators"),
+			slog.String("query", name),
+			slog.String("matched", symbol.Name),
+		)
+	}
+
+	return symbol.ID, nil
 }
 
 // getDominatedNodes returns all nodes dominated by the given node.

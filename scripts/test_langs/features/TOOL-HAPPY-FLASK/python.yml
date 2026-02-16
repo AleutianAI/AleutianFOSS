@@ -1,0 +1,548 @@
+# TOOL-HAPPY-FLASK: Tool Happy Path Tests (Python - Flask)
+#
+# One happy-path test per registered tool against the Flask web framework.
+# Tests 6000-6022: Registered tools (expected_state: COMPLETE)
+# Tests 6023-6039: Unregistered/TODO tools (expected_state: CLARIFY)
+
+metadata:
+  feature: TOOL-HAPPY-FLASK
+  title: "Tool Happy Path - Flask"
+  language: python
+  project: flask
+  ticket: tickets/in_progress/integration_testing_outcomes_results_1a.md
+  description: >
+    Validates every registered graph tool against the Flask web framework.
+    Each test exercises one tool with a project-specific query using real symbols.
+    Flask is a Python micro web framework with WSGI routing and Jinja2 templating.
+
+tests:
+  # ── Registered Tools (00-22) ── expected_state: COMPLETE ──
+
+  - id: 6000
+    name: flask_find_callers
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callers tool against Flask. Target: full_dispatch_request (app.py:904).
+    query: |
+      Who calls the full_dispatch_request function?
+    expected_state: COMPLETE
+    reference_answer: |
+      The full_dispatch_request function in app.py is called from wsgi_app
+      during request handling. It dispatches the request after running before_request hooks.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6001
+    name: flask_find_callees
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against Flask. Target: make_response (app.py:1129, complexity 16).
+    query: |
+      What functions does make_response call?
+    expected_state: COMPLETE
+    reference_answer: |
+      make_response in app.py calls response_class, force_type, and various
+      type-checking helpers to convert view return values into Response objects.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6002
+    name: flask_find_implementations
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_implementations tool against Flask. Target: SessionInterface (sessions.py).
+    query: |
+      What classes implement the SessionInterface?
+    expected_state: COMPLETE
+    reference_answer: |
+      SessionInterface in sessions.py is implemented by SecureCookieSessionInterface
+      which provides the default cookie-based session handling.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6003
+    name: flask_find_symbol
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_symbol tool against Flask. Target: Flask class (app.py:81).
+    query: |
+      Where is the Flask class defined?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Flask class is defined in app.py at line 81. It is the central
+      application object that implements the WSGI interface.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6004
+    name: flask_find_references
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_references tool against Flask. Target: request proxy (globals.py:46, 404 refs).
+    query: |
+      Where is the request proxy used across the codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      The request proxy from globals.py is used extensively across flask modules
+      including app.py, blueprints.py, helpers.py, and testing.py for accessing request context.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6005
+    name: flask_get_call_chain
+    category: TOOL_HAPPY_PATH
+    description: >
+      get_call_chain tool against Flask. From Flask.run to a view function.
+    query: |
+      Show the call chain from Flask.run to a view function
+    expected_state: COMPLETE
+    reference_answer: |
+      Flask.run -> werkzeug.serving.run_simple -> wsgi_app -> full_dispatch_request ->
+      dispatch_request -> view function execution via url_map routing.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6006
+    name: flask_find_path
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_path tool against Flask. Between wsgi_app and dispatch_request.
+    query: |
+      Find the shortest path between wsgi_app and dispatch_request
+    expected_state: COMPLETE
+    reference_answer: |
+      wsgi_app -> full_dispatch_request -> dispatch_request. The path goes
+      through the main request handling pipeline in app.py.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6007
+    name: flask_find_hotspots
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_hotspots tool against Flask.
+    query: |
+      What are the most connected functions (hotspots) in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      Top hotspots include Flask.__init__, wsgi_app, full_dispatch_request,
+      and make_response which serve as central hubs in request handling.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6008
+    name: flask_find_dead_code
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dead_code tool against Flask.
+    query: |
+      Find unused or dead code in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Dead code analysis finds functions with zero incoming edges that are
+      not entry points, test helpers, or __init__ methods.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6009
+    name: flask_find_cycles
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_cycles tool against Flask.
+    query: |
+      Find circular call dependencies in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Flask has circular dependencies in areas like app/blueprint registration
+      where blueprints reference the app and the app registers blueprints.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6010
+    name: flask_find_important
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_important tool (PageRank) against Flask.
+    query: |
+      What are the most important functions by PageRank in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      PageRank identifies central functions in app.py (request dispatching),
+      sessions.py (session management), and helpers.py (utility functions).
+    validations:
+      - type: graph_tool_used
+
+  - id: 6011
+    name: flask_find_communities
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_communities tool (Leiden) against Flask.
+    query: |
+      Find natural code communities and module boundaries in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Communities align with Flask's module structure: app (core), sessions,
+      blueprints, templating, helpers, and the testing/cli utilities.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6012
+    name: flask_find_articulation_points
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_articulation_points tool against Flask.
+    query: |
+      Find single points of failure in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Articulation points include key orchestration functions like wsgi_app
+      and full_dispatch_request that bridge between routing and response handling.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6013
+    name: flask_find_dominators
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dominators tool against Flask. Target: dispatch_request.
+    query: |
+      What functions must be called before dispatch_request executes?
+    expected_state: COMPLETE
+    reference_answer: |
+      Dominators of dispatch_request include wsgi_app and full_dispatch_request
+      which must execute first to set up the request context.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6014
+    name: flask_find_loops
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_loops tool against Flask. Target: blueprint registration.
+    query: |
+      Find recursive functions in the blueprint registration
+    expected_state: COMPLETE
+    reference_answer: |
+      Recursive patterns exist in blueprint registration where nested blueprints
+      trigger recursive register calls to build the URL rule hierarchy.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6015
+    name: flask_find_merge_points
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_merge_points tool against Flask.
+    query: |
+      Where do different request handling paths converge?
+    expected_state: COMPLETE
+    reference_answer: |
+      Merge points include make_response where different view return types
+      (string, tuple, Response) converge into a single Response object.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6016
+    name: flask_find_common_dependency
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_common_dependency tool against Flask. Between wsgi_app and Blueprint.register.
+    query: |
+      What shared dependency do wsgi_app and Blueprint.register have?
+    expected_state: COMPLETE
+    reference_answer: |
+      Both wsgi_app and Blueprint.register depend on the Flask app object
+      and its url_map for routing configuration and request dispatching.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6017
+    name: flask_find_control_dependencies
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_control_dependencies tool against Flask. Target: before_request handlers.
+    query: |
+      What conditionals control whether before_request handlers run?
+    expected_state: COMPLETE
+    reference_answer: |
+      before_request handlers are controlled by the request context setup
+      and blueprint matching logic that determines which handlers apply.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6018
+    name: flask_find_extractable_regions
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_extractable_regions tool against Flask. Target: full_dispatch_request.
+    query: |
+      Find functions that could be safely extracted from full_dispatch_request
+    expected_state: COMPLETE
+    reference_answer: |
+      SESE regions in full_dispatch_request include the before_request processing,
+      error handling, and after_request finalization blocks.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6019
+    name: flask_check_reducibility
+    category: TOOL_HAPPY_PATH
+    description: >
+      check_reducibility tool against Flask.
+    query: |
+      Check the control flow structure quality of this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Reducibility analysis shows the overall control flow graph structure,
+      identifying any irreducible regions that complicate analysis.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6020
+    name: flask_find_critical_path
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_critical_path tool against Flask. Target: HTTP request handling.
+    query: |
+      What is the mandatory call sequence to handle an HTTP request?
+    expected_state: COMPLETE
+    reference_answer: |
+      The critical path goes through wsgi_app -> full_dispatch_request ->
+      dispatch_request -> view function -> make_response -> finalize_request.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6021
+    name: flask_find_module_api
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_module_api tool against Flask. Target: flask.sessions module.
+    query: |
+      What is the public API of the flask.sessions module?
+    expected_state: COMPLETE
+    reference_answer: |
+      flask.sessions exports SessionInterface, SecureCookieSessionInterface,
+      SecureCookieSession, and NullSession for session management.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6022
+    name: flask_find_weighted_criticality
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_weighted_criticality tool against Flask.
+    query: |
+      What are the most critical functions by weighted importance?
+    expected_state: COMPLETE
+    reference_answer: |
+      Weighted criticality combines PageRank, betweenness, and degree
+      centrality to identify functions critical across multiple dimensions.
+    validations:
+      - type: graph_tool_used
+
+  # ── Unregistered/TODO Tools (23-39) ── expected_state: CLARIFY ──
+
+  - id: 6023
+    name: flask_find_entry_points
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_entry_points tool (not yet registered as standalone tool).
+    query: |
+      What are the entry points into this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone. Entry points include
+      Flask.run(), wsgi_app(), and CLI command registrations.
+    validations: []
+
+  - id: 6024
+    name: flask_trace_data_flow
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: trace_data_flow tool (not yet registered as standalone tool).
+    query: |
+      Trace how request data flows through the dispatch pipeline
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6025
+    name: flask_trace_error_flow
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: trace_error_flow tool (not yet registered as standalone tool).
+    query: |
+      Trace how errors propagate through the request handling system
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6026
+    name: flask_find_config_usage
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_config_usage tool (not yet registered as standalone tool).
+    query: |
+      How is the app configuration used across Flask?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6027
+    name: flask_find_similar_code
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_similar_code tool (not yet registered as standalone tool).
+    query: |
+      Find code similar to the request dispatching logic
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6028
+    name: flask_build_minimal_context
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: build_minimal_context tool (not yet registered as standalone tool).
+    query: |
+      Build minimal context needed to understand the wsgi_app function
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6029
+    name: flask_summarize_file
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: summarize_file tool (not yet registered as standalone tool).
+    query: |
+      Summarize the flask/app.py file
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6030
+    name: flask_summarize_package
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: summarize_package tool (not yet registered as standalone tool).
+    query: |
+      Summarize the flask package and its modules
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6031
+    name: flask_analyze_change_impact
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: analyze_change_impact tool (not yet registered as standalone tool).
+    query: |
+      What would be the impact of changing the Flask.route decorator?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6032
+    name: flask_check_breaking_changes
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: check_breaking_changes tool (not yet registered as standalone tool).
+    query: |
+      Would removing the make_response method be a breaking change?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6033
+    name: flask_simulate_change
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: simulate_change tool (not yet registered as standalone tool).
+    query: |
+      Simulate the impact of refactoring full_dispatch_request into smaller methods
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6034
+    name: flask_find_test_coverage
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_test_coverage tool (not yet registered as standalone tool).
+    query: |
+      Which functions in flask/app.py lack test coverage?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6035
+    name: flask_detect_side_effects
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: detect_side_effects tool (not yet registered as standalone tool).
+    query: |
+      What side effects does the wsgi_app function have?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6036
+    name: flask_detect_patterns
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: detect_patterns tool (not yet registered as standalone tool).
+    query: |
+      What design patterns are used in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6037
+    name: flask_find_code_smells
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_code_smells tool (not yet registered as standalone tool).
+    query: |
+      Find code smells in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6038
+    name: flask_find_duplication
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_duplication tool (not yet registered as standalone tool).
+    query: |
+      Find duplicated code patterns in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6039
+    name: flask_extract_conventions
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: extract_conventions tool (not yet registered as standalone tool).
+    query: |
+      What coding conventions does this codebase follow?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
