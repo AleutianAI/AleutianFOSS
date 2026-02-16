@@ -2,40 +2,50 @@
 # CRS Integration Tests for Aleutian Trace Agent
 # Tests Phase 0 CRS features (GR-28 through GR-37)
 #
-# These tests verify:
-#   - Session restore (GR-36): State persists across sessions
-#   - Graph provider snapshot (GR-28): Graph state captured
-#   - Disk persistence (GR-33): Backup/restore working
-#   - Analytics CRS routing (GR-31): Analytics queries tracked
-#   - Delta history (GR-35): Deltas recorded for replay
+# Refactored to use modular components from test_langs/common/
 #
 # Usage:
 #   ./test_crs_integration.sh              # Run all CRS tests (remote mode)
 #   ./test_crs_integration.sh -t 1,2,3     # Run specific tests
 #   ./test_crs_integration.sh --local      # Run local Go tests (no GPU required)
+#   ./test_crs_integration.sh --lang go    # Run Go tests only (future: multi-language)
+#   ./test_crs_integration.sh --feature GR-36  # Run specific feature tests (future: YAML-based)
 
 set -e
 
-# Configuration (can be overridden via environment)
+# ==============================================================================
+# CONFIGURATION
+# ==============================================================================
+
+# Remote server configuration
 REMOTE_HOST="${CRS_TEST_HOST:-10.0.0.250}"
 REMOTE_PORT="${CRS_TEST_PORT:-13022}"
 REMOTE_USER="${CRS_TEST_USER:-aleutiandevops}"
 SSH_KEY="$HOME/.ssh/aleutiandevops_ansible_key"
 SSH_CONTROL_SOCKET="$HOME/.ssh/crs_test_multiplex_%h_%p_%r"
 
-# Model configuration (must match test_trace_agent_remote.sh)
-# Testing gpt-oss:20b for synthesis (larger model, better reasoning)
+# Model configuration
 OLLAMA_MODEL="gpt-oss:20b"
 ROUTER_MODEL="granite4:micro-h"
 
 # Project to analyze on remote
 PROJECT_TO_ANALYZE="${TEST_PROJECT_ROOT:-/Users/jin/GolandProjects/AleutianOrchestrator}"
+
+# Output files (timestamped)
 OUTPUT_FILE="/tmp/crs_test_results_$(date +%Y%m%d_%H%M%S).json"
 
-# Local test mode (uses local Go tests instead of remote)
+# Local test mode
 LOCAL_MODE=false
 
-# Parse arguments
+# Language filter (for future multi-language support)
+LANGUAGE_FILTER=""
+FEATURE_FILTER=""
+TOOL_FILTER=""
+
+# ==============================================================================
+# PARSE ARGUMENTS
+# ==============================================================================
+
 SPECIFIC_TESTS=""
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -47,12 +57,37 @@ while [[ $# -gt 0 ]]; do
             LOCAL_MODE=true
             shift
             ;;
+        --lang|--language)
+            LANGUAGE_FILTER="$2"
+            shift 2
+            ;;
+        --feature)
+            FEATURE_FILTER="$2"
+            shift 2
+            ;;
+        --tool)
+            TOOL_FILTER="$2"
+            shift 2
+            ;;
+        --router-model)
+            ROUTER_MODEL="$2"
+            shift 2
+            ;;
+        --main-model)
+            OLLAMA_MODEL="$2"
+            shift 2
+            ;;
         -h|--help)
-            echo "Usage: $0 [-t|--tests TEST_SPEC] [--local]"
+            echo "Usage: $0 [-t|--tests TEST_SPEC] [--local] [--lang LANGUAGE] [--feature FEATURE] [--tool TOOL] [--router-model MODEL] [--main-model MODEL]"
             echo ""
             echo "Options:"
-            echo "  -t, --tests   Comma-separated test numbers or ranges (e.g., 1,2,3 or 1-5)"
-            echo "  --local       Run local Go tests instead of remote integration tests"
+            echo "  -t, --tests       Comma-separated test numbers or ranges (e.g., 1,2,3 or 1-5)"
+            echo "  --local           Run local Go tests instead of remote integration tests"
+            echo "  --lang            Filter by language (go, python, javascript, typescript)"
+            echo "  --feature         Filter by feature (e.g., GR-36, TOOL-HAPPY-HUGO)"
+            echo "  --tool            Run one tool across all projects (e.g., find_callers)"
+            echo "  --router-model    Router model to use (default: granite4:micro-h)"
+            echo "  --main-model      Main agent model to use (default: gpt-oss:20b)"
             echo ""
             echo "Test Categories:"
             echo "  1-3:   Session Restore (GR-36)"
@@ -61,33 +96,7 @@ while [[ $# -gt 0 ]]; do
             echo "  10-12: Analytics Routing (GR-31)"
             echo "  13-15: Delta History (GR-35)"
             echo "  16-21: Graph Index Optimization (GR-01)"
-            echo "  22-27: Go Interface Implementation Detection (GR-40)"
-            echo "  28-30: Existence Tests (things that exist in AleutianOrchestrator)"
-            echo "  31-35: PageRank Algorithm & find_important Tool (GR-12/GR-13)"
-            echo "  36-44: Integration Test Quality Fixes (GR-Phase1)"
-            echo "  45-49: Secondary Indexes (GR-06 to GR-09)"
-            echo "  50-54: Query Cache LRU (GR-10)"
-            echo "  55-59: Parallel BFS (GR-11)"
-            echo "  60-64: Louvain Community Detection (GR-14)"
-            echo "  65-69: find_communities Tool (GR-15)"
-            echo "  70-72: Articulation Points (GR-16a)"
-            echo "  73-76: Dominator Trees (GR-16b)"
-            echo "  77-78: Post-Dominator Trees (GR-16c)"
-            echo "  79-80: Dominance Frontier (GR-16d)"
-            echo "  81-82: Control Dependence (GR-16e)"
-            echo "  83-85: Natural Loop Detection (GR-16f)"
-            echo "  86-87: Lowest Common Dominator (GR-16g)"
-            echo "  88-90: SESE Region Detection (GR-16h)"
-            echo "  91-93: find_articulation_points Tool (GR-17a)"
-            echo "  94-96: find_dominators Tool (GR-17b)"
-            echo "  97-99: Check Reducibility Algorithm (GR-16i)"
-            echo "  100-102: find_loops Tool (GR-17e)"
-            echo "  103-105: find_control_dependencies Tool (GR-17c)"
-            echo "  106-108: find_extractable_regions Tool (GR-17g)"
-            echo "  109-111: check_reducibility Tool (GR-17h)"
-            echo "  112-114: find_critical_path Tool (GR-18a)"
-            echo "  135-138: LCA and Path Decomposition (GR-19c)"
-            echo "  139-142: Path Aggregate Queries (GR-19d)"
+            echo "  ... (see full list with --help-full)"
             echo ""
             echo "Environment Variables:"
             echo "  CRS_TEST_HOST    Remote host (default: 10.0.0.250)"
@@ -103,13 +112,154 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+# ==============================================================================
+# SOURCE MODULAR COMPONENTS
+# ==============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Colors (exported so modules can use them)
+export RED='\033[0;31m'
+export GREEN='\033[0;32m'
+export YELLOW='\033[1;33m'
+export BLUE='\033[0;34m'
+export CYAN='\033[0;36m'
+export NC='\033[0m'
+
+# Source modules with error checking
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+for module in ssh_utils test_functions internal_tests project_utils; do
+    module_path="$REPO_ROOT/test_langs/common/${module}.sh"
+    if [ ! -f "$module_path" ]; then
+        echo -e "${RED}ERROR: Required module not found: $module_path${NC}" >&2
+        echo "Please ensure test_langs/common/ directory exists and contains all required modules." >&2
+        exit 1
+    fi
+    source "$module_path"
+done
+
+# ==============================================================================
+# HELPER FUNCTIONS FOR AUTO-DETECTION
+# ==============================================================================
+
+expand_test_spec() {
+    local spec="$1"
+    local result=()
+
+    IFS=',' read -ra parts <<< "$spec"
+    for part in "${parts[@]}"; do
+        if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+            # Range like "1-5"
+            for ((i=${BASH_REMATCH[1]}; i<=${BASH_REMATCH[2]}; i++)); do
+                result+=($i)
+            done
+        else
+            # Single number
+            result+=($part)
+        fi
+    done
+
+    echo "${result[@]}"
+}
+
+# Auto-detect language from test ID ranges
+# Returns: go, python, javascript, typescript, or empty if mixed/unknown
+detect_language_from_tests() {
+    local spec="$1"
+    local tests=($(expand_test_spec "$spec"))
+    local detected_lang=""
+
+    for test_id in "${tests[@]}"; do
+        local lang=""
+        if [ "$test_id" -ge 101 ] && [ "$test_id" -le 133 ]; then
+            lang="go"
+        elif [ "$test_id" -ge 201 ] && [ "$test_id" -le 233 ]; then
+            lang="python"
+        elif [ "$test_id" -ge 301 ] && [ "$test_id" -le 333 ]; then
+            lang="javascript"
+        elif [ "$test_id" -ge 401 ] && [ "$test_id" -le 433 ]; then
+            lang="typescript"
+        # Tool Happy Path ranges (5000-8139)
+        elif [ "$test_id" -ge 5000 ] && [ "$test_id" -le 5239 ]; then
+            lang="go"
+        elif [ "$test_id" -ge 6000 ] && [ "$test_id" -le 6139 ]; then
+            lang="python"
+        elif [ "$test_id" -ge 7000 ] && [ "$test_id" -le 7139 ]; then
+            lang="javascript"
+        elif [ "$test_id" -ge 8000 ] && [ "$test_id" -le 8139 ]; then
+            lang="typescript"
+        fi
+
+        # If we detected a language
+        if [ -n "$lang" ]; then
+            # First detection
+            if [ -z "$detected_lang" ]; then
+                detected_lang="$lang"
+            # Mixed languages - return empty
+            elif [ "$detected_lang" != "$lang" ]; then
+                echo ""
+                return 1
+            fi
+        fi
+    done
+
+    echo "$detected_lang"
+}
+
+# ==============================================================================
+# AUTO-DETECT LANGUAGE FROM TEST IDS
+# ==============================================================================
+
+# If specific tests were provided without --lang, auto-detect language
+if [ -n "$SPECIFIC_TESTS" ] && [ -z "$LANGUAGE_FILTER" ]; then
+    AUTO_DETECTED_LANG=$(detect_language_from_tests "$SPECIFIC_TESTS")
+    if [ -n "$AUTO_DETECTED_LANG" ]; then
+        LANGUAGE_FILTER="$AUTO_DETECTED_LANG"
+        echo -e "${CYAN}Auto-detected language from test IDs: ${BOLD}$LANGUAGE_FILTER${NC}"
+        echo ""
+    fi
+fi
+
+# Auto-detect TOOL-HAPPY feature dir from test IDs in the 5000+ range
+# Maps test ID ranges to the correct TOOL-HAPPY-* feature directory
+if [ -n "$SPECIFIC_TESTS" ] && [ -z "$FEATURE_FILTER" ]; then
+    first_test_id=$(expand_test_spec "$SPECIFIC_TESTS" | awk '{print $1}')
+    if [ "$first_test_id" -ge 5000 ] 2>/dev/null; then
+        auto_feature=""
+        if [ "$first_test_id" -ge 5000 ] && [ "$first_test_id" -le 5039 ]; then
+            auto_feature="TOOL-HAPPY-HUGO"
+        elif [ "$first_test_id" -ge 5100 ] && [ "$first_test_id" -le 5139 ]; then
+            auto_feature="TOOL-HAPPY-BADGER"
+        elif [ "$first_test_id" -ge 5200 ] && [ "$first_test_id" -le 5239 ]; then
+            auto_feature="TOOL-HAPPY-GIN"
+        elif [ "$first_test_id" -ge 6000 ] && [ "$first_test_id" -le 6039 ]; then
+            auto_feature="TOOL-HAPPY-FLASK"
+        elif [ "$first_test_id" -ge 6100 ] && [ "$first_test_id" -le 6139 ]; then
+            auto_feature="TOOL-HAPPY-PANDAS"
+        elif [ "$first_test_id" -ge 7000 ] && [ "$first_test_id" -le 7039 ]; then
+            auto_feature="TOOL-HAPPY-EXPRESS"
+        elif [ "$first_test_id" -ge 7100 ] && [ "$first_test_id" -le 7139 ]; then
+            auto_feature="TOOL-HAPPY-BABYLONJS"
+        elif [ "$first_test_id" -ge 8000 ] && [ "$first_test_id" -le 8039 ]; then
+            auto_feature="TOOL-HAPPY-NESTJS"
+        elif [ "$first_test_id" -ge 8100 ] && [ "$first_test_id" -le 8139 ]; then
+            auto_feature="TOOL-HAPPY-PLOTTABLE"
+        fi
+        if [ -n "$auto_feature" ]; then
+            FEATURE_FILTER="$auto_feature"
+            echo -e "${CYAN}Auto-detected feature from test IDs: ${BOLD}$FEATURE_FILTER${NC}"
+        fi
+    fi
+fi
+
+# ==============================================================================
+# UTILITY FUNCTIONS
+# ==============================================================================
+
+# Get current time in milliseconds
+get_time_ms() {
+    python3 -c 'import time; print(int(time.time() * 1000))'
+}
 
 # ==============================================================================
 # LOCAL TEST MODE
@@ -134,469 +284,27 @@ run_local_tests() {
             *7*|*8*|*9*)
                 test_args="$test_args -run TestGraph"
                 ;;
-            *10*|*11*|*12*)
-                test_args="$test_args -run TestAnalytics"
-                ;;
-            *13*|*14*|*15*)
-                test_args="$test_args -run TestDeltaHistory"
-                ;;
-            *16*|*17*|*18*|*19*|*20*|*21*)
-                test_args="$test_args -run TestGraphIndex"
-                ;;
-            *22*|*23*|*24*|*25*|*26*|*27*)
-                test_args="$test_args -run TestGoInterface"
-                ;;
-            *28*|*29*|*30*)
-                test_args="$test_args -run TestExistence"
-                ;;
-            *31*|*32*|*33*|*34*|*35*)
-                test_args="$test_args -run TestPageRank"
-                ;;
-            *36*|*37*|*38*|*39*|*40*|*41*|*42*|*43*|*44*)
-                test_args="$test_args -run TestQuality"
-                ;;
-            *45*|*46*|*47*|*48*|*49*)
-                test_args="$test_args -run TestSecondaryIndex"
-                ;;
-            *50*|*51*|*52*|*53*|*54*)
-                test_args="$test_args -run TestQueryCache"
-                ;;
-            *55*|*56*|*57*|*58*|*59*)
-                test_args="$test_args -run TestParallelBFS"
-                ;;
-            *60*|*61*|*62*|*63*|*64*)
-                test_args="$test_args -run TestCommunity"
-                ;;
-            *65*|*66*|*67*|*68*|*69*)
-                test_args="$test_args -run TestFindCommunitiesTool"
-                ;;
-            *70*|*71*|*72*)
-                test_args="$test_args -run TestArticulationPoints"
-                ;;
-            *73*|*74*|*75*|*76*)
-                test_args="$test_args -run TestDominators"
-                ;;
-            *77*|*78*)
-                test_args="$test_args -run TestPostDominators"
-                ;;
-            *79*|*80*)
-                test_args="$test_args -run TestDominanceFrontier"
-                ;;
-            *81*|*82*)
-                test_args="$test_args -run TestControlDependence"
-                ;;
-            *83*|*84*|*85*)
-                test_args="$test_args -run TestDetectLoops"
-                ;;
-            *86*|*87*)
-                test_args="$test_args -run TestLCD"
-                ;;
-            *94*|*95*|*96*)
-                test_args="$test_args -run TestFindDominatorsTool"
-                ;;
-            *97*|*98*|*99*)
-                test_args="$test_args -run TestCheckReducibility"
-                ;;
+            # ... add more mappings as needed
         esac
     fi
 
-    echo -e "${YELLOW}Running CRS tests...${NC}"
-    echo ""
-
-    local exit_code=0
-
-    # Run the Go tests for CRS package
-    if ! go test ./services/trace/agent/mcts/crs/... -v -timeout 120s $test_args; then
-        exit_code=1
-    fi
-
-    # For tests 55-59 (Parallel BFS), also run graph package tests
-    if [[ "$SPECIFIC_TESTS" =~ (55|56|57|58|59) ]] || [ -z "$SPECIFIC_TESTS" ]; then
-        echo ""
-        echo -e "${YELLOW}Running Parallel BFS tests (GR-11)...${NC}"
-        echo ""
-
-        # Run parallel BFS tests with race detector
-        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestParallelBFS" -race; then
-            exit_code=1
-        fi
-
-        # Run benchmarks if no specific tests requested
-        if [ -z "$SPECIFIC_TESTS" ]; then
-            echo ""
-            echo -e "${YELLOW}Running Parallel BFS benchmarks...${NC}"
-            go test ./services/trace/graph/... -bench=BenchmarkBFS -benchmem -count=1 -timeout 60s || true
-        fi
-    fi
-
-    # For tests 60-64 (Community Detection), run graph package tests
-    if [[ "$SPECIFIC_TESTS" =~ (60|61|62|63|64) ]] || [ -z "$SPECIFIC_TESTS" ]; then
-        echo ""
-        echo -e "${YELLOW}Running Community Detection tests (GR-14)...${NC}"
-        echo ""
-
-        # Run community detection tests with race detector
-        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestCommunity" -race; then
-            exit_code=1
-        fi
-
-        # Run benchmarks if no specific tests requested
-        if [ -z "$SPECIFIC_TESTS" ]; then
-            echo ""
-            echo -e "${YELLOW}Running Louvain benchmarks...${NC}"
-            go test ./services/trace/graph/... -bench=BenchmarkLouvain -benchmem -count=1 -timeout 60s || true
-        fi
-    fi
-
-    # For tests 65-69 (find_communities Tool), run tool tests
-    if [[ "$SPECIFIC_TESTS" =~ (65|66|67|68|69) ]] || [ -z "$SPECIFIC_TESTS" ]; then
-        echo ""
-        echo -e "${YELLOW}Running find_communities Tool tests (GR-15)...${NC}"
-        echo ""
-
-        # Run find_communities tool tests with race detector
-        if ! go test ./services/trace/cli/tools/... -v -timeout 120s -run "TestFindCommunitiesTool" -race; then
-            exit_code=1
-        fi
-
-        # Run benchmarks if no specific tests requested
-        if [ -z "$SPECIFIC_TESTS" ]; then
-            echo ""
-            echo -e "${YELLOW}Running find_communities benchmarks...${NC}"
-            go test ./services/trace/cli/tools/... -bench=BenchmarkFindCommunities -benchmem -count=1 -timeout 60s || true
-        fi
-    fi
-
-    # For tests 70-72 (Articulation Points), run graph package tests
-    if [[ "$SPECIFIC_TESTS" =~ (70|71|72) ]] || [ -z "$SPECIFIC_TESTS" ]; then
-        echo ""
-        echo -e "${YELLOW}Running Articulation Points tests (GR-16a)...${NC}"
-        echo ""
-
-        # Run articulation points tests with race detector
-        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestArticulationPoints" -race; then
-            exit_code=1
-        fi
-
-        # Run benchmarks if no specific tests requested
-        if [ -z "$SPECIFIC_TESTS" ]; then
-            echo ""
-            echo -e "${YELLOW}Running Articulation Points benchmarks...${NC}"
-            go test ./services/trace/graph/... -bench=BenchmarkArticulationPoints -benchmem -count=1 -timeout 60s || true
-        fi
-    fi
-
-    # For tests 91-93 (find_articulation_points Tool), run tool tests
-    if [[ "$SPECIFIC_TESTS" =~ (91|92|93) ]] || [ -z "$SPECIFIC_TESTS" ]; then
-        echo ""
-        echo -e "${YELLOW}Running find_articulation_points Tool tests (GR-17a)...${NC}"
-        echo ""
-
-        # Run find_articulation_points tool tests with race detector
-        if ! go test ./services/trace/cli/tools/... -v -timeout 120s -run "TestFindArticulationPointsTool" -race; then
-            exit_code=1
-        fi
-
-        # Run benchmarks if no specific tests requested
-        if [ -z "$SPECIFIC_TESTS" ]; then
-            echo ""
-            echo -e "${YELLOW}Running find_articulation_points benchmarks...${NC}"
-            go test ./services/trace/cli/tools/... -bench=BenchmarkFindArticulationPoints -benchmem -count=1 -timeout 60s || true
-        fi
-    fi
-
-    # For tests 100-102 (find_loops Tool), run tool tests
-    if [[ "$SPECIFIC_TESTS" =~ (100|101|102) ]] || [ -z "$SPECIFIC_TESTS" ]; then
-        echo ""
-        echo -e "${YELLOW}Running find_loops Tool tests (GR-17e)...${NC}"
-        echo ""
-
-        # Run find_loops tool tests with race detector
-        if ! go test ./services/trace/cli/tools/... -v -timeout 120s -run "TestFindLoopsTool" -race; then
-            exit_code=1
-        fi
-
-        # Run underlying loop detection algorithm tests
-        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestDetectLoops" -race; then
-            exit_code=1
-        fi
-    fi
-
-    # For tests 106-108 (find_control_dependencies Tool), run tool tests
-    if [[ "$SPECIFIC_TESTS" =~ (106|107|108) ]] || [ -z "$SPECIFIC_TESTS" ]; then
-        echo ""
-        echo -e "${YELLOW}Running find_control_dependencies Tool tests (GR-17c)...${NC}"
-        echo ""
-
-        # Run find_control_dependencies tool tests with race detector
-        if ! go test ./services/trace/cli/tools/... -v -timeout 120s -run "TestFindControlDependenciesTool" -race; then
-            exit_code=1
-        fi
-
-        # Run underlying control dependence algorithm tests
-        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestComputeControlDependence" -race; then
-            exit_code=1
-        fi
-    fi
-
-    # For tests 109-111 (find_extractable_regions Tool), run tool tests
-    if [[ "$SPECIFIC_TESTS" =~ (109|110|111) ]] || [ -z "$SPECIFIC_TESTS" ]; then
-        echo ""
-        echo -e "${YELLOW}Running find_extractable_regions Tool tests (GR-17g)...${NC}"
-        echo ""
-
-        # Run find_extractable_regions tool tests with race detector
-        if ! go test ./services/trace/cli/tools/... -v -timeout 120s -run "TestFindExtractableRegionsTool" -race; then
-            exit_code=1
-        fi
-
-        # Run underlying SESE region detection algorithm tests
-        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestDetectSESERegions" -race; then
-            exit_code=1
-        fi
-    fi
-
-    # For tests 112-114 (check_reducibility Tool), run tool tests
-    if [[ "$SPECIFIC_TESTS" =~ (112|113|114) ]] || [ -z "$SPECIFIC_TESTS" ]; then
-        echo ""
-        echo -e "${YELLOW}Running check_reducibility Tool tests (GR-17h)...${NC}"
-        echo ""
-
-        # Run check_reducibility tool tests with race detector
-        if ! go test ./services/trace/cli/tools/... -v -timeout 120s -run "TestCheckReducibilityTool" -race; then
-            exit_code=1
-        fi
-
-        # Run underlying reducibility algorithm tests
-        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestCheckReducibility" -race; then
-            exit_code=1
-        fi
-    fi
-
-    # For tests 115-117 (find_critical_path Tool), run tool tests
-    if [[ "$SPECIFIC_TESTS" =~ (115|116|117) ]] || [ -z "$SPECIFIC_TESTS" ]; then
-        echo ""
-        echo -e "${YELLOW}Running find_critical_path Tool tests (GR-18a)...${NC}"
-        echo ""
-
-        # Run find_critical_path tool tests with race detector
-        if ! go test ./services/trace/cli/tools/... -v -timeout 120s -run "TestFindCriticalPathTool" -race; then
-            exit_code=1
-        fi
-
-        # Note: find_critical_path uses existing dominator tree algorithm (GR-16b)
-        # No separate algorithm tests needed
-    fi
-
-    # For tests 135-138 (LCA and Path Decomposition), run graph package tests
-    if [[ "$SPECIFIC_TESTS" =~ (135|136|137|138) ]] || [ -z "$SPECIFIC_TESTS" ]; then
-        echo ""
-        echo -e "${YELLOW}Running LCA and Path Decomposition tests (GR-19c)...${NC}"
-        echo ""
-
-        # Run LCA and path decomposition tests with race detector
-        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestLCA|TestDecomposePath|TestDistance|TestPathNodes" -race; then
-            exit_code=1
-        fi
-
-        # Run benchmarks if no specific tests requested
-        if [ -z "$SPECIFIC_TESTS" ]; then
-            echo ""
-            echo -e "${YELLOW}Running LCA and Path Decomposition benchmarks...${NC}"
-            go test ./services/trace/graph/... -bench="BenchmarkLCA|BenchmarkDecomposePath|BenchmarkDistance" -benchmem -count=1 -timeout 60s || true
-        fi
-    fi
-
-    # For tests 73-76 (Dominator Trees), run graph package tests
-    if [[ "$SPECIFIC_TESTS" =~ (73|74|75|76) ]] || [ -z "$SPECIFIC_TESTS" ]; then
-        echo ""
-        echo -e "${YELLOW}Running Dominator Trees tests (GR-16b)...${NC}"
-        echo ""
-
-        # Run dominator tests with race detector
-        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestDominators" -race; then
-            exit_code=1
-        fi
-
-        # Run benchmarks if no specific tests requested
-        if [ -z "$SPECIFIC_TESTS" ]; then
-            echo ""
-            echo -e "${YELLOW}Running Dominator Trees benchmarks...${NC}"
-            go test ./services/trace/graph/... -bench=BenchmarkDominators -benchmem -count=1 -timeout 60s || true
-        fi
-    fi
-
-    # For tests 77-78 (Post-Dominator Trees), run graph package tests
-    if [[ "$SPECIFIC_TESTS" =~ (77|78) ]] || [ -z "$SPECIFIC_TESTS" ]; then
-        echo ""
-        echo -e "${YELLOW}Running Post-Dominator Trees tests (GR-16c)...${NC}"
-        echo ""
-
-        # Run post-dominator tests with race detector
-        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestPostDominators" -race; then
-            exit_code=1
-        fi
-
-        # Run benchmarks if no specific tests requested
-        if [ -z "$SPECIFIC_TESTS" ]; then
-            echo ""
-            echo -e "${YELLOW}Running Post-Dominator Trees benchmarks...${NC}"
-            go test ./services/trace/graph/... -bench=BenchmarkPostDominators -benchmem -count=1 -timeout 60s || true
-        fi
-    fi
-
-    # For tests 79-80 (Dominance Frontier), run graph package tests
-    if [[ "$SPECIFIC_TESTS" =~ (79|80) ]] || [ -z "$SPECIFIC_TESTS" ]; then
-        echo ""
-        echo -e "${YELLOW}Running Dominance Frontier tests (GR-16d)...${NC}"
-        echo ""
-
-        # Run dominance frontier tests with race detector
-        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestDominanceFrontier" -race; then
-            exit_code=1
-        fi
-
-        # Run benchmarks if no specific tests requested
-        if [ -z "$SPECIFIC_TESTS" ]; then
-            echo ""
-            echo -e "${YELLOW}Running Dominance Frontier benchmarks...${NC}"
-            go test ./services/trace/graph/... -bench=BenchmarkDominanceFrontier -benchmem -count=1 -timeout 60s || true
-        fi
-    fi
-
-    # For tests 81-82 (Control Dependence), run graph package tests
-    if [[ "$SPECIFIC_TESTS" =~ (81|82) ]] || [ -z "$SPECIFIC_TESTS" ]; then
-        echo ""
-        echo -e "${YELLOW}Running Control Dependence tests (GR-16e)...${NC}"
-        echo ""
-
-        # Run control dependence tests with race detector
-        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestControlDependence" -race; then
-            exit_code=1
-        fi
-
-        # Run benchmarks if no specific tests requested
-        if [ -z "$SPECIFIC_TESTS" ]; then
-            echo ""
-            echo -e "${YELLOW}Running Control Dependence benchmarks...${NC}"
-            go test ./services/trace/graph/... -bench=BenchmarkControlDependence -benchmem -count=1 -timeout 60s || true
-        fi
-    fi
-
-    # For tests 83-85 (Natural Loop Detection), run graph package tests
-    if [[ "$SPECIFIC_TESTS" =~ (83|84|85) ]] || [ -z "$SPECIFIC_TESTS" ]; then
-        echo ""
-        echo -e "${YELLOW}Running Natural Loop Detection tests (GR-16f)...${NC}"
-        echo ""
-
-        # Run loop detection tests with race detector
-        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestDetectLoops" -race; then
-            exit_code=1
-        fi
-
-        # Run benchmarks if no specific tests requested
-        if [ -z "$SPECIFIC_TESTS" ]; then
-            echo ""
-            echo -e "${YELLOW}Running Natural Loop Detection benchmarks...${NC}"
-            go test ./services/trace/graph/... -bench=BenchmarkDetectLoops -benchmem -count=1 -timeout 60s || true
-        fi
-    fi
-
-    # For tests 86-87 (Lowest Common Dominator), run graph package tests
-    if [[ "$SPECIFIC_TESTS" =~ (86|87) ]] || [ -z "$SPECIFIC_TESTS" ]; then
-        echo ""
-        echo -e "${YELLOW}Running Lowest Common Dominator tests (GR-16g)...${NC}"
-        echo ""
-
-        # Run LCD tests with race detector
-        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestLCD" -race; then
-            exit_code=1
-        fi
-
-        # Run benchmarks if no specific tests requested
-        if [ -z "$SPECIFIC_TESTS" ]; then
-            echo ""
-            echo -e "${YELLOW}Running Lowest Common Dominator benchmarks...${NC}"
-            go test ./services/trace/graph/... -bench=BenchmarkLCD -benchmem -count=1 -timeout 60s || true
-        fi
-    fi
-
-    # For tests 88-90 (SESE Region Detection), run graph package tests
-    if [[ "$SPECIFIC_TESTS" =~ (88|89|90) ]] || [ -z "$SPECIFIC_TESTS" ]; then
-        echo ""
-        echo -e "${YELLOW}Running SESE Region Detection tests (GR-16h)...${NC}"
-        echo ""
-
-        # Run SESE tests with race detector
-        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestSESE" -race; then
-            exit_code=1
-        fi
-
-        # Run benchmarks if no specific tests requested
-        if [ -z "$SPECIFIC_TESTS" ]; then
-            echo ""
-            echo -e "${YELLOW}Running SESE Region Detection benchmarks...${NC}"
-            go test ./services/trace/graph/... -bench=BenchmarkSESE -benchmem -count=1 -timeout 60s || true
-        fi
-    fi
-
-    # For tests 94-96 (find_dominators Tool), run tool tests
-    if [[ "$SPECIFIC_TESTS" =~ (94|95|96) ]] || [ -z "$SPECIFIC_TESTS" ]; then
-        echo ""
-        echo -e "${YELLOW}Running find_dominators Tool tests (GR-17b)...${NC}"
-        echo ""
-
-        # Run find_dominators tool tests with race detector
-        if ! go test ./services/trace/cli/tools/... -v -timeout 120s -run "TestFindDominatorsTool" -race; then
-            exit_code=1
-        fi
-
-        # Run benchmarks if no specific tests requested
-        if [ -z "$SPECIFIC_TESTS" ]; then
-            echo ""
-            echo -e "${YELLOW}Running find_dominators benchmarks...${NC}"
-            go test ./services/trace/cli/tools/... -bench=BenchmarkFindDominators -benchmem -count=1 -timeout 60s || true
-        fi
-    fi
-
-    # For tests 97-99 (Check Reducibility Algorithm), run graph package tests
-    if [[ "$SPECIFIC_TESTS" =~ (97|98|99) ]] || [ -z "$SPECIFIC_TESTS" ]; then
-        echo ""
-        echo -e "${YELLOW}Running Check Reducibility Algorithm tests (GR-16i)...${NC}"
-        echo ""
-
-        # Run CheckReducibility tests with race detector
-        if ! go test ./services/trace/graph/... -v -timeout 120s -run "TestCheckReducibility" -race; then
-            exit_code=1
-        fi
-
-        # Run benchmarks if no specific tests requested
-        if [ -z "$SPECIFIC_TESTS" ]; then
-            echo ""
-            echo -e "${YELLOW}Running CheckReducibility benchmarks...${NC}"
-            go test ./services/trace/graph/... -bench=BenchmarkCheckReducibility -benchmem -count=1 -timeout 60s || true
-        fi
-    fi
-
-    if [ $exit_code -eq 0 ]; then
-        echo ""
-        echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
-        echo -e "${GREEN}  All CRS Tests PASSED${NC}"
-        echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
-    else
-        echo ""
-        echo -e "${RED}═══════════════════════════════════════════════════${NC}"
-        echo -e "${RED}  Some CRS Tests FAILED${NC}"
-        echo -e "${RED}═══════════════════════════════════════════════════${NC}"
-        exit 1
-    fi
+    cd "$SCRIPT_DIR/.."
+    go test -v ./services/trace/...${test_args:+ $test_args}
 }
 
 # ==============================================================================
-# REMOTE INTEGRATION TEST DEFINITIONS
+# GLOBAL VARIABLES FOR TEST TRACKING
 # ==============================================================================
 
-# Test categories for CRS integration
+declare -a DETAILED_RESULTS=()
+FIRST_TEST_RUNTIME=0
+LAST_TEST_RESULT="{}"
+
+
+# ==============================================================================
+# TEST DEFINITIONS (Will be migrated to YAML in Phases 3-5)
+# ==============================================================================
+
 declare -a CRS_TESTS=(
     # === SESSION RESTORE (GR-36) ===
     # These tests verify learned state persists across sessions
@@ -1082,243 +790,8 @@ declare -a CRS_TESTS=(
 )
 
 # ==============================================================================
-# SSH HELPERS
-# ==============================================================================
-
-# Setup ssh-agent to cache passphrase (only enter once)
-setup_ssh_agent() {
-    # Check if ssh-agent is already running with our key
-    if ! ssh-add -l 2>/dev/null | grep -q "aleutiandevops_ansible_key"; then
-        echo -e "${YELLOW}Setting up ssh-agent to cache passphrase...${NC}"
-        eval "$(ssh-agent -s)" > /dev/null
-        ssh-add "$SSH_KEY"
-        echo -e "${GREEN}SSH key added to agent${NC}"
-    fi
-}
-
-# SSH command wrapper (uses multiplexed connection)
-ssh_cmd() {
-    ssh -i "$SSH_KEY" \
-        -o StrictHostKeyChecking=no \
-        -o ControlPath="$SSH_CONTROL_SOCKET" \
-        -p "$REMOTE_PORT" "$REMOTE_USER@$REMOTE_HOST" "$@"
-}
-
-# Establish master SSH connection for multiplexing
-establish_connection() {
-    echo -e "${YELLOW}Establishing master SSH connection...${NC}"
-    ssh -i "$SSH_KEY" -p "$REMOTE_PORT" \
-        -o StrictHostKeyChecking=no \
-        -o ControlMaster=auto \
-        -o ControlPath="$SSH_CONTROL_SOCKET" \
-        -o ControlPersist=10m \
-        -fN "$REMOTE_USER@$REMOTE_HOST"
-    echo -e "${GREEN}Master connection established (multiplexing enabled)${NC}"
-}
-
-# Close master SSH connection
-close_connection() {
-    ssh -O exit -o ControlPath="$SSH_CONTROL_SOCKET" "$REMOTE_USER@$REMOTE_HOST" 2>/dev/null || true
-}
-
-# Test SSH connection
-test_ssh_connection() {
-    echo -e "${YELLOW}Testing SSH connection to $REMOTE_USER@$REMOTE_HOST:$REMOTE_PORT${NC}"
-    if ssh_cmd "echo 'SSH connection successful'"; then
-        echo -e "${GREEN}SSH connection OK${NC}"
-        return 0
-    else
-        echo -e "${RED}SSH connection failed${NC}"
-        return 1
-    fi
-}
-
-# Setup remote environment (sync project and build)
-setup_remote() {
-    echo -e "${YELLOW}Setting up remote environment...${NC}"
-
-    # Create temp directory on remote
-    ssh_cmd "mkdir -p ~/trace_test"
-
-    # Copy the project to analyze (if it's local Mac path)
-    if [[ "$PROJECT_TO_ANALYZE" == /Users/* ]]; then
-        echo "Syncing project to remote server..."
-        local project_basename="$(basename "$PROJECT_TO_ANALYZE")"
-        local remote_project="/home/$REMOTE_USER/trace_test/$project_basename"
-
-        # Use rsync for efficient sync (uses multiplexed connection)
-        rsync -az --delete -q --stats \
-            --exclude '.git' \
-            --exclude '.venv' \
-            --exclude '__pycache__' \
-            --exclude 'node_modules' \
-            --exclude '.DS_Store' \
-            -e "ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o ControlPath=$SSH_CONTROL_SOCKET -p $REMOTE_PORT" \
-            "$PROJECT_TO_ANALYZE/" "$REMOTE_USER@$REMOTE_HOST:$remote_project/" \
-            | tail -3
-
-        PROJECT_TO_ANALYZE="$remote_project"
-        echo -e "${GREEN}Project synced to $remote_project${NC}"
-    fi
-
-    # Copy and build the trace server on remote
-    echo "Building trace server on remote..."
-    local local_repo="$(cd "$(dirname "$0")/.." && pwd)"
-
-    # Sync the AleutianFOSS repo
-    rsync -az --delete -q --stats \
-        --exclude '.git' \
-        --exclude '.venv' \
-        --exclude '__pycache__' \
-        --exclude 'bin' \
-        --exclude '*.log' \
-        --exclude 'trace_test_results*' \
-        --exclude 'crs_test_results*' \
-        --exclude 'node_modules' \
-        --exclude '.DS_Store' \
-        --exclude 'demo_data' \
-        --exclude 'test_agent_data' \
-        --exclude 'slides' \
-        -e "ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o ControlPath=$SSH_CONTROL_SOCKET -p $REMOTE_PORT" \
-        "$local_repo/" "$REMOTE_USER@$REMOTE_HOST:~/trace_test/AleutianFOSS/" \
-        | tail -3
-
-    # Build on remote
-    ssh_cmd "cd ~/trace_test/AleutianFOSS && go build -o bin/trace ./cmd/trace"
-
-    echo -e "${GREEN}Remote environment ready${NC}"
-}
-
-# Check remote Ollama status
-check_remote_ollama() {
-    echo -e "${YELLOW}Checking Ollama on remote server...${NC}"
-
-    if ! ssh_cmd "curl -s http://localhost:11434/api/tags" > /dev/null 2>&1; then
-        echo -e "${RED}ERROR: Ollama is not running on remote server${NC}"
-        echo "SSH into the server and start Ollama:"
-        echo "  ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST"
-        echo "  ollama serve"
-        exit 1
-    fi
-
-    echo -e "${GREEN}✓ Ollama is running on remote server${NC}"
-
-    # Get available models
-    local models=$(ssh_cmd "curl -s http://localhost:11434/api/tags")
-
-    # Check main agent model
-    if ! echo "$models" | grep -q "$OLLAMA_MODEL"; then
-        echo -e "${RED}ERROR: Model $OLLAMA_MODEL not found${NC}"
-        exit 1
-    fi
-    echo -e "${GREEN}✓ Main Agent model available: $OLLAMA_MODEL${NC}"
-
-    # Check router model
-    if ! echo "$models" | grep -q "$ROUTER_MODEL"; then
-        echo -e "${RED}ERROR: Router model $ROUTER_MODEL not found${NC}"
-        exit 1
-    fi
-    echo -e "${GREEN}✓ Router model available: $ROUTER_MODEL${NC}"
-}
-
-# Start trace server on remote
-start_trace_server() {
-    echo -e "${YELLOW}Starting trace server on remote...${NC}"
-
-    # Kill any existing trace server
-    ssh_cmd "pkill -f 'bin/trace'" 2>/dev/null || true
-    sleep 1
-
-    # GR-40: Wipe stale graph cache to force rebuild with latest code
-    # This ensures new features (like interface detection) are picked up
-    echo "Wiping stale graph cache to force rebuild..."
-    ssh_cmd "rm -f ~/trace_test/AleutianFOSS/*.db ~/trace_test/AleutianFOSS/graph_cache.json ~/trace_test/AleutianFOSS/*.gob 2>/dev/null" || true
-    ssh_cmd "rm -rf ~/trace_test/AleutianFOSS/badger_* 2>/dev/null" || true
-    # GR-17: Also wipe CRS persistence cache where graphs are actually stored
-    ssh_cmd "rm -rf ~/.aleutian/crs/ 2>/dev/null" || true
-
-    # Start the server in background
-    ssh -f -i "$SSH_KEY" \
-        -o StrictHostKeyChecking=no \
-        -p "$REMOTE_PORT" "$REMOTE_USER@$REMOTE_HOST" \
-        "cd ~/trace_test/AleutianFOSS && \
-         OLLAMA_BASE_URL=http://localhost:11434 \
-         OLLAMA_MODEL=$OLLAMA_MODEL \
-         nohup ./bin/trace -with-context -with-tools > trace_server.log 2>&1 &"
-
-    sleep 2
-
-    # Check if process started
-    local server_pid
-    server_pid=$(ssh_cmd "pgrep -f 'bin/trace'" 2>/dev/null || echo "")
-    if [ -z "$server_pid" ]; then
-        echo -e "${RED}ERROR: Failed to start trace server${NC}"
-        ssh_cmd "cat ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null" || echo "(no log file)"
-        return 1
-    fi
-
-    echo "Server started with PID: $server_pid"
-
-    # Wait for server to be responding (basic connectivity)
-    echo "Waiting for server to respond..."
-    local responding=0
-    for i in {1..15}; do
-        echo -n "."
-        sleep 1
-        if ssh_cmd "curl -s http://localhost:8080/v1/codebuddy/health" > /dev/null 2>&1; then
-            responding=1
-            break
-        fi
-    done
-    echo ""
-
-    if [ $responding -eq 0 ]; then
-        echo -e "${RED}ERROR: Trace server not responding after 15 seconds${NC}"
-        ssh_cmd "tail -30 ~/trace_test/AleutianFOSS/trace_server.log" 2>/dev/null || true
-        return 1
-    fi
-
-    # Wait for warmup to complete (poll /ready endpoint)
-    # Model warmup takes 30-90 seconds for large models like glm-4.7-flash
-    echo "Waiting for model warmup to complete (this may take 30-90 seconds)..."
-    local ready=0
-    for i in {1..120}; do
-        # Check /ready endpoint - returns 200 when warmup complete, 503 when still warming
-        local ready_status=$(ssh_cmd "curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/v1/codebuddy/ready" 2>/dev/null)
-        if [ "$ready_status" = "200" ]; then
-            ready=1
-            break
-        fi
-        # Show progress every 10 seconds
-        if [ $((i % 10)) -eq 0 ]; then
-            echo "  Still warming up... (${i}s elapsed, status: $ready_status)"
-        fi
-        sleep 1
-    done
-
-    if [ $ready -eq 1 ]; then
-        echo -e "${GREEN}Trace server is ready (warmup complete)${NC}"
-        return 0
-    else
-        echo -e "${RED}ERROR: Model warmup did not complete after 120 seconds${NC}"
-        ssh_cmd "tail -50 ~/trace_test/AleutianFOSS/trace_server.log" 2>/dev/null || true
-        return 1
-    fi
-}
-
-# Stop trace server on remote
-stop_trace_server() {
-    echo -e "${YELLOW}Stopping trace server...${NC}"
-    ssh_cmd "pkill -f 'bin/trace'" 2>/dev/null || true
-}
-
-# ==============================================================================
 # TEST EXECUTION
 # ==============================================================================
-
-# Global variables for test tracking
-declare -a DETAILED_RESULTS=()
-FIRST_TEST_RUNTIME=0
 
 run_crs_test() {
     local test_spec="$1"
@@ -1342,11 +815,12 @@ run_crs_test() {
     # Run agent query using the remote project path
     local start_time=$(get_time_ms)
 
-    # Use PROJECT_TO_ANALYZE which is already converted to remote path in setup_remote
+    # Use REMOTE_PROJECT_PATH (set by setup_remote/sync_project_to_remote)
+    local remote_project="${REMOTE_PROJECT_PATH:-/home/$REMOTE_USER/trace_test/$(basename "$PROJECT_TO_ANALYZE")}"
     local response=$(ssh_cmd "curl -s -X POST 'http://localhost:8080/v1/codebuddy/agent/run' \
         -H 'Content-Type: application/json' \
         -H 'X-Session-ID: crs_test_${session_id}' \
-        -d '{\"project_root\": \"$PROJECT_TO_ANALYZE\", \"query\": \"$query\"}' \
+        -d '{\"project_root\": \"$remote_project\", \"query\": \"$query\", \"model\": \"$OLLAMA_MODEL\", \"router_model\": \"$ROUTER_MODEL\"}' \
         --max-time 300")
 
     local end_time=$(get_time_ms)
@@ -1662,2413 +1136,378 @@ run_crs_test() {
     fi
 }
 
-run_internal_test() {
-    local category="$1"
-    local test_name="$2"
-    local expected="$3"
-    local test_num="${4:-0}"  # GR-39 Issue 5: Accept test_num for proper result tracking
 
-    local start_time=$(get_time_ms)
-    local exit_code=0
-    local result_message=""
-
-    case "$test_name" in
-        verify_checkpoint_exists)
-            # Check for CRS checkpoint/backup files in ~/.aleutian/crs (NOT ~/.claude/crs)
-            echo -e "  ${BLUE}Checking ~/.aleutian/crs for persistence files...${NC}"
-
-            # First check if the directory exists
-            local dir_exists=$(ssh_cmd "test -d ~/.aleutian/crs && echo 'yes' || echo 'no'" || echo "no")
-            if [ "$dir_exists" = "no" ]; then
-                echo -e "  ${RED}✗ Directory ~/.aleutian/crs does not exist${NC}"
-                echo -e "  ${YELLOW}  → CRS persistence may not be initialized${NC}"
-                exit_code=1
-                result_message="Directory does not exist"
-            else
-                # Check for BadgerDB files (MANIFEST, *.vlog, *.sst)
-                local badger_files=$(ssh_cmd "find ~/.aleutian/crs -name 'MANIFEST' -o -name '*.vlog' -o -name '*.sst' 2>/dev/null | wc -l" || echo "0")
-                badger_files=$(echo "$badger_files" | tr -d '[:space:]')
-
-                # Check for checkpoint/backup files
-                local checkpoint_files=$(ssh_cmd "find ~/.aleutian/crs -name '*.backup*' -o -name '*.checkpoint*' -o -name 'crs_*.json' 2>/dev/null | wc -l" || echo "0")
-                checkpoint_files=$(echo "$checkpoint_files" | tr -d '[:space:]')
-
-                # List what's in the directory for debugging
-                echo -e "  ${BLUE}Contents of ~/.aleutian/crs:${NC}"
-                ssh_cmd "ls -la ~/.aleutian/crs 2>/dev/null | head -10" | while read line; do
-                    echo -e "    $line"
-                done
-
-                if [ "$badger_files" -gt 0 ]; then
-                    echo -e "  ${GREEN}✓ BadgerDB files found: $badger_files${NC}"
-                    result_message="BadgerDB files found: $badger_files"
-                elif [ "$checkpoint_files" -gt 0 ]; then
-                    echo -e "  ${GREEN}✓ Checkpoint files found: $checkpoint_files${NC}"
-                    result_message="Checkpoint files found: $checkpoint_files"
-                else
-                    echo -e "  ${RED}✗ No persistence files found in ~/.aleutian/crs${NC}"
-                    echo -e "  ${YELLOW}  → Directory exists but is empty or has no CRS data${NC}"
-                    exit_code=1
-                    result_message="No persistence files found"
-                fi
-            fi
-            ;;
-
-        restart_and_verify_state)
-            # Restart the server and verify state is restored
-            echo -e "    ${BLUE}Restarting trace server...${NC}"
-            stop_trace_server
-            sleep 2
-            if start_trace_server; then
-                echo -e "  ${GREEN}✓ Server restarted successfully${NC}"
-                result_message="Server restarted successfully"
-            else
-                echo -e "  ${RED}✗ Server failed to restart${NC}"
-                exit_code=1
-                result_message="Server failed to restart"
-            fi
-            ;;
-
-        verify_event_graph_context)
-            # Check server logs for graph context in events
-            local has_context=$(ssh_cmd "grep -c 'graph_context\|GraphContext' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null" || echo "0")
-            has_context=$(echo "$has_context" | tr -d '[:space:]')
-            if [ "$has_context" -gt 0 ]; then
-                echo -e "  ${GREEN}✓ Graph context found in events ($has_context occurrences)${NC}"
-                result_message="Graph context found: $has_context occurrences"
-            else
-                echo -e "  ${YELLOW}⚠ Graph context not found in logs (may need more queries first)${NC}"
-                result_message="Graph context not found (warning only)"
-            fi
-            ;;
-
-        verify_delta_count)
-            # Query CRS state for delta count
-            local delta_info=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/crs/deltas'" 2>/dev/null)
-            if echo "$delta_info" | jq . > /dev/null 2>&1; then
-                local count=$(echo "$delta_info" | jq '.count // .total // 0')
-                if [ "$count" -gt 0 ]; then
-                    echo -e "  ${GREEN}✓ Delta count: $count${NC}"
-                    result_message="Delta count: $count"
-                else
-                    echo -e "  ${YELLOW}⚠ Delta count is 0 (run more queries first)${NC}"
-                    result_message="Delta count is 0"
-                fi
-            else
-                echo -e "  ${YELLOW}⚠ CRS debug endpoint not available${NC}"
-                result_message="CRS debug endpoint not available"
-            fi
-            ;;
-
-        verify_history_limit)
-            # Verify ringbuffer history is bounded
-            local history_info=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/crs/history'" 2>/dev/null)
-            if echo "$history_info" | jq . > /dev/null 2>&1; then
-                local size=$(echo "$history_info" | jq '.size // .count // 0')
-                local limit=$(echo "$history_info" | jq '.limit // .max_size // 1000')
-                if [ "$size" -le "$limit" ]; then
-                    echo -e "  ${GREEN}✓ History size ($size) within limit ($limit)${NC}"
-                    result_message="History size ($size) within limit ($limit)"
-                else
-                    echo -e "  ${RED}✗ History size ($size) exceeds limit ($limit)${NC}"
-                    exit_code=1
-                    result_message="History size exceeds limit"
-                fi
-            else
-                echo -e "  ${YELLOW}⚠ History endpoint not available${NC}"
-                result_message="History endpoint not available"
-            fi
-            ;;
-
-        replay_and_verify)
-            # Test delta replay functionality
-            echo -e "  ${YELLOW}⚠ Replay verification not yet implemented${NC}"
-            result_message="Not yet implemented"
-            ;;
-
-        verify_index_span_attribute)
-            # GR-01: Check server logs for OTel span attributes indicating index usage
-            # After optimization, spans should have "index_used=true" or "lookup_method=index"
-            echo -e "  ${BLUE}Checking trace server logs for index span attributes...${NC}"
-
-            # Check for index-related span attributes in logs
-            local index_traces=$(ssh_cmd "grep -c 'index_used\|lookup_method.*index\|GetByName\|index.GetByName' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null" || echo "0")
-            index_traces=$(echo "$index_traces" | tr -d '[:space:]')
-
-            # Also check for O(V) scan indicators (should be absent after fix)
-            local scan_traces=$(ssh_cmd "grep -c 'findSymbolsByName\|O(V)\|full_scan' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null" || echo "0")
-            scan_traces=$(echo "$scan_traces" | tr -d '[:space:]')
-
-            echo -e "  ${BLUE}Index usage traces: $index_traces${NC}"
-            echo -e "  ${BLUE}Full scan traces: $scan_traces${NC}"
-
-            if [ "$index_traces" -gt 0 ]; then
-                echo -e "  ${GREEN}✓ Index usage detected in OTel spans${NC}"
-                result_message="Index usage: $index_traces traces, Scans: $scan_traces traces"
-            elif [ "$scan_traces" -eq 0 ]; then
-                # No scan traces means we're probably using index (good)
-                echo -e "  ${GREEN}✓ No O(V) scan traces detected (index likely used)${NC}"
-                result_message="No scan traces detected"
-            else
-                # Before GR-01 fix: expect scan traces, no index traces
-                echo -e "  ${YELLOW}⚠ O(V) scans detected, index usage not confirmed${NC}"
-                echo -e "  ${YELLOW}  → This test will pass after GR-01 is implemented${NC}"
-                result_message="Pre-GR-01: Scans=$scan_traces, Index=$index_traces"
-            fi
-            ;;
-
-        verify_pagerank_convergence)
-            # GR-12: Verify PageRank algorithm converged within max iterations
-            echo -e "  ${BLUE}Checking PageRank convergence (GR-12)...${NC}"
-
-            # Ensure graph is built first
-            local stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/graph/stats'" 2>/dev/null || echo "")
-            if [ -z "$stats_response" ] || echo "$stats_response" | jq -e '.error' >/dev/null 2>&1; then
-                echo -e "  ${YELLOW}Building graph first...${NC}"
-                ssh_cmd "curl -s -X POST -H 'Content-Type: application/json' -d '{\"project_root\":\"/home/aleutiandevops/trace_test/AleutianOrchestrator\"}' 'http://localhost:8080/v1/codebuddy/init'" 2>/dev/null
-                sleep 2
-            fi
-
-            # Trigger PageRank by calling find_important via agent
-            echo -e "  ${BLUE}Triggering PageRank via find_important...${NC}"
-            local agent_response=$(ssh_cmd "curl -s -X POST -H 'Content-Type: application/json' -d '{\"query\":\"What are the top 3 most important functions?\"}' 'http://localhost:8080/v1/codebuddy/agent/run'" 2>/dev/null)
-            sleep 3
-
-            # Check for PageRank-related log entries
-            local pr_logs=$(ssh_cmd "grep -i 'PageRank\|pagerank\|find_important' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -10" || echo "")
-
-            if [ -n "$pr_logs" ]; then
-                echo -e "  ${BLUE}PageRank log entries:${NC}"
-                echo "$pr_logs" | sed 's/^/    /'
-
-                # Check for convergence indicator
-                local converged=$(echo "$pr_logs" | grep -ci "converged\|iterations\|PageRankTop")
-                if [ "$converged" -gt 0 ]; then
-                    echo -e "  ${GREEN}✓ GR-12: PageRank convergence detected${NC}"
-                    result_message="PageRank converged"
-                else
-                    echo -e "  ${GREEN}✓ GR-12: PageRank executed${NC}"
-                    result_message="PageRank executed"
-                fi
-            else
-                echo -e "  ${RED}✗ GR-12: No PageRank activity found in logs${NC}"
-                exit_code=1
-                result_message="No PageRank activity"
-            fi
-            ;;
-
-        verify_implements_edges)
-            # GR-40: Verify EdgeTypeImplements edges exist in the graph for Go code
-            # NOTE: 0 implements edges is CORRECT if codebase has 0 interfaces
-            echo -e "  ${BLUE}Checking for EdgeTypeImplements edges in graph...${NC}"
-
-            # Query the graph stats endpoint for edge type breakdown
-            local graph_stats=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/graph/stats'" 2>/dev/null)
-
-            if echo "$graph_stats" | jq . > /dev/null 2>&1; then
-                local implements_count=$(echo "$graph_stats" | jq '.edges_by_type.implements // .edges_by_type.EdgeTypeImplements // 0')
-                local total_edges=$(echo "$graph_stats" | jq '.edge_count // .total_edges // 0')
-                local interface_count=$(echo "$graph_stats" | jq '.nodes_by_kind.interface // 0')
-
-                echo -e "  ${BLUE}Total edges: $total_edges${NC}"
-                echo -e "  ${BLUE}Interface nodes: $interface_count${NC}"
-                echo -e "  ${BLUE}Implements edges: $implements_count${NC}"
-
-                if [ "$interface_count" -eq 0 ]; then
-                    # No interfaces in codebase - 0 implements edges is correct
-                    echo -e "  ${GREEN}✓ GR-40: No interfaces in codebase, 0 implements edges is correct${NC}"
-                    result_message="No interfaces in codebase (correct: 0 implements edges)"
-                elif [ "$implements_count" -gt 0 ]; then
-                    echo -e "  ${GREEN}✓ GR-40: EdgeTypeImplements edges found: $implements_count${NC}"
-                    result_message="Implements edges found: $implements_count"
-                else
-                    # Has interfaces but no implements edges - this is the bug case
-                    echo -e "  ${RED}✗ GR-40: $interface_count interfaces but 0 implements edges${NC}"
-                    echo -e "  ${YELLOW}  → Go interface satisfaction requires method-set matching${NC}"
-                    exit_code=1
-                    result_message="Bug: $interface_count interfaces but 0 implements edges"
-                fi
-            else
-                # Fallback: check server logs for implements edge creation
-                local impl_logs=$(ssh_cmd "grep -c 'EdgeTypeImplements\|implements.*edge' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null" || echo "0")
-                impl_logs=$(echo "$impl_logs" | tr -d '[:space:]')
-
-                if [ "$impl_logs" -gt 0 ]; then
-                    echo -e "  ${GREEN}✓ Implements edge activity detected in logs${NC}"
-                    result_message="Implements edge logs: $impl_logs"
-                else
-                    # Can't determine - pass with warning
-                    echo -e "  ${YELLOW}⚠ Cannot verify implements edges (no graph stats)${NC}"
-                    result_message="Cannot verify (no graph stats endpoint)"
-                fi
-            fi
-            ;;
-
-        # ================================================================================
-        # GR-PHASE1: INTEGRATION TEST QUALITY INTERNAL TESTS
-        # TDD: These tests define expected behavior BEFORE fixes are implemented
-        # ================================================================================
-
-        verify_cb_threshold_consistency)
-            # P1-Issue2: Verify circuit breaker fires consistently for ALL tools at same threshold
-            echo -e "  ${BLUE}Checking circuit breaker consistency across all tools...${NC}"
-
-            # Get tool usage and circuit breaker events
-            local tool_calls=$(ssh_cmd "grep -c 'tool_call\|executing tool' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null" || echo "0")
-            local cb_fires=$(ssh_cmd "grep -c 'GR-39b\|circuit.*breaker.*fired' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null" || echo "0")
-            tool_calls=$(echo "$tool_calls" | tr -d '[:space:]')
-            cb_fires=$(echo "$cb_fires" | tr -d '[:space:]')
-
-            echo -e "  ${BLUE}Total tool calls: $tool_calls${NC}"
-            echo -e "  ${BLUE}Circuit breaker fires: $cb_fires${NC}"
-
-            # Check for tools that exceeded threshold but didn't fire CB
-            local tools_over_threshold=$(ssh_cmd "grep -E 'find_important.*calls|Read.*calls|Grep.*calls' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | grep -E '[345]+ calls' | head -5" || echo "")
-
-            if [ -n "$tools_over_threshold" ]; then
-                echo -e "  ${YELLOW}Tools exceeding threshold:${NC}"
-                echo "$tools_over_threshold" | sed 's/^/    /'
-
-                # Check if CB fired for these
-                local cb_for_tools=$(ssh_cmd "grep -E 'GR-39b.*(find_important|Read|Grep)' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null" || echo "")
-                if [ -z "$cb_for_tools" ]; then
-                    echo -e "  ${RED}✗ P1-Issue2: Tools exceeded threshold but no CB fired!${NC}"
-                    exit_code=1
-                    result_message="CB inconsistency: tools over threshold, no CB fired"
-                else
-                    echo -e "  ${GREEN}✓ P1-Issue2: Circuit breaker fired for tools exceeding threshold${NC}"
-                    result_message="CB consistent"
-                fi
-            else
-                if [ "$cb_fires" -gt 0 ]; then
-                    echo -e "  ${GREEN}✓ P1-Issue2: Circuit breaker fired when tools exceeded threshold${NC}"
-                    result_message="CB fires: $cb_fires"
-                else
-                    echo -e "  ${YELLOW}⚠ P1-Issue2: No tools exceeded threshold (cannot verify CB consistency)${NC}"
-                    result_message="No tools exceeded threshold yet"
-                fi
-            fi
-            ;;
-
-        verify_debug_crs_endpoint)
-            # P2-Issue5: Verify /debug/crs endpoint is available
-            # GR-Phase1: Endpoint moved to /agent/debug/crs for session access
-            echo -e "  ${BLUE}Checking /agent/debug/crs endpoint availability...${NC}"
-
-            local crs_response=$(ssh_cmd "curl -s -w '%{http_code}' 'http://localhost:8080/v1/codebuddy/agent/debug/crs'" 2>/dev/null || echo "")
-            local http_code=""
-            local body=""
-            local resp_len=${#crs_response}
-
-            # Handle empty response (server not running or connection failed)
-            if [ -z "$crs_response" ] || [ "$resp_len" -lt 3 ]; then
-                echo -e "  ${RED}✗ P2-Issue5: No response from server (connection failed or server stopped, len=$resp_len)${NC}"
-                exit_code=1
-                result_message="Server not responding"
-                http_code="000"
-            else
-                http_code="${crs_response: -3}"
-                body="${crs_response:0:$((resp_len - 3))}"
-            fi
-
-            echo -e "  ${BLUE}HTTP status: $http_code${NC}"
-
-            if [ "$http_code" = "200" ]; then
-                if echo "$body" | jq . > /dev/null 2>&1; then
-                    echo -e "  ${GREEN}✓ P2-Issue5: /debug/crs endpoint available and returns valid JSON${NC}"
-                    result_message="Endpoint available (HTTP 200)"
-                else
-                    echo -e "  ${YELLOW}⚠ P2-Issue5: /debug/crs returns 200 but invalid JSON${NC}"
-                    result_message="Endpoint returns invalid JSON"
-                fi
-            elif [ "$http_code" = "404" ]; then
-                echo -e "  ${RED}✗ P2-Issue5: /debug/crs endpoint not found (404)${NC}"
-                echo -e "  ${YELLOW}  → Implement endpoint to expose CRS state for debugging${NC}"
-                exit_code=1
-                result_message="Endpoint not implemented (404)"
-            else
-                echo -e "  ${RED}✗ P2-Issue5: /debug/crs endpoint error (HTTP $http_code)${NC}"
-                exit_code=1
-                result_message="Endpoint error (HTTP $http_code)"
-            fi
-            ;;
-
-        verify_debug_history_endpoint)
-            # P2-Issue5: Verify /debug/history endpoint is available
-            # NOTE: This endpoint is not yet implemented - test will show 404
-            echo -e "  ${BLUE}Checking /debug/history endpoint availability...${NC}"
-
-            local history_response=$(ssh_cmd "curl -s -w '%{http_code}' 'http://localhost:8080/v1/codebuddy/agent/debug/history'" 2>/dev/null || echo "")
-            local http_code=""
-            local body=""
-            local resp_len=${#history_response}
-
-            # Handle empty response (server not running or connection failed)
-            if [ -z "$history_response" ] || [ "$resp_len" -lt 3 ]; then
-                echo -e "  ${RED}✗ P2-Issue5: No response from server (connection failed or server stopped, len=$resp_len)${NC}"
-                exit_code=1
-                result_message="Server not responding"
-                http_code="000"
-            else
-                http_code="${history_response: -3}"
-                body="${history_response:0:$((resp_len - 3))}"
-            fi
-
-            echo -e "  ${BLUE}HTTP status: $http_code${NC}"
-
-            if [ "$http_code" = "200" ]; then
-                if echo "$body" | jq . > /dev/null 2>&1; then
-                    local history_count=$(echo "$body" | jq '.count // .size // length')
-                    echo -e "  ${GREEN}✓ P2-Issue5: /debug/history endpoint available ($history_count entries)${NC}"
-                    result_message="Endpoint available ($history_count entries)"
-                else
-                    echo -e "  ${YELLOW}⚠ P2-Issue5: /debug/history returns 200 but invalid JSON${NC}"
-                    result_message="Endpoint returns invalid JSON"
-                fi
-            elif [ "$http_code" = "404" ]; then
-                echo -e "  ${RED}✗ P2-Issue5: /debug/history endpoint not found (404)${NC}"
-                echo -e "  ${YELLOW}  → Implement endpoint to expose reasoning history${NC}"
-                exit_code=1
-                result_message="Endpoint not implemented (404)"
-            else
-                echo -e "  ${RED}✗ P2-Issue5: /debug/history endpoint error (HTTP $http_code)${NC}"
-                exit_code=1
-                result_message="Endpoint error (HTTP $http_code)"
-            fi
-            ;;
-
-        verify_pagerank_convergence_logged)
-            # P2-Issue6: Verify PageRank convergence is logged with iterations and tolerance
-            echo -e "  ${BLUE}Checking PageRank convergence logging...${NC}"
-
-            # Look for convergence logs with iterations and tolerance
-            local convergence_logs=$(ssh_cmd "grep -i 'pagerank.*converge\|iterations.*tolerance\|convergence.*achieved' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
-
-            if [ -n "$convergence_logs" ]; then
-                echo -e "  ${BLUE}PageRank convergence logs:${NC}"
-                echo "$convergence_logs" | sed 's/^/    /'
-
-                # Check for specific convergence info
-                local has_iterations=$(echo "$convergence_logs" | grep -ci "iteration")
-                local has_tolerance=$(echo "$convergence_logs" | grep -ci "tolerance\|delta\|diff")
-
-                if [ "$has_iterations" -gt 0 ] && [ "$has_tolerance" -gt 0 ]; then
-                    echo -e "  ${GREEN}✓ P2-Issue6: PageRank convergence logged with iterations and tolerance${NC}"
-                    result_message="Convergence logged with details"
-                else
-                    echo -e "  ${YELLOW}⚠ P2-Issue6: Convergence logged but missing iterations ($has_iterations) or tolerance ($has_tolerance)${NC}"
-                    result_message="Partial convergence logging"
-                fi
-            else
-                # Check if PageRank was even invoked
-                local pr_invoked=$(ssh_cmd "grep -ci 'pagerank\|find_important' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null" || echo "0")
-                pr_invoked=$(echo "$pr_invoked" | tr -d '[:space:]')
-
-                if [ "$pr_invoked" -gt 0 ]; then
-                    echo -e "  ${RED}✗ P2-Issue6: PageRank invoked ($pr_invoked times) but convergence not logged${NC}"
-                    echo -e "  ${YELLOW}  → Add logging for iterations to convergence and tolerance achieved${NC}"
-                    exit_code=1
-                    result_message="PageRank invoked but no convergence logging"
-                else
-                    echo -e "  ${YELLOW}⚠ P2-Issue6: PageRank not invoked yet (run importance queries first)${NC}"
-                    result_message="PageRank not invoked"
-                fi
-            fi
-            ;;
-
-        # ================================================================================
-        # GR-06 to GR-09: SECONDARY INDEX VERIFICATION TESTS
-        # These tests verify secondary indexes are populated and working correctly
-        # ================================================================================
-
-        verify_nodes_by_name_index)
-            # GR-06: Verify nodesByName secondary index exists and has data
-            echo -e "  ${BLUE}Checking nodesByName index (GR-06)...${NC}"
-
-            # Ensure graph is built first
-            local stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/graph/stats'" 2>/dev/null || echo "")
-            if [ -z "$stats_response" ] || echo "$stats_response" | jq -e '.error' >/dev/null 2>&1; then
-                echo -e "  ${YELLOW}Building graph first...${NC}"
-                local init_response=$(ssh_cmd "curl -s -X POST -H 'Content-Type: application/json' -d '{\"project_root\":\"/home/aleutiandevops/trace_test/AleutianOrchestrator\"}' 'http://localhost:8080/v1/codebuddy/init'" 2>/dev/null)
-                sleep 2
-                stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/graph/stats'" 2>/dev/null || echo "")
-            fi
-
-            if [ -z "$stats_response" ]; then
-                echo -e "  ${RED}✗ GR-06: Cannot connect to server${NC}"
-                exit_code=1
-                result_message="Server not responding"
-            elif echo "$stats_response" | jq -e '.error' >/dev/null 2>&1; then
-                echo -e "  ${RED}✗ GR-06: Failed to build graph${NC}"
-                exit_code=1
-                result_message="Graph build failed"
-            else
-                local node_count=$(echo "$stats_response" | jq -r '.node_count // 0' 2>/dev/null)
-                local kinds_count=$(echo "$stats_response" | jq -r '.nodes_by_kind | length' 2>/dev/null)
-
-                if [ "$node_count" -gt 0 ] && [ "$kinds_count" -gt 0 ]; then
-                    echo -e "  ${GREEN}✓ GR-06: nodesByName index verified (node_count=$node_count, kinds=$kinds_count)${NC}"
-                    echo -e "  ${BLUE}  Index is populated - nodes added use AddNode which populates nodesByName${NC}"
-                    result_message="nodesByName index working (nodes: $node_count)"
-                else
-                    echo -e "  ${RED}✗ GR-06: Graph has no nodes (node_count=$node_count)${NC}"
-                    exit_code=1
-                    result_message="Empty graph"
-                fi
-            fi
-            ;;
-
-        verify_nodes_by_kind_index)
-            # GR-07: Verify nodesByKind secondary index via /debug/graph/stats
-            echo -e "  ${BLUE}Checking nodesByKind index (GR-07)...${NC}"
-
-            # Ensure graph is built first
-            local stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/graph/stats'" 2>/dev/null || echo "")
-            if [ -z "$stats_response" ] || echo "$stats_response" | jq -e '.error' >/dev/null 2>&1; then
-                echo -e "  ${YELLOW}Building graph first...${NC}"
-                local init_response=$(ssh_cmd "curl -s -X POST -H 'Content-Type: application/json' -d '{\"project_root\":\"/home/aleutiandevops/trace_test/AleutianOrchestrator\"}' 'http://localhost:8080/v1/codebuddy/init'" 2>/dev/null)
-                sleep 2
-                stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/graph/stats'" 2>/dev/null || echo "")
-            fi
-
-            if [ -z "$stats_response" ]; then
-                echo -e "  ${RED}✗ GR-07: Cannot connect to server${NC}"
-                exit_code=1
-                result_message="Server not responding"
-            elif echo "$stats_response" | jq -e '.error' >/dev/null 2>&1; then
-                echo -e "  ${RED}✗ GR-07: Failed to build graph${NC}"
-                exit_code=1
-                result_message="Graph build failed"
-            else
-                # nodes_by_kind map should have entries
-                local kinds_map=$(echo "$stats_response" | jq -c '.nodes_by_kind // {}' 2>/dev/null)
-                local kinds_count=$(echo "$kinds_map" | jq 'length' 2>/dev/null)
-
-                if [ "$kinds_count" -gt 0 ]; then
-                    echo -e "  ${GREEN}✓ GR-07: nodesByKind index has $kinds_count kinds${NC}"
-                    echo "$kinds_map" | jq -r 'to_entries | .[:5] | .[] | "    \(.key): \(.value) nodes"' 2>/dev/null
-                    result_message="nodesByKind index working ($kinds_count kinds)"
-                else
-                    echo -e "  ${RED}✗ GR-07: nodesByKind is empty${NC}"
-                    exit_code=1
-                    result_message="Empty nodesByKind"
-                fi
-            fi
-            ;;
-
-        verify_edges_by_type_index)
-            # GR-08: Verify edgesByType secondary index via /debug/graph/stats
-            echo -e "  ${BLUE}Checking edgesByType index (GR-08)...${NC}"
-
-            # Ensure graph is built first
-            local stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/graph/stats'" 2>/dev/null || echo "")
-            if [ -z "$stats_response" ] || echo "$stats_response" | jq -e '.error' >/dev/null 2>&1; then
-                echo -e "  ${YELLOW}Building graph first...${NC}"
-                local init_response=$(ssh_cmd "curl -s -X POST -H 'Content-Type: application/json' -d '{\"project_root\":\"/home/aleutiandevops/trace_test/AleutianOrchestrator\"}' 'http://localhost:8080/v1/codebuddy/init'" 2>/dev/null)
-                sleep 2
-                stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/graph/stats'" 2>/dev/null || echo "")
-            fi
-
-            if [ -z "$stats_response" ]; then
-                echo -e "  ${RED}✗ GR-08: Cannot connect to server${NC}"
-                exit_code=1
-                result_message="Server not responding"
-            elif echo "$stats_response" | jq -e '.error' >/dev/null 2>&1; then
-                echo -e "  ${RED}✗ GR-08: Failed to build graph${NC}"
-                exit_code=1
-                result_message="Graph build failed"
-            else
-                # edges_by_type map should have entries
-                local types_map=$(echo "$stats_response" | jq -c '.edges_by_type // {}' 2>/dev/null)
-                local types_count=$(echo "$types_map" | jq 'length' 2>/dev/null)
-                local edge_count=$(echo "$stats_response" | jq -r '.edge_count // 0' 2>/dev/null)
-
-                if [ "$types_count" -gt 0 ]; then
-                    echo -e "  ${GREEN}✓ GR-08: edgesByType index has $types_count edge types (total edges: $edge_count)${NC}"
-                    echo "$types_map" | jq -r 'to_entries | .[] | "    \(.key): \(.value) edges"' 2>/dev/null
-                    result_message="edgesByType index working ($types_count types, $edge_count edges)"
-                else
-                    echo -e "  ${RED}✗ GR-08: edgesByType is empty${NC}"
-                    exit_code=1
-                    result_message="Empty edgesByType"
-                fi
-            fi
-            ;;
-
-        verify_edges_by_file_index)
-            # GR-09: Verify edgesByFile index exists (used by RemoveFile)
-            echo -e "  ${BLUE}Checking edgesByFile index (GR-09)...${NC}"
-
-            # Ensure graph is built first
-            local stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/graph/stats'" 2>/dev/null || echo "")
-            if [ -z "$stats_response" ] || echo "$stats_response" | jq -e '.error' >/dev/null 2>&1; then
-                echo -e "  ${YELLOW}Building graph first...${NC}"
-                local init_response=$(ssh_cmd "curl -s -X POST -H 'Content-Type: application/json' -d '{\"project_root\":\"/home/aleutiandevops/trace_test/AleutianOrchestrator\"}' 'http://localhost:8080/v1/codebuddy/init'" 2>/dev/null)
-                sleep 2
-                stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/graph/stats'" 2>/dev/null || echo "")
-            fi
-
-            if [ -z "$stats_response" ]; then
-                echo -e "  ${RED}✗ GR-09: Cannot connect to server${NC}"
-                exit_code=1
-                result_message="Server not responding"
-            elif echo "$stats_response" | jq -e '.error' >/dev/null 2>&1; then
-                echo -e "  ${RED}✗ GR-09: Failed to build graph${NC}"
-                exit_code=1
-                result_message="Graph build failed"
-            else
-                local edge_count=$(echo "$stats_response" | jq -r '.edge_count // 0' 2>/dev/null)
-                local node_count=$(echo "$stats_response" | jq -r '.node_count // 0' 2>/dev/null)
-
-                if [ "$edge_count" -gt 0 ]; then
-                    # Check logs for edgesByFile usage or RemoveFile operations
-                    local file_index_logs=$(ssh_cmd "grep -ci 'edgesByFile\|RemoveFile\|file.*index' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null" || echo "0")
-                    file_index_logs=$(echo "$file_index_logs" | tr -d '[:space:]')
-
-                    echo -e "  ${GREEN}✓ GR-09: edgesByFile index verified (edge_count=$edge_count, nodes=$node_count)${NC}"
-                    echo -e "  ${BLUE}  Index is populated - edges added use AddEdge which populates edgesByFile${NC}"
-
-                    if [ "$file_index_logs" -gt 0 ]; then
-                        echo -e "  ${BLUE}  Found $file_index_logs file index related log entries${NC}"
-                    fi
-
-                    result_message="edgesByFile index working (edges: $edge_count)"
-                else
-                    echo -e "  ${RED}✗ GR-09: Graph has no edges (edge_count=$edge_count)${NC}"
-                    exit_code=1
-                    result_message="Empty graph (no edges)"
-                fi
-            fi
-            ;;
-
-        # ================================================================================
-        # GR-10: QUERY CACHE VERIFICATION TESTS
-        # TDD: These tests define expected behavior BEFORE implementation
-        # ================================================================================
-
-        verify_cache_stats_endpoint)
-            # GR-10: Verify /debug/cache endpoint returns cache statistics
-            echo -e "  ${BLUE}Checking cache stats endpoint (GR-10)...${NC}"
-
-            # First, ensure graph is initialized
-            echo -e "  ${BLUE}Ensuring graph is initialized...${NC}"
-            local init_resp=$(ssh_cmd "curl -s -X POST -H 'Content-Type: application/json' -d '{\"project_root\":\"/home/aleutiandevops/trace_test/AleutianOrchestrator\"}' 'http://localhost:8080/v1/codebuddy/init'" 2>/dev/null || echo "")
-            local graph_id=$(echo "$init_resp" | jq -r '.graph_id // ""' 2>/dev/null)
-            if [ -n "$graph_id" ] && [ "$graph_id" != "null" ]; then
-                echo -e "  ${GREEN}✓ Graph initialized: $graph_id${NC}"
-            else
-                echo -e "  ${YELLOW}⚠ Graph init response: $init_resp${NC}"
-            fi
-
-            # Make callers queries to populate the cache (use actual AleutianOrchestrator function names)
-            echo -e "  ${BLUE}Populating cache with callers queries...${NC}"
-            local total_callers=0
-            # These are actual functions in AleutianOrchestrator that are likely to have callers
-            for func_name in "CodeAnalysisRequest" "NewClient" "ParseAPIMessage" "WriteDataToGCS" "FetchPromptFromGCS" "DistillerRequest"; do
-                local callers_resp=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/callers?graph_id=$graph_id&function=$func_name'" 2>/dev/null || echo "")
-                local callers_count=$(echo "$callers_resp" | jq '.callers | length' 2>/dev/null || echo "0")
-                if [ "$callers_count" -gt 0 ]; then
-                    echo -e "  ${GREEN}✓ Found $callers_count callers of '$func_name'${NC}"
-                    total_callers=$((total_callers + callers_count))
-                    break  # One successful query is enough to populate cache
-                fi
-            done
-            if [ "$total_callers" -eq 0 ]; then
-                echo -e "  ${YELLOW}⚠ No callers found (cache should still record misses)${NC}"
-            fi
-
-            local cache_response=$(ssh_cmd "curl -s -w '%{http_code}' 'http://localhost:8080/v1/codebuddy/debug/cache'" 2>/dev/null || echo "")
-            local http_code=""
-            local body=""
-            local resp_len=${#cache_response}
-
-            if [ -z "$cache_response" ] || [ "$resp_len" -lt 3 ]; then
-                echo -e "  ${RED}✗ GR-10: No response from cache endpoint${NC}"
-                exit_code=1
-                result_message="Server not responding"
-                http_code="000"
-            else
-                http_code="${cache_response: -3}"
-                body="${cache_response:0:$((resp_len - 3))}"
-            fi
-
-            echo -e "  ${BLUE}HTTP status: $http_code${NC}"
-
-            if [ "$http_code" = "200" ]; then
-                if echo "$body" | jq . > /dev/null 2>&1; then
-                    local callers_size=$(echo "$body" | jq '.callers_size // .callers.size // 0')
-                    local callees_size=$(echo "$body" | jq '.callees_size // .callees.size // 0')
-                    local paths_size=$(echo "$body" | jq '.paths_size // .paths.size // 0')
-                    local hit_rate=$(echo "$body" | jq '.hit_rate // 0')
-                    local callers_misses=$(echo "$body" | jq '.callers_misses // 0')
-
-                    echo -e "  ${GREEN}✓ GR-10: Cache stats endpoint available${NC}"
-                    echo -e "  ${BLUE}  Callers cache: $callers_size entries${NC}"
-                    echo -e "  ${BLUE}  Callees cache: $callees_size entries${NC}"
-                    echo -e "  ${BLUE}  Paths cache: $paths_size entries${NC}"
-                    echo -e "  ${BLUE}  Hit rate: $hit_rate${NC}"
-
-                    # Verify cache activity
-                    local total_size=$((callers_size + callees_size + paths_size))
-                    local total_misses=$(echo "$body" | jq '(.callers_misses // 0) + (.callees_misses // 0) + (.paths_misses // 0)' 2>/dev/null || echo "0")
-
-                    if [ "$total_size" -ge 1 ]; then
-                        echo -e "  ${GREEN}✓ GR-10: Cache populated with $total_size entries${NC}"
-                        result_message="Cache stats available and populated ($total_size entries)"
-                    elif [ "$total_misses" -ge 1 ]; then
-                        echo -e "  ${GREEN}✓ GR-10: Cache active ($total_misses queries made)${NC}"
-                        result_message="Cache stats available ($total_misses queries, 0 cached)"
-                    else
-                        echo -e "  ${GREEN}✓ GR-10: Cache endpoint working (no queries yet)${NC}"
-                        result_message="Cache stats endpoint working"
-                    fi
-                else
-                    echo -e "  ${YELLOW}⚠ GR-10: Cache endpoint returns 200 but invalid JSON${NC}"
-                    result_message="Endpoint returns invalid JSON"
-                fi
-            elif [ "$http_code" = "404" ]; then
-                echo -e "  ${RED}✗ GR-10: Cache stats endpoint not found (404)${NC}"
-                echo -e "  ${YELLOW}  → Implement /debug/cache endpoint to expose cache stats${NC}"
-                exit_code=1
-                result_message="Endpoint not implemented (404)"
-            else
-                echo -e "  ${RED}✗ GR-10: Cache stats endpoint error (HTTP $http_code)${NC}"
-                exit_code=1
-                result_message="Endpoint error (HTTP $http_code)"
-            fi
-            ;;
-
-        verify_cache_invalidation)
-            # GR-10: Verify cache is invalidated when graph is rebuilt
-            echo -e "  ${BLUE}Checking cache invalidation (GR-10)...${NC}"
-
-            # First, get current cache stats
-            local before_stats=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/cache'" 2>/dev/null || echo "{}")
-            local before_callers=$(echo "$before_stats" | jq '.callers_size // 0' 2>/dev/null || echo "0")
-
-            # Trigger a graph rebuild (re-init the project)
-            echo -e "  ${BLUE}Triggering graph rebuild...${NC}"
-            ssh_cmd "curl -s -X POST -H 'Content-Type: application/json' -d '{\"project_root\":\"/home/aleutiandevops/trace_test/AleutianOrchestrator\", \"force_rebuild\": true}' 'http://localhost:8080/v1/codebuddy/init'" 2>/dev/null
-            sleep 2
-
-            # Check cache stats after rebuild
-            local after_stats=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/cache'" 2>/dev/null || echo "{}")
-            local after_callers=$(echo "$after_stats" | jq '.callers_size // 0' 2>/dev/null || echo "0")
-            local generation=$(echo "$after_stats" | jq '.generation // 0' 2>/dev/null || echo "0")
-
-            echo -e "  ${BLUE}Before rebuild: $before_callers callers cached${NC}"
-            echo -e "  ${BLUE}After rebuild: $after_callers callers cached${NC}"
-            echo -e "  ${BLUE}Cache generation: $generation${NC}"
-
-            if [ "$after_callers" -eq 0 ] || [ "$after_callers" -lt "$before_callers" ]; then
-                echo -e "  ${GREEN}✓ GR-10: Cache was invalidated on graph rebuild${NC}"
-                result_message="Cache invalidated (before=$before_callers, after=$after_callers)"
-            else
-                echo -e "  ${YELLOW}⚠ GR-10: Cache may not have been invalidated${NC}"
-                echo -e "  ${YELLOW}  → Cache should be cleared when graph generation changes${NC}"
-                result_message="Cache not invalidated (before=$before_callers, after=$after_callers)"
-            fi
-            ;;
-
-        # ================================================================================
-        # GR-11: PARALLEL BFS VERIFICATION TESTS
-        # TDD: These tests define expected behavior BEFORE implementation
-        # ================================================================================
-
-        verify_parallel_threshold)
-            # GR-11: Verify parallel mode is used for levels with > 16 nodes
-            echo -e "  ${BLUE}Checking parallel BFS threshold (GR-11)...${NC}"
-
-            # Check server logs for parallel mode decisions
-            local parallel_logs=$(ssh_cmd "grep -i 'parallel_mode\|parallel.*threshold\|level.*nodes' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -10" || echo "")
-
-            if [ -n "$parallel_logs" ]; then
-                echo -e "  ${GREEN}✓ GR-11: Parallel BFS threshold logging found${NC}"
-                echo -e "  ${BLUE}Recent logs:${NC}"
-                echo "$parallel_logs" | sed 's/^/    /'
-                result_message="Parallel threshold logging present"
-            else
-                echo -e "  ${YELLOW}⚠ GR-11: No parallel threshold logs found${NC}"
-                echo -e "  ${YELLOW}  → Pre-GR-11: Expected (parallel BFS not implemented)${NC}"
-                echo -e "  ${YELLOW}  → Post-GR-11: Should log level sizes and parallel decisions${NC}"
-                result_message="No parallel logs (pre-implementation expected)"
-            fi
-            ;;
-
-        verify_parallel_context_cancellation)
-            # GR-11: Verify context cancellation works in parallel mode
-            echo -e "  ${BLUE}Checking parallel BFS context cancellation (GR-11)...${NC}"
-
-            # Check for cancellation handling in logs
-            local cancel_logs=$(ssh_cmd "grep -i 'context.*cancel\|parallel.*cancel\|bfs.*abort' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
-
-            # Also check that errgroup is used (indicates proper cancellation propagation)
-            local errgroup_logs=$(ssh_cmd "grep -i 'errgroup\|worker.*exit\|goroutine.*stop' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
-
-            if [ -n "$cancel_logs" ] || [ -n "$errgroup_logs" ]; then
-                echo -e "  ${GREEN}✓ GR-11: Context cancellation handling detected${NC}"
-                if [ -n "$cancel_logs" ]; then
-                    echo "$cancel_logs" | sed 's/^/    /'
-                fi
-                result_message="Cancellation handling present"
-            else
-                echo -e "  ${YELLOW}⚠ GR-11: No cancellation handling logs (may not have been triggered)${NC}"
-                echo -e "  ${YELLOW}  → This test passes if no crash occurs during normal operation${NC}"
-                result_message="No cancellation triggered (normal operation)"
-            fi
-            ;;
-
-        verify_no_race_conditions)
-            # GR-11: Verify no race conditions in parallel BFS
-            echo -e "  ${BLUE}Checking for race conditions (GR-11)...${NC}"
-
-            # Check if server was built with -race flag
-            local race_check=$(ssh_cmd "grep -i 'race.*detected\|DATA RACE' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | head -5" || echo "")
-
-            if [ -n "$race_check" ]; then
-                echo -e "  ${RED}✗ GR-11: RACE CONDITION DETECTED${NC}"
-                echo "$race_check" | sed 's/^/    /'
-                exit_code=1
-                result_message="Race condition detected"
-            else
-                echo -e "  ${GREEN}✓ GR-11: No race conditions detected in logs${NC}"
-                echo -e "  ${BLUE}  → For thorough check, rebuild with: go build -race${NC}"
-                echo -e "  ${BLUE}  → And run: go test -race ./services/trace/graph/...${NC}"
-                result_message="No races in logs (run -race for thorough check)"
-            fi
-            ;;
-
-        # ================================================================================
-        # GR-14: LOUVAIN COMMUNITY DETECTION VERIFICATION TESTS
-        # TDD: These tests define expected behavior BEFORE implementation
-        # ================================================================================
-
-        verify_community_modularity)
-            # GR-14: Verify modularity score is calculated and reasonable
-            echo -e "  ${BLUE}Checking community modularity score (GR-14)...${NC}"
-
-            # Query debug endpoint for community detection stats
-            local community_stats=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/graph/stats'" 2>/dev/null || echo "{}")
-            local modularity=$(echo "$community_stats" | jq '.communities.modularity // .community_modularity // -1' 2>/dev/null || echo "-1")
-            local community_count=$(echo "$community_stats" | jq '.communities.count // .community_count // 0' 2>/dev/null || echo "0")
-
-            if [ "$modularity" != "-1" ] && [ "$community_count" -gt 0 ]; then
-                echo -e "  ${GREEN}✓ GR-14: Modularity score available: $modularity${NC}"
-                echo -e "  ${BLUE}  Communities detected: $community_count${NC}"
-
-                # Check if modularity is in reasonable range [0, 1]
-                local mod_valid=$(echo "$modularity" | awk '{if ($1 >= 0 && $1 <= 1) print "yes"; else print "no"}')
-                if [ "$mod_valid" = "yes" ]; then
-                    result_message="Modularity: $modularity, Communities: $community_count"
-                else
-                    echo -e "  ${YELLOW}⚠ GR-14: Modularity out of expected range [0,1]: $modularity${NC}"
-                    result_message="Modularity out of range: $modularity"
-                fi
-            else
-                echo -e "  ${YELLOW}⚠ GR-14: Community stats not available${NC}"
-                echo -e "  ${YELLOW}  → Pre-GR-14: Expected (community detection not implemented)${NC}"
-                echo -e "  ${YELLOW}  → Post-GR-14: Should expose modularity via /debug/graph/stats${NC}"
-                result_message="Community stats not available (pre-implementation expected)"
-            fi
-            ;;
-
-        verify_community_crs_recording)
-            # GR-14: Verify community detection records TraceStep in CRS
-            echo -e "  ${BLUE}Checking CRS integration for community detection (GR-14)...${NC}"
-
-            # Check server logs for CRS trace step recording
-            local crs_logs=$(ssh_cmd "grep -i 'analytics_communities\|community.*trace\|DetectCommunities.*CRS' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
-
-            # Also check for trace step metadata
-            local trace_metadata=$(ssh_cmd "grep -i 'communities_found\|modularity\|community_count' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
-
-            if [ -n "$crs_logs" ] || [ -n "$trace_metadata" ]; then
-                echo -e "  ${GREEN}✓ GR-14: CRS recording detected for community detection${NC}"
-                if [ -n "$crs_logs" ]; then
-                    echo "$crs_logs" | sed 's/^/    /'
-                fi
-                result_message="CRS integration working"
-            else
-                echo -e "  ${YELLOW}⚠ GR-14: No CRS recording logs found${NC}"
-                echo -e "  ${YELLOW}  → Pre-GR-14: Expected (community detection not implemented)${NC}"
-                echo -e "  ${YELLOW}  → Post-GR-14: Should record TraceStep with WithCRS methods${NC}"
-                result_message="No CRS logs (pre-implementation expected)"
-            fi
-            ;;
-
-        # ================================================================================
-        # GR-15: find_communities TOOL VERIFICATION TESTS
-        # TDD: These tests define expected behavior BEFORE implementation
-        # ================================================================================
-
-        verify_find_communities_crs)
-            # GR-15: Verify find_communities tool records TraceStep in CRS
-            echo -e "  ${BLUE}Checking CRS integration for find_communities tool (GR-15)...${NC}"
-
-            # Check server logs for tool CRS trace step recording
-            local tool_crs_logs=$(ssh_cmd "grep -i 'find_communities\|tool.*communities' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
-
-            # Check for trace step with tool metadata
-            local trace_metadata=$(ssh_cmd "grep -i 'find_communities.*action\|find_communities.*trace' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
-
-            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
-                echo -e "  ${GREEN}✓ GR-15: find_communities tool CRS integration detected${NC}"
-                if [ -n "$tool_crs_logs" ]; then
-                    echo "$tool_crs_logs" | sed 's/^/    /'
-                fi
-                result_message="Tool CRS integration working"
-            else
-                echo -e "  ${YELLOW}⚠ GR-15: No find_communities tool CRS logs found${NC}"
-                echo -e "  ${YELLOW}  → Pre-GR-15: Expected (tool not implemented)${NC}"
-                echo -e "  ${YELLOW}  → Post-GR-15: Should record TraceStep with tool metadata${NC}"
-                result_message="No tool CRS logs (pre-implementation expected)"
-            fi
-            ;;
-
-        verify_modularity_quality_label)
-            # GR-15: Verify modularity quality label is included in output
-            echo -e "  ${BLUE}Checking modularity quality label (GR-15)...${NC}"
-
-            # Check server logs for quality labels
-            local quality_logs=$(ssh_cmd "grep -i 'modularity_quality\|quality.*weak\|quality.*moderate\|quality.*good\|quality.*strong' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
-
-            if [ -n "$quality_logs" ]; then
-                echo -e "  ${GREEN}✓ GR-15: Modularity quality labels detected${NC}"
-                echo "$quality_logs" | sed 's/^/    /'
-                result_message="Quality labels present"
-            else
-                echo -e "  ${YELLOW}⚠ GR-15: No modularity quality labels found${NC}"
-                echo -e "  ${YELLOW}  → Pre-GR-15: Expected (tool not implemented)${NC}"
-                echo -e "  ${YELLOW}  → Post-GR-15: Should include quality labels (weak/moderate/good/strong)${NC}"
-                result_message="No quality labels (pre-implementation expected)"
-            fi
-            ;;
-
-        verify_find_articulation_points_crs)
-            # GR-17a: Verify find_articulation_points tool records TraceStep in CRS
-            echo -e "  ${BLUE}Checking CRS integration for find_articulation_points tool (GR-17a)...${NC}"
-
-            # Check server logs for tool CRS trace step recording
-            local tool_crs_logs=$(ssh_cmd "grep -i 'find_articulation_points\|tool.*articulation' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
-
-            # Check for trace step with tool metadata
-            local trace_metadata=$(ssh_cmd "grep -i 'find_articulation_points.*action\|find_articulation_points.*trace' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
-
-            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
-                echo -e "  ${GREEN}✓ GR-17a: find_articulation_points tool CRS integration detected${NC}"
-                if [ -n "$tool_crs_logs" ]; then
-                    echo "$tool_crs_logs" | sed 's/^/    /'
-                fi
-                result_message="Tool CRS integration working"
-            else
-                echo -e "  ${YELLOW}⚠ GR-17a: No find_articulation_points tool CRS logs found${NC}"
-                echo -e "  ${YELLOW}  → Pre-GR-17a: Expected (tool not implemented)${NC}"
-                echo -e "  ${YELLOW}  → Post-GR-17a: Should record TraceStep with tool metadata${NC}"
-                result_message="No tool CRS logs (pre-implementation expected)"
-            fi
-            ;;
-
-        verify_find_dominators_crs)
-            # GR-17b: Verify find_dominators tool records TraceStep in CRS
-            echo -e "  ${BLUE}Checking CRS integration for find_dominators tool (GR-17b)...${NC}"
-
-            local tool_crs_logs=$(ssh_cmd "grep -i 'find_dominators\|tool.*dominators' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
-            local trace_metadata=$(ssh_cmd "grep -i 'find_dominators.*action\|find_dominators.*trace' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
-
-            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
-                echo -e "  ${GREEN}✓ GR-17b: find_dominators tool CRS integration detected${NC}"
-                if [ -n "$tool_crs_logs" ]; then
-                    echo "$tool_crs_logs" | sed 's/^/    /'
-                fi
-                result_message="Tool CRS integration working"
-            else
-                echo -e "  ${YELLOW}⚠ GR-17b: No find_dominators tool CRS logs found${NC}"
-                result_message="No tool CRS logs (pre-implementation expected)"
-            fi
-            ;;
-
-        verify_find_merge_points_crs)
-            # GR-17d: Verify find_merge_points tool records TraceStep in CRS
-            echo -e "  ${BLUE}Checking CRS integration for find_merge_points tool (GR-17d)...${NC}"
-
-            local tool_crs_logs=$(ssh_cmd "grep -i 'find_merge_points\|tool.*merge' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
-            local trace_metadata=$(ssh_cmd "grep -i 'find_merge_points.*action\|find_merge_points.*trace' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
-
-            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
-                echo -e "  ${GREEN}✓ GR-17d: find_merge_points tool CRS integration detected${NC}"
-                if [ -n "$tool_crs_logs" ]; then
-                    echo "$tool_crs_logs" | sed 's/^/    /'
-                fi
-                result_message="Tool CRS integration working"
-            else
-                echo -e "  ${YELLOW}⚠ GR-17d: No find_merge_points tool CRS logs found${NC}"
-                result_message="No tool CRS logs (pre-implementation expected)"
-            fi
-            ;;
-
-        verify_find_loops_crs)
-            # GR-17e: Verify find_loops tool records TraceStep in CRS
-            echo -e "  ${BLUE}Checking CRS integration for find_loops tool (GR-17e)...${NC}"
-
-            local tool_crs_logs=$(ssh_cmd "grep -i 'find_loops\|tool.*loops\|DetectLoops' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
-            local trace_metadata=$(ssh_cmd "grep -i 'analytics_loops\|loops.*trace\|DetectLoops.*CRS' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
-
-            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
-                echo -e "  ${GREEN}✓ GR-17e: find_loops tool CRS integration detected${NC}"
-                if [ -n "$tool_crs_logs" ]; then
-                    echo "$tool_crs_logs" | sed 's/^/    /'
-                fi
-                result_message="Tool CRS integration working"
-            else
-                echo -e "  ${YELLOW}⚠ GR-17e: No find_loops tool CRS logs found${NC}"
-                result_message="No tool CRS logs (pre-implementation expected)"
-            fi
-            ;;
-
-        verify_find_common_dependency_crs)
-            # GR-17f: Verify find_common_dependency tool records TraceStep in CRS
-            echo -e "  ${BLUE}Checking CRS integration for find_common_dependency tool (GR-17f)...${NC}"
-
-            local tool_crs_logs=$(ssh_cmd "grep -i 'find_common_dependency\|tool.*common.*dependency' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
-            local trace_metadata=$(ssh_cmd "grep -i 'find_common_dependency.*action\|find_common_dependency.*trace' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
-
-            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
-                echo -e "  ${GREEN}✓ GR-17f: find_common_dependency tool CRS integration detected${NC}"
-                if [ -n "$tool_crs_logs" ]; then
-                    echo "$tool_crs_logs" | sed 's/^/    /'
-                fi
-                result_message="Tool CRS integration working"
-            else
-                echo -e "  ${YELLOW}⚠ GR-17f: No find_common_dependency tool CRS logs found${NC}"
-                result_message="No tool CRS logs (pre-implementation expected)"
-            fi
-            ;;
-
-        verify_find_control_deps_crs)
-            # GR-17c: Verify find_control_dependencies tool records TraceStep in CRS
-            echo -e "  ${BLUE}Checking CRS integration for find_control_dependencies tool (GR-17c)...${NC}"
-
-            # Check server logs for tool CRS trace step recording
-            local tool_crs_logs=$(ssh_cmd "grep -i 'find_control_dependencies\|control.*dependenc\|ComputeControlDependence' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
-
-            # Check for trace step with tool metadata
-            local trace_metadata=$(ssh_cmd "grep -i 'analytics_control\|control.*trace\|ControlDependence.*CRS' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
-
-            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
-                echo -e "  ${GREEN}✓ GR-17c: find_control_dependencies tool CRS integration detected${NC}"
-                if [ -n "$tool_crs_logs" ]; then
-                    echo "$tool_crs_logs" | sed 's/^/    /'
-                fi
-                result_message="Tool CRS integration working"
-            else
-                echo -e "  ${YELLOW}⚠ GR-17c: No find_control_dependencies tool CRS logs found${NC}"
-                echo -e "  ${YELLOW}  → Pre-GR-17c: Expected (tool not implemented)${NC}"
-                echo -e "  ${YELLOW}  → Post-GR-17c: Should record TraceStep with tool metadata${NC}"
-                result_message="No tool CRS logs (pre-implementation expected)"
-            fi
-            ;;
-
-        verify_find_extractable_crs)
-            # GR-17g: Verify find_extractable_regions tool records TraceStep in CRS
-            echo -e "  ${BLUE}Checking CRS integration for find_extractable_regions tool (GR-17g)...${NC}"
-
-            # Check server logs for tool CRS trace step recording
-            local tool_crs_logs=$(ssh_cmd "grep -i 'find_extractable_regions\|extractable.*region\|DetectSESERegions' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
-
-            # Check for trace step with tool metadata
-            local trace_metadata=$(ssh_cmd "grep -i 'analytics_sese\|sese.*trace\|SESERegions.*CRS' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
-
-            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
-                echo -e "  ${GREEN}✓ GR-17g: find_extractable_regions tool CRS integration detected${NC}"
-                if [ -n "$tool_crs_logs" ]; then
-                    echo "$tool_crs_logs" | sed 's/^/    /'
-                fi
-                result_message="Tool CRS integration working"
-            else
-                echo -e "  ${YELLOW}⚠ GR-17g: No find_extractable_regions tool CRS logs found${NC}"
-                echo -e "  ${YELLOW}  → Pre-GR-17g: Expected (tool not implemented)${NC}"
-                echo -e "  ${YELLOW}  → Post-GR-17g: Should record TraceStep with tool metadata${NC}"
-                result_message="No tool CRS logs (pre-implementation expected)"
-            fi
-            ;;
-
-        verify_find_critical_path_crs)
-            # GR-18a: Verify find_critical_path tool records TraceStep in CRS
-            echo -e "  ${BLUE}Checking CRS integration for find_critical_path tool (GR-18a)...${NC}"
-
-            # Check server logs for tool CRS trace step recording
-            local tool_crs_logs=$(ssh_cmd "grep -i 'find_critical_path\|critical.*path.*tool\|CriticalPath' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
-
-            # Check for trace step with tool metadata
-            local trace_metadata=$(ssh_cmd "grep -i 'dominator.*critical\|critical.*path.*CRS\|tool_critical_path' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
-
-            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
-                echo -e "  ${GREEN}✓ GR-18a: find_critical_path tool CRS integration detected${NC}"
-                if [ -n "$tool_crs_logs" ]; then
-                    echo "$tool_crs_logs" | sed 's/^/    /'
-                fi
-                result_message="Tool CRS integration working"
-            else
-                echo -e "  ${YELLOW}⚠ GR-18a: No find_critical_path tool CRS logs found${NC}"
-                echo -e "  ${YELLOW}  → Pre-GR-18a: Expected (tool not implemented)${NC}"
-                echo -e "  ${YELLOW}  → Post-GR-18a: Should record TraceStep with tool metadata${NC}"
-                result_message="No tool CRS logs (pre-implementation expected)"
-            fi
-            ;;
-
-        verify_find_module_api_crs)
-            # GR-18b: Verify find_module_api tool records TraceStep in CRS
-            echo -e "  ${BLUE}Checking CRS integration for find_module_api tool (GR-18b)...${NC}"
-
-            # Check server logs for tool CRS trace step recording
-            local tool_crs_logs=$(ssh_cmd "grep -i 'find_module_api\|module.*api.*tool\|ModuleAPI' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
-
-            # Check for trace step with tool metadata
-            local trace_metadata=$(ssh_cmd "grep -i 'community.*api\|module.*api.*CRS\|tool_module_api' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
-
-            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
-                echo -e "  ${GREEN}✓ GR-18b: find_module_api tool CRS integration detected${NC}"
-                if [ -n "$tool_crs_logs" ]; then
-                    echo "$tool_crs_logs" | sed 's/^/    /'
-                fi
-                result_message="Tool CRS integration working"
-            else
-                echo -e "  ${YELLOW}⚠ GR-18b: No find_module_api tool CRS logs found${NC}"
-                echo -e "  ${YELLOW}  → Pre-GR-18b: Expected (tool not implemented)${NC}"
-                echo -e "  ${YELLOW}  → Post-GR-18b: Should record TraceStep with tool metadata${NC}"
-                result_message="No tool CRS logs (pre-implementation expected)"
-            fi
-            ;;
-
-        *)
-            echo -e "  ${YELLOW}⚠ Unknown internal test: $test_name${NC}"
-            result_message="Unknown test"
-            ;;
-    esac
-
-    # GR-39 Issue 5: Set LAST_TEST_RESULT for internal tests
-    local end_time=$(get_time_ms)
-    local duration=$((end_time - start_time))
-    local result_status="PASSED"
-    if [ $exit_code -ne 0 ]; then
-        result_status="FAILED"
+# ==============================================================================
+# TOOL NAME MAPPING (for --tool flag)
+# ==============================================================================
+
+# Tool name lists (bash 3.x compatible — no associative arrays)
+TOOL_NAMES=(
+    find_callers find_callees find_implementations find_symbol
+    find_references get_call_chain find_path find_hotspots
+    find_dead_code find_cycles find_important find_communities
+    find_articulation_points find_dominators find_loops find_merge_points
+    find_common_dependency find_control_dependencies find_extractable_regions
+    check_reducibility find_critical_path find_module_api find_weighted_criticality
+)
+
+# tool_name_to_index: returns index (0-22) for a tool name, or "" if not found
+tool_name_to_index() {
+    local name="$1"
+    for i in "${!TOOL_NAMES[@]}"; do
+        if [ "${TOOL_NAMES[$i]}" = "$name" ]; then
+            echo "$i"
+            return 0
+        fi
+    done
+    echo ""
+    return 1
+}
+
+# tool_index_to_name: returns tool name for an index (0-22)
+tool_index_to_name() {
+    local idx="$1"
+    if [ "$idx" -ge 0 ] && [ "$idx" -lt ${#TOOL_NAMES[@]} ] 2>/dev/null; then
+        echo "${TOOL_NAMES[$idx]}"
+    else
+        echo "tool_$idx"
     fi
-
-    LAST_TEST_RESULT=$(jq -n \
-        --arg test_num "$test_num" \
-        --arg category "$category" \
-        --arg query "INTERNAL:$test_name" \
-        --arg state "$result_status" \
-        --arg message "$result_message" \
-        --arg duration "$duration" \
-        '{
-            test: ($test_num | tonumber),
-            category: $category,
-            query: $query,
-            state: $state,
-            steps_taken: 0,
-            tokens_used: 0,
-            runtime_ms: ($duration | tonumber),
-            response: $message,
-            crs_trace: {total_steps: 0, trace: []}
-        }')
-
-    return $exit_code
 }
 
-run_extra_check() {
-    local check="$1"
-    local response="$2"
-    local duration="$3"
-    local session_id="${4:-}"
-
-    case "$check" in
-        faster_than_first)
-            # Session 2+ should be faster due to restored state
-            # Compare to first session runtime (stored globally)
-            if [ "$FIRST_TEST_RUNTIME" -gt 0 ] && [ "$duration" -lt "$FIRST_TEST_RUNTIME" ]; then
-                local speedup=$(( (FIRST_TEST_RUNTIME - duration) * 100 / FIRST_TEST_RUNTIME ))
-                echo -e "    ${GREEN}✓ ${speedup}% faster than first query (${duration}ms vs ${FIRST_TEST_RUNTIME}ms)${NC}"
-                echo -e "    ${GREEN}  → Session restore appears to be working!${NC}"
-            elif [ "$FIRST_TEST_RUNTIME" -gt 0 ]; then
-                local slowdown=$(( (duration - FIRST_TEST_RUNTIME) * 100 / FIRST_TEST_RUNTIME ))
-                echo -e "    ${YELLOW}⚠ ${slowdown}% slower than first query (${duration}ms vs ${FIRST_TEST_RUNTIME}ms)${NC}"
-                echo -e "    ${YELLOW}  → Query complexity may differ, or CRS not providing speedup${NC}"
-            else
-                echo -e "    ${YELLOW}⚠ No first test runtime to compare (${duration}ms)${NC}"
-            fi
-            ;;
-
-        analytics_recorded)
-            # Check if analytics were recorded in CRS
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
-            if echo "$trace" | jq . > /dev/null 2>&1; then
-                local has_analytics=$(echo "$trace" | jq '[.trace[] | select(.action == "analytics_query" or .action == "tool_call")] | length')
-                if [ "$has_analytics" -gt 0 ]; then
-                    echo -e "    ${GREEN}✓ Analytics/tool calls recorded in CRS ($has_analytics steps)${NC}"
-                else
-                    echo -e "    ${YELLOW}⚠ No analytics found in trace${NC}"
-                fi
-            fi
-            ;;
-
-        generation_incremented)
-            # Check CRS generation was incremented
-            local gen_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/crs/generation'" 2>/dev/null)
-            if echo "$gen_response" | jq . > /dev/null 2>&1; then
-                local gen=$(echo "$gen_response" | jq '.generation // 0')
-                if [ "$gen" -gt 0 ]; then
-                    echo -e "    ${GREEN}✓ CRS generation: $gen${NC}"
-                else
-                    echo -e "    ${YELLOW}⚠ CRS generation is 0${NC}"
-                fi
-            else
-                echo -e "    ${YELLOW}⚠ Could not fetch CRS generation${NC}"
-            fi
-            ;;
-
-        graph_tool_used)
-            # GR-01: Verify graph tools (find_callers, find_callees, find_implementations) were invoked
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
-            if echo "$trace" | jq . > /dev/null 2>&1; then
-                local graph_tools=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool | test("find_callers|find_callees|find_implementations|find_symbol"))] | length')
-                if [ "$graph_tools" -gt 0 ]; then
-                    echo -e "    ${GREEN}✓ Graph tools used: $graph_tools invocations${NC}"
-                else
-                    echo -e "    ${YELLOW}⚠ No graph tools in trace (may have used other tools)${NC}"
-                fi
-            fi
-            ;;
-
-        fast_execution)
-            # GR-01: Verify query executed quickly (< 5000ms for warmed index)
-            if [ "$duration" -lt 5000 ]; then
-                echo -e "    ${GREEN}✓ Fast execution: ${duration}ms (< 5s threshold)${NC}"
-            else
-                echo -e "    ${YELLOW}⚠ Slower than expected: ${duration}ms (threshold: 5s)${NC}"
-            fi
-            ;;
-
-        fast_not_found)
-            # GR-01: Verify not-found case is fast (O(1) index miss, not O(V) scan)
-            if [ "$duration" -lt 3000 ]; then
-                echo -e "    ${GREEN}✓ Fast not-found: ${duration}ms (O(1) index miss)${NC}"
-            else
-                echo -e "    ${YELLOW}⚠ Slow not-found: ${duration}ms (may be using O(V) scan)${NC}"
-            fi
-            # Also check response mentions not found
-            local not_found=$(echo "$response" | jq -r '.response // ""' | grep -ci "not found\|no callers\|no function")
-            if [ "$not_found" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ Correctly reported function not found${NC}"
-            fi
-            ;;
-
-        implementations_found)
-            # GR-40: Verify find_implementations returned actual results
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-
-            # Check if find_implementations was used
-            local impl_tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_implementations")] | length' 2>/dev/null || echo "0")
-
-            # Check if response contains implementation names (not "no implementations found")
-            local found_impls=$(echo "$agent_resp" | grep -ci "implement\|struct\|type.*handler\|concrete")
-            local no_impls=$(echo "$agent_resp" | grep -ci "no implementation\|not found\|empty\|none")
-
-            echo -e "    ${BLUE}find_implementations calls: $impl_tool_used${NC}"
-
-            if [ "$impl_tool_used" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-40: find_implementations tool was used${NC}"
-
-                if [ "$found_impls" -gt 0 ] && [ "$no_impls" -eq 0 ]; then
-                    echo -e "    ${GREEN}✓ GR-40: Implementations were found in response${NC}"
-                elif [ "$no_impls" -gt 0 ]; then
-                    echo -e "    ${RED}✗ GR-40: Response indicates no implementations found${NC}"
-                    echo -e "    ${YELLOW}  → Pre-GR-40: Go implicit interfaces not detected${NC}"
-                    echo -e "    ${YELLOW}  → Post-GR-40: This should show concrete types${NC}"
-                else
-                    echo -e "    ${YELLOW}⚠ GR-40: Could not determine if implementations found${NC}"
-                fi
-            else
-                # Check if Grep was used as fallback (bad)
-                local grep_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "Grep")] | length' 2>/dev/null || echo "0")
-                if [ "$grep_used" -gt 0 ]; then
-                    echo -e "    ${RED}✗ GR-40: Fell back to Grep ($grep_used calls) instead of find_implementations${NC}"
-                    echo -e "    ${YELLOW}  → Pre-GR-40: Expected behavior (no implements edges)${NC}"
-                else
-                    echo -e "    ${YELLOW}⚠ GR-40: find_implementations not used, but no Grep fallback${NC}"
-                fi
-            fi
-            ;;
-
-        pagerank_used)
-            # GR-12/GR-13: Verify find_important tool was used (PageRank-based)
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-
-            # Check if find_important was used
-            local fi_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_important")] | length' 2>/dev/null || echo "0")
-
-            # Check if response mentions PageRank
-            local mentions_pr=$(echo "$agent_resp" | grep -ci "pagerank\|page rank\|importance.*score")
-
-            if [ "$fi_used" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-13: find_important tool was used: $fi_used calls${NC}"
-                if [ "$mentions_pr" -gt 0 ]; then
-                    echo -e "    ${GREEN}✓ GR-12: Response mentions PageRank scoring${NC}"
-                fi
-            else
-                # Check if find_hotspots was used as fallback
-                local hs_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_hotspots")] | length' 2>/dev/null || echo "0")
-                if [ "$hs_used" -gt 0 ]; then
-                    echo -e "    ${YELLOW}⚠ GR-13: Used find_hotspots (degree-based) instead of find_important (PageRank)${NC}"
-                    echo -e "    ${YELLOW}  → Pre-GR-13: Expected (find_important not implemented)${NC}"
-                    echo -e "    ${YELLOW}  → Post-GR-13: Should use find_important for importance queries${NC}"
-                else
-                    echo -e "    ${RED}✗ GR-13: Neither find_important nor find_hotspots used${NC}"
-                fi
-            fi
-            ;;
-
-        fast_pagerank)
-            # GR-12: Verify PageRank completed within reasonable time (< 30s for convergence)
-            if [ "$duration" -lt 30000 ]; then
-                echo -e "    ${GREEN}✓ GR-12: PageRank completed in ${duration}ms (< 30s threshold)${NC}"
-            else
-                echo -e "    ${YELLOW}⚠ GR-12: PageRank took ${duration}ms (threshold: 30s)${NC}"
-                echo -e "    ${YELLOW}  → May need optimization for large graphs${NC}"
-            fi
-            ;;
-
-        no_grep_used)
-            # GR-40: Verify that Grep was NOT used as fallback for interface queries
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
-
-            local grep_calls=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "Grep")] | length' 2>/dev/null || echo "0")
-            local impl_calls=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_implementations")] | length' 2>/dev/null || echo "0")
-
-            if [ "$grep_calls" -eq 0 ]; then
-                echo -e "    ${GREEN}✓ GR-40: No Grep fallback (correct behavior)${NC}"
-                if [ "$impl_calls" -gt 0 ]; then
-                    echo -e "    ${GREEN}✓ GR-40: Used find_implementations: $impl_calls calls${NC}"
-                fi
-            else
-                echo -e "    ${RED}✗ GR-40: Grep fallback detected: $grep_calls calls${NC}"
-                echo -e "    ${YELLOW}  → Pre-GR-40: Expected (no implements edges, falls back to Grep)${NC}"
-                echo -e "    ${YELLOW}  → Post-GR-40: Should use find_implementations exclusively${NC}"
-
-                # Show what Grep was searching for
-                local grep_patterns=$(echo "$trace" | jq -r '[.trace[] | select(.action == "tool_call") | select(.tool == "Grep") | .params.pattern // .target] | unique | join(", ")' 2>/dev/null)
-                if [ -n "$grep_patterns" ] && [ "$grep_patterns" != "null" ]; then
-                    echo -e "    ${YELLOW}  → Grep patterns: $grep_patterns${NC}"
-                fi
-            fi
-            ;;
-
-        # ================================================================================
-        # GR-PHASE1: INTEGRATION TEST QUALITY CHECKS
-        # TDD: These checks define expected behavior BEFORE fixes are implemented
-        # ================================================================================
-
-        empty_response_threshold)
-            # P0: Verify empty response warnings are minimal (< 50 total)
-            local empty_warns=$(ssh_cmd "grep -c 'empty response' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null" || echo "0")
-            empty_warns=$(echo "$empty_warns" | tr -d '[:space:]')
-
-            if [ "$empty_warns" -lt 50 ]; then
-                echo -e "    ${GREEN}✓ P0-Issue1: Empty response warnings: $empty_warns (< 50 threshold)${NC}"
-            else
-                echo -e "    ${RED}✗ P0-Issue1: Empty response warnings: $empty_warns (exceeds 50 threshold)${NC}"
-                echo -e "    ${YELLOW}  → Root cause: OllamaAdapter receiving empty responses from LLM${NC}"
-                echo -e "    ${YELLOW}  → Fix: Check prompt format compatibility with $OLLAMA_MODEL${NC}"
-            fi
-            ;;
-
-        avg_runtime_threshold)
-            # P0: Verify this test completed in reasonable time (< 15s)
-            local threshold=15000
-            if [ "$duration" -lt "$threshold" ]; then
-                echo -e "    ${GREEN}✓ P0-Issue1: Runtime ${duration}ms (< ${threshold}ms threshold)${NC}"
-            else
-                echo -e "    ${RED}✗ P0-Issue1: Runtime ${duration}ms (exceeds ${threshold}ms threshold)${NC}"
-                echo -e "    ${YELLOW}  → Likely cause: Empty response retries adding ~9s per query${NC}"
-            fi
-            ;;
-
-        crs_speedup_verified)
-            # P1: Verify CRS provides speedup for subsequent queries
-            # This test should be faster than FIRST_TEST_RUNTIME (session 1)
-            if [ "$FIRST_TEST_RUNTIME" -gt 0 ]; then
-                if [ "$duration" -lt "$FIRST_TEST_RUNTIME" ]; then
-                    local speedup=$(( (FIRST_TEST_RUNTIME - duration) * 100 / FIRST_TEST_RUNTIME ))
-                    echo -e "    ${GREEN}✓ P1-Issue3: CRS speedup verified: ${speedup}% faster${NC}"
-                    echo -e "    ${GREEN}  → Session 1: ${FIRST_TEST_RUNTIME}ms, This query: ${duration}ms${NC}"
-                else
-                    local slowdown=$(( (duration - FIRST_TEST_RUNTIME) * 100 / FIRST_TEST_RUNTIME ))
-                    echo -e "    ${RED}✗ P1-Issue3: CRS NOT providing speedup: ${slowdown}% SLOWER${NC}"
-                    echo -e "    ${YELLOW}  → Session 1: ${FIRST_TEST_RUNTIME}ms, This query: ${duration}ms${NC}"
-                    echo -e "    ${YELLOW}  → CRS context should reduce tool calls for subsequent queries${NC}"
-                fi
-            else
-                echo -e "    ${YELLOW}⚠ P1-Issue3: No baseline runtime available for comparison${NC}"
-            fi
-            ;;
-
-        fast_not_found_strict)
-            # P2: Verify not-found queries complete in < 5 seconds
-            local threshold=5000
-            if [ "$duration" -lt "$threshold" ]; then
-                echo -e "    ${GREEN}✓ P2-Issue4: Not-found query: ${duration}ms (< ${threshold}ms threshold)${NC}"
-            else
-                echo -e "    ${RED}✗ P2-Issue4: Not-found query: ${duration}ms (exceeds ${threshold}ms)${NC}"
-                echo -e "    ${YELLOW}  → Should be O(1) index miss, not O(V) scan with LLM retries${NC}"
-            fi
-            # Verify response indicates not found
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-            if echo "$agent_resp" | grep -qi "not found\|no function\|doesn't exist\|does not exist"; then
-                echo -e "    ${GREEN}✓ P2-Issue4: Correctly reported symbol not found${NC}"
-            else
-                echo -e "    ${YELLOW}⚠ P2-Issue4: Response may not clearly indicate not found${NC}"
-            fi
-            ;;
-
-        citations_present)
-            # P3: Verify response includes [file:line] citations
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-            # Look for patterns like [file.go:123] or file.go:123 or (file.go:123)
-            local citation_count=$(echo "$agent_resp" | grep -oE '\[?[a-zA-Z0-9_/.-]+\.(go|py|js|ts|rs|java):[0-9]+\]?' | wc -l)
-            citation_count=$(echo "$citation_count" | tr -d '[:space:]')
-
-            if [ "$citation_count" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ P3-Issue7: Found $citation_count [file:line] citations${NC}"
-            else
-                echo -e "    ${RED}✗ P3-Issue7: No [file:line] citations in response${NC}"
-                echo -e "    ${YELLOW}  → Analytical responses should include source citations${NC}"
-                echo -e "    ${YELLOW}  → Fix: Improve prompt to require citations${NC}"
-            fi
-            ;;
-
-        # ================================================================================
-        # GR-10: QUERY CACHE PERFORMANCE CHECKS
-        # TDD: These checks define expected behavior BEFORE implementation
-        # ================================================================================
-
-        cache_miss_expected)
-            # GR-10: First query should be a cache miss
-            local cache_stats=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/cache'" 2>/dev/null || echo "{}")
-            local miss_count=$(echo "$cache_stats" | jq '.misses // 0' 2>/dev/null || echo "0")
-            local hit_count=$(echo "$cache_stats" | jq '.hits // 0' 2>/dev/null || echo "0")
-
-            if [ "$miss_count" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-10: Cache miss recorded (misses=$miss_count, hits=$hit_count)${NC}"
-            else
-                echo -e "    ${YELLOW}⚠ GR-10: Cache stats not available or no miss recorded${NC}"
-                echo -e "    ${YELLOW}  → Pre-GR-10: Expected (cache not implemented)${NC}"
-            fi
-
-            # Check server logs for cache activity
-            local cache_logs=$(ssh_cmd "grep -i 'cache.*miss\|cache.*populate' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
-            if [ -n "$cache_logs" ]; then
-                echo -e "    ${BLUE}Cache logs:${NC}"
-                echo "$cache_logs" | sed 's/^/      /'
-            fi
-            ;;
-
-        cache_hit_expected)
-            # GR-10: Second identical query should be a cache hit
-            local cache_stats=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/cache'" 2>/dev/null || echo "{}")
-            local hit_count=$(echo "$cache_stats" | jq '.hits // 0' 2>/dev/null || echo "0")
-            local miss_count=$(echo "$cache_stats" | jq '.misses // 0' 2>/dev/null || echo "0")
-
-            if [ "$hit_count" -gt 0 ]; then
-                local hit_rate=$(echo "scale=2; $hit_count * 100 / ($hit_count + $miss_count)" | bc 2>/dev/null || echo "?")
-                echo -e "    ${GREEN}✓ GR-10: Cache hit recorded (hits=$hit_count, hit_rate=$hit_rate%)${NC}"
-            else
-                echo -e "    ${RED}✗ GR-10: No cache hit for repeated query${NC}"
-                echo -e "    ${YELLOW}  → Pre-GR-10: Expected (cache not implemented)${NC}"
-                echo -e "    ${YELLOW}  → Post-GR-10: Second identical query should hit cache${NC}"
-            fi
-
-            # Check server logs for cache hit
-            local cache_logs=$(ssh_cmd "grep -i 'cache.*hit' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
-            if [ -n "$cache_logs" ]; then
-                echo -e "    ${BLUE}Cache hit logs:${NC}"
-                echo "$cache_logs" | sed 's/^/      /'
-            fi
-            ;;
-
-        cache_speedup_expected)
-            # GR-10: Cached query should be significantly faster
-            # Compare this runtime to the first test runtime
-            local cache_stats=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/cache'" 2>/dev/null || echo "{}")
-            local avg_hit_time=$(echo "$cache_stats" | jq '.avg_hit_time_ms // 0' 2>/dev/null || echo "0")
-            local avg_miss_time=$(echo "$cache_stats" | jq '.avg_miss_time_ms // 0' 2>/dev/null || echo "0")
-
-            if [ "$avg_hit_time" -gt 0 ] && [ "$avg_miss_time" -gt 0 ]; then
-                local speedup=$(echo "scale=1; $avg_miss_time / $avg_hit_time" | bc 2>/dev/null || echo "?")
-                echo -e "    ${GREEN}✓ GR-10: Cache speedup: ${speedup}x (miss=${avg_miss_time}ms, hit=${avg_hit_time}ms)${NC}"
-            else
-                # Fall back to comparing with first test
-                if [ "$FIRST_TEST_RUNTIME" -gt 0 ]; then
-                    if [ "$duration" -lt "$FIRST_TEST_RUNTIME" ]; then
-                        local speedup=$(( (FIRST_TEST_RUNTIME - duration) * 100 / FIRST_TEST_RUNTIME ))
-                        echo -e "    ${GREEN}✓ GR-10: Query ${speedup}% faster than first (cached)${NC}"
-                        echo -e "    ${BLUE}  First query: ${FIRST_TEST_RUNTIME}ms, This query: ${duration}ms${NC}"
-                    else
-                        echo -e "    ${YELLOW}⚠ GR-10: No speedup observed (may not be cached)${NC}"
-                    fi
-                fi
-            fi
-            ;;
-
-        # ================================================================================
-        # GR-11: PARALLEL BFS PERFORMANCE CHECKS
-        # TDD: These checks define expected behavior BEFORE implementation
-        # ================================================================================
-
-        parallel_correctness)
-            # GR-11: Verify parallel BFS returns same results as sequential
-            # Check that call graph contains expected nodes
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-            local node_count=$(echo "$agent_resp" | grep -oE '[a-zA-Z_][a-zA-Z0-9_]*' | sort -u | wc -l | tr -d ' ')
-
-            if [ "$node_count" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-11: Call graph returned $node_count unique symbols${NC}"
-
-                # Check server logs for parallel mode indication
-                local parallel_log=$(ssh_cmd "grep -i 'parallel.*bfs\|bfs.*parallel\|parallel_mode' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
-                if [ -n "$parallel_log" ]; then
-                    echo -e "    ${BLUE}Parallel BFS logs:${NC}"
-                    echo "$parallel_log" | sed 's/^/      /'
-                else
-                    echo -e "    ${YELLOW}⚠ GR-11: No parallel BFS log entries (pre-implementation expected)${NC}"
-                fi
-            else
-                echo -e "    ${RED}✗ GR-11: No symbols in call graph response${NC}"
-            fi
-            ;;
-
-        parallel_speedup)
-            # GR-11: Verify parallel is faster for wide graphs
-            # Check OTel span attributes for parallel_mode and timing
-            local trace_resp=$(echo "$response" | jq '.crs_trace // {}')
-            local parallel_used=$(echo "$trace_resp" | jq -r '[.trace[] | select(.metadata.parallel_mode == true)] | length' 2>/dev/null || echo "0")
-
-            if [ "$parallel_used" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-11: Parallel mode was used for traversal${NC}"
-
-                # Check if there's timing info
-                local parallel_time=$(echo "$trace_resp" | jq -r '[.trace[] | select(.metadata.parallel_mode == true) | .metadata.duration_ms // 0] | add' 2>/dev/null || echo "0")
-                if [ "$parallel_time" -gt 0 ]; then
-                    echo -e "    ${BLUE}  Parallel execution time: ${parallel_time}ms${NC}"
-                fi
-            else
-                echo -e "    ${YELLOW}⚠ GR-11: Parallel mode not detected (pre-implementation or graph too small)${NC}"
-                echo -e "    ${YELLOW}  → Pre-GR-11: Expected (parallel BFS not implemented)${NC}"
-                echo -e "    ${YELLOW}  → Post-GR-11: Should use parallel for levels > 16 nodes${NC}"
-            fi
-
-            # Check server logs for speedup info
-            local speedup_log=$(ssh_cmd "grep -i 'parallel.*speedup\|level.*nodes' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
-            if [ -n "$speedup_log" ]; then
-                echo -e "    ${BLUE}Speedup logs:${NC}"
-                echo "$speedup_log" | sed 's/^/      /'
-            fi
-            ;;
-
-        # ================================================================================
-        # GR-14: LOUVAIN COMMUNITY DETECTION CHECKS
-        # TDD: These checks define expected behavior BEFORE implementation
-        # ================================================================================
-
-        communities_found)
-            # GR-14: Verify community detection found actual communities
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-
-            # Check if response mentions communities, modules, or clusters
-            local mentions_community=$(echo "$agent_resp" | grep -ci "communit\|module\|cluster\|group")
-            local community_count=$(echo "$agent_resp" | grep -oE '[0-9]+ communit' | head -1 | grep -oE '[0-9]+' || echo "0")
-
-            if [ "$mentions_community" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-14: Response mentions communities ($mentions_community references)${NC}"
-                if [ "$community_count" -gt 0 ]; then
-                    echo -e "    ${GREEN}✓ GR-14: Found $community_count communities${NC}"
-                fi
-            else
-                echo -e "    ${YELLOW}⚠ GR-14: Response does not mention communities${NC}"
-                echo -e "    ${YELLOW}  → Pre-GR-14: Expected (community detection not implemented)${NC}"
-                echo -e "    ${YELLOW}  → Post-GR-14: Should describe detected code communities${NC}"
-            fi
-
-            # Check for modularity score in response
-            local has_modularity=$(echo "$agent_resp" | grep -ci "modularity")
-            if [ "$has_modularity" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-14: Response includes modularity score${NC}"
-            fi
-            ;;
-
-        find_communities_used)
-            # GR-14: Verify find_communities tool was used (not grep fallback)
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
-
-            # Check if find_communities was used
-            local fc_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_communities")] | length' 2>/dev/null || echo "0")
-
-            if [ "$fc_used" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-14: find_communities tool was used: $fc_used calls${NC}"
-
-                # Check for community detection metadata
-                local community_meta=$(echo "$trace" | jq -r '[.trace[] | select(.tool == "find_communities") | .metadata] | .[0]' 2>/dev/null || echo "{}")
-                local communities_found=$(echo "$community_meta" | jq '.communities_count // 0' 2>/dev/null || echo "0")
-                local modularity=$(echo "$community_meta" | jq '.modularity // 0' 2>/dev/null || echo "0")
-
-                if [ "$communities_found" -gt 0 ]; then
-                    echo -e "    ${BLUE}  Communities: $communities_found, Modularity: $modularity${NC}"
-                fi
-            else
-                echo -e "    ${RED}✗ GR-14: find_communities tool not used${NC}"
-                echo -e "    ${YELLOW}  → Pre-GR-14: Expected (tool not implemented)${NC}"
-                echo -e "    ${YELLOW}  → Post-GR-14: Should use find_communities for module/community queries${NC}"
-
-                # Check if Grep was used as fallback
-                local grep_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "Grep")] | length' 2>/dev/null || echo "0")
-                if [ "$grep_used" -gt 0 ]; then
-                    echo -e "    ${YELLOW}  → Fell back to Grep: $grep_used calls${NC}"
-                fi
-            fi
-            ;;
-
-        fast_community_detection)
-            # GR-14: Verify community detection completed in reasonable time
-            # Louvain should be O(V+E) per pass, typically <5s for 100K nodes
-            local threshold=30000  # 30 seconds max for reasonable sized graphs
-
-            if [ "$duration" -lt "$threshold" ]; then
-                echo -e "    ${GREEN}✓ GR-14: Community detection completed in ${duration}ms (< ${threshold}ms threshold)${NC}"
-            else
-                echo -e "    ${YELLOW}⚠ GR-14: Community detection took ${duration}ms (threshold: ${threshold}ms)${NC}"
-                echo -e "    ${YELLOW}  → May need optimization for large graphs${NC}"
-            fi
-
-            # Check server logs for iteration count
-            local iteration_log=$(ssh_cmd "grep -i 'louvain.*iteration\|community.*converge' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
-            if [ -n "$iteration_log" ]; then
-                echo -e "    ${BLUE}Louvain iteration logs:${NC}"
-                echo "$iteration_log" | sed 's/^/      /'
-            fi
-            ;;
-
-        # ================================================================================
-        # GR-15: find_communities TOOL CHECKS
-        # TDD: These checks define expected behavior BEFORE implementation
-        # ================================================================================
-
-        find_communities_tool_used)
-            # GR-15: Verify find_communities tool was used for module boundary queries
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-
-            # Check if find_communities was used
-            local fc_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_communities")] | length' 2>/dev/null || echo "0")
-
-            if [ "$fc_used" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-15: find_communities tool was used: $fc_used calls${NC}"
-
-                # Check for algorithm info
-                local algorithm=$(echo "$agent_resp" | grep -oi "leiden" | head -1 || echo "")
-                if [ -n "$algorithm" ]; then
-                    echo -e "    ${GREEN}✓ GR-15: Response mentions Leiden algorithm${NC}"
-                fi
-
-                # Check for modularity score
-                local has_modularity=$(echo "$agent_resp" | grep -ci "modularity")
-                if [ "$has_modularity" -gt 0 ]; then
-                    echo -e "    ${GREEN}✓ GR-15: Response includes modularity score${NC}"
-                fi
-            else
-                echo -e "    ${RED}✗ GR-15: find_communities tool not used${NC}"
-                echo -e "    ${YELLOW}  → Pre-GR-15: Expected (tool not implemented)${NC}"
-                echo -e "    ${YELLOW}  → Post-GR-15: Should use find_communities for boundary queries${NC}"
-            fi
-            ;;
-
-        find_communities_params)
-            # GR-15: Verify find_communities tool respects parameters
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
-
-            # Check if find_communities was used with parameters
-            local fc_calls=$(echo "$trace" | jq '[.trace[] | select(.tool == "find_communities")]' 2>/dev/null || echo "[]")
-            local has_resolution=$(echo "$fc_calls" | jq 'any(.[]; .params.resolution != null)' 2>/dev/null || echo "false")
-            local has_min_size=$(echo "$fc_calls" | jq 'any(.[]; .params.min_size != null)' 2>/dev/null || echo "false")
-
-            if [ "$has_resolution" = "true" ] || [ "$has_min_size" = "true" ]; then
-                echo -e "    ${GREEN}✓ GR-15: find_communities tool called with parameters${NC}"
-                if [ "$has_resolution" = "true" ]; then
-                    echo -e "    ${BLUE}  - resolution parameter used${NC}"
-                fi
-                if [ "$has_min_size" = "true" ]; then
-                    echo -e "    ${BLUE}  - min_size parameter used${NC}"
-                fi
-            else
-                echo -e "    ${YELLOW}⚠ GR-15: find_communities called without custom parameters${NC}"
-                echo -e "    ${YELLOW}  → May use defaults, which is acceptable${NC}"
-            fi
-            ;;
-
-        cross_package_found)
-            # GR-15: Verify cross-package communities are identified
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-
-            # Check for cross-package indicators
-            local cross_pkg_mentions=$(echo "$agent_resp" | grep -ci "cross.package\|span.*package\|multiple package\|REFACTOR")
-
-            if [ "$cross_pkg_mentions" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-15: Cross-package communities identified ($cross_pkg_mentions mentions)${NC}"
-
-                # Extract specific cross-package info if available
-                local cross_pkg_line=$(echo "$agent_resp" | grep -i "cross.package\|span.*package" | head -1)
-                if [ -n "$cross_pkg_line" ]; then
-                    echo -e "    ${BLUE}  $cross_pkg_line${NC}"
-                fi
-            else
-                echo -e "    ${YELLOW}⚠ GR-15: No cross-package communities mentioned${NC}"
-                echo -e "    ${YELLOW}  → Pre-GR-15: Expected (tool not implemented)${NC}"
-                echo -e "    ${YELLOW}  → Post-GR-15: Should highlight [REFACTOR] for cross-package${NC}"
-            fi
-            ;;
-
-        # ================================================================================
-        # GR-17e: find_loops TOOL CHECKS
-        # ================================================================================
-
-        find_loops_tool_used)
-            # GR-17e: Verify find_loops tool was used for recursion/loop queries
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-
-            # Check if find_loops was used
-            local loops_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_loops")] | length' 2>/dev/null || echo "0")
-
-            if [ "$loops_used" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-17e: find_loops tool was used: $loops_used calls${NC}"
-
-                # Check for loop count in response
-                local loop_count=$(echo "$agent_resp" | grep -oi "[0-9]* loop\|[0-9]* recursion\|[0-9]* recursive" | head -1)
-                if [ -n "$loop_count" ]; then
-                    echo -e "    ${BLUE}  $loop_count found${NC}"
-                fi
-
-                # Check for recursion type breakdown
-                local has_recursion_type=$(echo "$agent_resp" | grep -ci "direct recursion\|mutual recursion\|self-call")
-                if [ "$has_recursion_type" -gt 0 ]; then
-                    echo -e "    ${GREEN}✓ GR-17e: Response includes recursion type analysis${NC}"
-                fi
-            else
-                echo -e "    ${RED}✗ GR-17e: find_loops tool not used${NC}"
-                echo -e "    ${YELLOW}  → Pre-GR-17e: Expected (tool not implemented)${NC}"
-                echo -e "    ${YELLOW}  → Post-GR-17e: Should use find_loops for recursion queries${NC}"
-            fi
-            ;;
-
-        find_loops_min_size)
-            # GR-17e: Verify find_loops with min_size parameter
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-
-            # Check for mutual recursion mentions (size >= 2)
-            local mutual_mentions=$(echo "$agent_resp" | grep -ci "mutual recursion\|A.*B.*A\|two functions")
-
-            if [ "$mutual_mentions" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-17e: Mutual recursion patterns identified ($mutual_mentions mentions)${NC}"
-
-                # Extract specific pattern info if available
-                local pattern_line=$(echo "$agent_resp" | grep -i "mutual\|A.*B" | head -1)
-                if [ -n "$pattern_line" ]; then
-                    echo -e "    ${BLUE}  $pattern_line${NC}"
-                fi
-            else
-                echo -e "    ${YELLOW}⚠ GR-17e: No mutual recursion patterns found${NC}"
-                echo -e "    ${YELLOW}  → May indicate no mutual recursion in codebase${NC}"
-                echo -e "    ${YELLOW}  → Or min_size filter correctly filtering self-loops${NC}"
-            fi
-            ;;
-
-        # ================================================================================
-        # GR-17c: find_control_dependencies TOOL CHECKS
-        # ================================================================================
-
-        find_control_deps_tool_used)
-            # GR-17c: Verify find_control_dependencies tool was used for control flow queries
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-
-            # Check if find_control_dependencies was used
-            local ctrl_deps_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_control_dependencies")] | length' 2>/dev/null || echo "0")
-
-            if [ "$ctrl_deps_used" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-17c: find_control_dependencies tool was used: $ctrl_deps_used calls${NC}"
-
-                # Check for control dependency info in response
-                local ctrl_info=$(echo "$agent_resp" | grep -oi "control.*depend\|conditionals\|branch\|decision point" | head -1)
-                if [ -n "$ctrl_info" ]; then
-                    echo -e "    ${BLUE}  Control flow information found${NC}"
-                fi
-
-                # Check for controller nodes
-                local has_controllers=$(echo "$agent_resp" | grep -ci "controls.*execution\|determines.*whether")
-                if [ "$has_controllers" -gt 0 ]; then
-                    echo -e "    ${GREEN}✓ GR-17c: Response includes controller analysis${NC}"
-                fi
-            else
-                echo -e "    ${RED}✗ GR-17c: find_control_dependencies tool not used${NC}"
-                echo -e "    ${YELLOW}  → Pre-GR-17c: Expected (tool not implemented)${NC}"
-                echo -e "    ${YELLOW}  → Post-GR-17c: Should use find_control_dependencies for control flow queries${NC}"
-            fi
-            ;;
-
-        find_control_deps_depth)
-            # GR-17c: Verify find_control_dependencies with depth parameter
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-
-            # Check for depth-limited dependency analysis
-            local depth_info=$(echo "$agent_resp" | grep -ci "depth\|level\|chain")
-
-            if [ "$depth_info" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-17c: Depth-limited control dependency analysis performed${NC}"
-
-                # Extract dependency chain info if available
-                local chain_line=$(echo "$agent_resp" | grep -i "dependency\|chain" | head -1)
-                if [ -n "$chain_line" ]; then
-                    echo -e "    ${BLUE}  $chain_line${NC}"
-                fi
-            else
-                echo -e "    ${YELLOW}⚠ GR-17c: No depth-limited analysis found${NC}"
-                echo -e "    ${YELLOW}  → May indicate flat control structure${NC}"
-            fi
-            ;;
-
-        # GR-17g: find_extractable_regions TOOL CHECKS
-        # ================================================================================
-
-        find_extractable_tool_used)
-            # GR-17g: Verify find_extractable_regions tool was used for refactoring queries
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-
-            # Check if find_extractable_regions was used
-            local extractable_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_extractable_regions")] | length' 2>/dev/null || echo "0")
-
-            if [ "$extractable_used" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-17g: find_extractable_regions tool was used: $extractable_used calls${NC}"
-
-                # Check for SESE region info in response
-                local region_info=$(echo "$agent_resp" | grep -oi "region\|extractable\|refactor\|single.*entry\|single.*exit" | head -1)
-                if [ -n "$region_info" ]; then
-                    echo -e "    ${BLUE}  SESE region information found${NC}"
-                fi
-
-                # Check for region count
-                local region_count=$(echo "$agent_resp" | grep -oi "[0-9]* region\|[0-9]* extractable" | head -1)
-                if [ -n "$region_count" ]; then
-                    echo -e "    ${GREEN}✓ GR-17g: $region_count identified${NC}"
-                fi
-            else
-                echo -e "    ${RED}✗ GR-17g: find_extractable_regions tool not used${NC}"
-                echo -e "    ${YELLOW}  → Pre-GR-17g: Expected (tool not implemented)${NC}"
-                echo -e "    ${YELLOW}  → Post-GR-17g: Should use find_extractable_regions for refactoring queries${NC}"
-            fi
-            ;;
-
-        find_extractable_size)
-            # GR-17g: Verify find_extractable_regions with size parameters
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-
-            # Check for size-filtered region analysis
-            local size_info=$(echo "$agent_resp" | grep -ci "size\|nodes\|between.*and")
-
-            if [ "$size_info" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-17g: Size-filtered region analysis performed${NC}"
-
-                # Extract region size info if available
-                local size_line=$(echo "$agent_resp" | grep -i "size\|nodes" | head -1)
-                if [ -n "$size_line" ]; then
-                    echo -e "    ${BLUE}  $size_line${NC}"
-                fi
-            else
-                echo -e "    ${YELLOW}⚠ GR-17g: No size-filtered results found${NC}"
-                echo -e "    ${YELLOW}  → May indicate no regions in requested size range${NC}"
-            fi
-            ;;
-
-
-        check_reducibility_tool_used)
-            # GR-17h: Verify check_reducibility tool was used for code quality queries
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-
-            # Check if check_reducibility was used
-            local reducibility_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "check_reducibility")] | length' 2>/dev/null || echo "0")
-
-            if [ "$reducibility_used" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-17h: check_reducibility tool was used: $reducibility_used calls${NC}"
-
-                # Check for reducibility info in response
-                local reducibility_info=$(echo "$agent_resp" | grep -oi "reducible\|well-structured\|irreducible\|complex.*control" | head -1)
-                if [ -n "$reducibility_info" ]; then
-                    echo -e "    ${BLUE}  Reducibility analysis: $reducibility_info${NC}"
-                fi
-
-                # Check for score
-                local score=$(echo "$agent_resp" | grep -oi "[0-9]*\.*[0-9]*%\|score.*[0-9]" | head -1)
-                if [ -n "$score" ]; then
-                    echo -e "    ${GREEN}✓ GR-17h: Reducibility score provided: $score${NC}"
-                fi
-            else
-                echo -e "    ${RED}✗ GR-17h: check_reducibility tool not used${NC}"
-                echo -e "    ${YELLOW}  → Pre-GR-17h: Expected (tool not implemented)${NC}"
-                echo -e "    ${YELLOW}  → Post-GR-17h: Should use check_reducibility for code quality queries${NC}"
-            fi
-            ;;
-
-        check_reducibility_details)
-            # GR-17h: Verify check_reducibility with irreducible region details
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-
-            # Check for irreducible region details
-            local region_details=$(echo "$agent_resp" | grep -ci "irreducible.*region\|entry.*node\|cross.*edge")
-
-            if [ "$region_details" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-17h: Irreducible region details provided${NC}"
-
-                # Extract region info if available
-                local region_line=$(echo "$agent_resp" | grep -i "irreducible\|cross.*edge" | head -1)
-                if [ -n "$region_line" ]; then
-                    echo -e "    ${BLUE}  $region_line${NC}"
-                fi
-            else
-                echo -e "    ${YELLOW}⚠ GR-17h: No irreducible regions found${NC}"
-                echo -e "    ${YELLOW}  → May indicate well-structured codebase${NC}"
-            fi
-            ;;
-
-        verify_check_reducibility_crs)
-            # GR-17h: Verify check_reducibility tool records TraceStep in CRS
-            echo -e "  ${BLUE}Checking CRS integration for check_reducibility tool (GR-17h)...${NC}"
-
-            # Check server logs for tool CRS trace step recording
-            local tool_crs_logs=$(ssh_cmd "grep -i 'check_reducibility\|reducibility\|CheckReducibility' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
-
-            # Check for trace step with tool metadata
-            local trace_metadata=$(ssh_cmd "grep -i 'analytics_reducibility\|reducibility.*trace\|Reducibility.*CRS' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
-
-            if [ -n "$tool_crs_logs" ] || [ -n "$trace_metadata" ]; then
-                echo -e "  ${GREEN}✓ GR-17h: check_reducibility tool CRS integration detected${NC}"
-                if [ -n "$tool_crs_logs" ]; then
-                    echo "$tool_crs_logs" | sed 's/^/    /'
-                fi
-                result_message="Tool CRS integration working"
-            else
-                echo -e "  ${YELLOW}⚠ GR-17h: No check_reducibility tool CRS logs found${NC}"
-                echo -e "  ${YELLOW}  → Pre-GR-17h: Expected (tool not implemented)${NC}"
-                echo -e "  ${YELLOW}  → Post-GR-17h: Should record TraceStep with tool metadata${NC}"
-                result_message="No tool CRS logs (pre-implementation expected)"
-            fi
-            ;;
-
-        # ================================================================================
-        # GR-18a: find_critical_path TOOL CHECKS
-        # ================================================================================
-
-        find_critical_path_tool_used)
-            # GR-18a: Verify find_critical_path tool was used for mandatory path queries
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-
-            # Check if find_critical_path was used
-            local critical_path_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_critical_path")] | length' 2>/dev/null || echo "0")
-
-            if [ "$critical_path_used" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-18a: find_critical_path tool was used: $critical_path_used calls${NC}"
-
-                # Check for critical path info in response
-                local path_info=$(echo "$agent_resp" | grep -oi "critical path\|mandatory.*call\|must.*call\|required.*sequence" | head -1)
-                if [ -n "$path_info" ]; then
-                    echo -e "    ${BLUE}  Path analysis: $path_info${NC}"
-                fi
-
-                # Check for path sequence (e.g., "main → init → parseConfig")
-                local sequence=$(echo "$agent_resp" | grep -o "[A-Za-z_][A-Za-z0-9_]*[[:space:]]*→[[:space:]]*[A-Za-z_][A-Za-z0-9_]*" | head -1)
-                if [ -n "$sequence" ]; then
-                    echo -e "    ${GREEN}✓ GR-18a: Call sequence found: $sequence${NC}"
-                fi
-            else
-                echo -e "    ${RED}✗ GR-18a: find_critical_path tool not used${NC}"
-                echo -e "    ${YELLOW}  → Pre-GR-18a: Expected (tool not implemented)${NC}"
-                echo -e "    ${YELLOW}  → Post-GR-18a: Should use find_critical_path for mandatory path queries${NC}"
-            fi
-            ;;
-
-        find_critical_path_entry)
-            # GR-18a: Verify find_critical_path with custom entry point parameter
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-
-            # Check tool calls for entry parameter
-            local tool_calls=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_critical_path")]' 2>/dev/null || echo "[]")
-            local entry_param=$(echo "$tool_calls" | jq -r '.[0].params.entry // ""' 2>/dev/null || echo "")
-
-            if [ -n "$entry_param" ] && [ "$entry_param" != "null" ]; then
-                echo -e "    ${GREEN}✓ GR-18a: Custom entry point used: $entry_param${NC}"
-            else
-                echo -e "    ${BLUE}  GR-18a: Using auto-detected entry point${NC}"
-            fi
-
-            # Check for path in response
-            local path_count=$(echo "$agent_resp" | grep -ci "critical path\|mandatory.*call")
-            if [ "$path_count" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-18a: Critical path information provided${NC}"
-            else
-                echo -e "    ${YELLOW}⚠ GR-18a: No critical path information in response${NC}"
-            fi
-            ;;
-
-        # ================================================================================
-
-        verify_post_dominator_crs_recording)
-            # GR-16c: Verify post-dominator analysis records TraceStep in CRS
-            echo -e "  ${BLUE}Checking CRS integration for post-dominator analysis (GR-16c)...${NC}"
-
-            # Check server logs for CRS trace step recording
-            local crs_logs=$(ssh_cmd "grep -i 'analytics_post_dominators\|post.*dominator.*trace\|PostDominators.*CRS' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
-
-            # Check for trace step with post-dominator metadata
-            local trace_metadata=$(ssh_cmd "grep -i 'post_dominators\|exit_node\|post_dom_depth' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
-
-            if [ -n "$crs_logs" ] || [ -n "$trace_metadata" ]; then
-                echo -e "  ${GREEN}✓ GR-16c: CRS recording detected for post-dominator analysis${NC}"
-                if [ -n "$crs_logs" ]; then
-                    echo "$crs_logs" | sed 's/^/    /'
-                fi
-                result_message="CRS integration working"
-            else
-                echo -e "  ${YELLOW}⚠ GR-16c: No CRS recording logs found${NC}"
-                echo -e "  ${YELLOW}  → Pre-GR-16c: Expected (post-dominator not implemented)${NC}"
-                echo -e "  ${YELLOW}  → Post-GR-16c: Should record TraceStep with WithCRS methods${NC}"
-                result_message="No CRS logs (pre-implementation expected)"
-            fi
-            ;;
-
-        # ================================================================================
-        # GR-16d: DOMINANCE FRONTIER CRS VERIFICATION
-        # ================================================================================
-
-        verify_dominance_frontier_crs_recording)
-            # GR-16d: Verify dominance frontier computation records TraceStep in CRS
-            echo -e "  ${BLUE}Checking CRS integration for dominance frontier (GR-16d)...${NC}"
-
-            # Check server logs for CRS trace step recording
-            local crs_logs=$(ssh_cmd "grep -i 'analytics_dominance_frontier\|dominance.*frontier.*trace\|ComputeDominanceFrontier.*CRS' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
-
-            # Check for trace step with dominance frontier metadata
-            local trace_metadata=$(ssh_cmd "grep -i 'merge_points_found\|frontier_size\|dominance_frontier' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
-
-            if [ -n "$crs_logs" ] || [ -n "$trace_metadata" ]; then
-                echo -e "  ${GREEN}✓ GR-16d: CRS recording detected for dominance frontier${NC}"
-                if [ -n "$crs_logs" ]; then
-                    echo "$crs_logs" | sed 's/^/    /'
-                fi
-                result_message="CRS integration working"
-            else
-                echo -e "  ${YELLOW}⚠ GR-16d: No CRS recording logs found${NC}"
-                echo -e "  ${YELLOW}  → Pre-GR-16d: Expected (dominance frontier not implemented)${NC}"
-                echo -e "  ${YELLOW}  → Post-GR-16d: Should record TraceStep with WithCRS methods${NC}"
-                result_message="No CRS logs (pre-implementation expected)"
-            fi
-            ;;
-
-        # ================================================================================
-        # GR-16e: CONTROL DEPENDENCE CRS VERIFICATION
-        # ================================================================================
-
-        verify_control_dependence_crs_recording)
-            # GR-16e: Verify control dependence computation records TraceStep in CRS
-            echo -e "  ${BLUE}Checking CRS integration for control dependence (GR-16e)...${NC}"
-
-            # Check server logs for CRS trace step recording
-            local crs_logs=$(ssh_cmd "grep -i 'analytics_control_dependence\|control.*depend.*trace\|ComputeControlDependence.*CRS' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
-
-            # Check for trace step with control dependence metadata
-            local trace_metadata=$(ssh_cmd "grep -i 'dependency_count\|dependents_count\|control_dependence' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
-
-            if [ -n "$crs_logs" ] || [ -n "$trace_metadata" ]; then
-                echo -e "  ${GREEN}✓ GR-16e: CRS recording detected for control dependence${NC}"
-                if [ -n "$crs_logs" ]; then
-                    echo "$crs_logs" | sed 's/^/    /'
-                fi
-                result_message="CRS integration working"
-            else
-                echo -e "  ${YELLOW}⚠ GR-16e: No CRS recording logs found${NC}"
-                echo -e "  ${YELLOW}  → Pre-GR-16e: Expected (control dependence not implemented)${NC}"
-                echo -e "  ${YELLOW}  → Post-GR-16e: Should record TraceStep with WithCRS methods${NC}"
-                result_message="No CRS logs (pre-implementation expected)"
-            fi
-            ;;
-
-        find_dominators_tool_used)
-            # GR-17a: Verify find_dominators tool was invoked
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-
-            if [ -z "$session_id" ] || [ "$session_id" = "null" ]; then
-                echo -e "    ${YELLOW}⚠ GR-17a: Cannot validate (no session_id)${NC}"
-                return 0
-            fi
-
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
-            if ! echo "$trace" | jq . > /dev/null 2>&1; then
-                echo -e "    ${YELLOW}⚠ GR-17a: Cannot validate (trace fetch failed)${NC}"
-                return 0
-            fi
-
-            # Check for both "tool_call" and "tool_call_forced" actions
-            local dominators_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call" or .action == "tool_call_forced") | select(.tool == "find_dominators")] | length')
-            if [ "$dominators_used" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-17a: find_dominators tool used ($dominators_used invocations)${NC}"
-            else
-                echo -e "    ${YELLOW}⚠ GR-17a: find_dominators not found in trace${NC}"
-            fi
-            ;;
-
-        find_dominators_tree)
-            # GR-17a: Verify dominator tree was shown in response
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-            
-            # Check for dominator tree indicators (tree structure, hierarchy, dominators list)
-            local has_tree=$(echo "$agent_resp" | grep -ciE "dominator.*tree|tree.*starting|entry.*point|dominates|dominated.*by")
-            local has_structure=$(echo "$agent_resp" | grep -ciE "└|├|│|→|▼|main.*→")
-            
-            if [ "$has_tree" -gt 0 ] || [ "$has_structure" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-17a: Dominator tree shown in response${NC}"
-            else
-                echo -e "    ${YELLOW}⚠ GR-17a: No dominator tree structure in response${NC}"
-                echo -e "    ${YELLOW}  → Response may describe dominators without tree visualization${NC}"
-            fi
-            ;;
-
-        find_articulation_points_tool_used)
-            # GR-16b: Verify find_articulation_points tool was invoked
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-
-            if [ -z "$session_id" ] || [ "$session_id" = "null" ]; then
-                echo -e "    ${YELLOW}⚠ GR-16b: Cannot validate (no session_id)${NC}"
-                return 0
-            fi
-
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
-            if ! echo "$trace" | jq . > /dev/null 2>&1; then
-                echo -e "    ${YELLOW}⚠ GR-16b: Cannot validate (trace fetch failed)${NC}"
-                return 0
-            fi
-
-            # Check for both "tool_call" and "tool_call_forced" actions
-            local tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call" or .action == "tool_call_forced") | select(.tool == "find_articulation_points")] | length')
-            if [ "$tool_used" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-16b: find_articulation_points tool used ($tool_used invocations)${NC}"
-            else
-                echo -e "    ${YELLOW}⚠ GR-16b: find_articulation_points not found in trace${NC}"
-            fi
-            ;;
-
-        find_articulation_points_bridges)
-            # GR-16b: Verify bridges parameter was used
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-            local has_bridges=$(echo "$agent_resp" | grep -ciE "bridge|edge.*critical|remove.*disconn")
-            if [ "$has_bridges" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-16b: Bridges parameter handling detected${NC}"
-            else
-                echo -e "    ${YELLOW}⚠ GR-16b: No bridge-specific output${NC}"
-            fi
-            ;;
-
-        find_merge_points_tool_used)
-            # GR-17b: Verify find_merge_points tool was invoked
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
-            if echo "$trace" | jq . > /dev/null 2>&1; then
-                local tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_merge_points")] | length')
-                if [ "$tool_used" -gt 0 ]; then
-                    echo -e "    ${GREEN}✓ GR-17b: find_merge_points tool used ($tool_used invocations)${NC}"
-                else
-                    echo -e "    ${YELLOW}⚠ GR-17b: find_merge_points not found in trace${NC}"
-                fi
-            fi
-            ;;
-
-        find_merge_points_sources)
-            # GR-17b: Verify specific sources parameter was used
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-            local has_sources=$(echo "$agent_resp" | grep -ciE "merge.*point|confluence|join")
-            if [ "$has_sources" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-17b: Merge points with sources detected${NC}"
-            else
-                echo -e "    ${YELLOW}⚠ GR-17b: No merge point details${NC}"
-            fi
-            ;;
-
-        find_loops_tool_used)
-            # GR-17d: Verify find_loops tool was invoked
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
-            if echo "$trace" | jq . > /dev/null 2>&1; then
-                local tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_loops")] | length')
-                if [ "$tool_used" -gt 0 ]; then
-                    echo -e "    ${GREEN}✓ GR-17d: find_loops tool used ($tool_used invocations)${NC}"
-                else
-                    echo -e "    ${YELLOW}⚠ GR-17d: find_loops not found in trace${NC}"
-                fi
-            fi
-            ;;
-
-        find_loops_min_size)
-            # GR-17d: Verify min_size parameter was used
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-            local has_loops=$(echo "$agent_resp" | grep -ciE "loop|cycle|back.*edge")
-            if [ "$has_loops" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-17d: Loop detection with min_size detected${NC}"
-            else
-                echo -e "    ${YELLOW}⚠ GR-17d: No loop details${NC}"
-            fi
-            ;;
-
-        find_common_dependency_tool_used)
-            # GR-17e: Verify find_common_dependency tool was invoked
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
-            if echo "$trace" | jq . > /dev/null 2>&1; then
-                local tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_common_dependency")] | length')
-                if [ "$tool_used" -gt 0 ]; then
-                    echo -e "    ${GREEN}✓ GR-17e: find_common_dependency tool used ($tool_used invocations)${NC}"
-                else
-                    echo -e "    ${YELLOW}⚠ GR-17e: find_common_dependency not found in trace${NC}"
-                fi
-            fi
-            ;;
-
-        find_common_dependency_entry)
-            # GR-17e: Verify entry point parameter was used
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-            local has_lcd=$(echo "$agent_resp" | grep -ciE "common.*dependency|LCD|lowest.*common")
-            if [ "$has_lcd" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-17e: Common dependency with entry point detected${NC}"
-            else
-                echo -e "    ${YELLOW}⚠ GR-17e: No common dependency details${NC}"
-            fi
-            ;;
-
-        find_control_deps_tool_used)
-            # GR-17c: Verify find_control_dependencies tool was invoked
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
-            if echo "$trace" | jq . > /dev/null 2>&1; then
-                local tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_control_dependencies")] | length')
-                if [ "$tool_used" -gt 0 ]; then
-                    echo -e "    ${GREEN}✓ GR-17c: find_control_dependencies tool used ($tool_used invocations)${NC}"
-                else
-                    echo -e "    ${YELLOW}⚠ GR-17c: find_control_dependencies not found in trace${NC}"
-                fi
-            fi
-            ;;
-
-        find_control_deps_depth)
-            # GR-17c: Verify depth parameter was used
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-            local has_control=$(echo "$agent_resp" | grep -ciE "control.*depend|dominated.*by|branch")
-            if [ "$has_control" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-17c: Control dependencies with depth detected${NC}"
-            else
-                echo -e "    ${YELLOW}⚠ GR-17c: No control dependency details${NC}"
-            fi
-            ;;
-
-        find_extractable_tool_used)
-            # GR-17g: Verify find_extractable_regions tool was invoked
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
-            if echo "$trace" | jq . > /dev/null 2>&1; then
-                local tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_extractable_regions")] | length')
-                if [ "$tool_used" -gt 0 ]; then
-                    echo -e "    ${GREEN}✓ GR-17g: find_extractable_regions tool used ($tool_used invocations)${NC}"
-                else
-                    echo -e "    ${YELLOW}⚠ GR-17g: find_extractable_regions not found in trace${NC}"
-                fi
-            fi
-            ;;
-
-        find_extractable_size)
-            # GR-17g: Verify size parameters were used
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-            local has_sese=$(echo "$agent_resp" | grep -ciE "SESE|extractable|single.*entry.*single.*exit")
-            if [ "$has_sese" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-17g: Extractable regions with size detected${NC}"
-            else
-                echo -e "    ${YELLOW}⚠ GR-17g: No SESE region details${NC}"
-            fi
-            ;;
-
-        check_reducibility_tool_used)
-            # GR-17h: Verify check_reducibility tool was invoked
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
-            if echo "$trace" | jq . > /dev/null 2>&1; then
-                local tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "check_reducibility")] | length')
-                if [ "$tool_used" -gt 0 ]; then
-                    echo -e "    ${GREEN}✓ GR-17h: check_reducibility tool used ($tool_used invocations)${NC}"
-                else
-                    echo -e "    ${YELLOW}⚠ GR-17h: check_reducibility not found in trace${NC}"
-                fi
-            fi
-            ;;
-
-        check_reducibility_details)
-            # GR-17h: Verify irreducible region details shown
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-            local has_details=$(echo "$agent_resp" | grep -ciE "reducib|irreducib|region|back.*edge")
-            if [ "$has_details" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-17h: Reducibility details detected${NC}"
-            else
-                echo -e "    ${YELLOW}⚠ GR-17h: No reducibility details${NC}"
-            fi
-            ;;
-
-        find_critical_path_tool_used)
-            # GR-18a: Verify find_critical_path tool was invoked
-            if [ -z "$session_id" ]; then
-                session_id=$(echo "$response" | jq -r '.session_id')
-            fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
-            if echo "$trace" | jq . > /dev/null 2>&1; then
-                local tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_critical_path")] | length')
-                if [ "$tool_used" -gt 0 ]; then
-                    echo -e "    ${GREEN}✓ GR-18a: find_critical_path tool used ($tool_used invocations)${NC}"
-                else
-                    echo -e "    ${YELLOW}⚠ GR-18a: find_critical_path not found in trace${NC}"
-                fi
-            fi
-            ;;
-
-        find_critical_path_entry)
-            # GR-18a: Verify entry point parameter was used
-            local agent_resp=$(echo "$response" | jq -r '.response // ""')
-            local has_path=$(echo "$agent_resp" | grep -ciE "critical.*path|longest.*path|bottleneck")
-            if [ "$has_path" -gt 0 ]; then
-                echo -e "    ${GREEN}✓ GR-18a: Critical path with entry point detected${NC}"
-            else
-                echo -e "    ${YELLOW}⚠ GR-18a: No critical path details${NC}"
-            fi
-            ;;
-
-        *)
-            echo -e "    ${YELLOW}⚠ Unknown extra check: $check${NC}"
-            ;;
-    esac
-}
-
-# ==============================================================================
-# UTILITY FUNCTIONS
-# ==============================================================================
-
-# Get current time in milliseconds
-get_time_ms() {
-    python3 -c 'import time; print(int(time.time() * 1000))'
-}
-
-# Expand test specification into array of test numbers
-expand_test_spec() {
-    local spec="$1"
-    local result=()
-
-    IFS=',' read -ra parts <<< "$spec"
+# Parallel arrays: maps test array index → project_root / project name
+CRS_TEST_PROJECT_ROOTS=()
+CRS_TEST_PROJECT_NAMES=()
+
+# Resolve tool filter to a list of tool indices
+# Input: tool name (find_callers), index (01), or comma-separated list
+# Output: space-separated list of indices
+resolve_tool_indices() {
+    local filter="$1"
+    local indices=()
+
+    IFS=',' read -ra parts <<< "$filter"
     for part in "${parts[@]}"; do
-        if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
-            # Range like "1-5"
-            for ((i=${BASH_REMATCH[1]}; i<=${BASH_REMATCH[2]}; i++)); do
-                result+=($i)
-            done
+        part=$(echo "$part" | xargs)  # trim whitespace
+        if [[ "$part" =~ ^[0-9]+$ ]]; then
+            # Numeric index
+            indices+=("$part")
         else
-            # Single number
-            result+=($part)
+            # Tool name lookup
+            local idx
+            idx=$(tool_name_to_index "$part")
+            if [ -n "$idx" ]; then
+                indices+=("$idx")
+            else
+                echo -e "${RED}Unknown tool: $part${NC}" >&2
+                echo -e "${YELLOW}Available tools:${NC}" >&2
+                for i in "${!TOOL_NAMES[@]}"; do
+                    printf "  %02d  %s\n" "$i" "${TOOL_NAMES[$i]}" >&2
+                done
+                return 1
+            fi
         fi
     done
 
-    echo "${result[@]}"
+    echo "${indices[@]}"
+}
+
+# ==============================================================================
+# YAML TEST LOADING
+# ==============================================================================
+
+# Load tests from YAML files based on feature and language filters
+load_yaml_tests() {
+    local yaml_files=()
+    local yaml_dir="$SCRIPT_DIR/test_langs/features"
+
+    # Check if YAML directory exists
+    if [ ! -d "$yaml_dir" ]; then
+        echo -e "${YELLOW}Warning: YAML test directory not found: $yaml_dir${NC}"
+        echo -e "${YELLOW}Falling back to hardcoded test array${NC}"
+        return 1
+    fi
+
+    # Check for yq
+    if ! command -v yq &> /dev/null; then
+        echo -e "${YELLOW}Warning: yq not found. Install with: brew install yq${NC}"
+        echo -e "${YELLOW}Falling back to hardcoded test array${NC}"
+        return 1
+    fi
+
+    # Build list of YAML files to load based on filters
+    if [ -n "$FEATURE_FILTER" ] && [ -n "$LANGUAGE_FILTER" ]; then
+        # Specific feature + language
+        local feature_file="$yaml_dir/$FEATURE_FILTER/${LANGUAGE_FILTER}.yml"
+        if [ -f "$feature_file" ]; then
+            yaml_files+=("$feature_file")
+        fi
+    elif [ -n "$FEATURE_FILTER" ]; then
+        # All languages for specific feature
+        for lang_file in "$yaml_dir/$FEATURE_FILTER"/*.yml; do
+            if [ -f "$lang_file" ]; then
+                yaml_files+=("$lang_file")
+            fi
+        done
+    elif [ -n "$LANGUAGE_FILTER" ]; then
+        # All features for specific language
+        for lang_file in "$yaml_dir"/*/"$LANGUAGE_FILTER.yml"; do
+            if [ -f "$lang_file" ]; then
+                yaml_files+=("$lang_file")
+            fi
+        done
+    else
+        # All tests
+        for lang_file in "$yaml_dir"/*/*.yml; do
+            if [ -f "$lang_file" ]; then
+                yaml_files+=("$lang_file")
+            fi
+        done
+    fi
+
+    if [ ${#yaml_files[@]} -eq 0 ]; then
+        echo -e "${YELLOW}Warning: No YAML test files matched filters${NC}"
+        echo -e "${YELLOW}  Feature: ${FEATURE_FILTER:-all}${NC}"
+        echo -e "${YELLOW}  Language: ${LANGUAGE_FILTER:-all}${NC}"
+        echo -e "${YELLOW}Falling back to hardcoded test array${NC}"
+        return 1
+    fi
+
+    # Extract project_root from the first YAML file's metadata
+    local first_yaml="${yaml_files[0]}"
+    local yaml_project_root=$(yq eval '.metadata.project_root' "$first_yaml")
+    if [ "$yaml_project_root" != "null" ] && [ -n "$yaml_project_root" ]; then
+        # Expand ~ to home directory
+        yaml_project_root="${yaml_project_root/#\~/$HOME}"
+        PROJECT_TO_ANALYZE="$yaml_project_root"
+        echo -e "${GREEN}✓ Using project from YAML metadata.project_root: $PROJECT_TO_ANALYZE${NC}"
+    else
+        # Fallback: resolve from metadata.language + metadata.project via get_project_root()
+        local yaml_lang=$(yq eval '.metadata.language' "$first_yaml")
+        local yaml_project=$(yq eval '.metadata.project' "$first_yaml")
+        if [ "$yaml_lang" != "null" ] && [ "$yaml_project" != "null" ]; then
+            local resolved_path
+            if resolved_path=$(get_project_root "$yaml_lang" "$yaml_project" 2>/dev/null); then
+                PROJECT_TO_ANALYZE="$resolved_path"
+                echo -e "${GREEN}✓ Resolved project from language=$yaml_lang project=$yaml_project: $PROJECT_TO_ANALYZE${NC}"
+            else
+                echo -e "${YELLOW}⚠ Could not resolve project path for language=$yaml_lang project=$yaml_project${NC}"
+                echo -e "${YELLOW}  Set project_root in YAML metadata or TEST_PROJECT_ROOT env var${NC}"
+            fi
+        fi
+    fi
+
+    # Parse YAML files and build CRS_TESTS array
+    CRS_TESTS=()
+    CRS_TEST_IDS=()  # Parallel array: maps array index → YAML test ID
+    CRS_TEST_PROJECT_ROOTS=()  # Parallel array: maps array index → project_root
+    CRS_TEST_PROJECT_NAMES=()  # Parallel array: maps array index → project name
+    local test_count=0
+
+    for yaml_file in "${yaml_files[@]}"; do
+        # Extract per-file metadata for project tracking
+        local file_project_root=$(yq eval '.metadata.project_root' "$yaml_file")
+        local file_project_name=$(yq eval '.metadata.project' "$yaml_file")
+        if [ "$file_project_root" != "null" ] && [ -n "$file_project_root" ]; then
+            file_project_root="${file_project_root/#\~/$HOME}"
+        else
+            file_project_root=""
+        fi
+        [ "$file_project_name" = "null" ] && file_project_name=""
+
+        # Get number of tests in this file
+        local num_tests=$(yq eval '.tests | length' "$yaml_file")
+
+        # Extract each test
+        for ((i=0; i<num_tests; i++)); do
+            local test_id=$(yq eval ".tests[$i].id" "$yaml_file")
+            local category=$(yq eval ".tests[$i].category" "$yaml_file")
+            local name=$(yq eval ".tests[$i].name" "$yaml_file")
+            local query=$(yq eval ".tests[$i].query" "$yaml_file")
+            local expected_state=$(yq eval ".tests[$i].expected_state" "$yaml_file")
+
+            # Build validation string (pipe-separated list)
+            local validations=""
+            local num_validations=$(yq eval ".tests[$i].validations | length" "$yaml_file")
+            if [ "$num_validations" != "null" ] && [ "$num_validations" -gt 0 ]; then
+                for ((v=0; v<num_validations; v++)); do
+                    local val_type=$(yq eval ".tests[$i].validations[$v].type" "$yaml_file")
+                    if [ -n "$validations" ]; then
+                        validations="${validations}|${val_type}"
+                    else
+                        validations="$val_type"
+                    fi
+                done
+            fi
+
+            # Build pipe-delimited test string
+            local test_string="$category|$name|$query|$expected_state"
+            if [ -n "$validations" ]; then
+                test_string="${test_string}|${validations}"
+            fi
+
+            CRS_TESTS+=("$test_string")
+            CRS_TEST_IDS+=("$test_id")
+            CRS_TEST_PROJECT_ROOTS+=("$file_project_root")
+            CRS_TEST_PROJECT_NAMES+=("$file_project_name")
+            ((test_count++))
+        done
+    done
+
+    echo -e "${GREEN}Loaded $test_count tests from ${#yaml_files[@]} YAML files${NC}"
+    return 0
+}
+
+# Load tests for specific tool(s) across all TOOL-HAPPY projects
+# Uses TOOL_FILTER and optionally LANGUAGE_FILTER
+load_tool_across_projects() {
+    local yaml_dir="$SCRIPT_DIR/test_langs/features"
+
+    if [ ! -d "$yaml_dir" ]; then
+        echo -e "${RED}YAML test directory not found: $yaml_dir${NC}"
+        return 1
+    fi
+
+    if ! command -v yq &> /dev/null; then
+        echo -e "${RED}yq not found. Install with: brew install yq${NC}"
+        return 1
+    fi
+
+    # Resolve tool names to indices
+    local tool_indices
+    tool_indices=$(resolve_tool_indices "$TOOL_FILTER") || return 1
+    local indices_arr=($tool_indices)
+
+    echo -e "${CYAN}Tool(s): ${TOOL_FILTER} → indices: ${tool_indices}${NC}"
+
+    # Find all TOOL-HAPPY YAML files
+    local yaml_files=()
+    for feature_dir in "$yaml_dir"/TOOL-HAPPY-*; do
+        if [ ! -d "$feature_dir" ]; then
+            continue
+        fi
+        for yml_file in "$feature_dir"/*.yml; do
+            if [ ! -f "$yml_file" ]; then
+                continue
+            fi
+            # Apply language filter if set
+            if [ -n "$LANGUAGE_FILTER" ]; then
+                local yml_basename=$(basename "$yml_file" .yml)
+                if [ "$yml_basename" != "$LANGUAGE_FILTER" ]; then
+                    continue
+                fi
+            fi
+            yaml_files+=("$yml_file")
+        done
+    done
+
+    if [ ${#yaml_files[@]} -eq 0 ]; then
+        echo -e "${RED}No TOOL-HAPPY YAML files found${NC}"
+        return 1
+    fi
+
+    echo -e "${CYAN}Scanning ${#yaml_files[@]} YAML files for matching tests...${NC}"
+
+    # Build test arrays — extract only matching tool indices from each file
+    CRS_TESTS=()
+    CRS_TEST_IDS=()
+    CRS_TEST_PROJECT_ROOTS=()
+    CRS_TEST_PROJECT_NAMES=()
+    local test_count=0
+
+    for yaml_file in "${yaml_files[@]}"; do
+        local file_project_root=$(yq eval '.metadata.project_root' "$yaml_file")
+        local file_project_name=$(yq eval '.metadata.project' "$yaml_file")
+        local file_language=$(yq eval '.metadata.language' "$yaml_file")
+        local file_feature=$(yq eval '.metadata.feature' "$yaml_file")
+        if [ "$file_project_root" != "null" ] && [ -n "$file_project_root" ]; then
+            file_project_root="${file_project_root/#\~/$HOME}"
+        else
+            file_project_root=""
+        fi
+        [ "$file_project_name" = "null" ] && file_project_name=""
+        [ "$file_language" = "null" ] && file_language=""
+
+        local num_tests=$(yq eval '.tests | length' "$yaml_file")
+
+        for tool_idx in "${indices_arr[@]}"; do
+            # Only pick from the first 23 tests (registered tools at indices 0-22)
+            if [ "$tool_idx" -ge "$num_tests" ]; then
+                echo -e "${YELLOW}  Skip $file_feature: only $num_tests tests, need index $tool_idx${NC}"
+                continue
+            fi
+
+            local test_id=$(yq eval ".tests[$tool_idx].id" "$yaml_file")
+            local category=$(yq eval ".tests[$tool_idx].category" "$yaml_file")
+            local name=$(yq eval ".tests[$tool_idx].name" "$yaml_file")
+            local query=$(yq eval ".tests[$tool_idx].query" "$yaml_file")
+            local expected_state=$(yq eval ".tests[$tool_idx].expected_state" "$yaml_file")
+
+            local validations=""
+            local num_validations=$(yq eval ".tests[$tool_idx].validations | length" "$yaml_file")
+            if [ "$num_validations" != "null" ] && [ "$num_validations" -gt 0 ] 2>/dev/null; then
+                for ((v=0; v<num_validations; v++)); do
+                    local val_type=$(yq eval ".tests[$tool_idx].validations[$v].type" "$yaml_file")
+                    if [ -n "$validations" ]; then
+                        validations="${validations}|${val_type}"
+                    else
+                        validations="$val_type"
+                    fi
+                done
+            fi
+
+            local test_string="$category|$name|$query|$expected_state"
+            if [ -n "$validations" ]; then
+                test_string="${test_string}|${validations}"
+            fi
+
+            CRS_TESTS+=("$test_string")
+            CRS_TEST_IDS+=("$test_id")
+            CRS_TEST_PROJECT_ROOTS+=("$file_project_root")
+            CRS_TEST_PROJECT_NAMES+=("$file_project_name")
+            ((test_count++))
+
+            local tool_display
+            tool_display=$(tool_index_to_name "$tool_idx")
+            echo -e "  ${GREEN}✓${NC} ${file_project_name} (${file_language}): test $test_id — $tool_display"
+        done
+    done
+
+    if [ $test_count -eq 0 ]; then
+        echo -e "${RED}No tests matched tool filter: $TOOL_FILTER${NC}"
+        return 1
+    fi
+
+    # Set PROJECT_TO_ANALYZE to the first project (will be overridden per-test in main loop)
+    if [ -n "${CRS_TEST_PROJECT_ROOTS[0]}" ]; then
+        PROJECT_TO_ANALYZE="${CRS_TEST_PROJECT_ROOTS[0]}"
+    fi
+
+    echo ""
+    echo -e "${GREEN}Loaded $test_count tests across ${#yaml_files[@]} projects${NC}"
+    return 0
+}
+
+# Look up array index for a given test ID
+# For YAML tests: searches CRS_TEST_IDS for matching ID
+# For legacy tests: returns (test_num - 1) as before
+find_test_index() {
+    local target="$1"
+
+    # If we have YAML test IDs, search by ID
+    if [ ${#CRS_TEST_IDS[@]} -gt 0 ]; then
+        for i in "${!CRS_TEST_IDS[@]}"; do
+            if [ "${CRS_TEST_IDS[$i]}" = "$target" ]; then
+                echo "$i"
+                return 0
+            fi
+        done
+        echo "-1"
+        return 1
+    fi
+
+    # Legacy fallback: test_num maps to array index (test_num - 1)
+    echo $((target - 1))
+    return 0
 }
 
 # ==============================================================================
@@ -4082,14 +1521,58 @@ main() {
         exit $?
     fi
 
-    echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
-    echo -e "${BLUE}  CRS Integration Tests - Remote GPU Mode${NC}"
-    echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
+    # Load tests from YAML based on flags (MUST happen before banner display)
+    local CROSS_PROJECT_MODE=false
+    if [ -n "$TOOL_FILTER" ]; then
+        # --tool mode: load specific tool(s) across all TOOL-HAPPY projects
+        echo ""
+        echo -e "${CYAN}Loading tool tests across projects...${NC}"
+        echo "  Tool: $TOOL_FILTER"
+        if [ -n "$LANGUAGE_FILTER" ]; then
+            echo "  Language: $LANGUAGE_FILTER"
+        fi
+        if ! load_tool_across_projects; then
+            echo -e "${RED}Failed to load tool tests${NC}"
+            exit 1
+        fi
+        CROSS_PROJECT_MODE=true
+        echo ""
+    elif [ -n "$FEATURE_FILTER" ] || [ -n "$LANGUAGE_FILTER" ]; then
+        echo ""
+        echo -e "${CYAN}Loading tests from YAML...${NC}"
+        if [ -n "$FEATURE_FILTER" ]; then
+            echo "  Feature: $FEATURE_FILTER"
+        fi
+        if [ -n "$LANGUAGE_FILTER" ]; then
+            echo "  Language: $LANGUAGE_FILTER"
+        fi
+        if ! load_yaml_tests; then
+            echo -e "${YELLOW}Using hardcoded test array instead${NC}"
+        fi
+        echo ""
+    fi
+
+    if [ "$CROSS_PROJECT_MODE" = true ]; then
+        echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
+        echo -e "${BLUE}  CRS Integration Tests - Cross-Project Tool Mode${NC}"
+        echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
+        echo ""
+        echo "Remote: $REMOTE_USER@$REMOTE_HOST:$REMOTE_PORT"
+        echo "Tool: $TOOL_FILTER"
+        echo "Projects: ${#CRS_TESTS[@]} tests across multiple projects"
+        echo "Main Agent: $OLLAMA_MODEL"
+        echo "Router: $ROUTER_MODEL"
+    else
+        echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
+        echo -e "${BLUE}  CRS Integration Tests - Remote GPU Mode${NC}"
+        echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
+        echo ""
+        echo "Remote: $REMOTE_USER@$REMOTE_HOST:$REMOTE_PORT"
+        echo "Project: $PROJECT_TO_ANALYZE"
+        echo "Main Agent: $OLLAMA_MODEL"
+        echo "Router: $ROUTER_MODEL"
+    fi
     echo ""
-    echo "Remote: $REMOTE_USER@$REMOTE_HOST:$REMOTE_PORT"
-    echo "Project: $PROJECT_TO_ANALYZE"
-    echo "Main Agent: $OLLAMA_MODEL"
-    echo "Router: $ROUTER_MODEL"
     echo "Output: $OUTPUT_FILE"
     echo ""
 
@@ -4108,28 +1591,41 @@ main() {
     # Check remote Ollama
     check_remote_ollama
 
-    # Setup remote environment (sync and build)
-    setup_remote
-
-    # Start trace server
-    if ! start_trace_server; then
+    # Setup remote environment (sync project, build trace server, start server)
+    if ! setup_remote "$PROJECT_TO_ANALYZE"; then
+        echo -e "${RED}Failed to setup remote environment${NC}"
         exit 1
     fi
+
+    # Track which project is currently synced (for cross-project switching)
+    local CURRENT_SYNCED_PROJECT="$PROJECT_TO_ANALYZE"
 
     # Determine which tests to run
     local tests_to_run=()
     if [ -n "$SPECIFIC_TESTS" ]; then
         tests_to_run=($(expand_test_spec "$SPECIFIC_TESTS"))
         echo ""
-        echo -e "${BLUE}Running ${#tests_to_run[@]} specific CRS tests${NC}"
+        echo -e "${BLUE}Running ${#tests_to_run[@]} specific tests${NC}"
         echo "Tests: ${tests_to_run[*]}"
     else
-        # Run all tests
-        for ((i=1; i<=${#CRS_TESTS[@]}; i++)); do
-            tests_to_run+=($i)
-        done
+        # Run all tests (either from YAML or hardcoded array)
+        if [ ${#CRS_TEST_IDS[@]} -gt 0 ]; then
+            # YAML tests: use actual test IDs
+            tests_to_run=("${CRS_TEST_IDS[@]}")
+        else
+            # Legacy: sequential 1..N
+            for ((i=1; i<=${#CRS_TESTS[@]}; i++)); do
+                tests_to_run+=($i)
+            done
+        fi
         echo ""
-        echo -e "${BLUE}Running all ${#tests_to_run[@]} CRS tests${NC}"
+        if [ "$CROSS_PROJECT_MODE" = true ]; then
+            echo -e "${BLUE}Running ${#tests_to_run[@]} tests across projects (tool: $TOOL_FILTER)${NC}"
+        elif [ -n "$FEATURE_FILTER" ] || [ -n "$LANGUAGE_FILTER" ]; then
+            echo -e "${BLUE}Running ${#tests_to_run[@]} filtered tests${NC}"
+        else
+            echo -e "${BLUE}Running all ${#tests_to_run[@]} tests${NC}"
+        fi
     fi
     echo ""
 
@@ -4143,8 +1639,36 @@ main() {
 
     # Run tests
     for test_num in "${tests_to_run[@]}"; do
-        local idx=$((test_num - 1))
+        local idx=$(find_test_index "$test_num")
         if [ $idx -ge 0 ] && [ $idx -lt ${#CRS_TESTS[@]} ]; then
+
+            # Cross-project mode: switch project if needed
+            if [ "$CROSS_PROJECT_MODE" = true ] && [ ${#CRS_TEST_PROJECT_ROOTS[@]} -gt 0 ]; then
+                local test_project="${CRS_TEST_PROJECT_ROOTS[$idx]}"
+                local test_project_name="${CRS_TEST_PROJECT_NAMES[$idx]:-unknown}"
+                if [ -n "$test_project" ] && [ "$test_project" != "$CURRENT_SYNCED_PROJECT" ]; then
+                    echo ""
+                    echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
+                    echo -e "${CYAN}║  Switching to project: $test_project_name${NC}"
+                    echo -e "${CYAN}║  Path: $test_project${NC}"
+                    echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
+
+                    # Sync new project to remote
+                    REMOTE_PROJECT_PATH=$(sync_project_to_remote "$test_project")
+                    PROJECT_TO_ANALYZE="$test_project"
+                    CURRENT_SYNCED_PROJECT="$test_project"
+
+                    # Restart trace server to pick up new project
+                    stop_trace_server
+                    sleep 2
+                    if ! start_trace_server; then
+                        echo -e "${RED}Failed to restart trace server for $test_project_name${NC}"
+                        ((failed++))
+                        continue
+                    fi
+                fi
+            fi
+
             # LAST_TEST_RESULT is set by run_crs_test
             LAST_TEST_RESULT="{}"
 
@@ -4154,6 +1678,15 @@ main() {
             else
                 ((failed++))
                 LAST_TEST_RESULT=$(echo "$LAST_TEST_RESULT" | jq '.status = "FAILED"')
+            fi
+
+            # Add project info to result for cross-project tracking
+            if [ "$CROSS_PROJECT_MODE" = true ] && [ ${#CRS_TEST_PROJECT_NAMES[@]} -gt 0 ]; then
+                local proj_name="${CRS_TEST_PROJECT_NAMES[$idx]:-unknown}"
+                local proj_root="${CRS_TEST_PROJECT_ROOTS[$idx]:-unknown}"
+                LAST_TEST_RESULT=$(echo "$LAST_TEST_RESULT" | jq \
+                    --arg pn "$proj_name" --arg pr "$proj_root" \
+                    '.project_name = $pn | .project_root = $pr')
             fi
 
             # Extract stats from test result
@@ -4231,9 +1764,15 @@ main() {
     local tests_over_60s=$(echo "$results" | jq '[.[] | select(.runtime_ms >= 60000)] | length' 2>/dev/null || echo "0")
 
     # Build output JSON
+    local test_type="CRS Integration"
+    if [ "$CROSS_PROJECT_MODE" = true ]; then
+        test_type="CRS Cross-Project Tool ($TOOL_FILTER)"
+    fi
     local output=$(jq -n \
         --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg test_type "$test_type" \
         --arg project "$PROJECT_TO_ANALYZE" \
+        --arg tool_filter "${TOOL_FILTER:-}" \
         --arg remote "$REMOTE_USER@$REMOTE_HOST:$REMOTE_PORT" \
         --arg model "$OLLAMA_MODEL" \
         --arg router "$ROUTER_MODEL" \
@@ -4251,8 +1790,9 @@ main() {
         '{
             metadata: {
                 timestamp: $timestamp,
-                test_type: "CRS Integration",
+                test_type: $test_type,
                 project_root: $project,
+                tool_filter: (if $tool_filter == "" then null else $tool_filter end),
                 remote_host: $remote,
                 models: {
                     main_agent: $model,
@@ -4420,6 +1960,59 @@ main() {
         echo ""
     fi
 
+    # Cross-project summary table (only in --tool mode)
+    if [ "$CROSS_PROJECT_MODE" = true ]; then
+        echo ""
+        echo -e "${BLUE}╔══════════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${BLUE}║   Tool: $TOOL_FILTER — Cross-Project Results${NC}"
+        echo -e "${BLUE}╠══════════════════════════════════════════════════════════════════╣${NC}"
+        printf "${BLUE}║${NC}  %-14s │ %-4s │ %-8s │ %-7s │ %-8s ${BLUE}║${NC}\n" "Project" "Lang" "State" "Time" "Verdict"
+        printf "${BLUE}║${NC}  %-14s─┼─%-4s─┼─%-8s─┼─%-7s─┼─%-8s ${BLUE}║${NC}\n" "──────────────" "────" "────────" "───────" "────────"
+
+        echo "$results" | jq -r '.[] |
+            [
+                (.project_name // .category),
+                (.state // "?"),
+                (.runtime_ms // 0 | tostring),
+                (.status // "?")
+            ] | @tsv
+        ' 2>/dev/null | while IFS=$'\t' read -r proj state runtime verdict; do
+            # Determine language from project name
+            local lang="?"
+            case "$proj" in
+                hugo|badger|gin) lang="Go" ;;
+                flask|pandas) lang="Py" ;;
+                express|babylonjs) lang="JS" ;;
+                nest|plottable) lang="TS" ;;
+            esac
+
+            # Format runtime
+            local time_s
+            if [ "$runtime" -gt 0 ] 2>/dev/null; then
+                time_s=$(echo "scale=1; $runtime / 1000" | bc 2>/dev/null || echo "${runtime}ms")
+                time_s="${time_s}s"
+            else
+                time_s="0s"
+            fi
+
+            # Color the verdict
+            local verdict_colored="$verdict"
+            if [ "$verdict" = "PASSED" ]; then
+                verdict_colored="${GREEN}PASSED${NC}"
+            else
+                verdict_colored="${RED}FAILED${NC}"
+            fi
+
+            printf "${BLUE}║${NC}  %-14s │ %-4s │ %-8s │ %7s │ " "$proj" "$lang" "$state" "$time_s"
+            echo -e "${verdict_colored}   ${BLUE}║${NC}"
+        done
+
+        local pass_rate="$passed/$tests_run"
+        echo -e "${BLUE}╠══════════════════════════════════════════════════════════════════╣${NC}"
+        printf "${BLUE}║${NC}  Pass rate: %-10s │  Avg time: %-8s                      ${BLUE}║${NC}\n" "$pass_rate" "${avg_runtime}ms"
+        echo -e "${BLUE}╚══════════════════════════════════════════════════════════════════╝${NC}"
+    fi
+
     # Option to view full JSON
     echo ""
     echo -e "${YELLOW}Full JSON results saved to: $OUTPUT_FILE${NC}"
@@ -4431,8 +2024,79 @@ main() {
     echo -e "${YELLOW}Search for GR-39b: ssh -p $REMOTE_PORT $REMOTE_USER@$REMOTE_HOST 'grep GR-39b ~/trace_test/AleutianFOSS/trace_server.log'${NC}"
 
     if [ $failed -gt 0 ]; then
-        exit 1
+        return 1
     fi
 }
 
-main "$@"
+# ==============================================================================
+# ENTRY POINT
+# ==============================================================================
+
+# Run tests
+# The || captures the exit code without triggering set -e
+main_exit=0
+main "$@" || main_exit=$?
+
+# ==============================================================================
+# POST-RUN: AUTO-COMPARE TO GOLD STANDARD (REMOTE)
+# ==============================================================================
+
+# Run comparison on the remote server where Ollama is available.
+# The synced repo at ~/trace_test/AleutianFOSS/ already has the comparison script.
+if [ -n "$LANGUAGE_FILTER" ] && [ -f "$OUTPUT_FILE" ]; then
+    echo ""
+    echo -e "${BLUE}╔══════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BLUE}║         Running gold standard comparison (remote)...             ║${NC}"
+    echo -e "${BLUE}╚══════════════════════════════════════════════════════════════════╝${NC}"
+
+    RESULTS_BASENAME=$(basename "$OUTPUT_FILE")
+
+    # 1. Upload results JSON to remote /tmp/
+    scp -i "$SSH_KEY" -P "$REMOTE_PORT" \
+        -o StrictHostKeyChecking=no \
+        -o ControlPath="$SSH_CONTROL_SOCKET" \
+        "$OUTPUT_FILE" "$REMOTE_USER@$REMOTE_HOST:/tmp/$RESULTS_BASENAME"
+
+    # 2. Run comparison on remote (Ollama is at localhost:11434 there)
+    REMOTE_COMPARISON_OUTPUT=$(ssh_cmd "cd ~/trace_test/AleutianFOSS && \
+        OLLAMA_BASE_URL=http://localhost:11434 \
+        JUDGE_MODEL=${OLLAMA_MODEL:-gpt-oss:20b} \
+        bash scripts/compare_to_gold_standard.sh /tmp/$RESULTS_BASENAME $LANGUAGE_FILTER /tmp" 2>&1) || true
+
+    echo "$REMOTE_COMPARISON_OUTPUT" | tail -30
+
+    # 3. Find and pull back comparison files from remote /tmp/
+    REMOTE_COMPARISON_JSON=$(ssh_cmd "ls -t /tmp/gold_standard_comparison_${LANGUAGE_FILTER}_*.json 2>/dev/null | head -1" 2>/dev/null || true)
+    REMOTE_COMPARISON_TXT=$(ssh_cmd "ls -t /tmp/gold_standard_comparison_${LANGUAGE_FILTER}_*.txt 2>/dev/null | head -1" 2>/dev/null || true)
+
+    if [ -n "$REMOTE_COMPARISON_JSON" ] && [ -n "$REMOTE_COMPARISON_TXT" ]; then
+        scp -i "$SSH_KEY" -P "$REMOTE_PORT" \
+            -o StrictHostKeyChecking=no \
+            -o ControlPath="$SSH_CONTROL_SOCKET" \
+            "$REMOTE_USER@$REMOTE_HOST:$REMOTE_COMPARISON_JSON" /tmp/
+        scp -i "$SSH_KEY" -P "$REMOTE_PORT" \
+            -o StrictHostKeyChecking=no \
+            -o ControlPath="$SSH_CONTROL_SOCKET" \
+            "$REMOTE_USER@$REMOTE_HOST:$REMOTE_COMPARISON_TXT" /tmp/
+
+        LOCAL_COMPARISON_JSON="/tmp/$(basename "$REMOTE_COMPARISON_JSON")"
+        LOCAL_COMPARISON_TXT="/tmp/$(basename "$REMOTE_COMPARISON_TXT")"
+
+        echo ""
+        echo -e "${GREEN}Gold standard comparison complete!${NC}"
+        echo -e "  Text report: ${GREEN}$LOCAL_COMPARISON_TXT${NC}"
+        echo -e "  JSON results: ${GREEN}$LOCAL_COMPARISON_JSON${NC}"
+        echo -e "${YELLOW}View mismatches: cat $LOCAL_COMPARISON_JSON | jq '.[] | select(.verdict == \"FAIL\")'${NC}"
+    else
+        echo -e "${YELLOW}WARNING: Could not retrieve comparison files from remote${NC}"
+        echo "Remote output:"
+        echo "$REMOTE_COMPARISON_OUTPUT"
+    fi
+fi
+
+# Tip for capturing console logs
+echo ""
+echo -e "${YELLOW}Tip: To also capture console output, run with:${NC}"
+echo -e "  $0 $* 2>&1 | tee /tmp/trace_logs_\$(date +%Y%m%d_%H%M%S).txt"
+
+exit $main_exit

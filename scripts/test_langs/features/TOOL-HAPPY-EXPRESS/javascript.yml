@@ -9,6 +9,7 @@ metadata:
   title: "Tool Happy Path - Express"
   language: javascript
   project: express
+  project_root: ~/projects/crs_test_codebases/javascript/express
   ticket: tickets/in_progress/integration_testing_outcomes_results_1a.md
   description: >
     Validates every registered graph tool against the Express.js web framework.

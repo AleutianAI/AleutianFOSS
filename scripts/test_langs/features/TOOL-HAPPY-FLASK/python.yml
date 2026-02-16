@@ -9,6 +9,7 @@ metadata:
   title: "Tool Happy Path - Flask"
   language: python
   project: flask
+  project_root: ~/projects/crs_test_codebases/python/flask
   ticket: tickets/in_progress/integration_testing_outcomes_results_1a.md
   description: >
     Validates every registered graph tool against the Flask web framework.

@@ -9,6 +9,7 @@ metadata:
   title: "Tool Happy Path - Badger"
   language: go
   project: badger
+  project_root: ~/projects/badger
   ticket: tickets/in_progress/integration_testing_outcomes_results_1a.md
   description: >
     Validates every registered graph tool against the Badger key-value store.
