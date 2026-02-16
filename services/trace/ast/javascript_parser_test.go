@@ -1367,3 +1367,70 @@ class Router {
 		t.Errorf("expected Receiver=%q, got %q", "Router", handleSym.Receiver)
 	}
 }
+
+func TestJavaScriptParser_Parse_PrototypeDotMethodAssignment(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `
+module.exports = Route;
+
+function Route(path) {
+    this.path = path;
+    this.methods = {};
+}
+
+Route.prototype.dispatch = function dispatch(req, res, done) {
+    var method = req.method.toLowerCase();
+    done();
+};
+
+Route.prototype._handles_method = function _handles_method(method) {
+    return Boolean(this.methods[method.toLowerCase()]);
+};
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "lib/route.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find the dispatch method — it should be associated with Route
+	var dispatchSym *Symbol
+	var handlesMethodSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "dispatch" && sym.Kind == SymbolKindMethod {
+			dispatchSym = sym
+		}
+		if sym.Name == "_handles_method" && sym.Kind == SymbolKindMethod {
+			handlesMethodSym = sym
+		}
+	}
+
+	if dispatchSym == nil {
+		// Also check class children
+		for _, sym := range result.Symbols {
+			if sym.Kind == SymbolKindClass && sym.Name == "Route" {
+				for _, child := range sym.Children {
+					if child.Name == "dispatch" {
+						dispatchSym = child
+					}
+					if child.Name == "_handles_method" {
+						handlesMethodSym = child
+					}
+				}
+			}
+		}
+	}
+
+	if dispatchSym == nil {
+		t.Fatal("expected dispatch method symbol from Route.prototype.dispatch pattern")
+	}
+	if dispatchSym.Receiver != "Route" {
+		t.Errorf("expected Receiver=%q, got %q", "Route", dispatchSym.Receiver)
+	}
+
+	if handlesMethodSym == nil {
+		t.Fatal("expected _handles_method symbol from Route.prototype._handles_method pattern")
+	}
+	if handlesMethodSym.Receiver != "Route" {
+		t.Errorf("expected Receiver=%q, got %q", "Route", handlesMethodSym.Receiver)
+	}
+}

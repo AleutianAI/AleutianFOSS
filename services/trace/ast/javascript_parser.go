@@ -1542,6 +1542,22 @@ func (p *JavaScriptParser) extractMethodsFromAssignmentChain(ctx context.Context
 				propertyName: propName,
 				line:         int(leftNode.StartPoint().Row) + 1,
 			})
+		} else if objNode != nil && propNode != nil && objNode.Type() == jsNodeMemberExpression {
+			// Handle Constructor.prototype.method pattern
+			innerObj := objNode.ChildByFieldName("object")
+			innerProp := objNode.ChildByFieldName("property")
+			if innerObj != nil && innerProp != nil && innerObj.Type() == jsNodeIdentifier {
+				innerPropName := string(content[innerProp.StartByte():innerProp.EndByte()])
+				if innerPropName == "prototype" {
+					constructorName := string(content[innerObj.StartByte():innerObj.EndByte()])
+					propName := string(content[propNode.StartByte():propNode.EndByte()])
+					targets = append(targets, memberTarget{
+						objectName:   constructorName,
+						propertyName: propName,
+						line:         int(leftNode.StartPoint().Row) + 1,
+					})
+				}
+			}
 		}
 	}
 

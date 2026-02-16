@@ -182,6 +182,58 @@ func buildTestIndex(t *testing.T) *index.SymbolIndex {
 			Exported:  true,
 			Language:  "javascript",
 		},
+		// Inheritance chain: ThinEngine defines runRenderLoop, Engine extends ThinEngine
+		{
+			ID:        "src/thinEngine.ts:10:ThinEngine",
+			Name:      "ThinEngine",
+			Kind:      ast.SymbolKindClass,
+			FilePath:  "src/thinEngine.ts",
+			StartLine: 10,
+			EndLine:   200,
+			Package:   "engines",
+			Exported:  true,
+			Language:  "typescript",
+			Children: []*ast.Symbol{
+				{
+					ID:        "src/thinEngine.ts:50:runRenderLoop",
+					Name:      "runRenderLoop",
+					Kind:      ast.SymbolKindMethod,
+					FilePath:  "src/thinEngine.ts",
+					StartLine: 50,
+					EndLine:   80,
+					Package:   "engines",
+					Exported:  true,
+					Language:  "typescript",
+				},
+			},
+		},
+		{
+			ID:        "src/engine.ts:10:Engine",
+			Name:      "Engine",
+			Kind:      ast.SymbolKindClass,
+			FilePath:  "src/engine.ts",
+			StartLine: 10,
+			EndLine:   300,
+			Package:   "engines",
+			Exported:  true,
+			Language:  "typescript",
+			Metadata: &ast.SymbolMetadata{
+				Extends: "ThinEngine",
+			},
+			Children: []*ast.Symbol{
+				{
+					ID:        "src/engine.ts:20:dispose",
+					Name:      "dispose",
+					Kind:      ast.SymbolKindMethod,
+					FilePath:  "src/engine.ts",
+					StartLine: 20,
+					EndLine:   40,
+					Package:   "engines",
+					Exported:  true,
+					Language:  "typescript",
+				},
+			},
+		},
 	}
 
 	for _, sym := range symbols {
@@ -283,6 +335,29 @@ func TestResolveTypeDotMethod(t *testing.T) {
 		}
 		if sym.FilePath != "src/plot.js" {
 			t.Errorf("expected file 'src/plot.js', got %q", sym.FilePath)
+		}
+	})
+
+	t.Run("Inheritance chain: Engine.runRenderLoop resolves to ThinEngine", func(t *testing.T) {
+		sym, err := resolveTypeDotMethod(ctx, idx, "Engine", "runRenderLoop", logger)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if sym.Name != "runRenderLoop" {
+			t.Errorf("expected name 'runRenderLoop', got %q", sym.Name)
+		}
+		if sym.ID != "src/thinEngine.ts:50:runRenderLoop" {
+			t.Errorf("expected ID from ThinEngine, got %q", sym.ID)
+		}
+	})
+
+	t.Run("Inheritance: direct method on Engine still works", func(t *testing.T) {
+		sym, err := resolveTypeDotMethod(ctx, idx, "Engine", "dispose", logger)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if sym.Name != "dispose" {
+			t.Errorf("expected name 'dispose', got %q", sym.Name)
 		}
 	})
 

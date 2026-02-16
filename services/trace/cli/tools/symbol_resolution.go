@@ -325,6 +325,26 @@ func resolveTypeDotMethod(
 		}
 	}
 
+	// Strategy 4: Inheritance chain walk
+	// If the type extends a parent, recursively search for the method on the parent.
+	for _, typeSym := range typeMatches {
+		if typeSym.Kind != ast.SymbolKindClass && typeSym.Kind != ast.SymbolKindStruct &&
+			typeSym.Kind != ast.SymbolKindInterface && typeSym.Kind != ast.SymbolKindType {
+			continue
+		}
+		if typeSym.Metadata == nil || typeSym.Metadata.Extends == "" {
+			continue
+		}
+		logger.Debug("resolveTypeDotMethod: trying inheritance chain",
+			slog.String("type", typeName),
+			slog.String("extends", typeSym.Metadata.Extends),
+		)
+		parentSym, err := resolveTypeDotMethod(ctx, idx, typeSym.Metadata.Extends, methodName, logger)
+		if err == nil {
+			return parentSym, nil
+		}
+	}
+
 	return nil, fmt.Errorf("no method '%s' found on type '%s'", methodName, typeName)
 }
 
