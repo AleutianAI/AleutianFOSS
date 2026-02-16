@@ -61,8 +61,12 @@ const (
 	jsNodeAssignmentExpression = "assignment_expression"
 
 	// Statement nodes
-	jsNodeStatementBlock  = "statement_block"
-	jsNodeReturnStatement = "return_statement"
+	jsNodeStatementBlock      = "statement_block"
+	jsNodeReturnStatement     = "return_statement"
+	jsNodeExpressionStatement = "expression_statement"
+
+	// Function expression nodes (RHS of assignments like proto.handle = function handle() {})
+	jsNodeFunctionExpression = "function_expression"
 
 	// Comment nodes
 	jsNodeComment = "comment"

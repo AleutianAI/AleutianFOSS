@@ -28,8 +28,10 @@ tests:
       Who calls the full_dispatch_request function?
     expected_state: COMPLETE
     reference_answer: |
-      The full_dispatch_request function in app.py is called from wsgi_app
-      during request handling. It dispatches the request after running before_request hooks.
+      full_dispatch_request has 3 callers: wsgi_app (the main WSGI entry point),
+      test_bad_environ_raises_bad_request, and test_environ_for_valid_idna_completes.
+      The production caller is wsgi_app; the other two are test functions that
+      invoke it directly for error handling verification.
     validations:
       - type: graph_tool_used
 
@@ -547,3 +549,37 @@ tests:
     reference_answer: |
       TODO: Tool not yet registered as standalone.
     validations: []
+
+  # -- Additional find_callers tests (40-41) -- expected_state: COMPLETE --
+
+  - id: 6040
+    name: flask_find_callers_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callers tool against Flask (test B). Target: finalize_request method.
+    query: |
+      Who calls the finalize_request method?
+    expected_state: COMPLETE
+    reference_answer: |
+      finalize_request has 2 callers: handle_exception and full_dispatch_request.
+      handle_exception calls it after error handler processing to finalize the
+      error response, and full_dispatch_request calls it after successful view
+      dispatch to run after_request hooks and build the final Response.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6041
+    name: flask_find_callers_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callers tool against Flask (test C). Target: create_url_adapter method.
+    query: |
+      Who calls the create_url_adapter method?
+    expected_state: COMPLETE
+    reference_answer: |
+      create_url_adapter has 3 callers: url_for (builds URLs using the adapter),
+      AppContext.__init__ (creates adapter for application context), and
+      RequestContext.push (creates adapter for the incoming request context).
+      Each caller needs a URL adapter to map between endpoints and URLs.
+    validations:
+      - type: graph_tool_used

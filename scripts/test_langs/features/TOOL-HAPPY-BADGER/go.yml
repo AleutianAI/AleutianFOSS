@@ -23,13 +23,15 @@ tests:
     name: badger_find_callers
     category: TOOL_HAPPY_PATH
     description: >
-      find_callers tool against Badger. Target: Get method on Transaction.
+      find_callers tool against Badger. Target: Get method on Txn.
     query: |
-      Who calls the Get method on the Transaction type?
+      Who calls the Get method on the Txn type?
     expected_state: COMPLETE
     reference_answer: |
-      The Get method on Transaction is called from various parts of the codebase
-      including user-facing read operations and internal lookup paths.
+      Txn.Get has 4 callers: get, Release, updateLease, and read.
+      These are internal methods within the badger package that use
+      transactional reads for key lookups, lease management, and
+      garbage collection operations.
     validations:
       - type: graph_tool_used
 
@@ -547,3 +549,37 @@ tests:
     reference_answer: |
       TODO: Tool not yet registered as standalone.
     validations: []
+
+  # -- Additional find_callers tests (40-41) -- expected_state: COMPLETE --
+
+  - id: 5140
+    name: badger_find_callers_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callers tool against Badger (test B). Target: DB.View method.
+    query: |
+      Who calls the DB.View method?
+    expected_state: COMPLETE
+    reference_answer: |
+      DB.View has 5+ callers including: MergeOperator.Get, initBannedNamespaces,
+      filterPrefixesToDrop, read (in testgc), and main (in testgc). These
+      callers use read-only transactions for data lookups, namespace filtering,
+      merge operations, and integration test verification.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5141
+    name: badger_find_callers_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callers tool against Badger (test C). Target: WriteBatch.Flush method.
+    query: |
+      Who calls the WriteBatch.Flush method?
+    expected_state: COMPLETE
+    reference_answer: |
+      WriteBatch.Flush has 5+ callers including: StreamDB (stream-based DB
+      loading), writeRandom, writeSorted (write benchmarks), doBackup (backup
+      operations), and runTest (integration tests). These callers use batch
+      writes for bulk data ingestion and database restore operations.
+    validations:
+      - type: graph_tool_used

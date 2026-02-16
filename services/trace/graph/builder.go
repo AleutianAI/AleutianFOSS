@@ -210,6 +210,16 @@ type buildState struct {
 	placeholders  map[string]*Node        // external ID -> placeholder node
 	mu            sync.Mutex              // protects placeholders
 	startTime     time.Time
+
+	// symbolParent maps a child symbol ID to its parent symbol ID.
+	// Built during collectPhase to enable O(1) method → owning class lookup.
+	// Used by resolveCallTarget for this/self receiver resolution.
+	symbolParent map[string]string
+
+	// classExtends maps a class/struct name to its parent class name.
+	// Built from Metadata.Extends during collectPhase.
+	// Used by resolveCallTarget for inheritance-aware method resolution.
+	classExtends map[string]string
 }
 
 // Build constructs a graph from the given parse results.
@@ -253,6 +263,8 @@ func (b *Builder) Build(ctx context.Context, results []*ast.ParseResult) (*Build
 		symbolsByName: make(map[string][]*ast.Symbol),
 		fileImports:   make(map[string][]ast.Import),
 		placeholders:  make(map[string]*Node),
+		symbolParent:  make(map[string]string),
+		classExtends:  make(map[string]string),
 		startTime:     time.Now(),
 	}
 	state.result.Graph = state.graph
@@ -342,8 +354,13 @@ func (b *Builder) collectPhase(ctx context.Context, state *buildState, results [
 			state.symbolsByName[sym.Name] = append(state.symbolsByName[sym.Name], sym)
 			state.result.Stats.NodesCreated++
 
-			// Recursively add children
-			b.addChildSymbols(state, sym.Children)
+			// Track class inheritance from Metadata.Extends
+			if sym.Metadata != nil && sym.Metadata.Extends != "" {
+				state.classExtends[sym.Name] = sym.Metadata.Extends
+			}
+
+			// Recursively add children with parent tracking
+			b.addChildSymbols(state, sym.Children, sym.ID)
 		}
 
 		state.result.Stats.FilesProcessed++
@@ -354,7 +371,8 @@ func (b *Builder) collectPhase(ctx context.Context, state *buildState, results [
 }
 
 // addChildSymbols recursively adds child symbols to the graph.
-func (b *Builder) addChildSymbols(state *buildState, children []*ast.Symbol) {
+// parentID tracks the owning symbol for reverse parent lookup.
+func (b *Builder) addChildSymbols(state *buildState, children []*ast.Symbol, parentID string) {
 	for _, child := range children {
 		if child == nil {
 			continue
@@ -370,8 +388,18 @@ func (b *Builder) addChildSymbols(state *buildState, children []*ast.Symbol) {
 		state.symbolsByName[child.Name] = append(state.symbolsByName[child.Name], child)
 		state.result.Stats.NodesCreated++
 
+		// Track parent-child relationship for receiver resolution
+		if parentID != "" {
+			state.symbolParent[child.ID] = parentID
+		}
+
+		// Track class inheritance from Metadata.Extends
+		if child.Metadata != nil && child.Metadata.Extends != "" {
+			state.classExtends[child.Name] = child.Metadata.Extends
+		}
+
 		// Recurse
-		b.addChildSymbols(state, child.Children)
+		b.addChildSymbols(state, child.Children, child.ID)
 	}
 }
 
@@ -944,8 +972,36 @@ func (b *Builder) resolveCallTarget(state *buildState, call ast.CallSite, caller
 	// Strategy 3: Method call using receiver
 	// For calls like "obj.Method()" where call.Receiver = "obj", call.Target = "Method"
 	if call.IsMethod && call.Receiver != "" {
-		// Try to find methods matching the target name
 		candidates := b.resolveSymbolByName(state, target, caller.FilePath)
+
+		// Sub-strategy 3a: this/self receiver → resolve to caller's owning class
+		if call.Receiver == "this" || call.Receiver == "self" {
+			if resolved := b.resolveThisSelfCall(state, candidates, caller); resolved != "" {
+				return resolved
+			}
+		}
+
+		// Sub-strategy 3b: Go-style receiver matching (case-insensitive)
+		// Handles: txn.Get() → Txn.Get, ctx.Done() → Context.Done
+		if call.Receiver != "this" && call.Receiver != "self" {
+			if resolved := b.resolveReceiverCaseInsensitive(state, candidates, call.Receiver); resolved != "" {
+				return resolved
+			}
+
+			// Sub-strategy 3b2: Receiver matching failed on same-file candidates.
+			// Try ALL candidates across all files. This handles cross-file method
+			// calls like Application.handle calling router.handle() where Router.handle
+			// is in a different file. resolveSymbolByName prefers same-file matches,
+			// which may not include the correct receiver-matched target.
+			allCandidates := b.resolveAllSymbolsByName(state, target)
+			if len(allCandidates) > len(candidates) {
+				if resolved := b.resolveReceiverCaseInsensitive(state, allCandidates, call.Receiver); resolved != "" {
+					return resolved
+				}
+			}
+		}
+
+		// Sub-strategy 3c: Fallback — first method match (original behavior)
 		for _, id := range candidates {
 			if sym, ok := state.symbolsByID[id]; ok {
 				if sym.Kind == ast.SymbolKindMethod {
@@ -957,6 +1013,161 @@ func (b *Builder) resolveCallTarget(state *buildState, call ast.CallSite, caller
 
 	// Unresolved - caller will create placeholder
 	return ""
+}
+
+// resolveThisSelfCall resolves method calls on this/self to the caller's owning class.
+//
+// Description:
+//
+//	When a method calls this.foo() or self.foo(), the target should resolve to
+//	a method on the same class (or a parent class via inheritance). This function
+//	finds the caller's owning class and matches the target method.
+//
+// Inputs:
+//
+//	state - Build state with symbol indexes and parent maps.
+//	candidates - Symbol IDs that match the target method name.
+//	caller - The calling function/method symbol.
+//
+// Outputs:
+//
+//	string - Resolved symbol ID, or empty if no match found.
+func (b *Builder) resolveThisSelfCall(state *buildState, candidates []string, caller *ast.Symbol) string {
+	// Find the caller's owning class
+	ownerClassName := b.findOwnerClassName(state, caller)
+	if ownerClassName == "" {
+		return ""
+	}
+
+	// Try to find a candidate method that belongs to this class or a parent class
+	classChain := b.buildInheritanceChain(state, ownerClassName)
+
+	for _, className := range classChain {
+		for _, id := range candidates {
+			sym, ok := state.symbolsByID[id]
+			if !ok {
+				continue
+			}
+			if sym.Kind != ast.SymbolKindMethod && sym.Kind != ast.SymbolKindFunction {
+				continue
+			}
+
+			// Check 1: sym.Receiver matches the class name (Go, JS)
+			if sym.Receiver == className {
+				return id
+			}
+
+			// Check 2: sym is a child of the class (Python, TS — Receiver often empty)
+			parentID, hasParent := state.symbolParent[id]
+			if hasParent {
+				if parentSym, ok := state.symbolsByID[parentID]; ok {
+					if parentSym.Name == className {
+						return id
+					}
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+// resolveReceiverCaseInsensitive matches a call receiver to a method's declared receiver type
+// using case-insensitive comparison.
+//
+// Description:
+//
+//	In Go, variable names are conventionally lowercase abbreviations of their types:
+//	txn → Txn, ctx → Context, r → Router. This function exploits that convention
+//	by doing case-insensitive matching between call.Receiver and sym.Receiver.
+//
+// Inputs:
+//
+//	state - Build state with symbol indexes.
+//	candidates - Symbol IDs that match the target method name.
+//	callReceiver - The receiver expression from the call site (e.g., "txn").
+//
+// Outputs:
+//
+//	string - Resolved symbol ID, or empty if no match found.
+func (b *Builder) resolveReceiverCaseInsensitive(state *buildState, candidates []string, callReceiver string) string {
+	for _, id := range candidates {
+		sym, ok := state.symbolsByID[id]
+		if !ok {
+			continue
+		}
+		if sym.Kind != ast.SymbolKindMethod {
+			continue
+		}
+		if sym.Receiver != "" && strings.EqualFold(callReceiver, sym.Receiver) {
+			return id
+		}
+	}
+	return ""
+}
+
+// findOwnerClassName finds the class/struct name that owns the given method.
+//
+// Description:
+//
+//	Uses multiple strategies to find the owning class:
+//	1. sym.Receiver field (Go, JS — directly set by parser)
+//	2. symbolParent reverse index (Python, TS — method is a child of class)
+//
+// Inputs:
+//
+//	state - Build state with symbol and parent indexes.
+//	method - The method symbol to find the owner for.
+//
+// Outputs:
+//
+//	string - The owning class/struct name, or empty if not found.
+func (b *Builder) findOwnerClassName(state *buildState, method *ast.Symbol) string {
+	// Strategy 1: Receiver field (Go, JS)
+	if method.Receiver != "" {
+		return method.Receiver
+	}
+
+	// Strategy 2: Parent symbol lookup (Python, TS)
+	parentID, ok := state.symbolParent[method.ID]
+	if ok {
+		if parent, exists := state.symbolsByID[parentID]; exists {
+			if parent.Kind == ast.SymbolKindClass || parent.Kind == ast.SymbolKindStruct {
+				return parent.Name
+			}
+		}
+	}
+
+	return ""
+}
+
+// buildInheritanceChain builds the chain of class names from the given class up through its parents.
+//
+// Description:
+//
+//	Walks the classExtends map to build [className, parentName, grandparentName, ...].
+//	Stops at a maximum depth of 10 to prevent infinite loops from circular inheritance.
+//
+// Inputs:
+//
+//	state - Build state with classExtends map.
+//	className - Starting class name.
+//
+// Outputs:
+//
+//	[]string - Class names from child to root, including className itself.
+func (b *Builder) buildInheritanceChain(state *buildState, className string) []string {
+	chain := []string{className}
+	current := className
+	for i := 0; i < 10; i++ {
+		parent, ok := state.classExtends[current]
+		if !ok || parent == "" {
+			break
+		}
+		chain = append(chain, parent)
+		current = parent
+	}
+	return chain
 }
 
 // resolveSymbolByName finds symbols matching the given name.
@@ -990,6 +1201,35 @@ func (b *Builder) resolveSymbolByName(state *buildState, name string, currentFil
 		return samePackage
 	}
 	return other
+}
+
+// resolveAllSymbolsByName returns ALL symbol IDs matching a name across all files.
+//
+// Description:
+//
+//	Unlike resolveSymbolByName which prefers same-file/same-package matches,
+//	this returns every symbol with the given name. Used as a fallback when
+//	receiver-based disambiguation fails on the filtered candidate set—the
+//	correct target may be in a different file.
+//
+// Inputs:
+//
+//	state - Build state with symbol indexes.
+//	name - The symbol name to look up.
+//
+// Outputs:
+//
+//	[]string - All symbol IDs matching the name, or nil if none found.
+func (b *Builder) resolveAllSymbolsByName(state *buildState, name string) []string {
+	candidates := state.symbolsByName[name]
+	if len(candidates) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(candidates))
+	for _, sym := range candidates {
+		ids = append(ids, sym.ID)
+	}
+	return ids
 }
 
 // samePackage checks if two files are in the same package.

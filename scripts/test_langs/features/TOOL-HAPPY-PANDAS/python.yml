@@ -28,8 +28,11 @@ tests:
       Who calls the DataFrame.__init__ constructor?
     expected_state: COMPLETE
     reference_answer: |
-      DataFrame.__init__ is called from factory functions like read_csv, read_json,
-      concat, and merge as well as from DataFrame methods that return new DataFrames.
+      DataFrame.__init__ has 3 primary callers in the inheritance chain:
+      DataFrame.__init__ (self-delegation for alternate constructors),
+      NDFrame.__init__ (parent class initialization), and Series.__init__
+      (which shares the NDFrame base). Additional callers include factory
+      functions throughout the codebase.
     validations:
       - type: graph_tool_used
 
@@ -547,3 +550,37 @@ tests:
     reference_answer: |
       TODO: Tool not yet registered as standalone.
     validations: []
+
+  # -- Additional find_callers tests (40-41) -- expected_state: COMPLETE --
+
+  - id: 6140
+    name: pandas_find_callers_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callers tool against Pandas (test B). Target: _reindex_and_concat function.
+    query: |
+      Who calls the _reindex_and_concat function?
+    expected_state: COMPLETE
+    reference_answer: |
+      _reindex_and_concat has 2 callers: MergeOperation.get_result and
+      _AsofMerge.get_result. Both merge strategy classes call it as the
+      final step to align indexes and concatenate the left/right DataFrames
+      into the merged result.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6141
+    name: pandas_find_callers_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callers tool against Pandas (test C). Target: _get_join_keys function.
+    query: |
+      Who calls the _get_join_keys function?
+    expected_state: COMPLETE
+    reference_answer: |
+      _get_join_keys has 3 callers: get_join_indexers (the main join index
+      builder), _get_multiindex_indexer (handles MultiIndex join cases), and
+      _get_join_keys itself (recursive call for nested key resolution).
+      These are all in core/reshape/merge.py handling join key extraction.
+    validations:
+      - type: graph_tool_used

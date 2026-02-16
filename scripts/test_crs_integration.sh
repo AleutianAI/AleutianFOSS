@@ -1188,6 +1188,13 @@ resolve_tool_indices() {
     IFS=',' read -ra parts <<< "$filter"
     for part in "${parts[@]}"; do
         part=$(echo "$part" | xargs)  # trim whitespace
+
+        # Special aliases that expand to multiple indices
+        if [ "$part" = "find_callers_all" ]; then
+            indices+=(0 40 41)
+            continue
+        fi
+
         if [[ "$part" =~ ^[0-9]+$ ]]; then
             # Numeric index
             indices+=("$part")
@@ -1203,6 +1210,7 @@ resolve_tool_indices() {
                 for i in "${!TOOL_NAMES[@]}"; do
                     printf "  %02d  %s\n" "$i" "${TOOL_NAMES[$i]}" >&2
                 done
+                echo -e "${YELLOW}Aliases: find_callers_all (= 0,40,41)${NC}" >&2
                 return 1
             fi
         fi
@@ -1983,7 +1991,7 @@ main() {
                 hugo|badger|gin) lang="Go" ;;
                 flask|pandas) lang="Py" ;;
                 express|babylonjs) lang="JS" ;;
-                nest|plottable) lang="TS" ;;
+                nest|nestjs|plottable) lang="TS" ;;
             esac
 
             # Format runtime

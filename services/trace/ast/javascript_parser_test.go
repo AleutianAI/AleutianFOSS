@@ -862,3 +862,508 @@ export default UserService;
 		}
 	}
 }
+
+// GR-41: Tests for JavaScript call site extraction
+
+const jsCallsSource = `
+class Router {
+    handle(req, res) {
+        const route = this.matchRoute(req.path);
+        const result = route.handler(req, res);
+        this.sendResponse(res, result);
+    }
+
+    matchRoute(path) {
+        return this.routes.find(r => r.matches(path));
+    }
+}
+
+function processRequest(req) {
+    const data = parseBody(req);
+    const validated = validate(data);
+    return formatResponse(validated);
+}
+
+class EventEmitter {
+    emit(event, data) {
+        const listeners = this.getListeners(event);
+        listeners.forEach(listener => listener(data));
+        logger.debug("emitted", event);
+    }
+}
+`
+
+func TestJavaScriptParser_ExtractCallSites_ThisMethodCalls(t *testing.T) {
+	parser := NewJavaScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(jsCallsSource), "router.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find Router.handle method
+	var handleMethod *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Router" {
+			for _, child := range sym.Children {
+				if child.Name == "handle" {
+					handleMethod = child
+					break
+				}
+			}
+		}
+	}
+
+	if handleMethod == nil {
+		t.Fatal("Router.handle method not found")
+	}
+
+	if len(handleMethod.Calls) == 0 {
+		t.Fatal("Router.handle should have call sites extracted")
+	}
+
+	callTargets := make(map[string]bool)
+	for _, call := range handleMethod.Calls {
+		callTargets[call.Target] = true
+	}
+
+	if !callTargets["matchRoute"] {
+		t.Error("expected call to matchRoute")
+	}
+	if !callTargets["sendResponse"] {
+		t.Error("expected call to sendResponse")
+	}
+
+	// Verify this.method() calls have IsMethod=true and Receiver="this"
+	for _, call := range handleMethod.Calls {
+		if call.Target == "matchRoute" || call.Target == "sendResponse" {
+			if !call.IsMethod {
+				t.Errorf("call to %s should be IsMethod=true", call.Target)
+			}
+			if call.Receiver != "this" {
+				t.Errorf("call to %s should have Receiver='this', got %q", call.Target, call.Receiver)
+			}
+		}
+	}
+}
+
+func TestJavaScriptParser_ExtractCallSites_SimpleFunctionCalls(t *testing.T) {
+	parser := NewJavaScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(jsCallsSource), "router.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var processFn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "processRequest" {
+			processFn = sym
+			break
+		}
+	}
+
+	if processFn == nil {
+		t.Fatal("processRequest function not found")
+	}
+
+	if len(processFn.Calls) < 3 {
+		t.Errorf("expected at least 3 calls, got %d", len(processFn.Calls))
+	}
+
+	callTargets := make(map[string]bool)
+	for _, call := range processFn.Calls {
+		callTargets[call.Target] = true
+	}
+
+	for _, expected := range []string{"parseBody", "validate", "formatResponse"} {
+		if !callTargets[expected] {
+			t.Errorf("expected call to %s", expected)
+		}
+	}
+
+	// Simple function calls should NOT be method calls
+	for _, call := range processFn.Calls {
+		if call.IsMethod {
+			t.Errorf("call to %s should not be IsMethod", call.Target)
+		}
+	}
+}
+
+func TestJavaScriptParser_ExtractCallSites_MixedCalls(t *testing.T) {
+	parser := NewJavaScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(jsCallsSource), "router.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find EventEmitter.emit — has this.method(), obj.method(), and simple calls
+	var emitMethod *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "EventEmitter" {
+			for _, child := range sym.Children {
+				if child.Name == "emit" {
+					emitMethod = child
+					break
+				}
+			}
+		}
+	}
+
+	if emitMethod == nil {
+		t.Fatal("EventEmitter.emit method not found")
+	}
+
+	callMap := make(map[string]*CallSite)
+	for i := range emitMethod.Calls {
+		callMap[emitMethod.Calls[i].Target] = &emitMethod.Calls[i]
+	}
+
+	if call, ok := callMap["getListeners"]; ok {
+		if !call.IsMethod || call.Receiver != "this" {
+			t.Errorf("getListeners should be this.getListeners, got IsMethod=%v, Receiver=%q", call.IsMethod, call.Receiver)
+		}
+	} else {
+		t.Error("expected call to getListeners")
+	}
+
+	if call, ok := callMap["debug"]; ok {
+		if !call.IsMethod || call.Receiver != "logger" {
+			t.Errorf("debug should be logger.debug, got IsMethod=%v, Receiver=%q", call.IsMethod, call.Receiver)
+		}
+	} else {
+		t.Error("expected call to debug")
+	}
+}
+
+// =============================================================================
+// IT-01 Phase C: Prototype Method Extraction Tests
+// =============================================================================
+
+func TestJavaScriptParser_DeriveSemanticTypeName(t *testing.T) {
+	tests := []struct {
+		filePath string
+		expected string
+	}{
+		{"lib/router/index.js", "Router"},
+		{"lib/application.js", "Application"},
+		{"lib/request.js", "Request"},
+		{"lib/response.js", "Response"},
+		{"src/utils/helper.js", "Helper"},
+		{"index.js", ""}, // root index.js with "." parent → empty
+		{"lib/middleware/cors.js", "Cors"},
+		{"server.mjs", "Server"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.filePath, func(t *testing.T) {
+			result := deriveSemanticTypeName(tt.filePath)
+			if result != tt.expected {
+				t.Errorf("deriveSemanticTypeName(%q) = %q, want %q", tt.filePath, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestJavaScriptParser_PrototypeMethodAssignment_Express(t *testing.T) {
+	// Express router pattern: var proto = module.exports = function() {}; proto.handle = function handle() {}
+	parser := NewJavaScriptParser()
+	content := `
+var proto = module.exports = function(options) {
+  return function router(req, res, next) {
+    router.handle(req, res, next);
+  };
+};
+
+proto.handle = function handle(req, res, out) {
+  var self = this;
+  var done = out;
+};
+
+proto.route = function route(path) {
+  var route = new Route(path);
+  return route;
+};
+
+proto.use = function use(fn) {
+  var offset = 0;
+  return this;
+};
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "lib/router/index.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Build a map of method names to symbols
+	methodMap := make(map[string]*Symbol)
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindMethod {
+			methodMap[sym.Name] = sym
+		}
+	}
+
+	// Should find handle, route, use as methods with Receiver = "Router"
+	expectedMethods := []string{"handle", "route", "use"}
+	for _, name := range expectedMethods {
+		sym, ok := methodMap[name]
+		if !ok {
+			t.Errorf("expected method %q to be extracted", name)
+			continue
+		}
+		if sym.Receiver != "Router" {
+			t.Errorf("method %q: expected Receiver=%q, got %q", name, "Router", sym.Receiver)
+		}
+		if sym.Kind != SymbolKindMethod {
+			t.Errorf("method %q: expected Kind=Method, got %v", name, sym.Kind)
+		}
+		if !sym.Exported {
+			t.Errorf("method %q: expected Exported=true", name)
+		}
+	}
+
+	// handle should have call sites extracted from its body
+	if handleSym, ok := methodMap["handle"]; ok {
+		if len(handleSym.Calls) == 0 {
+			t.Log("Note: handle has 0 calls — body may be too simple for call extraction")
+		}
+	}
+}
+
+func TestJavaScriptParser_PrototypeMethodAssignment_ApplicationPattern(t *testing.T) {
+	// Express application.js pattern: var app = exports = module.exports = {}; app.init = function init() {}
+	parser := NewJavaScriptParser()
+	content := `
+var app = exports = module.exports = {};
+
+app.init = function init() {
+  this.cache = {};
+  this.engines = {};
+};
+
+app.handle = function handle(req, res, callback) {
+  var router = this._router;
+  done(req, res);
+};
+
+app.use = function use(fn) {
+  var offset = 0;
+  var path = '/';
+  return this;
+};
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "lib/application.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	methodMap := make(map[string]*Symbol)
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindMethod {
+			methodMap[sym.Name] = sym
+		}
+	}
+
+	expectedMethods := []string{"init", "handle", "use"}
+	for _, name := range expectedMethods {
+		sym, ok := methodMap[name]
+		if !ok {
+			t.Errorf("expected method %q to be extracted", name)
+			continue
+		}
+		if sym.Receiver != "Application" {
+			t.Errorf("method %q: expected Receiver=%q, got %q", name, "Application", sym.Receiver)
+		}
+	}
+}
+
+func TestJavaScriptParser_PrototypeMethodAssignment_RequestPattern(t *testing.T) {
+	// Express request.js pattern: var req = Object.create(...); module.exports = req; req.get = function() {}
+	parser := NewJavaScriptParser()
+	content := `
+var req = Object.create(http.IncomingMessage.prototype);
+
+module.exports = req;
+
+req.get = function header(name) {
+  return this.headers[name.toLowerCase()];
+};
+
+req.accepts = function() {
+  var accept = accepts(this);
+  return accept.types.apply(accept, arguments);
+};
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "lib/request.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	methodMap := make(map[string]*Symbol)
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindMethod {
+			methodMap[sym.Name] = sym
+		}
+	}
+
+	// "get" method: property name "get" takes priority over function name "header"
+	// The public API is req.get(), so the method should be named "get"
+	for _, name := range []string{"get", "accepts"} {
+		sym, ok := methodMap[name]
+		if !ok {
+			t.Errorf("expected method %q to be extracted", name)
+			continue
+		}
+		if sym.Receiver != "Request" {
+			t.Errorf("method %q: expected Receiver=%q, got %q", name, "Request", sym.Receiver)
+		}
+	}
+}
+
+func TestJavaScriptParser_PrototypeMethod_NonAlias_Ignored(t *testing.T) {
+	// If a variable is NOT a module export alias, its assignments should not create methods
+	parser := NewJavaScriptParser()
+	content := `
+var helper = {};
+
+helper.doWork = function doWork() {
+  return 42;
+};
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "lib/utils.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindMethod && sym.Name == "doWork" {
+			t.Error("did not expect doWork to be extracted as a method (helper is not a module export)")
+		}
+	}
+}
+
+func TestJavaScriptParser_PrototypeMethod_WithCalls(t *testing.T) {
+	// Verify that call sites are extracted from prototype method bodies
+	parser := NewJavaScriptParser()
+	content := `
+var proto = module.exports = function() {};
+
+proto.handle = function handle(req, res, out) {
+  this.process(req, res);
+  done(out);
+  logger.debug("handled");
+};
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "lib/router/index.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var handleSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindMethod && sym.Name == "handle" {
+			handleSym = sym
+			break
+		}
+	}
+
+	if handleSym == nil {
+		t.Fatal("expected handle method to be extracted")
+	}
+
+	if handleSym.Receiver != "Router" {
+		t.Errorf("expected Receiver=%q, got %q", "Router", handleSym.Receiver)
+	}
+
+	// Should have calls extracted from the body
+	if len(handleSym.Calls) == 0 {
+		t.Error("expected call sites to be extracted from handle body")
+	}
+
+	callMap := make(map[string]CallSite)
+	for _, call := range handleSym.Calls {
+		callMap[call.Target] = call
+	}
+
+	// Check for this.process(), done(), logger.debug()
+	if _, ok := callMap["process"]; !ok {
+		t.Error("expected call to process (this.process)")
+	}
+	if _, ok := callMap["done"]; !ok {
+		t.Error("expected call to done")
+	}
+	if _, ok := callMap["debug"]; !ok {
+		t.Error("expected call to debug (logger.debug)")
+	}
+}
+
+func TestJavaScriptParser_PrototypeMethod_IndexFile_UsesDirectory(t *testing.T) {
+	// For index.js, semantic type should come from parent directory
+	parser := NewJavaScriptParser()
+	content := `
+var proto = module.exports = function() {};
+proto.render = function render() {};
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "components/widget/index.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindMethod && sym.Name == "render" {
+			if sym.Receiver != "Widget" {
+				t.Errorf("expected Receiver=%q (from directory), got %q", "Widget", sym.Receiver)
+			}
+			return
+		}
+	}
+	t.Error("expected render method to be extracted")
+}
+
+func TestJavaScriptParser_PrototypeMethod_ClassSyntaxUnaffected(t *testing.T) {
+	// ES6 class syntax should still work as before (methods are in Children, not top-level)
+	parser := NewJavaScriptParser()
+	content := `
+class Router {
+  constructor(options) {
+    this.options = options;
+  }
+
+  handle(req, res) {
+    return this.dispatch(req, res);
+  }
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "lib/router.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find the Router class
+	var routerClass *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindClass && sym.Name == "Router" {
+			routerClass = sym
+			break
+		}
+	}
+
+	if routerClass == nil {
+		t.Fatal("expected Router class")
+	}
+
+	// Methods are stored as children of the class
+	var handleSym *Symbol
+	for _, child := range routerClass.Children {
+		if child.Kind == SymbolKindMethod && child.Name == "handle" {
+			handleSym = child
+			break
+		}
+	}
+
+	if handleSym == nil {
+		t.Fatal("expected handle method in class children")
+	}
+
+	if handleSym.Receiver != "Router" {
+		t.Errorf("expected Receiver=%q, got %q", "Router", handleSym.Receiver)
+	}
+}

@@ -22,6 +22,7 @@ import (
 
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/python"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // PythonParserOption configures a PythonParser instance.
@@ -254,7 +255,7 @@ func (p *PythonParser) Parse(ctx context.Context, content []byte, filePath strin
 	p.extractClasses(ctx, rootNode, content, filePath, result)
 
 	// Extract top-level functions
-	p.extractFunctions(rootNode, content, filePath, result, nil)
+	p.extractFunctions(ctx, rootNode, content, filePath, result, nil)
 
 	// Extract module-level variables
 	p.extractModuleVariables(rootNode, content, filePath, result)
@@ -583,7 +584,7 @@ func (p *PythonParser) processClass(ctx context.Context, node *sitter.Node, cont
 
 	// Extract methods and class variables from body
 	if bodyNode != nil {
-		p.extractClassMembers(bodyNode, content, filePath, sym)
+		p.extractClassMembers(ctx, bodyNode, content, filePath, sym)
 	}
 
 	// GR-40a M-1: For ABC classes, only mark as interface if they have @abstractmethod
@@ -608,16 +609,16 @@ func (p *PythonParser) processClass(ctx context.Context, node *sitter.Node, cont
 }
 
 // extractClassMembers extracts methods and class variables from a class body.
-func (p *PythonParser) extractClassMembers(body *sitter.Node, content []byte, filePath string, classSym *Symbol) {
+func (p *PythonParser) extractClassMembers(ctx context.Context, body *sitter.Node, content []byte, filePath string, classSym *Symbol) {
 	for i := 0; i < int(body.ChildCount()); i++ {
 		child := body.Child(i)
 		switch child.Type() {
 		case "function_definition":
-			if method := p.processMethod(child, content, filePath, nil, classSym.Name); method != nil {
+			if method := p.processMethod(ctx, child, content, filePath, nil, classSym.Name); method != nil {
 				classSym.Children = append(classSym.Children, method)
 			}
 		case "decorated_definition":
-			if method := p.processDecoratedMethod(child, content, filePath, classSym.Name); method != nil {
+			if method := p.processDecoratedMethod(ctx, child, content, filePath, classSym.Name); method != nil {
 				classSym.Children = append(classSym.Children, method)
 			}
 		case "expression_statement":
@@ -676,18 +677,18 @@ func (p *PythonParser) processClassVariable(node *sitter.Node, content []byte, f
 }
 
 // processMethod extracts a method from a class.
-func (p *PythonParser) processMethod(node *sitter.Node, content []byte, filePath string, decorators []string, className string) *Symbol {
-	return p.processFunction(node, content, filePath, decorators, className)
+func (p *PythonParser) processMethod(ctx context.Context, node *sitter.Node, content []byte, filePath string, decorators []string, className string) *Symbol {
+	return p.processFunction(ctx, node, content, filePath, decorators, className)
 }
 
 // processDecoratedMethod extracts a decorated method.
-func (p *PythonParser) processDecoratedMethod(node *sitter.Node, content []byte, filePath string, className string) *Symbol {
+func (p *PythonParser) processDecoratedMethod(ctx context.Context, node *sitter.Node, content []byte, filePath string, className string) *Symbol {
 	decorators := p.extractDecorators(node, content)
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
 		if child.Type() == "function_definition" {
-			return p.processMethod(child, content, filePath, decorators, className)
+			return p.processMethod(ctx, child, content, filePath, decorators, className)
 		}
 	}
 
@@ -695,14 +696,14 @@ func (p *PythonParser) processDecoratedMethod(node *sitter.Node, content []byte,
 }
 
 // extractFunctions extracts top-level function definitions.
-func (p *PythonParser) extractFunctions(root *sitter.Node, content []byte, filePath string, result *ParseResult, parent *Symbol) {
+func (p *PythonParser) extractFunctions(ctx context.Context, root *sitter.Node, content []byte, filePath string, result *ParseResult, parent *Symbol) {
 	for i := 0; i < int(root.ChildCount()); i++ {
 		child := root.Child(i)
 		switch child.Type() {
 		case "function_definition":
-			if fn := p.processFunction(child, content, filePath, nil, ""); fn != nil {
+			if fn := p.processFunction(ctx, child, content, filePath, nil, ""); fn != nil {
 				// Extract nested functions
-				p.extractNestedFunctions(child, content, filePath, fn)
+				p.extractNestedFunctions(ctx, child, content, filePath, fn)
 				result.Symbols = append(result.Symbols, fn)
 			}
 		case "decorated_definition":
@@ -711,9 +712,9 @@ func (p *PythonParser) extractFunctions(root *sitter.Node, content []byte, fileP
 				grandchild := child.Child(j)
 				if grandchild.Type() == "function_definition" {
 					decorators := p.extractDecorators(child, content)
-					if fn := p.processFunction(grandchild, content, filePath, decorators, ""); fn != nil {
+					if fn := p.processFunction(ctx, grandchild, content, filePath, decorators, ""); fn != nil {
 						// Extract nested functions
-						p.extractNestedFunctions(grandchild, content, filePath, fn)
+						p.extractNestedFunctions(ctx, grandchild, content, filePath, fn)
 						result.Symbols = append(result.Symbols, fn)
 					}
 					break
@@ -724,7 +725,7 @@ func (p *PythonParser) extractFunctions(root *sitter.Node, content []byte, fileP
 }
 
 // extractNestedFunctions extracts nested function definitions.
-func (p *PythonParser) extractNestedFunctions(funcNode *sitter.Node, content []byte, filePath string, parentFn *Symbol) {
+func (p *PythonParser) extractNestedFunctions(ctx context.Context, funcNode *sitter.Node, content []byte, filePath string, parentFn *Symbol) {
 	// Find the block node
 	for i := 0; i < int(funcNode.ChildCount()); i++ {
 		child := funcNode.Child(i)
@@ -732,7 +733,7 @@ func (p *PythonParser) extractNestedFunctions(funcNode *sitter.Node, content []b
 			for j := 0; j < int(child.ChildCount()); j++ {
 				stmt := child.Child(j)
 				if stmt.Type() == "function_definition" {
-					if nested := p.processFunction(stmt, content, filePath, nil, ""); nested != nil {
+					if nested := p.processFunction(ctx, stmt, content, filePath, nil, ""); nested != nil {
 						parentFn.Children = append(parentFn.Children, nested)
 					}
 				} else if stmt.Type() == "decorated_definition" {
@@ -740,7 +741,7 @@ func (p *PythonParser) extractNestedFunctions(funcNode *sitter.Node, content []b
 					for k := 0; k < int(stmt.ChildCount()); k++ {
 						def := stmt.Child(k)
 						if def.Type() == "function_definition" {
-							if nested := p.processFunction(def, content, filePath, decorators, ""); nested != nil {
+							if nested := p.processFunction(ctx, def, content, filePath, decorators, ""); nested != nil {
 								parentFn.Children = append(parentFn.Children, nested)
 							}
 							break
@@ -754,12 +755,13 @@ func (p *PythonParser) extractNestedFunctions(funcNode *sitter.Node, content []b
 }
 
 // processFunction extracts a function definition.
-func (p *PythonParser) processFunction(node *sitter.Node, content []byte, filePath string, decorators []string, className string) *Symbol {
+func (p *PythonParser) processFunction(ctx context.Context, node *sitter.Node, content []byte, filePath string, decorators []string, className string) *Symbol {
 	var name string
 	var params string
 	var returnType string
 	var docstring string
 	var isAsync bool
+	var bodyNode *sitter.Node
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
@@ -774,6 +776,7 @@ func (p *PythonParser) processFunction(node *sitter.Node, content []byte, filePa
 		case "type":
 			returnType = string(content[child.StartByte():child.EndByte()])
 		case "block":
+			bodyNode = child
 			docstring = p.extractDocstring(child, content)
 		}
 	}
@@ -826,6 +829,7 @@ func (p *PythonParser) processFunction(node *sitter.Node, content []byte, filePa
 		Exported:   exported,
 		Signature:  signature,
 		DocComment: docstring,
+		Receiver:   className, // IT-01 Phase C: Set Receiver for graph builder receiver resolution
 		StartLine:  int(node.StartPoint().Row + 1),
 		EndLine:    int(node.EndPoint().Row + 1),
 		StartCol:   int(node.StartPoint().Column),
@@ -840,6 +844,11 @@ func (p *PythonParser) processFunction(node *sitter.Node, content []byte, filePa
 			IsAsync:    isAsync,
 			IsStatic:   isStatic,
 		}
+	}
+
+	// GR-41: Extract call sites from function/method body
+	if bodyNode != nil {
+		sym.Calls = p.extractCallSites(ctx, bodyNode, content, filePath)
 	}
 
 	return sym
@@ -1386,6 +1395,209 @@ var protocolDunderMethods = map[string]bool{
 // Thread Safety: Safe for concurrent use (reads from immutable map).
 func isProtocolDunderMethod(name string) bool {
 	return protocolDunderMethods[name]
+}
+
+// extractCallSites extracts all function and method calls from a Python function body.
+//
+// Description:
+//
+//	Traverses the AST of a Python function or method body to find all call
+//	nodes. For each call, it extracts the target name, location, and whether
+//	it's a method call (e.g., self.method(), obj.func()). This enables the
+//	graph builder to create EdgeTypeCalls edges for find_callers/find_callees.
+//
+// Inputs:
+//   - ctx: Context for cancellation. Checked every 100 nodes.
+//   - bodyNode: The block node representing the function body. May be nil.
+//   - content: The source file content bytes.
+//   - filePath: Path to the source file for location data.
+//
+// Outputs:
+//   - []CallSite: Extracted call sites. Empty slice if bodyNode is nil or no calls found.
+//     Limited to MaxCallSitesPerSymbol (1000) to prevent memory exhaustion.
+//
+// Limitations:
+//   - Does not resolve call targets to symbol IDs (that's the graph builder's job)
+//   - Cannot detect calls through dynamic dispatch or metaprogramming
+//   - Limited to MaxCallExpressionDepth (50) nesting depth
+//
+// Thread Safety: Safe for concurrent use.
+func (p *PythonParser) extractCallSites(ctx context.Context, bodyNode *sitter.Node, content []byte, filePath string) []CallSite {
+	if bodyNode == nil {
+		return nil
+	}
+
+	if ctx.Err() != nil {
+		return nil
+	}
+
+	ctx, span := tracer.Start(ctx, "PythonParser.extractCallSites")
+	defer span.End()
+
+	calls := make([]CallSite, 0, 16)
+
+	type stackEntry struct {
+		node  *sitter.Node
+		depth int
+	}
+
+	stack := make([]stackEntry, 0, 64)
+	stack = append(stack, stackEntry{node: bodyNode, depth: 0})
+
+	nodeCount := 0
+	for len(stack) > 0 {
+		entry := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+
+		node := entry.node
+		if node == nil {
+			continue
+		}
+
+		if entry.depth > MaxCallExpressionDepth {
+			slog.Debug("GR-41: Max call expression depth reached in Python",
+				slog.String("file", filePath),
+				slog.Int("depth", entry.depth),
+			)
+			continue
+		}
+
+		nodeCount++
+		if nodeCount%100 == 0 {
+			if ctx.Err() != nil {
+				slog.Debug("GR-41: Context cancelled during Python call extraction",
+					slog.String("file", filePath),
+					slog.Int("calls_found", len(calls)),
+				)
+				return calls
+			}
+		}
+
+		if len(calls) >= MaxCallSitesPerSymbol {
+			slog.Warn("GR-41: Max call sites per symbol reached in Python",
+				slog.String("file", filePath),
+				slog.Int("limit", MaxCallSitesPerSymbol),
+			)
+			return calls
+		}
+
+		// Python tree-sitter uses "call" (not "call_expression" like Go)
+		if node.Type() == "call" {
+			call := p.extractSingleCallSite(node, content, filePath)
+			if call != nil && call.Target != "" {
+				calls = append(calls, *call)
+			}
+		}
+
+		// Add children to stack in reverse order for left-to-right processing
+		childCount := int(node.ChildCount())
+		for i := childCount - 1; i >= 0; i-- {
+			child := node.Child(i)
+			if child != nil {
+				stack = append(stack, stackEntry{
+					node:  child,
+					depth: entry.depth + 1,
+				})
+			}
+		}
+	}
+
+	span.SetAttributes(
+		attribute.String("file", filePath),
+		attribute.Int("calls_found", len(calls)),
+		attribute.Int("nodes_traversed", nodeCount),
+	)
+
+	return calls
+}
+
+// extractSingleCallSite extracts call information from a Python call node.
+//
+// Description:
+//
+//	Parses a single Python call node to extract the function/method name,
+//	location, and receiver information. Handles:
+//	  - Simple function calls: func(args)
+//	  - Method calls: self.method(args), obj.method(args)
+//	  - Chained calls: obj.method1().method2(args)
+//
+// Inputs:
+//   - node: A "call" node from tree-sitter-python. Must not be nil.
+//   - content: The source file content bytes.
+//   - filePath: Path to the source file for location data.
+//
+// Outputs:
+//   - *CallSite: The extracted call site, or nil if extraction fails.
+//
+// Thread Safety: Safe for concurrent use.
+func (p *PythonParser) extractSingleCallSite(node *sitter.Node, content []byte, filePath string) *CallSite {
+	if node == nil || node.Type() != "call" {
+		return nil
+	}
+
+	// Python call node structure:
+	//   call { function: <expr>, arguments: argument_list }
+	// The function child can be:
+	//   - identifier: simple call like func()
+	//   - attribute: method call like self.method() or obj.func()
+	//   - call: chained call like func()()
+	funcNode := node.ChildByFieldName("function")
+	if funcNode == nil && node.ChildCount() > 0 {
+		funcNode = node.Child(0)
+	}
+
+	if funcNode == nil {
+		return nil
+	}
+
+	call := &CallSite{
+		Location: Location{
+			FilePath:  filePath,
+			StartLine: int(node.StartPoint().Row) + 1,
+			EndLine:   int(node.EndPoint().Row) + 1,
+			StartCol:  int(node.StartPoint().Column),
+			EndCol:    int(node.EndPoint().Column),
+		},
+	}
+
+	switch funcNode.Type() {
+	case "identifier":
+		// Simple function call: function_name(args)
+		call.Target = string(content[funcNode.StartByte():funcNode.EndByte()])
+		call.IsMethod = false
+
+	case "attribute":
+		// Method call: obj.method(args) or self.method(args)
+		// Python attribute node has: object, attribute
+		objectNode := funcNode.ChildByFieldName("object")
+		attrNode := funcNode.ChildByFieldName("attribute")
+
+		if attrNode != nil {
+			call.Target = string(content[attrNode.StartByte():attrNode.EndByte()])
+		}
+
+		if objectNode != nil {
+			receiver := string(content[objectNode.StartByte():objectNode.EndByte()])
+			call.Receiver = receiver
+			call.IsMethod = true
+		}
+
+	default:
+		// Other cases: subscript calls, call chains, etc.
+		// Extract text as target
+		text := string(content[funcNode.StartByte():funcNode.EndByte()])
+		if len(text) > 100 {
+			// Truncate very long expressions
+			text = text[:100]
+		}
+		call.Target = text
+	}
+
+	if call.Target == "" {
+		return nil
+	}
+
+	return call
 }
 
 // Compile-time interface compliance check.

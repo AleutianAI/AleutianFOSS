@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
@@ -74,6 +75,23 @@ func ResolveFunctionWithFuzzy(
 			slog.Int("line", exactMatches[0].StartLine),
 		)
 		return exactMatches[0], false, nil
+	}
+
+	// Try Type.Method dot notation split (e.g., "Plot.render" → type "Plot", method "render")
+	if strings.Contains(name, ".") {
+		parts := strings.SplitN(name, ".", 2)
+		typeName, methodName := parts[0], parts[1]
+		if sym, err := resolveTypeDotMethod(ctx, index, typeName, methodName, logger); err == nil {
+			logger.Info("Symbol resolution: dot notation match",
+				slog.String("query", name),
+				slog.String("type", typeName),
+				slog.String("method", methodName),
+				slog.String("resolved", sym.Name),
+				slog.String("file", sym.FilePath),
+			)
+			return sym, false, nil
+		}
+		// Fall through to fuzzy search if dot notation didn't work
 	}
 
 	// Fallback: Try fuzzy search (slower, requires context timeout)
@@ -208,4 +226,136 @@ func ResolveMultipleFunctionsWithFuzzy(
 	}
 
 	return symbols, fuzzyFlags, nil
+}
+
+// resolveTypeDotMethod resolves a Type.Method query by finding a method named
+// methodName that belongs to the type named typeName.
+//
+// Description:
+//
+//	Handles dot-notation queries like "Plot.render", "Context.JSON", or
+//	"DataFrame.__init__" by splitting the query and matching the method to
+//	its owning type via three strategies:
+//	  1. Receiver field match (Go, JS): sym.Receiver == typeName
+//	  2. ID contains match (JS fallback): sym.ID contains "typeName.methodName"
+//	  3. Parent class match (Python, TS): type symbol's Children contain the method
+//
+// Inputs:
+//   - ctx: Context for cancellation. Must not be nil.
+//   - idx: Symbol index to search. Must not be nil.
+//   - typeName: The type/class part of the query (e.g., "Plot").
+//   - methodName: The method part of the query (e.g., "render").
+//   - logger: Logger for debugging. Must not be nil.
+//
+// Outputs:
+//   - *ast.Symbol: The resolved method symbol. Never nil on success.
+//   - error: Non-nil if no matching method could be found.
+//
+// Thread Safety: This function is safe for concurrent use.
+func resolveTypeDotMethod(
+	ctx context.Context,
+	idx *index.SymbolIndex,
+	typeName string,
+	methodName string,
+	logger *slog.Logger,
+) (*ast.Symbol, error) {
+	if idx == nil {
+		return nil, fmt.Errorf("symbol index is nil")
+	}
+	if typeName == "" || methodName == "" {
+		return nil, fmt.Errorf("typeName and methodName must not be empty")
+	}
+
+	// Strategy 1 & 2: Look up all symbols named methodName and filter
+	methodMatches := idx.GetByName(methodName)
+
+	var candidates []*ast.Symbol
+	for _, sym := range methodMatches {
+		if sym.Kind != ast.SymbolKindMethod && sym.Kind != ast.SymbolKindFunction {
+			continue
+		}
+
+		// Strategy 1: Receiver field match (Go, JS set this)
+		if sym.Receiver == typeName {
+			candidates = append(candidates, sym)
+			continue
+		}
+
+		// Strategy 2: ID contains "typeName.methodName" (JS fallback)
+		if strings.Contains(sym.ID, typeName+"."+methodName) {
+			candidates = append(candidates, sym)
+			continue
+		}
+	}
+
+	// If we found candidates via receiver/ID, pick the best one
+	if len(candidates) > 0 {
+		best := pickBestCandidate(candidates)
+		logger.Debug("resolveTypeDotMethod: matched via receiver/ID",
+			slog.String("type", typeName),
+			slog.String("method", methodName),
+			slog.String("resolved_id", best.ID),
+			slog.Int("candidates", len(candidates)),
+		)
+		return best, nil
+	}
+
+	// Strategy 3: Parent class match (Python, TS — Receiver may be empty)
+	// Find the type/class symbol, then check its Children for the method
+	typeMatches := idx.GetByName(typeName)
+	for _, typeSym := range typeMatches {
+		if typeSym.Kind != ast.SymbolKindClass &&
+			typeSym.Kind != ast.SymbolKindStruct &&
+			typeSym.Kind != ast.SymbolKindInterface &&
+			typeSym.Kind != ast.SymbolKindType {
+			continue
+		}
+
+		for _, child := range typeSym.Children {
+			if child.Name == methodName &&
+				(child.Kind == ast.SymbolKindMethod || child.Kind == ast.SymbolKindFunction) {
+				logger.Debug("resolveTypeDotMethod: matched via parent class children",
+					slog.String("type", typeName),
+					slog.String("method", methodName),
+					slog.String("resolved_id", child.ID),
+					slog.String("parent_id", typeSym.ID),
+				)
+				return child, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("no method '%s' found on type '%s'", methodName, typeName)
+}
+
+// pickBestCandidate selects the best symbol from a list of candidates.
+// Prefers symbols with Receiver set, then shortest ID (most specific).
+//
+// Inputs:
+//   - candidates: Non-empty slice of candidate symbols.
+//
+// Outputs:
+//   - *ast.Symbol: The best candidate. Never nil when input is non-empty.
+func pickBestCandidate(candidates []*ast.Symbol) *ast.Symbol {
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+
+	best := candidates[0]
+	for _, c := range candidates[1:] {
+		// Prefer symbols with Receiver set (more explicit match)
+		if c.Receiver != "" && best.Receiver == "" {
+			best = c
+			continue
+		}
+		if c.Receiver == "" && best.Receiver != "" {
+			continue
+		}
+		// Among equal receiver status, prefer shorter ID (more specific)
+		if len(c.ID) < len(best.ID) {
+			best = c
+		}
+	}
+
+	return best
 }

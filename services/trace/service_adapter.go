@@ -37,7 +37,7 @@ type ServiceAdapter struct {
 // Description:
 //
 //	Creates an adapter wrapping the provided Service with default
-//	languages (go, python, typescript) and excludes (vendor, tests).
+//	languages (go, python, javascript, typescript) and excludes (vendor, tests).
 //
 // Inputs:
 //
@@ -49,8 +49,8 @@ type ServiceAdapter struct {
 func NewServiceAdapter(service *Service) *ServiceAdapter {
 	return &ServiceAdapter{
 		service:   service,
-		languages: []string{"go", "python", "typescript"},
-		excludes:  []string{"vendor/*", "*_test.go", "node_modules/*"},
+		languages: []string{"go", "python", "javascript", "typescript"},
+		excludes:  []string{"vendor", "vendor/*", "*_test.go", "node_modules", "node_modules/*"},
 	}
 }
 

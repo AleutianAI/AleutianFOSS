@@ -1506,3 +1506,326 @@ func BenchmarkABCDetection(b *testing.B) {
 		_, _ = parser.Parse(ctx, []byte(pythonABCSource), "abc.py")
 	}
 }
+
+// GR-41: Tests for Python call site extraction
+
+const pythonCallsSource = `
+class Flask:
+    """A minimal Flask-like app."""
+
+    def wsgi_app(self, environ, start_response):
+        """The WSGI application."""
+        ctx = self.request_context(environ)
+        response = self.full_dispatch_request()
+        return response(environ, start_response)
+
+    def full_dispatch_request(self):
+        """Dispatch the request."""
+        self.try_trigger_before_first_request_functions()
+        rv = self.dispatch_request()
+        return self.finalize_request(rv)
+
+    def dispatch_request(self):
+        """Dispatch to the handler."""
+        rule = self.url_map.match()
+        return self.view_functions[rule.endpoint]()
+
+def standalone_function():
+    """A top-level function that calls other functions."""
+    result = helper()
+    data = process_data(result)
+    return format_output(data)
+
+class Server:
+    def start(self):
+        db.connect()
+        self.listen()
+        logger.info("started")
+
+    def handle_request(self, request):
+        validated = validate(request)
+        response = self.process(validated)
+        self.send_response(response)
+`
+
+func TestPythonParser_ExtractCallSites_SelfMethodCalls(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonCallsSource), "flask_app.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find the wsgi_app method
+	var wsgiApp *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Flask" {
+			for _, child := range sym.Children {
+				if child.Name == "wsgi_app" {
+					wsgiApp = child
+					break
+				}
+			}
+		}
+	}
+
+	if wsgiApp == nil {
+		t.Fatal("wsgi_app method not found")
+	}
+
+	if len(wsgiApp.Calls) == 0 {
+		t.Fatal("wsgi_app should have call sites extracted")
+	}
+
+	// wsgi_app calls: self.request_context(), self.full_dispatch_request(), response()
+	callTargets := make(map[string]bool)
+	for _, call := range wsgiApp.Calls {
+		callTargets[call.Target] = true
+	}
+
+	if !callTargets["request_context"] {
+		t.Error("expected call to request_context, got calls:", callTargetNames(wsgiApp.Calls))
+	}
+	if !callTargets["full_dispatch_request"] {
+		t.Error("expected call to full_dispatch_request, got calls:", callTargetNames(wsgiApp.Calls))
+	}
+
+	// Verify self.method() calls have IsMethod=true and Receiver="self"
+	for _, call := range wsgiApp.Calls {
+		if call.Target == "request_context" || call.Target == "full_dispatch_request" {
+			if !call.IsMethod {
+				t.Errorf("call to %s should be IsMethod=true", call.Target)
+			}
+			if call.Receiver != "self" {
+				t.Errorf("call to %s should have Receiver='self', got %q", call.Target, call.Receiver)
+			}
+		}
+	}
+}
+
+func TestPythonParser_ExtractCallSites_FullDispatchRequest(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonCallsSource), "flask_app.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find full_dispatch_request method
+	var fullDispatch *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Flask" {
+			for _, child := range sym.Children {
+				if child.Name == "full_dispatch_request" {
+					fullDispatch = child
+					break
+				}
+			}
+		}
+	}
+
+	if fullDispatch == nil {
+		t.Fatal("full_dispatch_request method not found")
+	}
+
+	// full_dispatch_request calls: self.try_trigger_before_first_request_functions(),
+	// self.dispatch_request(), self.finalize_request()
+	if len(fullDispatch.Calls) < 3 {
+		t.Errorf("expected at least 3 calls, got %d: %v", len(fullDispatch.Calls), callTargetNames(fullDispatch.Calls))
+	}
+
+	callTargets := make(map[string]bool)
+	for _, call := range fullDispatch.Calls {
+		callTargets[call.Target] = true
+	}
+
+	for _, expected := range []string{"try_trigger_before_first_request_functions", "dispatch_request", "finalize_request"} {
+		if !callTargets[expected] {
+			t.Errorf("expected call to %s, got: %v", expected, callTargetNames(fullDispatch.Calls))
+		}
+	}
+}
+
+func TestPythonParser_ExtractCallSites_SimpleFunctionCalls(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonCallsSource), "flask_app.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find standalone_function
+	var standaloneFn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "standalone_function" {
+			standaloneFn = sym
+			break
+		}
+	}
+
+	if standaloneFn == nil {
+		t.Fatal("standalone_function not found")
+	}
+
+	if len(standaloneFn.Calls) < 3 {
+		t.Errorf("expected at least 3 calls, got %d: %v", len(standaloneFn.Calls), callTargetNames(standaloneFn.Calls))
+	}
+
+	callTargets := make(map[string]bool)
+	for _, call := range standaloneFn.Calls {
+		callTargets[call.Target] = true
+	}
+
+	for _, expected := range []string{"helper", "process_data", "format_output"} {
+		if !callTargets[expected] {
+			t.Errorf("expected call to %s, got: %v", expected, callTargetNames(standaloneFn.Calls))
+		}
+	}
+
+	// These should NOT be method calls
+	for _, call := range standaloneFn.Calls {
+		if call.IsMethod {
+			t.Errorf("call to %s should not be IsMethod (receiver=%q)", call.Target, call.Receiver)
+		}
+	}
+}
+
+func TestPythonParser_ExtractCallSites_MixedCalls(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonCallsSource), "flask_app.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find Server.handle_request — has both simple calls and self.method() calls
+	var handleRequest *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Server" {
+			for _, child := range sym.Children {
+				if child.Name == "handle_request" {
+					handleRequest = child
+					break
+				}
+			}
+		}
+	}
+
+	if handleRequest == nil {
+		t.Fatal("handle_request method not found")
+	}
+
+	// handle_request calls: validate(request), self.process(validated), self.send_response(response)
+	if len(handleRequest.Calls) < 3 {
+		t.Errorf("expected at least 3 calls, got %d: %v", len(handleRequest.Calls), callTargetNames(handleRequest.Calls))
+	}
+
+	for _, call := range handleRequest.Calls {
+		switch call.Target {
+		case "validate":
+			if call.IsMethod {
+				t.Error("validate should not be a method call")
+			}
+		case "process":
+			if !call.IsMethod || call.Receiver != "self" {
+				t.Errorf("process should be self.process, got IsMethod=%v, Receiver=%q", call.IsMethod, call.Receiver)
+			}
+		case "send_response":
+			if !call.IsMethod || call.Receiver != "self" {
+				t.Errorf("send_response should be self.send_response, got IsMethod=%v, Receiver=%q", call.IsMethod, call.Receiver)
+			}
+		}
+	}
+}
+
+func TestPythonParser_ExtractCallSites_ObjectMethodCalls(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonCallsSource), "flask_app.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find Server.start — has obj.method() calls (db.connect, logger.info)
+	var startMethod *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Server" {
+			for _, child := range sym.Children {
+				if child.Name == "start" {
+					startMethod = child
+					break
+				}
+			}
+		}
+	}
+
+	if startMethod == nil {
+		t.Fatal("start method not found")
+	}
+
+	// start calls: db.connect(), self.listen(), logger.info()
+	callMap := make(map[string]*CallSite)
+	for i := range startMethod.Calls {
+		callMap[startMethod.Calls[i].Target] = &startMethod.Calls[i]
+	}
+
+	if call, ok := callMap["connect"]; ok {
+		if !call.IsMethod || call.Receiver != "db" {
+			t.Errorf("db.connect should have IsMethod=true, Receiver='db', got %v, %q", call.IsMethod, call.Receiver)
+		}
+	} else {
+		t.Error("expected call to connect (from db.connect)")
+	}
+
+	if call, ok := callMap["listen"]; ok {
+		if !call.IsMethod || call.Receiver != "self" {
+			t.Errorf("self.listen should have IsMethod=true, Receiver='self', got %v, %q", call.IsMethod, call.Receiver)
+		}
+	} else {
+		t.Error("expected call to listen (from self.listen)")
+	}
+
+	if call, ok := callMap["info"]; ok {
+		if !call.IsMethod || call.Receiver != "logger" {
+			t.Errorf("logger.info should have IsMethod=true, Receiver='logger', got %v, %q", call.IsMethod, call.Receiver)
+		}
+	} else {
+		t.Error("expected call to info (from logger.info)")
+	}
+}
+
+func TestPythonParser_ExtractCallSites_CallLocations(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonCallsSource), "flask_app.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify that call locations have valid line numbers
+	for _, sym := range result.Symbols {
+		checkCallLocations(t, sym)
+		for _, child := range sym.Children {
+			checkCallLocations(t, child)
+		}
+	}
+}
+
+func checkCallLocations(t *testing.T, sym *Symbol) {
+	t.Helper()
+	for _, call := range sym.Calls {
+		if call.Location.StartLine <= 0 {
+			t.Errorf("call to %s in %s has invalid StartLine: %d", call.Target, sym.Name, call.Location.StartLine)
+		}
+		if call.Location.FilePath != "flask_app.py" {
+			t.Errorf("call to %s in %s has wrong FilePath: %q", call.Target, sym.Name, call.Location.FilePath)
+		}
+	}
+}
+
+// callTargetNames is a helper to extract call target names for error messages.
+func callTargetNames(calls []CallSite) []string {
+	names := make([]string, len(calls))
+	for i, call := range calls {
+		if call.IsMethod {
+			names[i] = call.Receiver + "." + call.Target
+		} else {
+			names[i] = call.Target
+		}
+	}
+	return names
+}

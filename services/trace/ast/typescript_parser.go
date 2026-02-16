@@ -23,6 +23,7 @@ import (
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/typescript/tsx"
 	"github.com/smacker/go-tree-sitter/typescript/typescript"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // TypeScriptParserOption configures a TypeScriptParser instance.
@@ -255,7 +256,7 @@ func (p *TypeScriptParser) Parse(ctx context.Context, content []byte, filePath s
 	p.extractImports(rootNode, content, filePath, result)
 
 	// Extract declarations (functions, classes, interfaces, types, enums, variables)
-	p.extractDeclarations(rootNode, content, filePath, result)
+	p.extractDeclarations(ctx, rootNode, content, filePath, result)
 
 	// Validate result before returning
 	if err := result.Validate(); err != nil {
@@ -505,18 +506,18 @@ func (p *TypeScriptParser) extractRequireCall(node *sitter.Node, content []byte)
 }
 
 // extractDeclarations extracts all top-level declarations.
-func (p *TypeScriptParser) extractDeclarations(root *sitter.Node, content []byte, filePath string, result *ParseResult) {
+func (p *TypeScriptParser) extractDeclarations(ctx context.Context, root *sitter.Node, content []byte, filePath string, result *ParseResult) {
 	for i := 0; i < int(root.ChildCount()); i++ {
 		child := root.Child(i)
 		switch child.Type() {
 		case "export_statement":
-			p.processExportStatement(child, content, filePath, result)
+			p.processExportStatement(ctx, child, content, filePath, result)
 		case "function_declaration":
-			if fn := p.processFunction(child, content, filePath, nil, false); fn != nil {
+			if fn := p.processFunction(ctx, child, content, filePath, nil, false); fn != nil {
 				result.Symbols = append(result.Symbols, fn)
 			}
 		case "class_declaration":
-			if cls := p.processClass(child, content, filePath, nil, false); cls != nil {
+			if cls := p.processClass(ctx, child, content, filePath, nil, false); cls != nil {
 				result.Symbols = append(result.Symbols, cls)
 			}
 		case "interface_declaration":
@@ -540,7 +541,7 @@ func (p *TypeScriptParser) extractDeclarations(root *sitter.Node, content []byte
 }
 
 // processExportStatement handles export statements.
-func (p *TypeScriptParser) processExportStatement(node *sitter.Node, content []byte, filePath string, result *ParseResult) {
+func (p *TypeScriptParser) processExportStatement(ctx context.Context, node *sitter.Node, content []byte, filePath string, result *ParseResult) {
 	var decorators []string
 	isDefault := false
 
@@ -552,7 +553,7 @@ func (p *TypeScriptParser) processExportStatement(node *sitter.Node, content []b
 		case "default":
 			isDefault = true
 		case "function_declaration":
-			if fn := p.processFunction(child, content, filePath, decorators, true); fn != nil {
+			if fn := p.processFunction(ctx, child, content, filePath, decorators, true); fn != nil {
 				if isDefault {
 					if fn.Metadata == nil {
 						fn.Metadata = &SymbolMetadata{}
@@ -562,7 +563,7 @@ func (p *TypeScriptParser) processExportStatement(node *sitter.Node, content []b
 				result.Symbols = append(result.Symbols, fn)
 			}
 		case "class_declaration":
-			if cls := p.processClass(child, content, filePath, decorators, true); cls != nil {
+			if cls := p.processClass(ctx, child, content, filePath, decorators, true); cls != nil {
 				result.Symbols = append(result.Symbols, cls)
 			}
 		case "interface_declaration":
@@ -580,7 +581,7 @@ func (p *TypeScriptParser) processExportStatement(node *sitter.Node, content []b
 		case "lexical_declaration":
 			p.processLexicalDeclaration(child, content, filePath, result, true)
 		case "abstract_class_declaration":
-			if cls := p.processAbstractClass(child, content, filePath, decorators, true); cls != nil {
+			if cls := p.processAbstractClass(ctx, child, content, filePath, decorators, true); cls != nil {
 				result.Symbols = append(result.Symbols, cls)
 			}
 		}
@@ -588,13 +589,14 @@ func (p *TypeScriptParser) processExportStatement(node *sitter.Node, content []b
 }
 
 // processFunction extracts a function declaration.
-func (p *TypeScriptParser) processFunction(node *sitter.Node, content []byte, filePath string, decorators []string, exported bool) *Symbol {
+func (p *TypeScriptParser) processFunction(ctx context.Context, node *sitter.Node, content []byte, filePath string, decorators []string, exported bool) *Symbol {
 	var name string
 	var typeParams []string
 	var params string
 	var returnType string
 	var docstring string
 	var isAsync bool
+	var bodyNode *sitter.Node
 
 	// Get preceding comment
 	docstring = p.getPrecedingComment(node, content)
@@ -612,6 +614,8 @@ func (p *TypeScriptParser) processFunction(node *sitter.Node, content []byte, fi
 			params = string(content[child.StartByte():child.EndByte()])
 		case "type_annotation":
 			returnType = p.extractTypeAnnotation(child, content)
+		case tsNodeStatementBlock:
+			bodyNode = child
 		}
 	}
 
@@ -653,11 +657,16 @@ func (p *TypeScriptParser) processFunction(node *sitter.Node, content []byte, fi
 		}
 	}
 
+	// GR-41: Extract call sites from function body
+	if bodyNode != nil {
+		sym.Calls = p.extractCallSites(ctx, bodyNode, content, filePath)
+	}
+
 	return sym
 }
 
 // processClass extracts a class declaration.
-func (p *TypeScriptParser) processClass(node *sitter.Node, content []byte, filePath string, decorators []string, exported bool) *Symbol {
+func (p *TypeScriptParser) processClass(ctx context.Context, node *sitter.Node, content []byte, filePath string, decorators []string, exported bool) *Symbol {
 	var name string
 	var typeParams []string
 	var extends string
@@ -711,15 +720,15 @@ func (p *TypeScriptParser) processClass(node *sitter.Node, content []byte, fileP
 
 	// Extract class members
 	if bodyNode != nil {
-		p.extractClassMembers(bodyNode, content, filePath, sym)
+		p.extractClassMembers(ctx, bodyNode, content, filePath, sym)
 	}
 
 	return sym
 }
 
 // processAbstractClass extracts an abstract class declaration.
-func (p *TypeScriptParser) processAbstractClass(node *sitter.Node, content []byte, filePath string, decorators []string, exported bool) *Symbol {
-	sym := p.processClass(node, content, filePath, decorators, exported)
+func (p *TypeScriptParser) processAbstractClass(ctx context.Context, node *sitter.Node, content []byte, filePath string, decorators []string, exported bool) *Symbol {
+	sym := p.processClass(ctx, node, content, filePath, decorators, exported)
 	if sym != nil {
 		if sym.Metadata == nil {
 			sym.Metadata = &SymbolMetadata{}
@@ -730,12 +739,14 @@ func (p *TypeScriptParser) processAbstractClass(node *sitter.Node, content []byt
 }
 
 // extractClassMembers extracts methods and fields from a class body.
-func (p *TypeScriptParser) extractClassMembers(body *sitter.Node, content []byte, filePath string, classSym *Symbol) {
+func (p *TypeScriptParser) extractClassMembers(ctx context.Context, body *sitter.Node, content []byte, filePath string, classSym *Symbol) {
 	for i := 0; i < int(body.ChildCount()); i++ {
 		child := body.Child(i)
 		switch child.Type() {
 		case "method_definition":
-			if method := p.processMethod(child, content, filePath); method != nil {
+			if method := p.processMethod(ctx, child, content, filePath); method != nil {
+				// IT-01 Phase C: Set Receiver to class name for graph builder receiver resolution
+				method.Receiver = classSym.Name
 				classSym.Children = append(classSym.Children, method)
 			}
 		case "public_field_definition":
@@ -747,7 +758,7 @@ func (p *TypeScriptParser) extractClassMembers(body *sitter.Node, content []byte
 }
 
 // processMethod extracts a method definition.
-func (p *TypeScriptParser) processMethod(node *sitter.Node, content []byte, filePath string) *Symbol {
+func (p *TypeScriptParser) processMethod(ctx context.Context, node *sitter.Node, content []byte, filePath string) *Symbol {
 	var name string
 	var typeParams []string
 	var params string
@@ -756,6 +767,7 @@ func (p *TypeScriptParser) processMethod(node *sitter.Node, content []byte, file
 	var isAsync bool
 	var isStatic bool
 	var isAbstract bool
+	var bodyNode *sitter.Node
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
@@ -776,6 +788,8 @@ func (p *TypeScriptParser) processMethod(node *sitter.Node, content []byte, file
 			params = string(content[child.StartByte():child.EndByte()])
 		case "type_annotation":
 			returnType = p.extractTypeAnnotation(child, content)
+		case tsNodeStatementBlock:
+			bodyNode = child
 		}
 	}
 
@@ -812,6 +826,11 @@ func (p *TypeScriptParser) processMethod(node *sitter.Node, content []byte, file
 			IsAbstract:     isAbstract,
 			AccessModifier: accessModifier,
 		},
+	}
+
+	// GR-41: Extract call sites from method body
+	if bodyNode != nil {
+		sym.Calls = p.extractCallSites(ctx, bodyNode, content, filePath)
 	}
 
 	return sym
@@ -1418,6 +1437,192 @@ func (p *TypeScriptParser) getPrecedingComment(node *sitter.Node, content []byte
 	}
 
 	return ""
+}
+
+// extractCallSites extracts all function and method calls from a TypeScript function body.
+//
+// Description:
+//
+//	Traverses the AST of a TypeScript function or method body to find all
+//	call_expression nodes. For each call, it extracts the target name, location,
+//	and whether it's a method call (e.g., this.method(), obj.func()). This enables
+//	the graph builder to create EdgeTypeCalls edges for find_callers/find_callees.
+//
+// Inputs:
+//   - ctx: Context for cancellation. Checked every 100 nodes.
+//   - bodyNode: The statement_block node representing the function body. May be nil.
+//   - content: The source file content bytes.
+//   - filePath: Path to the source file for location data.
+//
+// Outputs:
+//   - []CallSite: Extracted call sites. Limited to MaxCallSitesPerSymbol (1000).
+//
+// Thread Safety: Safe for concurrent use.
+func (p *TypeScriptParser) extractCallSites(ctx context.Context, bodyNode *sitter.Node, content []byte, filePath string) []CallSite {
+	if bodyNode == nil {
+		return nil
+	}
+
+	if ctx.Err() != nil {
+		return nil
+	}
+
+	ctx, span := tracer.Start(ctx, "TypeScriptParser.extractCallSites")
+	defer span.End()
+
+	calls := make([]CallSite, 0, 16)
+
+	type stackEntry struct {
+		node  *sitter.Node
+		depth int
+	}
+
+	stack := make([]stackEntry, 0, 64)
+	stack = append(stack, stackEntry{node: bodyNode, depth: 0})
+
+	nodeCount := 0
+	for len(stack) > 0 {
+		entry := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+
+		node := entry.node
+		if node == nil {
+			continue
+		}
+
+		if entry.depth > MaxCallExpressionDepth {
+			slog.Debug("GR-41: Max call expression depth reached in TypeScript",
+				slog.String("file", filePath),
+				slog.Int("depth", entry.depth),
+			)
+			continue
+		}
+
+		nodeCount++
+		if nodeCount%100 == 0 {
+			if ctx.Err() != nil {
+				slog.Debug("GR-41: Context cancelled during TypeScript call extraction",
+					slog.String("file", filePath),
+					slog.Int("calls_found", len(calls)),
+				)
+				return calls
+			}
+		}
+
+		if len(calls) >= MaxCallSitesPerSymbol {
+			slog.Warn("GR-41: Max call sites per symbol reached in TypeScript",
+				slog.String("file", filePath),
+				slog.Int("limit", MaxCallSitesPerSymbol),
+			)
+			return calls
+		}
+
+		// TypeScript tree-sitter uses "call_expression" for calls
+		if node.Type() == tsNodeCallExpression {
+			call := p.extractSingleCallSite(node, content, filePath)
+			if call != nil && call.Target != "" {
+				calls = append(calls, *call)
+			}
+		}
+
+		childCount := int(node.ChildCount())
+		for i := childCount - 1; i >= 0; i-- {
+			child := node.Child(i)
+			if child != nil {
+				stack = append(stack, stackEntry{
+					node:  child,
+					depth: entry.depth + 1,
+				})
+			}
+		}
+	}
+
+	span.SetAttributes(
+		attribute.String("file", filePath),
+		attribute.Int("calls_found", len(calls)),
+		attribute.Int("nodes_traversed", nodeCount),
+	)
+
+	return calls
+}
+
+// extractSingleCallSite extracts call information from a TypeScript call_expression node.
+//
+// Description:
+//
+//	Parses a single call_expression node to extract the function/method name,
+//	location, and receiver information. Handles:
+//	  - Simple calls: func(args)
+//	  - Method calls: this.method(args), obj.method(args)
+//	  - Chained calls: obj.method1().method2(args)
+//
+// Inputs:
+//   - node: A call_expression node from tree-sitter-typescript. Must not be nil.
+//   - content: The source file content bytes.
+//   - filePath: Path to the source file for location data.
+//
+// Outputs:
+//   - *CallSite: The extracted call site, or nil if extraction fails.
+//
+// Thread Safety: Safe for concurrent use.
+func (p *TypeScriptParser) extractSingleCallSite(node *sitter.Node, content []byte, filePath string) *CallSite {
+	if node == nil || node.Type() != tsNodeCallExpression {
+		return nil
+	}
+
+	funcNode := node.ChildByFieldName("function")
+	if funcNode == nil && node.ChildCount() > 0 {
+		funcNode = node.Child(0)
+	}
+
+	if funcNode == nil {
+		return nil
+	}
+
+	call := &CallSite{
+		Location: Location{
+			FilePath:  filePath,
+			StartLine: int(node.StartPoint().Row) + 1,
+			EndLine:   int(node.EndPoint().Row) + 1,
+			StartCol:  int(node.StartPoint().Column),
+			EndCol:    int(node.EndPoint().Column),
+		},
+	}
+
+	switch funcNode.Type() {
+	case "identifier":
+		// Simple function call: functionName(args)
+		call.Target = string(content[funcNode.StartByte():funcNode.EndByte()])
+		call.IsMethod = false
+
+	case "member_expression":
+		// Method call: obj.method(args) or this.method(args)
+		objectNode := funcNode.ChildByFieldName("object")
+		propertyNode := funcNode.ChildByFieldName("property")
+
+		if propertyNode != nil {
+			call.Target = string(content[propertyNode.StartByte():propertyNode.EndByte()])
+		}
+
+		if objectNode != nil {
+			receiver := string(content[objectNode.StartByte():objectNode.EndByte()])
+			call.Receiver = receiver
+			call.IsMethod = true
+		}
+
+	default:
+		text := string(content[funcNode.StartByte():funcNode.EndByte()])
+		if len(text) > 100 {
+			text = text[:100]
+		}
+		call.Target = text
+	}
+
+	if call.Target == "" {
+		return nil
+	}
+
+	return call
 }
 
 // Compile-time interface compliance check.

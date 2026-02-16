@@ -48,6 +48,79 @@ type QueryResult struct {
 	Duration time.Duration
 }
 
+// InheritanceQueryResult separates direct callers from inherited callers.
+//
+// Description:
+//
+//	Returned by FindCallersWithInheritance to allow the caller to distinguish
+//	between direct callers of the queried method and callers that reach it
+//	through parent class methods in the inheritance chain.
+//
+// Example:
+//
+//	result, err := g.FindCallersWithInheritance(ctx, plotRenderID, parentIDs)
+//	// result.DirectCallers has callers of Plot.render
+//	// result.InheritedCallers["Component.render ID"] has callers of Component.render
+type InheritanceQueryResult struct {
+	// DirectCallers are callers of the primary (queried) method.
+	DirectCallers *QueryResult
+
+	// InheritedCallers maps parent method ID to callers of that parent method.
+	// Only includes callers NOT already in DirectCallers (deduplicated).
+	InheritedCallers map[string]*QueryResult
+
+	// Truncated is true if limit was reached or context was cancelled.
+	Truncated bool
+
+	// Duration is the total query execution time.
+	Duration time.Duration
+}
+
+// AllCallers returns a flat deduplicated list of all callers (direct + inherited).
+//
+// Description:
+//
+//	Convenience method that merges DirectCallers and InheritedCallers into a
+//	single QueryResult. Useful when the caller doesn't need to distinguish
+//	between direct and inherited callers.
+func (r *InheritanceQueryResult) AllCallers() *QueryResult {
+	if r == nil {
+		return &QueryResult{}
+	}
+	merged := &QueryResult{
+		Truncated: r.Truncated,
+		Duration:  r.Duration,
+	}
+	if r.DirectCallers != nil {
+		merged.Symbols = append(merged.Symbols, r.DirectCallers.Symbols...)
+		merged.Truncated = merged.Truncated || r.DirectCallers.Truncated
+	}
+	for _, qr := range r.InheritedCallers {
+		if qr != nil {
+			merged.Symbols = append(merged.Symbols, qr.Symbols...)
+			merged.Truncated = merged.Truncated || qr.Truncated
+		}
+	}
+	return merged
+}
+
+// TotalCallerCount returns the total number of callers across all levels.
+func (r *InheritanceQueryResult) TotalCallerCount() int {
+	if r == nil {
+		return 0
+	}
+	count := 0
+	if r.DirectCallers != nil {
+		count += len(r.DirectCallers.Symbols)
+	}
+	for _, qr := range r.InheritedCallers {
+		if qr != nil {
+			count += len(qr.Symbols)
+		}
+	}
+	return count
+}
+
 // QueryOptions configures query behavior.
 type QueryOptions struct {
 	// Limit is the maximum number of results (default: 1000, max: 10000).
@@ -204,6 +277,113 @@ func (g *Graph) FindCallersByID(ctx context.Context, symbolID string, opts ...Qu
 		callerNode, exists := g.nodes[edge.FromID]
 		if exists {
 			result.Symbols = append(result.Symbols, callerNode.Symbol)
+		}
+	}
+
+	result.Duration = time.Since(start)
+	return result, nil
+}
+
+// FindCallersWithInheritance returns callers of a method AND callers of the same method
+// on parent classes in the inheritance chain.
+//
+// Description:
+//
+//	When a child class overrides a parent method, calls through the parent class
+//	(e.g., this.renderImmediately() inside Component) create edges to the parent's
+//	method, not the child's. This function collects callers from the entire
+//	inheritance chain so that callers of both Plot.renderImmediately AND
+//	Component.renderImmediately are returned.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation.
+//	symbolID - ID of the target method (e.g., Plot.renderImmediately).
+//	parentMethodIDs - IDs of the same-named method on parent classes.
+//	opts - Query options (Limit, Timeout).
+//
+// Outputs:
+//
+//	*QueryResult - Combined callers from all inheritance levels, deduplicated by ID.
+//	error - Non-nil if context error occurs.
+func (g *Graph) FindCallersWithInheritance(ctx context.Context, symbolID string, parentMethodIDs []string, opts ...QueryOption) (*InheritanceQueryResult, error) {
+	start := time.Now()
+	options := applyOptions(opts)
+
+	result := &InheritanceQueryResult{
+		DirectCallers:    &QueryResult{Symbols: make([]*ast.Symbol, 0)},
+		InheritedCallers: make(map[string]*QueryResult),
+	}
+
+	seen := make(map[string]bool)
+	totalCount := 0
+
+	// Phase 1: Direct callers of the primary method
+	if node, ok := g.nodes[symbolID]; ok {
+		for _, edge := range node.Incoming {
+			if err := ctx.Err(); err != nil {
+				result.Truncated = true
+				result.Duration = time.Since(start)
+				return result, nil
+			}
+			if edge.Type != EdgeTypeCalls {
+				continue
+			}
+			if seen[edge.FromID] {
+				continue
+			}
+			seen[edge.FromID] = true
+			if totalCount >= options.Limit {
+				result.Truncated = true
+				break
+			}
+			if callerNode, exists := g.nodes[edge.FromID]; exists {
+				result.DirectCallers.Symbols = append(result.DirectCallers.Symbols, callerNode.Symbol)
+				totalCount++
+			}
+		}
+	}
+
+	// Phase 2: Inherited callers from parent methods (deduplicated against direct)
+	for _, parentID := range parentMethodIDs {
+		if err := ctx.Err(); err != nil {
+			result.Truncated = true
+			result.Duration = time.Since(start)
+			return result, nil
+		}
+
+		node, ok := g.nodes[parentID]
+		if !ok {
+			continue
+		}
+
+		parentResult := &QueryResult{Symbols: make([]*ast.Symbol, 0)}
+
+		for _, edge := range node.Incoming {
+			if err := ctx.Err(); err != nil {
+				result.Truncated = true
+				result.Duration = time.Since(start)
+				return result, nil
+			}
+			if edge.Type != EdgeTypeCalls {
+				continue
+			}
+			if seen[edge.FromID] {
+				continue
+			}
+			seen[edge.FromID] = true
+			if totalCount >= options.Limit {
+				result.Truncated = true
+				break
+			}
+			if callerNode, exists := g.nodes[edge.FromID]; exists {
+				parentResult.Symbols = append(parentResult.Symbols, callerNode.Symbol)
+				totalCount++
+			}
+		}
+
+		if len(parentResult.Symbols) > 0 {
+			result.InheritedCallers[parentID] = parentResult
 		}
 	}
 

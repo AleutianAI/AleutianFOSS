@@ -156,7 +156,7 @@ func (t *findCalleesTool) Definition() ToolDefinition {
 		Parameters: map[string]ParamDef{
 			"function_name": {
 				Type:        ParamTypeString,
-				Description: "Name of the function to find callees for",
+				Description: "Name of the function to find callees for. Use Type.Method format for methods (e.g., 'Context.JSON', 'DB.Open', 'Txn.Get'). For standalone functions, just the name (e.g., 'parseConfig').",
 				Required:    true,
 			},
 			"limit": {
@@ -215,18 +215,35 @@ func (t *findCalleesTool) Execute(ctx context.Context, params map[string]any) (*
 	var queryErrors int
 
 	if t.index != nil {
-		symbols := t.index.GetByName(p.FunctionName)
+		var symbols []*ast.Symbol
 
-		// P1: If no exact match, try fuzzy search (Feb 14, 2026)
-		if len(symbols) == 0 {
-			symbol, fuzzy, err := ResolveFunctionWithFuzzy(ctx, t.index, p.FunctionName, t.logger)
-			if err == nil && fuzzy {
-				t.logger.Info("P1: Using fuzzy match for function",
+		// IT-01 SI-2: If name contains ".", skip exact match (dot-notation names like
+		// "Txn.Get" are never stored as-is in the index) and go straight to fuzzy resolution.
+		if strings.Contains(p.FunctionName, ".") {
+			symbol, _, err := ResolveFunctionWithFuzzy(ctx, t.index, p.FunctionName, t.logger)
+			if err == nil {
+				t.logger.Info("dot-notation resolved",
 					slog.String("tool", "find_callees"),
 					slog.String("query", p.FunctionName),
 					slog.String("matched", symbol.Name),
 				)
 				symbols = []*ast.Symbol{symbol}
+			}
+		} else {
+			// O(1) index lookup for bare names
+			symbols = t.index.GetByName(p.FunctionName)
+
+			// P1: If no exact match, try fuzzy search (Feb 14, 2026)
+			if len(symbols) == 0 {
+				symbol, fuzzy, err := ResolveFunctionWithFuzzy(ctx, t.index, p.FunctionName, t.logger)
+				if err == nil && fuzzy {
+					t.logger.Info("P1: Using fuzzy match for function",
+						slog.String("tool", "find_callees"),
+						slog.String("query", p.FunctionName),
+						slog.String("matched", symbol.Name),
+					)
+					symbols = []*ast.Symbol{symbol}
+				}
 			}
 		}
 
