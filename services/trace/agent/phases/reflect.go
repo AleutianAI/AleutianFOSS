@@ -348,6 +348,104 @@ func (p *ReflectPhase) looksComplete(input *ReflectionInput) bool {
 		}
 	}
 
+	// Check for legitimate "not found" answers
+	// These indicate a complete answer (symbol doesn't exist) rather than being stuck
+	if input.LastResponse != "" {
+		notFoundPhrases := []string{
+			"not found",
+			"does not exist",
+			"could not locate",
+			"unable to find",
+			"no function",
+			"no symbol",
+			"no matches",
+		}
+
+		lastRespLower := strings.ToLower(input.LastResponse)
+		hasNotFound := false
+		for _, phrase := range notFoundPhrases {
+			if strings.Contains(lastRespLower, phrase) {
+				hasNotFound = true
+				break
+			}
+		}
+
+		// If response says "not found" AND mentions searching, it's complete
+		if hasNotFound {
+			searchIndicators := []string{"searched", "looked", "analyz", "checked", "queried"}
+			hasSearch := false
+			for _, indicator := range searchIndicators {
+				if strings.Contains(lastRespLower, indicator) {
+					hasSearch = true
+					break
+				}
+			}
+
+			if hasSearch {
+				slog.Debug("REFLECT: Detected legitimate 'not found' answer - marking complete",
+					slog.String("response_preview", input.LastResponse[:min(100, len(input.LastResponse))]))
+				return true
+			}
+		}
+	}
+
+	// Check for empty response loop (Fix 1C - Feb 13, 2026)
+	// If we have multiple consecutive results with empty responses,
+	// the LLM is stuck in an empty response loop. Mark as complete
+	// to trigger final synthesis from tool results.
+	if input.LastResponse == "" && len(input.RecentResults) >= 3 {
+		// Count results with no meaningful output
+		emptyOrFailed := 0
+		for _, r := range input.RecentResults {
+			// Consider it empty/failed if:
+			// - Failed execution, OR
+			// - Success but output is tiny (just error message or empty)
+			outputStr := fmt.Sprintf("%v", r.Output)
+			if !r.Success || len(outputStr) < 100 {
+				emptyOrFailed++
+			}
+		}
+
+		// If most results are empty/failed, we're in a loop
+		// Require >75% to be empty (at least 3/4) to avoid false positives
+		if float64(emptyOrFailed)/float64(len(input.RecentResults)) > 0.75 {
+			slog.Debug("REFLECT: Detected empty response loop - marking complete",
+				slog.Int("total_results", len(input.RecentResults)),
+				slog.Int("empty_or_failed", emptyOrFailed),
+				slog.String("last_response_len", fmt.Sprintf("%d", len(input.LastResponse))))
+			return true
+		}
+	}
+
+	// Phase 11C: Fix "tool-only mode" detection (Feb 14, 2026)
+	// Original P0-1 incorrectly checked tool results instead of LLM responses.
+	// Now checks LastResponse for tool call patterns with minimal narrative.
+	if input.LastResponse != "" && len(input.RecentResults) >= 2 {
+		// Check if last LLM response has tool calls but minimal explanatory text
+		lastRespLower := strings.ToLower(input.LastResponse)
+
+		// Tool call indicators in LLM response
+		hasToolCall := strings.Contains(lastRespLower, "<tool_call>") ||
+					   strings.Contains(lastRespLower, "</tool_call>") ||
+					   strings.Contains(lastRespLower, "tool_calls")
+
+		// Remove tool call XML to count actual narrative text
+		narrativeText := input.LastResponse
+		if idx := strings.Index(narrativeText, "<tool_call>"); idx >= 0 {
+			narrativeText = narrativeText[:idx]
+		}
+		narrativeText = strings.TrimSpace(narrativeText)
+
+		// If LLM has tool calls but <20 chars of narrative, it's tool-only mode
+		if hasToolCall && len(narrativeText) < 20 {
+			slog.Debug("Phase 11C: Detected tool-only mode - LLM calling tools with minimal narrative",
+				slog.Int("narrative_chars", len(narrativeText)),
+				slog.Int("response_chars", len(input.LastResponse)),
+				slog.String("narrative_preview", narrativeText))
+			return true
+		}
+	}
+
 	// If all recent results are successful and there's substantial progress
 	if len(input.RecentResults) >= 3 {
 		allSuccessful := true
@@ -377,6 +475,15 @@ func (p *ReflectPhase) looksComplete(input *ReflectionInput) bool {
 func (p *ReflectPhase) looksStuck(input *ReflectionInput) bool {
 	if len(input.RecentResults) < 3 {
 		return false
+	}
+
+	// If last response contains "not found", it's a valid answer, not stuck
+	if input.LastResponse != "" {
+		lastRespLower := strings.ToLower(input.LastResponse)
+		if strings.Contains(lastRespLower, "not found") ||
+			strings.Contains(lastRespLower, "does not exist") {
+			return false // Valid "not found" answer, not stuck
+		}
 	}
 
 	// Count recent failures

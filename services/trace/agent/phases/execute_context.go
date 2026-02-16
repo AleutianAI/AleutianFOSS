@@ -925,6 +925,52 @@ func (t *TokenTracker) Reset() {
 // Error Categorization
 // -----------------------------------------------------------------------------
 
+// isNotFoundError checks if an error message indicates a definitive "not found" result.
+//
+// Description:
+//
+//	Phase 11B (Feb 14, 2026): Detects when a tool has definitively determined
+//	that a symbol/file/resource does not exist. These are VALID RESULTS, not
+//	errors that should trigger retries.
+//
+// Inputs:
+//
+//	errMsg - The error message from tool execution.
+//
+// Outputs:
+//
+//	bool - True if this is a definitive "not found" result.
+//
+// Thread Safety: Safe for concurrent use (stateless function).
+func isNotFoundError(errMsg string) bool {
+	if errMsg == "" {
+		return false
+	}
+
+	errLower := strings.ToLower(errMsg)
+
+	// Check for explicit "not found" patterns
+	notFoundPatterns := []string{
+		"not found",
+		"does not exist",
+		"could not locate",
+		"unable to find",
+		"no function",
+		"no symbol",
+		"no matches",
+		"target(s) not found", // find_common_dependency specific
+		"symbol not found",    // find_symbol specific
+	}
+
+	for _, pattern := range notFoundPatterns {
+		if strings.Contains(errLower, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // categorizeToolError maps error messages to ErrorCategory for CDCL learning.
 //
 // Description:

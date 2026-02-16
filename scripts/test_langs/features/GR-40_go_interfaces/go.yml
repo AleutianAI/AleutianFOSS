@@ -1,0 +1,92 @@
+# GR-40: Go Interface Implementation Detection (Go Language Only)
+#
+# Verifies that find_implementations works correctly for Go interfaces.
+# Tests interface implementation detection, Grep fallback avoidance, and performance.
+
+metadata:
+  feature: GR-40
+  title: "Go Interface Implementation Detection"
+  language: go
+  project: orchestrator
+  ticket: tickets/merged/GR-40_go_interfaces.md
+  description: >
+    Tests CRS interface implementation detection for Go code. Verifies that
+    find_implementations uses graph edges (EdgeTypeImplements) rather than
+    falling back to text search (Grep). This is a Go-specific feature.
+
+tests:
+  - id: 22
+    name: basic_impl
+    category: GO_INTERFACE
+    description: >
+      Basic interface implementation - should find concrete types.
+      This query should use EdgeTypeImplements edges in the call graph
+      to find all types that implement the Handler interface.
+    query: |
+      Find all implementations of the Handler interface in this Go codebase
+    expected_state: COMPLETE
+    validations:
+      - type: implementations_found
+
+  - id: 23
+    name: multi_impl
+    category: GO_INTERFACE
+    description: >
+      Interface with multiple implementations.
+      Should find all concrete types implementing the Service interface,
+      demonstrating that the graph correctly tracks multiple implementers.
+    query: |
+      What types implement the Service interface?
+    expected_state: COMPLETE
+    validations:
+      - type: implementations_found
+
+  - id: 24
+    name: empty_interface
+    category: GO_INTERFACE
+    description: >
+      Empty interface (interface{}/any) - should handle gracefully.
+      The Reader interface test verifies that edge detection works
+      for standard library interfaces.
+    query: |
+      Find implementations of the Reader interface
+    expected_state: COMPLETE
+    validations:
+      - type: implementations_found
+
+  - id: 25
+    name: no_grep_fallback
+    category: GO_INTERFACE
+    description: >
+      Verify no Grep fallback - should use graph tools only.
+      This test ensures that find_implementations uses EdgeTypeImplements
+      edges rather than falling back to text search.
+    query: |
+      List all types that implement Closer
+    expected_state: COMPLETE
+    validations:
+      - type: no_grep_used
+
+  - id: 26
+    name: edge_exists
+    category: GO_INTERFACE
+    description: >
+      Verify EdgeTypeImplements exists in graph (internal check).
+      This internal test checks that the graph contains "implements"
+      edges connecting interfaces to their implementations.
+    query: INTERNAL:verify_implements_edges
+    expected_state: COMPLETE
+    validations: []
+
+  - id: 27
+    name: perf_check
+    category: GO_INTERFACE
+    description: >
+      Performance - implementation lookup should be O(k) not O(V).
+      Finding interface implementations should be fast (traversing
+      implements edges) rather than O(V) text search.
+    query: |
+      Find implementations of the Writer interface
+    expected_state: COMPLETE
+    validations:
+      - type: fast_execution

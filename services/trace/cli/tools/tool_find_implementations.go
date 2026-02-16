@@ -322,7 +322,7 @@ func (t *findImplementationsTool) parseParams(params map[string]any) (FindImplem
 			if limit < 1 {
 				limit = 1
 			} else if limit > 1000 {
-				t.logger.Warn("limit above maximum, clamping to 1000",
+				t.logger.Debug("limit above maximum, clamping to 1000",
 					slog.String("tool", "find_implementations"),
 					slog.Int("requested", limit),
 				)

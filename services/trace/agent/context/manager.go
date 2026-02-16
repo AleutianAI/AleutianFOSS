@@ -130,6 +130,47 @@ When you see these questions, call these tools FIRST:
 | "Security concerns?" | find_entry_points → trace_data_flow |
 | "Logging patterns?" | find_config_usage(config_key="log") |
 
+## STOPPING CRITERIA (When You Have Enough Information)
+
+**Recognize when you have sufficient information to answer, even if the result is negative.**
+
+### Complete Answers Include:
+
+1. **Positive Results** - Tool found what was requested
+   - Example: find_dominators returns dominator tree → Answer ready ✓
+
+2. **Negative Results** - Tool definitively shows something doesn't exist
+   - Example: find_dominators says "not reachable from entry point" → Answer ready ✓
+   - Example: find_callers returns empty list → Answer ready ✓
+   - **DO NOT** keep calling more tools hoping for a different result
+
+3. **Partial Results** - Tool provides related information
+   - Example: Can't find dominators, but find_callers shows the call chain → Answer ready ✓
+
+### Domain-Specific Stopping Rules:
+
+**For Dominator/Reachability Queries:**
+- If find_dominators says "not reachable from entry point" → **STOP, synthesize answer**
+- This IS a complete answer - it means the function is dead code or not in the main execution path
+- DO NOT call find_callers or find_entry_points to "verify" - trust the graph analysis
+
+**For Call Chain Queries:**
+- If find_callers/get_call_chain returns a chain → **STOP, synthesize answer**
+- If it returns empty → **STOP, synthesize answer** (no callers IS the answer)
+
+**For Entry Point Queries:**
+- If find_entry_points returns entries → **STOP, synthesize answer**
+- If it returns empty → **STOP, synthesize answer** (no standard entry points IS the answer)
+
+### Anti-Pattern (DO NOT DO THIS):
+
+  Tool 1: find_dominators returns "not reachable from entry point"
+  Tool 2: find_entry_points to verify entry points exist [UNNECESSARY]
+  Tool 3: find_callers to check if there are callers [UNNECESSARY]
+  Tool 4: Read to look at the source code [UNNECESSARY]
+
+**Instead:** After Tool 1, synthesize the answer immediately.
+
 ## GROUNDING RULES (Prevents Hallucination)
 
 ### Evidence Requirements

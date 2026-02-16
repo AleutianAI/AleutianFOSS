@@ -197,8 +197,27 @@ func (t *findSymbolTool) Execute(ctx context.Context, params map[string]any) (*R
 
 	// Use index to find symbols by name
 	var matches []*ast.Symbol
+	var usedFuzzy bool
+
 	if t.index != nil {
+		// Try exact match first (fast path)
 		matches = t.index.GetByName(p.Name)
+
+		// If no exact match, try fuzzy search (fallback)
+		if len(matches) == 0 {
+			searchCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			defer cancel()
+
+			fuzzyMatches, err := t.index.Search(searchCtx, p.Name, 10)
+			if err == nil && len(fuzzyMatches) > 0 {
+				matches = fuzzyMatches
+				usedFuzzy = true
+
+				t.logger.Info("find_symbol: exact match failed, using fuzzy search",
+					slog.String("query", p.Name),
+					slog.Int("fuzzy_matches", len(fuzzyMatches)))
+			}
+		}
 	}
 
 	// Apply filters
@@ -227,7 +246,15 @@ func (t *findSymbolTool) Execute(ctx context.Context, params map[string]any) (*R
 	// Format text output
 	outputText := t.formatText(p.Name, filtered)
 
-	span.SetAttributes(attribute.Int("match_count", len(filtered)))
+	// Add fuzzy match indicator if applicable
+	if usedFuzzy && len(filtered) > 0 {
+		outputText = "⚠️ No exact match found. Showing partial matches:\n\n" + outputText
+	}
+
+	span.SetAttributes(
+		attribute.Int("match_count", len(filtered)),
+		attribute.Bool("used_fuzzy", usedFuzzy),
+	)
 
 	return &Result{
 		Success:    true,

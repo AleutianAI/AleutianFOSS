@@ -1,0 +1,51 @@
+# GR-28: Graph Snapshots Tests (Python Language)
+#
+# Verifies that graph state is captured correctly in CRS events for Python code.
+# Tests graph provider snapshot, event context, and generation tracking.
+
+metadata:
+  feature: GR-28
+  title: "Graph Snapshots"
+  language: python
+  project: flask
+  ticket: tickets/merged/GR-28_graph_snapshots.md
+  description: >
+    Tests CRS graph snapshot functionality on Python code. Verifies that
+    call graphs for Python modules, classes, and functions are captured
+    in CRS events and can be reused without rebuilding.
+
+tests:
+  - id: 107
+    name: py_snapshot_create
+    category: GRAPH
+    description: >
+      Build Python call graph and verify snapshot is created.
+      This query should trigger graph construction for Flask codebase
+      and create a snapshot in CRS event context.
+    query: |
+      Find all callers of the create_app function in Flask
+    expected_state: COMPLETE
+    validations: []
+
+  - id: 108
+    name: py_event_context
+    category: GRAPH
+    description: >
+      Verify graph context in events for Python code.
+      This internal test checks that CRS events contain Python-specific
+      graph snapshots (modules, classes, decorators).
+    query: INTERNAL:verify_event_graph_context
+    expected_state: COMPLETE
+    validations: []
+
+  - id: 109
+    name: py_generation_track
+    category: GRAPH
+    description: >
+      Verify graph generation tracking for Python module imports.
+      Each graph modification should increment the generation counter.
+    query: |
+      Find which modules import Blueprint from flask
+    expected_state: COMPLETE
+    validations:
+      - type: generation_incremented

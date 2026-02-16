@@ -35,6 +35,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/safety"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
 )
 
 // Phase defines the interface for agent phases.
@@ -166,6 +167,16 @@ type Dependencies struct {
 	// Optional - if nil, delta journaling is disabled.
 	// GR-33/GR-36: Required for session restore to replay deltas.
 	BadgerJournal *crs.BadgerJournal
+
+	// GraphAnalytics provides graph analysis operations (dominators, communities, etc).
+	// Required for symbol resolution in parameter extraction (CB-31d).
+	// Optional - if nil, parameter extraction falls back to raw symbol names.
+	GraphAnalytics *graph.GraphAnalytics
+
+	// SymbolIndex provides fast symbol lookup by ID, name, or fuzzy search.
+	// Required for symbol resolution in parameter extraction (CB-31d).
+	// Optional - if nil, parameter extraction falls back to raw symbol names.
+	SymbolIndex *index.SymbolIndex
 }
 
 // GraphProvider initializes and provides access to the code graph.

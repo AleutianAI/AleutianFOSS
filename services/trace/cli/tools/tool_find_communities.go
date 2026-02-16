@@ -346,13 +346,13 @@ func (t *findCommunitiesTool) parseParams(params map[string]any) (FindCommunitie
 	if minSizeRaw, ok := params["min_size"]; ok {
 		if minSize, ok := parseIntParam(minSizeRaw); ok {
 			if minSize < 1 {
-				t.logger.Warn("min_size below minimum, clamping to 1",
+				t.logger.Debug("min_size below minimum, clamping to 1",
 					slog.String("tool", "find_communities"),
 					slog.Int("requested", minSize),
 				)
 				minSize = 1
 			} else if minSize > 100 {
-				t.logger.Warn("min_size above maximum, clamping to 100",
+				t.logger.Debug("min_size above maximum, clamping to 100",
 					slog.String("tool", "find_communities"),
 					slog.Int("requested", minSize),
 				)
@@ -366,13 +366,13 @@ func (t *findCommunitiesTool) parseParams(params map[string]any) (FindCommunitie
 	if resolutionRaw, ok := params["resolution"]; ok {
 		if resolution, ok := parseFloatParam(resolutionRaw); ok {
 			if resolution < 0.1 {
-				t.logger.Warn("resolution below minimum, clamping to 0.1",
+				t.logger.Debug("resolution below minimum, clamping to 0.1",
 					slog.String("tool", "find_communities"),
 					slog.Float64("requested", resolution),
 				)
 				resolution = 0.1
 			} else if resolution > 5.0 {
-				t.logger.Warn("resolution above maximum, clamping to 5.0",
+				t.logger.Debug("resolution above maximum, clamping to 5.0",
 					slog.String("tool", "find_communities"),
 					slog.Float64("requested", resolution),
 				)
@@ -386,13 +386,13 @@ func (t *findCommunitiesTool) parseParams(params map[string]any) (FindCommunitie
 	if topRaw, ok := params["top"]; ok {
 		if top, ok := parseIntParam(topRaw); ok {
 			if top < 1 {
-				t.logger.Warn("top below minimum, clamping to 1",
+				t.logger.Debug("top below minimum, clamping to 1",
 					slog.String("tool", "find_communities"),
 					slog.Int("requested", top),
 				)
 				top = 1
 			} else if top > 50 {
-				t.logger.Warn("top above maximum, clamping to 50",
+				t.logger.Debug("top above maximum, clamping to 50",
 					slog.String("tool", "find_communities"),
 					slog.Int("requested", top),
 				)

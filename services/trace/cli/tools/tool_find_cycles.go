@@ -260,7 +260,7 @@ func (t *findCyclesTool) parseParams(params map[string]any) (FindCyclesParams, e
 	if minSizeRaw, ok := params["min_size"]; ok {
 		if minSize, ok := parseIntParam(minSizeRaw); ok {
 			if minSize < 2 {
-				t.logger.Warn("min_size below minimum, clamping to 2",
+				t.logger.Debug("min_size below minimum, clamping to 2",
 					slog.String("tool", "find_cycles"),
 					slog.Int("requested", minSize),
 				)
@@ -274,13 +274,13 @@ func (t *findCyclesTool) parseParams(params map[string]any) (FindCyclesParams, e
 	if limitRaw, ok := params["limit"]; ok {
 		if limit, ok := parseIntParam(limitRaw); ok {
 			if limit < 1 {
-				t.logger.Warn("limit below minimum, clamping to 1",
+				t.logger.Debug("limit below minimum, clamping to 1",
 					slog.String("tool", "find_cycles"),
 					slog.Int("requested", limit),
 				)
 				limit = 1
 			} else if limit > 100 {
-				t.logger.Warn("limit above maximum, clamping to 100",
+				t.logger.Debug("limit above maximum, clamping to 100",
 					slog.String("tool", "find_cycles"),
 					slog.Int("requested", limit),
 				)

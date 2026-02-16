@@ -1,0 +1,51 @@
+# GR-33: Disk Persistence Tests (Go Language)
+#
+# Verifies checkpoint save/load works correctly.
+# Tests that CRS state is persisted to disk and can be restored after restart.
+# These are internal tests that verify BadgerDB persistence.
+
+metadata:
+  feature: GR-33
+  title: "Disk Persistence"
+  language: go
+  project: orchestrator
+  ticket: tickets/merged/GR-33_disk_persistence.md
+  description: >
+    Tests CRS disk persistence layer. Verifies that checkpoint files are
+    created, persisted to BadgerDB, and can be restored after server restart.
+    This is critical for session restore to work across server restarts.
+
+tests:
+  - id: 4
+    name: checkpoint_save
+    category: PERSISTENCE
+    description: >
+      Trigger checkpoint save by analyzing the api package.
+      The agent should remember key types, and this should create
+      checkpoint files in ~/.aleutian/crs/.
+    query: |
+      Analyze the api package and remember the key types
+    expected_state: COMPLETE
+    validations: []
+
+  - id: 5
+    name: checkpoint_verify
+    category: PERSISTENCE
+    description: >
+      Verify checkpoint exists on disk.
+      This is an internal test that checks for BadgerDB files
+      (MANIFEST, *.vlog, *.sst) in ~/.aleutian/crs/.
+    query: INTERNAL:verify_checkpoint_exists
+    expected_state: COMPLETE
+    validations: []
+
+  - id: 6
+    name: checkpoint_restore
+    category: PERSISTENCE
+    description: >
+      Restore from checkpoint after crash simulation.
+      This internal test restarts the trace server and verifies
+      that state is restored from disk (not recreated from scratch).
+    query: INTERNAL:restart_and_verify_state
+    expected_state: COMPLETE
+    validations: []

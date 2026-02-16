@@ -29,6 +29,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/safety"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools/file"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 )
 
 // coordinatorRegistry tracks coordinators by session ID for cleanup.
@@ -445,6 +446,24 @@ func (f *DefaultDependenciesFactory) Create(session *agent.Session, query string
 					} else {
 						deps.ContextManager = mgr
 						slog.Info("ContextManager created",
+							slog.String("session_id", session.ID),
+						)
+					}
+				}
+
+				// CB-31d: Populate GraphAnalytics and SymbolIndex for symbol resolution
+				if cached.Graph != nil && cached.Index != nil {
+					// Wrap graph as hierarchical for analytics
+					hg, err := graph.WrapGraph(cached.Graph)
+					if err != nil {
+						slog.Warn("CB-31d: Failed to wrap graph for analytics",
+							slog.String("error", err.Error()),
+						)
+					} else {
+						// Create GraphAnalytics for symbol resolution
+						deps.GraphAnalytics = graph.NewGraphAnalytics(hg)
+						deps.SymbolIndex = cached.Index
+						slog.Debug("CB-31d: Symbol resolution enabled",
 							slog.String("session_id", session.ID),
 						)
 					}

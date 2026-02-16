@@ -291,13 +291,13 @@ func (t *findDeadCodeTool) parseParams(params map[string]any) (FindDeadCodeParam
 	if limitRaw, ok := params["limit"]; ok {
 		if limit, ok := parseIntParam(limitRaw); ok {
 			if limit < 1 {
-				t.logger.Warn("limit below minimum, clamping to 1",
+				t.logger.Debug("limit below minimum, clamping to 1",
 					slog.String("tool", "find_dead_code"),
 					slog.Int("requested", limit),
 				)
 				limit = 1
 			} else if limit > 500 {
-				t.logger.Warn("limit above maximum, clamping to 500",
+				t.logger.Debug("limit above maximum, clamping to 500",
 					slog.String("tool", "find_dead_code"),
 					slog.Int("requested", limit),
 				)

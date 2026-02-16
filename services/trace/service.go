@@ -281,7 +281,7 @@ func (s *Service) Init(ctx context.Context, projectRoot string, languages, exclu
 	result.SymbolsExtracted = idx.Stats().TotalSymbols
 
 	// O-1: Log build statistics for observability
-	slog.Info("GR-41c: Graph built",
+	logAttrs := []any{
 		slog.String("project_root", projectRoot),
 		slog.Int("nodes", buildResult.Stats.NodesCreated),
 		slog.Int("edges", buildResult.Stats.EdgesCreated),
@@ -290,8 +290,13 @@ func (s *Service) Init(ctx context.Context, projectRoot string, languages, exclu
 		slog.Int("call_edges_unresolved", buildResult.Stats.CallEdgesUnresolved),
 		slog.Int("interface_edges", buildResult.Stats.GoInterfaceEdges),
 		slog.Int64("build_duration_ms", buildResult.Stats.DurationMilli),
-		slog.Bool("incomplete", buildResult.Incomplete),
-	)
+	}
+	// Add microsecond precision for sub-millisecond builds
+	if buildResult.Stats.DurationMilli == 0 && buildResult.Stats.DurationMicro > 0 {
+		logAttrs = append(logAttrs, slog.Int64("build_duration_us", buildResult.Stats.DurationMicro))
+	}
+	logAttrs = append(logAttrs, slog.Bool("incomplete", buildResult.Incomplete))
+	slog.Info("GR-41c: Graph built", logAttrs...)
 
 	// Create assembler
 	assembler := cbcontext.NewAssembler(g, idx)
@@ -320,6 +325,15 @@ func (s *Service) Init(ctx context.Context, projectRoot string, languages, exclu
 				slog.String("project_root", projectRoot),
 				slog.Int("nodes", g.NodeCount()),
 				slog.Int("edges", g.EdgeCount()),
+			)
+
+			// P3: Log explicit graph readiness for easier debugging
+			slog.Info("graph ready for queries",
+				slog.String("project_root", projectRoot),
+				slog.Int("nodes", g.NodeCount()),
+				slog.Int("edges", g.EdgeCount()),
+				slog.Int64("build_time_us", buildResult.Stats.DurationMicro),
+				slog.Bool("complete", !buildResult.Incomplete),
 			)
 		}
 	}

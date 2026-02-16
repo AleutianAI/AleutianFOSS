@@ -395,6 +395,131 @@ func TestFindSymbolTool_Execute(t *testing.T) {
 	})
 }
 
+func TestFindSymbolTool_PartialMatch(t *testing.T) {
+	ctx := context.Background()
+
+	// Create test index with symbol "getDatesToProcess"
+	g := graph.NewGraph("/test")
+	idx := index.NewSymbolIndex()
+
+	sym := &ast.Symbol{
+		ID:        "processor/dates.go:10:getDatesToProcess",
+		Name:      "getDatesToProcess",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "processor/dates.go",
+		StartLine: 10,
+		EndLine:   20,
+		Package:   "processor",
+		Signature: "func getDatesToProcess() []time.Time",
+		Exported:  false,
+		Language:  "go",
+	}
+
+	// Add to graph and index
+	g.AddNode(sym)
+	if err := idx.Add(sym); err != nil {
+		t.Fatalf("Failed to add symbol to index: %v", err)
+	}
+
+	tool := NewFindSymbolTool(g, idx)
+
+	t.Run("exact match works", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"name": "getDatesToProcess",
+		})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindSymbolOutput)
+		if !ok {
+			t.Fatalf("Output is not FindSymbolOutput, got %T", result.Output)
+		}
+
+		if output.MatchCount != 1 {
+			t.Errorf("got %d matches, want 1", output.MatchCount)
+		}
+
+		// Exact match should NOT have fuzzy warning
+		outputText := result.OutputText
+		if strings.Contains(outputText, "⚠️") {
+			t.Errorf("Exact match should not have fuzzy warning")
+		}
+	})
+
+	t.Run("partial match finds it", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"name": "Process", // Partial match
+		})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindSymbolOutput)
+		if !ok {
+			t.Fatalf("Output is not FindSymbolOutput, got %T", result.Output)
+		}
+
+		if output.MatchCount < 1 {
+			t.Errorf("got %d matches, want at least 1", output.MatchCount)
+		}
+
+		// Check that getDatesToProcess is in the results
+		found := false
+		for _, match := range output.Symbols {
+			if match.Name == "getDatesToProcess" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Expected to find 'getDatesToProcess' in partial match results")
+		}
+
+		// Partial match should have fuzzy warning
+		outputText := result.OutputText
+		if !strings.Contains(outputText, "⚠️") {
+			t.Errorf("Partial match should have fuzzy warning, got: %s", outputText)
+		}
+	})
+
+	t.Run("no match at all", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"name": "NonExistentXYZ",
+		})
+
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindSymbolOutput)
+		if !ok {
+			t.Fatalf("Output is not FindSymbolOutput, got %T", result.Output)
+		}
+
+		if output.MatchCount != 0 {
+			t.Errorf("got %d matches, want 0", output.MatchCount)
+		}
+
+		// No matches should show "No symbols found"
+		outputText := result.OutputText
+		if !strings.Contains(outputText, "No symbols found") {
+			t.Errorf("Expected 'No symbols found' message, got: %s", outputText)
+		}
+	})
+}
+
 func TestGetCallChainTool_Execute(t *testing.T) {
 	ctx := context.Background()
 	g, idx := createTestGraphWithCallers(t)

@@ -1,0 +1,549 @@
+# TOOL-HAPPY-PANDAS: Tool Happy Path Tests (Python - Pandas)
+#
+# One happy-path test per registered tool against the Pandas data analysis library.
+# Tests 6100-6122: Registered tools (expected_state: COMPLETE)
+# Tests 6123-6139: Unregistered/TODO tools (expected_state: CLARIFY)
+
+metadata:
+  feature: TOOL-HAPPY-PANDAS
+  title: "Tool Happy Path - Pandas"
+  language: python
+  project: pandas
+  project_root: ~/projects/pandas
+  ticket: tickets/in_progress/integration_testing_outcomes_results_1a.md
+  description: >
+    Validates every registered graph tool against the Pandas data analysis library.
+    Each test exercises one tool with a project-specific query using real symbols.
+    Pandas is a Python data analysis library with DataFrame, Series, and Index types.
+
+tests:
+  # ── Registered Tools (00-22) ── expected_state: COMPLETE ──
+
+  - id: 6100
+    name: pandas_find_callers
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callers tool against Pandas. Target: DataFrame.__init__ constructor.
+    query: |
+      Who calls the DataFrame.__init__ constructor?
+    expected_state: COMPLETE
+    reference_answer: |
+      DataFrame.__init__ is called from factory functions like read_csv, read_json,
+      concat, and merge as well as from DataFrame methods that return new DataFrames.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6101
+    name: pandas_find_callees
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against Pandas. Target: DataFrame.merge.
+    query: |
+      What functions does DataFrame.merge call?
+    expected_state: COMPLETE
+    reference_answer: |
+      DataFrame.merge calls merge_ordered, _MergeOperation, and various
+      index alignment and dtype validation functions in core/reshape/merge.py.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6102
+    name: pandas_find_implementations
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_implementations tool against Pandas. Target: Index base class.
+    query: |
+      What classes extend the Index base class?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Index base class in core/indexes/base.py is extended by RangeIndex,
+      MultiIndex, DatetimeIndex, TimedeltaIndex, PeriodIndex, and CategoricalIndex.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6103
+    name: pandas_find_symbol
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_symbol tool against Pandas. Target: DataFrame class.
+    query: |
+      Where is the DataFrame class defined?
+    expected_state: COMPLETE
+    reference_answer: |
+      The DataFrame class is defined in core/frame.py. It is the primary
+      two-dimensional tabular data structure in Pandas.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6104
+    name: pandas_find_references
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_references tool against Pandas. Target: Series type.
+    query: |
+      Where is the Series type used across the codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Series type is used extensively across core modules including frame.py,
+      groupby, reshape, indexing, and io parsers for column-level operations.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6105
+    name: pandas_get_call_chain
+    category: TOOL_HAPPY_PATH
+    description: >
+      get_call_chain tool against Pandas. From read_csv to DataFrame construction.
+    query: |
+      Show the call chain from read_csv to DataFrame construction
+    expected_state: COMPLETE
+    reference_answer: |
+      read_csv -> TextFileReader.__init__ -> _engine.read -> _make_parser_function ->
+      TextParser.read -> DataFrame.__init__ with parsed column data.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6106
+    name: pandas_find_path
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_path tool against Pandas. Between DataFrame.groupby and aggregate.
+    query: |
+      Find the shortest path between DataFrame.groupby and aggregate
+    expected_state: COMPLETE
+    reference_answer: |
+      DataFrame.groupby -> DataFrameGroupBy.__init__ -> aggregate via
+      the GroupBy.aggregate method in core/groupby/generic.py.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6107
+    name: pandas_find_hotspots
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_hotspots tool against Pandas.
+    query: |
+      What are the most connected functions (hotspots) in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      Top hotspots include DataFrame.__init__, Series.__init__, Index methods,
+      and the internal BlockManager operations that underpin data storage.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6108
+    name: pandas_find_dead_code
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dead_code tool against Pandas.
+    query: |
+      Find unused or dead code in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Dead code analysis finds functions with zero incoming edges that are
+      not entry points, test helpers, or __init__ methods.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6109
+    name: pandas_find_cycles
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_cycles tool against Pandas.
+    query: |
+      Find circular call dependencies in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Pandas has circular dependencies in areas like DataFrame/Series interop
+      where Series methods create DataFrames and DataFrame methods create Series.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6110
+    name: pandas_find_important
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_important tool (PageRank) against Pandas.
+    query: |
+      What are the most important functions by PageRank in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      PageRank identifies central functions in core/frame.py (DataFrame ops),
+      core/series.py (Series ops), and core/internals (BlockManager).
+    validations:
+      - type: graph_tool_used
+
+  - id: 6111
+    name: pandas_find_communities
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_communities tool (Leiden) against Pandas.
+    query: |
+      Find natural code communities and module boundaries in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Communities align with Pandas module structure: core/frame, core/series,
+      core/groupby, core/reshape, io (parsers/writers), and indexing.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6112
+    name: pandas_find_articulation_points
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_articulation_points tool against Pandas.
+    query: |
+      Find single points of failure in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Articulation points include key functions in BlockManager and Index
+      that bridge between data storage, indexing, and computation layers.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6113
+    name: pandas_find_dominators
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dominators tool against Pandas. Target: aggregation.
+    query: |
+      What functions must be called before aggregation executes?
+    expected_state: COMPLETE
+    reference_answer: |
+      Dominators of aggregation include groupby initialization, key validation,
+      and GroupBy.__init__ which must complete before aggregate runs.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6114
+    name: pandas_find_loops
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_loops tool against Pandas. Target: indexing system.
+    query: |
+      Find recursive functions in the indexing system
+    expected_state: COMPLETE
+    reference_answer: |
+      Recursive patterns exist in MultiIndex level processing, hierarchical
+      index operations, and nested groupby key resolution.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6115
+    name: pandas_find_merge_points
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_merge_points tool against Pandas. Target: merge strategies.
+    query: |
+      Where do different merge strategies converge?
+    expected_state: COMPLETE
+    reference_answer: |
+      Merge points include _MergeOperation.get_result where different join types
+      (inner, outer, left, right) converge into a single DataFrame result.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6116
+    name: pandas_find_common_dependency
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_common_dependency tool against Pandas. Between concat and merge.
+    query: |
+      What shared dependency do concat and merge operations have?
+    expected_state: COMPLETE
+    reference_answer: |
+      Both concat and merge depend on Index alignment routines and the
+      BlockManager for constructing the resulting DataFrame.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6117
+    name: pandas_find_control_dependencies
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_control_dependencies tool against Pandas. Target: dtype inference.
+    query: |
+      What conditionals control whether dtype inference runs?
+    expected_state: COMPLETE
+    reference_answer: |
+      dtype inference is controlled by the dtype parameter checks, the
+      convert_dtypes flag, and nullable dtype detection in array construction.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6118
+    name: pandas_find_extractable_regions
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_extractable_regions tool against Pandas.
+    query: |
+      Find functions that could be safely extracted into separate functions
+    expected_state: COMPLETE
+    reference_answer: |
+      SESE regions in large functions like DataFrame.__init__ and merge
+      that have clear entry/exit points for extraction.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6119
+    name: pandas_check_reducibility
+    category: TOOL_HAPPY_PATH
+    description: >
+      check_reducibility tool against Pandas.
+    query: |
+      Check the control flow structure quality of this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Reducibility analysis shows the overall control flow graph structure,
+      identifying any irreducible regions that complicate analysis.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6120
+    name: pandas_find_critical_path
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_critical_path tool against Pandas.
+    query: |
+      What is the mandatory call sequence to read a CSV file into a DataFrame?
+    expected_state: COMPLETE
+    reference_answer: |
+      The critical path goes through read_csv -> parser initialization ->
+      data reading -> dtype inference -> DataFrame construction.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6121
+    name: pandas_find_module_api
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_module_api tool against Pandas. Target: pandas.core.frame module.
+    query: |
+      What is the public API of the pandas.core.frame module?
+    expected_state: COMPLETE
+    reference_answer: |
+      pandas.core.frame exports the DataFrame class with methods for data
+      manipulation, aggregation, merging, indexing, and IO operations.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6122
+    name: pandas_find_weighted_criticality
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_weighted_criticality tool against Pandas.
+    query: |
+      What are the most critical functions by weighted importance?
+    expected_state: COMPLETE
+    reference_answer: |
+      Weighted criticality combines PageRank, betweenness, and degree
+      centrality to identify functions critical across multiple dimensions.
+    validations:
+      - type: graph_tool_used
+
+  # ── Unregistered/TODO Tools (23-39) ── expected_state: CLARIFY ──
+
+  - id: 6123
+    name: pandas_find_entry_points
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_entry_points tool (not yet registered as standalone tool).
+    query: |
+      What are the entry points into this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone. Entry points include
+      public API functions like read_csv, DataFrame(), and Series().
+    validations: []
+
+  - id: 6124
+    name: pandas_trace_data_flow
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: trace_data_flow tool (not yet registered as standalone tool).
+    query: |
+      Trace how data flows through the groupby aggregation pipeline
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6125
+    name: pandas_trace_error_flow
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: trace_error_flow tool (not yet registered as standalone tool).
+    query: |
+      Trace how errors propagate through the indexing system
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6126
+    name: pandas_find_config_usage
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_config_usage tool (not yet registered as standalone tool).
+    query: |
+      How are pandas options and configuration used across the library?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6127
+    name: pandas_find_similar_code
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_similar_code tool (not yet registered as standalone tool).
+    query: |
+      Find code similar to the DataFrame.merge logic
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6128
+    name: pandas_build_minimal_context
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: build_minimal_context tool (not yet registered as standalone tool).
+    query: |
+      Build minimal context needed to understand the DataFrame.groupby method
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6129
+    name: pandas_summarize_file
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: summarize_file tool (not yet registered as standalone tool).
+    query: |
+      Summarize the pandas/core/frame.py file
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6130
+    name: pandas_summarize_package
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: summarize_package tool (not yet registered as standalone tool).
+    query: |
+      Summarize the pandas.core.groupby package and its modules
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6131
+    name: pandas_analyze_change_impact
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: analyze_change_impact tool (not yet registered as standalone tool).
+    query: |
+      What would be the impact of changing the DataFrame.iloc accessor?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6132
+    name: pandas_check_breaking_changes
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: check_breaking_changes tool (not yet registered as standalone tool).
+    query: |
+      Would removing the DataFrame.append method be a breaking change?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6133
+    name: pandas_simulate_change
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: simulate_change tool (not yet registered as standalone tool).
+    query: |
+      Simulate the impact of refactoring BlockManager into a new storage backend
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6134
+    name: pandas_find_test_coverage
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_test_coverage tool (not yet registered as standalone tool).
+    query: |
+      Which functions in pandas/core/frame.py lack test coverage?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6135
+    name: pandas_detect_side_effects
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: detect_side_effects tool (not yet registered as standalone tool).
+    query: |
+      What side effects does the DataFrame.__setitem__ method have?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6136
+    name: pandas_detect_patterns
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: detect_patterns tool (not yet registered as standalone tool).
+    query: |
+      What design patterns are used in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6137
+    name: pandas_find_code_smells
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_code_smells tool (not yet registered as standalone tool).
+    query: |
+      Find code smells in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6138
+    name: pandas_find_duplication
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: find_duplication tool (not yet registered as standalone tool).
+    query: |
+      Find duplicated code patterns in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []
+
+  - id: 6139
+    name: pandas_extract_conventions
+    category: TOOL_HAPPY_PATH_TODO
+    description: >
+      TODO: extract_conventions tool (not yet registered as standalone tool).
+    query: |
+      What coding conventions does this codebase follow?
+    expected_state: COMPLETE
+    reference_answer: |
+      TODO: Tool not yet registered as standalone.
+    validations: []

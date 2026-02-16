@@ -208,8 +208,6 @@ func (t *findLoopsTool) Definition() ToolDefinition {
 
 // Execute runs the find_loops tool.
 func (t *findLoopsTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
-	start := time.Now()
-
 	// Parse and validate parameters
 	p, err := t.parseParams(params)
 	if err != nil {
@@ -226,6 +224,39 @@ func (t *findLoopsTool) Execute(ctx context.Context, params map[string]any) (*Re
 			Error:   "graph analytics not initialized",
 		}, nil
 	}
+
+	// GR-17b Fix: Check graph readiness with retry logic
+	const maxRetries = 3
+	const retryDelay = 500 * time.Millisecond
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if t.analytics.IsGraphReady() {
+			break
+		}
+
+		if attempt < maxRetries-1 {
+			t.logger.Info("graph not ready, retrying after delay",
+				slog.Int("attempt", attempt+1),
+				slog.Int("max_retries", maxRetries),
+				slog.Duration("retry_delay", retryDelay),
+			)
+			time.Sleep(retryDelay)
+		} else {
+			return &Result{
+				Success: false,
+				Error: "graph not ready - indexing still in progress. " +
+					"Please wait a few seconds for graph initialization to complete and try again.",
+			}, nil
+		}
+	}
+
+	// Continue with existing logic
+	return t.executeOnce(ctx, p)
+}
+
+// executeOnce performs a single execution attempt (extracted for retry logic).
+func (t *findLoopsTool) executeOnce(ctx context.Context, p FindLoopsParams) (*Result, error) {
+	start := time.Now()
 
 	// Start span with context
 	ctx, span := findLoopsTracer.Start(ctx, "findLoopsTool.Execute",
@@ -349,13 +380,13 @@ func (t *findLoopsTool) parseParams(params map[string]any) (FindLoopsParams, err
 	if topRaw, ok := params["top"]; ok {
 		if top, ok := parseIntParam(topRaw); ok {
 			if top < 1 {
-				t.logger.Warn("top below minimum, clamping to 1",
+				t.logger.Debug("top below minimum, clamping to 1",
 					slog.String("tool", "find_loops"),
 					slog.Int("requested", top),
 				)
 				top = 1
 			} else if top > 100 {
-				t.logger.Warn("top above maximum, clamping to 100",
+				t.logger.Debug("top above maximum, clamping to 100",
 					slog.String("tool", "find_loops"),
 					slog.Int("requested", top),
 				)
@@ -369,7 +400,7 @@ func (t *findLoopsTool) parseParams(params map[string]any) (FindLoopsParams, err
 	if minSizeRaw, ok := params["min_size"]; ok {
 		if minSize, ok := parseIntParam(minSizeRaw); ok {
 			if minSize < 1 {
-				t.logger.Warn("min_size below minimum, clamping to 1",
+				t.logger.Debug("min_size below minimum, clamping to 1",
 					slog.String("tool", "find_loops"),
 					slog.Int("requested", minSize),
 				)

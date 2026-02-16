@@ -1630,7 +1630,44 @@ func (a *GraphAnalytics) DetectEntryNodes(ctx context.Context) []string {
 	entries := make([]string, 0)
 	mainEntries := make([]string, 0) // Prioritize main/init
 
+	totalNodes := 0
+	nodesWithIncoming := 0
+	mainFunctionFound := false
+	mainFunctionIncoming := 0
+
 	for _, node := range a.graph.Nodes() {
+		totalNodes++
+
+		// Track if we see main function
+		if node.Symbol != nil && node.Symbol.Name == "main" && node.Symbol.Package == "main" {
+			mainFunctionFound = true
+			mainFunctionIncoming = len(node.Incoming)
+			slog.Debug("GR-17: Found main function",
+				slog.String("id", node.ID),
+				slog.Int("incoming_edges", len(node.Incoming)),
+				slog.Int("outgoing_edges", len(node.Outgoing)),
+			)
+			if len(node.Incoming) > 0 {
+				slog.Debug("GR-17: Main function has incoming edges (BUG!)",
+					slog.Int("count", len(node.Incoming)),
+				)
+				for i, edge := range node.Incoming {
+					fromNode, _ := a.graph.GetNode(edge.FromID)
+					fromName := "<unknown>"
+					if fromNode != nil && fromNode.Symbol != nil {
+						fromName = fromNode.Symbol.Name
+					}
+					slog.Debug("GR-17: Main incoming edge",
+						slog.Int("edge_num", i),
+						slog.String("from_id", edge.FromID),
+						slog.String("from_name", fromName),
+						slog.String("edge_type", edge.Type.String()),
+						slog.String("location", edge.Location.String()),
+					)
+				}
+			}
+		}
+
 		// Node is an entry if it has no incoming edges
 		if len(node.Incoming) == 0 {
 			// Check if this is a main or init function
@@ -1642,8 +1679,18 @@ func (a *GraphAnalytics) DetectEntryNodes(ctx context.Context) []string {
 				}
 			}
 			entries = append(entries, node.ID)
+		} else {
+			nodesWithIncoming++
 		}
 	}
+
+	slog.Info("GR-17: DetectEntryNodes summary",
+		slog.Int("total_nodes", totalNodes),
+		slog.Int("nodes_with_incoming", nodesWithIncoming),
+		slog.Int("entry_nodes_found", len(mainEntries)+len(entries)),
+		slog.Bool("main_function_found", mainFunctionFound),
+		slog.Int("main_incoming_edges", mainFunctionIncoming),
+	)
 
 	// Return main/init entries first, then others
 	result := append(mainEntries, entries...)

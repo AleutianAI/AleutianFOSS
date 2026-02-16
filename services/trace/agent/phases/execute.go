@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
@@ -80,6 +81,11 @@ type ExecutePhase struct {
 	// qualityValidator validates response quality (hedging, citations).
 	// Checks for evidence-based claims in analytical responses.
 	qualityValidator *classifier.QualityValidator
+
+	// symbolCache caches symbol resolutions per session (CB-31d).
+	// Key: "sessionID:symbolName", Value: SymbolResolution
+	// Thread Safety: sync.Map is safe for concurrent use.
+	symbolCache sync.Map
 }
 
 // ExecutePhaseOption configures an ExecutePhase.
@@ -435,7 +441,8 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 		}
 
 		// TR-1 Fix: Extract tool parameters from query/context
-		params, paramErr := p.extractToolParameters(deps.Query, hardForcing.Tool, toolDefs, deps.Context)
+		// CB-31d: Pass deps for symbol resolution
+		params, paramErr := p.extractToolParameters(deps.Query, hardForcing.Tool, toolDefs, deps.Context, deps)
 		if paramErr != nil {
 			// TR-7 Fix: Fallback to Main LLM on parameter extraction failure
 			slog.Warn("Parameter extraction failed, falling back to Main LLM (CB-31d)",
@@ -697,26 +704,26 @@ func (p *ExecutePhase) buildLLMRequest(deps *Dependencies) (*llm.Request, *agent
 					// trace_logs_30 showed GLM-4.7-flash outputting malformed XML that
 					// crashed Ollama's parser.
 					if circuitBreakerFired {
-						synthesisPrompt := `You have already gathered information from tools. Now synthesize a complete answer.
+						synthesisPrompt := `You have gathered information from tools. Now provide a complete answer.
 
-CRITICAL - DO NOT OUTPUT ANY OF THESE PATTERNS:
-- <tool_call> or </tool_call> XML tags
-- <function> or </function> XML tags
-- Any XML-formatted tool invocations
-- Tool names by themselves without explanation
+MANDATORY: YOU MUST RESPOND
+- You MUST provide a text response
+- Empty responses are not allowed
+- If you don't know, say "I don't know" or "Not found"
+- NEVER return an empty response
 
-DO NOT:
-- Say you need to call more tools
-- Output raw tool names
-- Say "I'll analyze..." without actually answering
-- Use any XML syntax in your response
+CRITICAL - DO NOT OUTPUT ANY XML OR TOOL CALLS:
+- No <tool_call> or </tool_call> tags
+- No <function> or </function> tags
+- No XML-formatted invocations
+- Tools are now disabled - you cannot call more tools
 
 DO:
-- Use the information already gathered from previous tool calls shown above
-- Provide a direct, comprehensive answer in plain text
-- If information is incomplete, state what you found and what's missing
+- Synthesize a clear answer from the tool results above
+- State "not found" if results are empty
+- Be concise (2-3 paragraphs maximum)
 
-Answer the user's question now based on the tool results shown above.`
+Provide your answer now:`
 						request.Messages = append(request.Messages, llm.Message{
 							Role:    "user",
 							Content: synthesisPrompt,

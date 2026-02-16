@@ -1,0 +1,79 @@
+# GR-12: PageRank Algorithm Tests (JavaScript Language)
+#
+# Verifies that PageRank-based importance ranking works correctly for JavaScript code.
+# Tests find_important tool, convergence, and performance.
+
+metadata:
+  feature: GR-12
+  title: "PageRank Algorithm"
+  language: javascript
+  project: express
+  ticket: tickets/merged/GR-12_pagerank.md
+  description: >
+    Tests CRS PageRank functionality on JavaScript code. Verifies that
+    find_important uses PageRank algorithm to rank symbol importance
+    in JavaScript module call graphs and middleware chains.
+
+tests:
+  - id: 231
+    name: js_basic
+    category: PAGERANK
+    description: >
+      Basic find_important query for JavaScript code.
+      This query should trigger PageRank calculation and rank JavaScript
+      functions by their structural importance in the module graph.
+    query: |
+      What are the most important functions in this Express application?
+    expected_state: COMPLETE
+    validations:
+      - type: pagerank_used
+
+  - id: 232
+    name: js_top_param
+    category: PAGERANK
+    description: >
+      find_important with top parameter for JavaScript code.
+      This query should limit results to the top 5 most important
+      JavaScript symbols (functions or middleware).
+    query: |
+      Find the top 5 most important middleware and route handlers
+    expected_state: COMPLETE
+    validations:
+      - type: pagerank_used
+
+  - id: 233
+    name: js_compare
+    category: PAGERANK
+    description: >
+      Comparison query for JavaScript - PageRank vs degree difference.
+      This query should demonstrate PageRank's advantage for identifying
+      central functions in complex middleware chains.
+    query: |
+      Which JavaScript functions have the highest PageRank score?
+    expected_state: COMPLETE
+    validations:
+      - type: pagerank_used
+
+  - id: 234
+    name: js_convergence
+    category: PAGERANK
+    description: >
+      Verify PageRank converges for JavaScript call graphs.
+      This internal test checks that PageRank converges correctly
+      for JavaScript module structures (CommonJS requires).
+    query: INTERNAL:verify_pagerank_convergence
+    expected_state: COMPLETE
+    validations: []
+
+  - id: 235
+    name: js_perf_check
+    category: PAGERANK
+    description: >
+      Performance - PageRank should complete within reasonable time.
+      PageRank calculation should be efficient for JavaScript codebases
+      with many module.exports and require() chains.
+    query: |
+      Find the most architecturally important functions in this Express app using PageRank
+    expected_state: COMPLETE
+    validations:
+      - type: fast_pagerank

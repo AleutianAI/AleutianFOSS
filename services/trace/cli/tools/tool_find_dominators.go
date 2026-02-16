@@ -190,8 +190,6 @@ func (t *findDominatorsTool) Definition() ToolDefinition {
 
 // Execute runs the find_dominators tool.
 func (t *findDominatorsTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
-	start := time.Now()
-
 	// Parse and validate parameters
 	p, err := t.parseParams(params)
 	if err != nil {
@@ -208,6 +206,39 @@ func (t *findDominatorsTool) Execute(ctx context.Context, params map[string]any)
 			Error:   "analytics not initialized",
 		}, nil
 	}
+
+	// GR-17b Fix: Check graph readiness with retry logic
+	const maxRetries = 3
+	const retryDelay = 500 * time.Millisecond
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if t.analytics.IsGraphReady() {
+			break
+		}
+
+		if attempt < maxRetries-1 {
+			t.logger.Info("graph not ready, retrying after delay",
+				slog.Int("attempt", attempt+1),
+				slog.Int("max_retries", maxRetries),
+				slog.Duration("retry_delay", retryDelay),
+			)
+			time.Sleep(retryDelay)
+		} else {
+			return &Result{
+				Success: false,
+				Error: "graph not ready - indexing still in progress. " +
+					"Please wait a few seconds for graph initialization to complete and try again.",
+			}, nil
+		}
+	}
+
+	// Continue with existing logic
+	return t.executeOnce(ctx, p)
+}
+
+// executeOnce performs a single execution attempt (extracted for retry logic).
+func (t *findDominatorsTool) executeOnce(ctx context.Context, p *FindDominatorsParams) (*Result, error) {
+	start := time.Now()
 
 	// Create OTel span
 	ctx, span := findDominatorsTracer.Start(ctx, "findDominatorsTool.Execute",
@@ -428,15 +459,26 @@ func (t *findDominatorsTool) resolveTarget(ctx context.Context, name string) (st
 		return name, nil
 	}
 
-	// Search by name
-	matches := t.index.GetByName(name)
-	for _, sym := range matches {
-		if sym != nil && (sym.Kind == ast.SymbolKindFunction || sym.Kind == ast.SymbolKindMethod) {
-			return sym.ID, nil
-		}
+	// P1: Use fuzzy search helper (Feb 14, 2026)
+	symbol, fuzzy, err := ResolveFunctionWithFuzzy(ctx, t.index, name, t.logger)
+	if err != nil {
+		return "", err
 	}
 
-	return "", fmt.Errorf("no function named '%s' found", name)
+	// Filter by kind - only accept functions and methods
+	if symbol.Kind != ast.SymbolKindFunction && symbol.Kind != ast.SymbolKindMethod {
+		return "", fmt.Errorf("symbol '%s' is not a function or method (kind: %s)", symbol.Name, symbol.Kind)
+	}
+
+	if fuzzy {
+		t.logger.Info("P1: Using fuzzy match for target",
+			slog.String("tool", "find_dominators"),
+			slog.String("query", name),
+			slog.String("matched", symbol.Name),
+		)
+	}
+
+	return symbol.ID, nil
 }
 
 // getDominatedNodes returns all nodes dominated by the given node.

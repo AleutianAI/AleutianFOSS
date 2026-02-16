@@ -94,7 +94,11 @@ type BuildStats struct {
 	CallEdgesUnresolved int
 
 	// DurationMilli is the total build time in milliseconds.
+	// NOTE: For fast builds (< 1ms), this rounds to 0. Use DurationMicro for precision.
 	DurationMilli int64
+
+	// DurationMicro is the total build time in microseconds (for sub-millisecond precision).
+	DurationMicro int64
 }
 
 // BuildResult contains the result of a graph build operation.

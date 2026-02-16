@@ -1,0 +1,51 @@
+# GR-28: Graph Snapshots Tests (TypeScript Language)
+#
+# Verifies that graph state is captured correctly in CRS events for TypeScript code.
+# Tests graph provider snapshot, event context, and generation tracking.
+
+metadata:
+  feature: GR-28
+  title: "Graph Snapshots"
+  language: typescript
+  project: nest
+  ticket: tickets/merged/GR-28_graph_snapshots.md
+  description: >
+    Tests CRS graph snapshot functionality on TypeScript code. Verifies that
+    call graphs for TS modules, decorators, and dependency injection are
+    captured in CRS events and can be reused without rebuilding.
+
+tests:
+  - id: 307
+    name: ts_snapshot_create
+    category: GRAPH
+    description: >
+      Build TypeScript call graph and verify snapshot is created.
+      This query should trigger graph construction for NestJS codebase
+      (decorators, DI) and create a snapshot in CRS event context.
+    query: |
+      Find all callers of the NestFactory.create() method
+    expected_state: COMPLETE
+    validations: []
+
+  - id: 308
+    name: ts_event_context
+    category: GRAPH
+    description: >
+      Verify graph context in events for TypeScript code.
+      This internal test checks that CRS events contain TS-specific
+      graph snapshots (decorators, interfaces, generics).
+    query: INTERNAL:verify_event_graph_context
+    expected_state: COMPLETE
+    validations: []
+
+  - id: 309
+    name: ts_generation_track
+    category: GRAPH
+    description: >
+      Verify graph generation tracking for TypeScript imports.
+      Each graph modification should increment the generation counter.
+    query: |
+      Find which modules import the @Module decorator from nest/common
+    expected_state: COMPLETE
+    validations:
+      - type: generation_incremented

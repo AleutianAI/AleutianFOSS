@@ -257,10 +257,18 @@ func (a *GraphAnalytics) ComputeDominanceFrontier(
 
 	result.DomTree = domTree
 
-	// Empty dominator tree check
+	// Empty dominator tree check (GR-17b Fix)
+	// An empty dominator tree with a valid entry point indicates the graph
+	// is not fully populated yet (initialization race condition).
+	// This should be an error, not a silent empty result.
 	if len(domTree.ImmediateDom) == 0 {
-		telemetry.LoggerWithTrace(ctx, slog.Default()).Debug("dominance_frontier: empty dominator tree, returning empty result")
-		return result, nil
+		telemetry.LoggerWithTrace(ctx, slog.Default()).Warn(
+			"dominance_frontier: empty dominator tree - graph may not be ready",
+			slog.String("entry", domTree.Entry),
+		)
+		return result, &DominanceFrontierError{
+			Message: "dominator tree has no nodes - graph may not be indexed yet or entry point is isolated",
+		}
 	}
 
 	// Start timing

@@ -177,8 +177,6 @@ func (t *findMergePointsTool) Definition() ToolDefinition {
 
 // Execute runs the find_merge_points tool.
 func (t *findMergePointsTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
-	start := time.Now()
-
 	// Parse and validate parameters
 	p, err := t.parseParams(params)
 	if err != nil {
@@ -195,6 +193,42 @@ func (t *findMergePointsTool) Execute(ctx context.Context, params map[string]any
 			Error:   "graph analytics not initialized",
 		}, nil
 	}
+
+	// GR-17b Fix: Check graph readiness with retry logic
+	const maxRetries = 3
+	const retryDelay = 500 * time.Millisecond
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// Check if graph is ready
+		if t.analytics.IsGraphReady() {
+			break
+		}
+
+		// If this is not the last attempt, retry after delay
+		if attempt < maxRetries-1 {
+			t.logger.Info("graph not ready, retrying after delay",
+				slog.Int("attempt", attempt+1),
+				slog.Int("max_retries", maxRetries),
+				slog.Duration("retry_delay", retryDelay),
+			)
+			time.Sleep(retryDelay)
+		} else {
+			// Last attempt failed - return error
+			return &Result{
+				Success: false,
+				Error: "graph not ready - indexing still in progress. " +
+					"Please wait a few seconds for graph initialization to complete and try again.",
+			}, nil
+		}
+	}
+
+	// Continue with existing logic after graph readiness confirmed
+	return t.executeOnce(ctx, p)
+}
+
+// executeOnce performs a single execution attempt (extracted for retry logic).
+func (t *findMergePointsTool) executeOnce(ctx context.Context, p FindMergePointsParams) (*Result, error) {
+	start := time.Now()
 
 	// Start span with context
 	ctx, span := findMergePointsTracer.Start(ctx, "findMergePointsTool.Execute",
@@ -241,9 +275,33 @@ func (t *findMergePointsTool) Execute(ctx context.Context, params map[string]any
 	}
 
 	// Compute dominance frontier
+	// GR-17b Fix: After Fix 2, this will return error if dominator tree is empty
+	// (indicating graph not ready), which will be caught and returned to user.
 	frontier, traceStep := t.analytics.ComputeDominanceFrontierWithCRS(ctx, domTree)
 	if frontier == nil {
-		// No frontier computed - return empty result
+		// This should not happen after Fix 2, but keep as defensive check
+		span.SetAttributes(attribute.Int("merge_points_found", 0))
+		return &Result{
+			Success:   false,
+			Error:     "dominance frontier computation returned nil - graph may not be ready",
+			TraceStep: &traceStep,
+			Duration:  time.Since(start),
+		}, nil
+	}
+
+	// Check if frontier computation returned error via TraceStep
+	if traceStep.Error != "" {
+		span.RecordError(fmt.Errorf("frontier computation failed: %s", traceStep.Error))
+		return &Result{
+			Success:   false,
+			Error:     fmt.Sprintf("failed to compute dominance frontier: %s", traceStep.Error),
+			TraceStep: &traceStep,
+			Duration:  time.Since(start),
+		}, nil
+	}
+
+	// If frontier is empty (no merge points exist), return success with empty result
+	if len(frontier.MergePoints) == 0 {
 		span.SetAttributes(attribute.Int("merge_points_found", 0))
 		output := FindMergePointsOutput{
 			MergePoints: []MergePointInfo{},
@@ -309,13 +367,13 @@ func (t *findMergePointsTool) parseParams(params map[string]any) (FindMergePoint
 	if topRaw, ok := params["top"]; ok {
 		if top, ok := parseIntParam(topRaw); ok {
 			if top < 1 {
-				t.logger.Warn("top below minimum, clamping to 1",
+				t.logger.Debug("top below minimum, clamping to 1",
 					slog.String("tool", "find_merge_points"),
 					slog.Int("requested", top),
 				)
 				top = 1
 			} else if top > 100 {
-				t.logger.Warn("top above maximum, clamping to 100",
+				t.logger.Debug("top above maximum, clamping to 100",
 					slog.String("tool", "find_merge_points"),
 					slog.Int("requested", top),
 				)
@@ -329,7 +387,7 @@ func (t *findMergePointsTool) parseParams(params map[string]any) (FindMergePoint
 	if minSourcesRaw, ok := params["min_sources"]; ok {
 		if minSources, ok := parseIntParam(minSourcesRaw); ok {
 			if minSources < 2 {
-				t.logger.Warn("min_sources below minimum, clamping to 2",
+				t.logger.Debug("min_sources below minimum, clamping to 2",
 					slog.String("tool", "find_merge_points"),
 					slog.Int("requested", minSources),
 				)

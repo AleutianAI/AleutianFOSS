@@ -185,8 +185,6 @@ func (t *findControlDependenciesTool) Definition() ToolDefinition {
 
 // Execute runs the find_control_dependencies tool.
 func (t *findControlDependenciesTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
-	start := time.Now()
-
 	// Parse and validate parameters
 	p, err := t.parseParams(params)
 	if err != nil {
@@ -203,6 +201,39 @@ func (t *findControlDependenciesTool) Execute(ctx context.Context, params map[st
 			Error:   "graph analytics not initialized",
 		}, nil
 	}
+
+	// GR-17b Fix: Check graph readiness with retry logic
+	const maxRetries = 3
+	const retryDelay = 500 * time.Millisecond
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if t.analytics.IsGraphReady() {
+			break
+		}
+
+		if attempt < maxRetries-1 {
+			t.logger.Info("graph not ready, retrying after delay",
+				slog.Int("attempt", attempt+1),
+				slog.Int("max_retries", maxRetries),
+				slog.Duration("retry_delay", retryDelay),
+			)
+			time.Sleep(retryDelay)
+		} else {
+			return &Result{
+				Success: false,
+				Error: "graph not ready - indexing still in progress. " +
+					"Please wait a few seconds for graph initialization to complete and try again.",
+			}, nil
+		}
+	}
+
+	// Continue with existing logic
+	return t.executeOnce(ctx, p)
+}
+
+// executeOnce performs a single execution attempt (extracted for retry logic).
+func (t *findControlDependenciesTool) executeOnce(ctx context.Context, p FindControlDependenciesParams) (*Result, error) {
+	start := time.Now()
 
 	// Start span with context
 	ctx, span := findControlDependenciesTracer.Start(ctx, "findControlDependenciesTool.Execute",
@@ -346,13 +377,13 @@ func (t *findControlDependenciesTool) parseParams(params map[string]any) (FindCo
 	if depthRaw, ok := params["depth"]; ok {
 		if depth, ok := parseIntParam(depthRaw); ok {
 			if depth < 1 {
-				t.logger.Warn("depth below minimum, clamping to 1",
+				t.logger.Debug("depth below minimum, clamping to 1",
 					slog.String("tool", "find_control_dependencies"),
 					slog.Int("requested", depth),
 				)
 				depth = 1
 			} else if depth > 10 {
-				t.logger.Warn("depth above maximum, clamping to 10",
+				t.logger.Debug("depth above maximum, clamping to 10",
 					slog.String("tool", "find_control_dependencies"),
 					slog.Int("requested", depth),
 				)
@@ -377,14 +408,27 @@ func (t *findControlDependenciesTool) resolveTarget(ctx context.Context, name st
 		return name, nil
 	}
 
-	matches := t.index.GetByName(name)
-	for _, sym := range matches {
-		if sym != nil && (sym.Kind == ast.SymbolKindFunction || sym.Kind == ast.SymbolKindMethod) {
-			return sym.ID, nil
-		}
+	// P1: Use fuzzy search helper (Feb 14, 2026)
+	// This enables partial matching - e.g., "Process" finds "getDatesToProcess"
+	symbol, fuzzy, err := ResolveFunctionWithFuzzy(ctx, t.index, name, t.logger)
+	if err != nil {
+		return "", err
 	}
 
-	return "", fmt.Errorf("no function named '%s' found", name)
+	// Filter by kind - only accept functions and methods
+	if symbol.Kind != ast.SymbolKindFunction && symbol.Kind != ast.SymbolKindMethod {
+		return "", fmt.Errorf("symbol '%s' is not a function or method (kind: %s)", symbol.Name, symbol.Kind)
+	}
+
+	if fuzzy {
+		t.logger.Info("P1: Using fuzzy match for target",
+			slog.String("tool", "find_control_dependencies"),
+			slog.String("query", name),
+			slog.String("matched", symbol.Name),
+		)
+	}
+
+	return symbol.ID, nil
 }
 
 // approximateControlDependence creates an approximation using dominators.

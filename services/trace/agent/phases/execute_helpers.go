@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
@@ -293,8 +294,40 @@ func extractFunctionNameFromQuery(query string) string {
 		}
 	}
 
-	// Pattern 5: Look for CamelCase or snake_case function names
+	// P0 Fix (Feb 14, 2026): Pattern 5: "for X function/method" or "of X function/method"
+	// Handles queries like "control dependencies for Process function"
+	for _, pattern := range []string{" for ", " of "} {
+		if idx := strings.Index(lowerQuery, pattern); idx >= 0 {
+			after := query[idx+len(pattern):] // Keep original case
+			words := strings.Fields(after)
+			// Look for pattern: <Symbol> function/method
+			for i := 0; i < len(words)-1; i++ {
+				nextWordLower := strings.ToLower(words[i+1])
+				if nextWordLower == "function" || nextWordLower == "method" || nextWordLower == "symbol" {
+					candidate := strings.Trim(words[i], "?,.()")
+					if isValidFunctionName(candidate) && isFunctionLikeName(candidate) {
+						return candidate
+					}
+				}
+			}
+		}
+	}
+
+	// P0 Fix (Feb 14, 2026): Pattern 6: "X function/method" anywhere in query
+	// Handles: "What dominates Process function", "Find Process method"
 	words := strings.Fields(query)
+	for i := 0; i < len(words)-1; i++ {
+		nextWordLower := strings.ToLower(words[i+1])
+		if nextWordLower == "function" || nextWordLower == "method" || nextWordLower == "symbol" {
+			candidate := strings.Trim(words[i], "?,.()")
+			if isValidFunctionName(candidate) && isFunctionLikeName(candidate) {
+				return candidate
+			}
+		}
+	}
+
+	// Pattern 7 (fallback): Look for CamelCase or snake_case function names
+	// P0 Fix (Feb 14, 2026): This now correctly skips query keywords like "control", "dependencies"
 	for _, word := range words {
 		candidate := strings.Trim(word, "?,.()")
 		if isValidFunctionName(candidate) && isFunctionLikeName(candidate) {
@@ -315,6 +348,8 @@ func isValidFunctionName(s string) bool {
 		return false
 	}
 	// Skip common non-function words (GR-Phase1: expanded for path extraction)
+	// P0 Fix (Feb 14, 2026): Added "control", "dependencies", "dependency", "common"
+	// to prevent extracting query keywords instead of symbol names
 	lower := strings.ToLower(s)
 	skipWords := []string{
 		"the", "a", "an", "this", "that", "what", "who", "how", "which",
@@ -322,6 +357,9 @@ func isValidFunctionName(s string) bool {
 		"path", "from", "to", "between", "and", "or", "with", "for", "in",
 		"most", "important", "top", "are", "is", "does", "do", "has", "have",
 		"these", "those", "connection", "connected", "calls", "callers", "callees",
+		"control", "dependencies", "dependency", "common", "dominators", "dominator",
+		"references", "reference", "implementations", "implementation", "symbol",
+		"hotspots", "hotspot", "cycles", "cycle", "communities", "community",
 	}
 	for _, skip := range skipWords {
 		if lower == skip {
@@ -413,6 +451,84 @@ func extractFunctionFromToolOutput(output string) string {
 				candidate := strings.Trim(words[0], "`,\"'")
 				if isValidFunctionName(candidate) {
 					return candidate
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+// extractSearchPatternFromQuery extracts a search pattern for Grep tool.
+//
+// Description:
+//
+//	P0-2 (Feb 14, 2026): Extracts search pattern when LLM calls Grep without
+//	explicit parameters. Looks for quoted strings, symbol names, or keywords.
+//
+// Inputs:
+//
+//	query - The user's query string.
+//
+// Outputs:
+//
+//	string - The extracted search pattern, or empty if not found.
+func extractSearchPatternFromQuery(query string) string {
+	// Pattern 1: Look for quoted strings (most explicit)
+	// Examples: search for "Handler", find "Process"
+	if idx := strings.Index(query, `"`); idx >= 0 {
+		after := query[idx+1:]
+		if endIdx := strings.Index(after, `"`); endIdx >= 0 {
+			pattern := after[:endIdx]
+			if len(pattern) > 0 {
+				return pattern
+			}
+		}
+	}
+
+	// Pattern 2: "search for X", "find X", "look for X"
+	searchPhrases := []string{"search for ", "find ", "look for ", "grep ", "locate "}
+	lowerQuery := strings.ToLower(query)
+	for _, phrase := range searchPhrases {
+		if idx := strings.Index(lowerQuery, phrase); idx >= 0 {
+			after := query[idx+len(phrase):]
+			words := strings.Fields(after)
+			if len(words) > 0 {
+				candidate := strings.Trim(words[0], "?,.()")
+				if len(candidate) > 0 {
+					return candidate
+				}
+			}
+		}
+	}
+
+	// Pattern 3: "where is X", "show X"
+	wherePhrases := []string{"where is ", "show ", "display "}
+	for _, phrase := range wherePhrases {
+		if idx := strings.Index(lowerQuery, phrase); idx >= 0 {
+			after := query[idx+len(phrase):]
+			words := strings.Fields(after)
+			if len(words) > 0 {
+				candidate := strings.Trim(words[0], "?,.()")
+				if len(candidate) > 0 && candidate != "me" && candidate != "the" {
+					return candidate
+				}
+			}
+		}
+	}
+
+	// Pattern 4: Extract capitalized words (likely symbol names)
+	// Only use this if query contains keywords suggesting search intent
+	if strings.Contains(lowerQuery, "search") || strings.Contains(lowerQuery, "find") ||
+		strings.Contains(lowerQuery, "locate") || strings.Contains(lowerQuery, "grep") {
+		words := strings.Fields(query)
+		for _, word := range words {
+			cleaned := strings.Trim(word, "?,.()'\"")
+			if len(cleaned) > 0 && unicode.IsUpper(rune(cleaned[0])) {
+				// Skip common capitalized non-symbols
+				if cleaned != "I" && cleaned != "What" && cleaned != "Where" &&
+					cleaned != "Show" && cleaned != "Find" && cleaned != "Search" {
+					return cleaned
 				}
 			}
 		}
@@ -824,4 +940,28 @@ func hasSemanticCorrectionForQuery(session *agent.Session, query, correctedTool 
 	}
 
 	return false
+}
+
+// parseInt attempts to parse a string as an integer.
+//
+// Description:
+//
+//	Wrapper around strconv.Atoi that returns 0 on error.
+//	Used by parameter extraction logic to parse numeric values from queries.
+//
+// Inputs:
+//
+//	s - The string to parse.
+//
+// Outputs:
+//
+//	int - The parsed integer, or 0 if parsing fails.
+//
+// Thread Safety: Safe for concurrent use.
+func parseInt(s string) int {
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil {
+		return 0
+	}
+	return n
 }

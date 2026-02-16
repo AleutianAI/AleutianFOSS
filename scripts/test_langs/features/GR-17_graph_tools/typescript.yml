@@ -1,0 +1,191 @@
+# GR-17: Graph Tools Tests (TypeScript Language)
+#
+# Verifies that graph analysis tools work correctly for TypeScript code.
+# Tests tool invocation, parameters, and TypeScript-specific adaptations.
+
+metadata:
+  feature: GR-17
+  title: "Graph Analysis Tools"
+  language: typescript
+  project: nest
+  ticket: tickets/merged/GR-17_graph_tools.md
+  description: >
+    Tests CRS graph tool integration for TypeScript code. Verifies that
+    specialized graph analysis tools work correctly for TypeScript decorators,
+    dependency injection, and NestJS module structure.
+
+tests:
+  - id: 391
+    name: ts_find_articulation_basic
+    category: FIND_ARTICULATION
+    description: >
+      Basic find_articulation_points tool query for TypeScript code.
+      Should identify critical services in NestJS app whose removal
+      would disconnect the dependency injection graph.
+    query: |
+      What are the single points of failure in this NestJS application?
+    expected_state: COMPLETE
+    validations:
+      - type: find_articulation_points_tool_used
+
+  - id: 392
+    name: ts_find_articulation_bridges
+    category: FIND_ARTICULATION
+    description: >
+      find_articulation_points with include_bridges for TypeScript code.
+      Should find both critical services and critical DI relationships.
+    query: |
+      Find critical bottleneck services and the critical dependencies connecting them
+    expected_state: COMPLETE
+    validations:
+      - type: find_articulation_points_bridges
+
+  - id: 394
+    name: ts_find_dominators_basic
+    category: FIND_DOMINATORS
+    description: >
+      Basic find_dominators tool query for TypeScript code.
+      Should find all services that must be injected before reaching
+      a target controller in NestJS.
+    query: |
+      What services dominate the main API controller?
+    expected_state: COMPLETE
+    validations:
+      - type: find_dominators_tool_used
+
+  - id: 395
+    name: ts_find_dominators_tree
+    category: FIND_DOMINATORS
+    description: >
+      find_dominators with show_tree for TypeScript code.
+      Should return the dominator tree structure for NestJS modules.
+    query: |
+      Show the dominator tree starting from the AppModule
+    expected_state: COMPLETE
+    validations:
+      - type: find_dominators_tree
+
+  - id: 397
+    name: ts_find_merge_points_basic
+    category: FIND_MERGE_POINTS
+    description: >
+      Basic find_merge_points tool query for TypeScript code.
+      Should find convergence points in NestJS request handling
+      where different guard/interceptor chains merge.
+    query: |
+      Where do different guard paths converge in this NestJS app?
+    expected_state: COMPLETE
+    validations:
+      - type: find_merge_points_tool_used
+
+  - id: 398
+    name: ts_find_merge_points_sources
+    category: FIND_MERGE_POINTS
+    description: >
+      find_merge_points with specific sources for TypeScript code.
+      Should find where auth module and user module merge in NestJS.
+    query: |
+      Find merge points for auth module and user module services
+    expected_state: COMPLETE
+    validations:
+      - type: find_merge_points_sources
+
+  - id: 400
+    name: ts_find_loops_basic
+    category: FIND_LOOPS
+    description: >
+      Basic find_loops tool query for TypeScript code.
+      Should detect recursive patterns and circular dependencies
+      in NestJS modules (which NestJS usually prevents at runtime).
+    query: |
+      Find recursive functions and circular module dependencies in this NestJS application
+    expected_state: COMPLETE
+    validations:
+      - type: find_loops_tool_used
+
+  - id: 401
+    name: ts_find_loops_min_size
+    category: FIND_LOOPS
+    description: >
+      find_loops with min_size for TypeScript code.
+      Should find mutual recursion with at least N functions involved.
+    query: |
+      Find mutual recursion patterns with at least 2 functions involved
+    expected_state: COMPLETE
+    validations:
+      - type: find_loops_min_size
+
+  - id: 403
+    name: ts_find_common_dependency_basic
+    category: FIND_COMMON_DEPENDENCY
+    description: >
+      Basic find_common_dependency tool query for TypeScript code.
+      Should find the lowest common dependency between two NestJS
+      services or controllers.
+    query: |
+      What is the common dependency between AuthService and UserService?
+    expected_state: COMPLETE
+    validations:
+      - type: find_common_dependency_tool_used
+
+  - id: 404
+    name: ts_find_common_dependency_entry
+    category: FIND_COMMON_DEPENDENCY
+    description: >
+      find_common_dependency with entry point for TypeScript code.
+      Should find LCD relative to bootstrap entry point.
+    query: |
+      Find the lowest common dominator of AuthController and UserController from bootstrap
+    expected_state: COMPLETE
+    validations:
+      - type: find_common_dependency_entry
+
+  - id: 406
+    name: ts_find_control_deps_basic
+    category: FIND_CONTROL_DEPS
+    description: >
+      Basic find_control_dependencies tool query for TypeScript code.
+      Should identify which guards control whether
+      a NestJS controller method executes.
+    query: |
+      What guards control whether the protected endpoint handler executes
+    expected_state: COMPLETE
+    validations:
+      - type: find_control_deps_tool_used
+
+  - id: 407
+    name: ts_find_control_deps_depth
+    category: FIND_CONTROL_DEPS
+    description: >
+      find_control_dependencies with depth for TypeScript code.
+      Should limit search depth for control dependencies.
+    query: |
+      Show control dependencies for createUser method with depth 3
+    expected_state: COMPLETE
+    validations:
+      - type: find_control_deps_depth
+
+  - id: 409
+    name: ts_find_extractable_basic
+    category: FIND_EXTRACTABLE
+    description: >
+      Basic find_extractable_regions tool query for TypeScript code.
+      Should find SESE regions in NestJS app that can be extracted
+      into separate services.
+    query: |
+      Find code regions in this NestJS app that can be safely extracted into separate services
+    expected_state: COMPLETE
+    validations:
+      - type: find_extractable_tool_used
+
+  - id: 410
+    name: ts_find_extractable_size
+    category: FIND_EXTRACTABLE
+    description: >
+      find_extractable_regions with size for TypeScript code.
+      Should find SESE regions within a specific size range.
+    query: |
+      Find extractable regions between 5 and 30 nodes in size
+    expected_state: COMPLETE
+    validations:
+      - type: find_extractable_size

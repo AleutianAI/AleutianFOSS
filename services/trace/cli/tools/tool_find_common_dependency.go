@@ -200,16 +200,42 @@ func (t *findCommonDependencyTool) Execute(ctx context.Context, params map[strin
 	// Resolve targets to node IDs
 	resolvedTargets, unresolvedTargets := t.resolveTargets(ctx, p.Targets)
 
+	// Phase 11A: Treat "not found" as successful informational result (Feb 14, 2026)
 	if len(unresolvedTargets) > 0 {
 		span.AddEvent("unresolved_targets", trace.WithAttributes(
 			attribute.StringSlice("unresolved", unresolvedTargets),
+			attribute.StringSlice("resolved", getResolvedNames(resolvedTargets)),
 		))
-		logger.Debug("find_common_dependency: unresolved targets",
+		logger.Info("find_common_dependency: some targets not found - returning informational result",
 			slog.Any("unresolved", unresolvedTargets),
+			slog.Any("resolved", getResolvedNames(resolvedTargets)),
 		)
+
+		// Build informational output text
+		var sb strings.Builder
+		sb.WriteString("## Symbol Verification Result\n\n")
+		sb.WriteString(fmt.Sprintf("Searched for: %s\n\n", strings.Join(p.Targets, ", ")))
+
+		if len(resolvedTargets) > 0 {
+			sb.WriteString(fmt.Sprintf("✓ Found: %s\n", strings.Join(getResolvedNames(resolvedTargets), ", ")))
+		}
+		sb.WriteString(fmt.Sprintf("✗ Not found: %s\n\n", strings.Join(unresolvedTargets, ", ")))
+
+		sb.WriteString("The graph has been fully indexed - this is the definitive answer.\n")
+		sb.WriteString("**Do NOT use Grep to search further** - the graph already analyzed all source files.\n\n")
+
+		if len(resolvedTargets) > 0 {
+			sb.WriteString("Since not all targets exist, common dependency analysis cannot be performed.\n")
+		} else {
+			sb.WriteString("None of the requested symbols exist in the codebase.\n")
+		}
+
+		outputText := sb.String()
 		return &Result{
-			Success: false,
-			Error:   fmt.Sprintf("target(s) not found: %s", strings.Join(unresolvedTargets, ", ")),
+			Success:    true, // Success because we definitively verified non-existence
+			Output:     outputText,
+			OutputText: outputText,
+			TokensUsed: estimateTokens(outputText),
 		}, nil
 	}
 
@@ -314,20 +340,42 @@ func (t *findCommonDependencyTool) Execute(ctx context.Context, params map[strin
 // parseParams validates and extracts typed parameters from the raw map.
 func (t *findCommonDependencyTool) parseParams(params map[string]any) (FindCommonDependencyParams, error) {
 	var p FindCommonDependencyParams
+	var targets []string
 
-	// Extract targets (required)
-	targetsRaw, ok := params["targets"]
-	if !ok {
-		return p, fmt.Errorf("targets parameter is required")
+	// Strategy 1: Try new format (targets array)
+	if targetsRaw, ok := params["targets"]; ok {
+		parsedTargets, ok := parseStringArray(targetsRaw)
+		if ok {
+			targets = parsedTargets
+		}
 	}
 
-	targets, ok := parseStringArray(targetsRaw)
-	if !ok {
-		return p, fmt.Errorf("targets must be an array of strings")
+	// Strategy 2: Fallback to old format (function_a, function_b) for backward compatibility
+	// This handles LLM-generated calls that might use the old parameter names
+	if len(targets) == 0 {
+		var legacyTargets []string
+		if funcA, okA := params["function_a"]; okA {
+			if str, ok := parseStringParam(funcA); ok && str != "" {
+				legacyTargets = append(legacyTargets, str)
+			}
+		}
+		if funcB, okB := params["function_b"]; okB {
+			if str, ok := parseStringParam(funcB); ok && str != "" {
+				legacyTargets = append(legacyTargets, str)
+			}
+		}
+
+		if len(legacyTargets) >= 2 {
+			targets = legacyTargets
+			t.logger.Debug("find_common_dependency: using legacy parameter format",
+				slog.String("function_a", legacyTargets[0]),
+				slog.String("function_b", legacyTargets[1]))
+		}
 	}
 
+	// Validate we have at least 2 targets
 	if len(targets) < 2 {
-		return p, fmt.Errorf("targets must contain at least 2 function names")
+		return p, fmt.Errorf("targets must be an array of at least 2 function names (got %d). Use 'targets' array or 'function_a'/'function_b' parameters", len(targets))
 	}
 
 	p.Targets = targets
@@ -351,13 +399,20 @@ func (t *findCommonDependencyTool) resolveTargets(
 	unresolved := make([]string, 0)
 
 	for _, target := range targets {
-		// Try index lookup
+		// P1: Use fuzzy search helper (Feb 14, 2026)
 		if t.index != nil {
-			results, err := t.index.Search(ctx, target, 1)
-			if err == nil && len(results) > 0 {
+			symbol, fuzzy, err := ResolveFunctionWithFuzzy(ctx, t.index, target, t.logger)
+			if err == nil {
+				if fuzzy {
+					t.logger.Info("P1: Using fuzzy match for target",
+						slog.String("tool", "find_common_dependency"),
+						slog.String("query", target),
+						slog.String("matched", symbol.Name),
+					)
+				}
 				resolved = append(resolved, ResolvedTarget{
-					Name: results[0].Name,
-					ID:   results[0].ID,
+					Name: symbol.Name,
+					ID:   symbol.ID,
 				})
 				continue
 			}
@@ -368,6 +423,15 @@ func (t *findCommonDependencyTool) resolveTargets(
 	}
 
 	return resolved, unresolved
+}
+
+// getResolvedNames extracts the names from resolved targets.
+func getResolvedNames(resolved []ResolvedTarget) []string {
+	names := make([]string, 0, len(resolved))
+	for _, r := range resolved {
+		names = append(names, r.Name)
+	}
+	return names
 }
 
 // resolveEntryPoint resolves the entry point to a node ID.

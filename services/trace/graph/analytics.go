@@ -231,6 +231,52 @@ func NewGraphAnalyticsWithCRS(graph *HierarchicalGraph, hld *HLDecomposition, cr
 }
 
 // =============================================================================
+// Graph Readiness Check (GR-17b Fix)
+// =============================================================================
+
+// IsGraphReady returns true if the graph has been fully indexed and is ready for queries.
+//
+// Description:
+//
+//	Checks if the underlying graph has been populated with nodes and edges.
+//	This prevents race conditions where dominator-based tools execute before
+//	graph indexing completes, returning incorrect empty results.
+//
+// Outputs:
+//   - bool: true if graph is ready for queries, false if still indexing.
+//
+// Thread Safety: Safe for concurrent use (read-only check).
+//
+// Example:
+//
+//	if !analytics.IsGraphReady() {
+//	    return &Result{Success: false, Error: "graph not ready - indexing in progress"}, nil
+//	}
+//
+// Limitations:
+//
+//	This only checks if nodes/edges exist and graph is frozen. It doesn't
+//	validate that all files have been processed or that the graph is complete.
+func (a *GraphAnalytics) IsGraphReady() bool {
+	if a == nil || a.graph == nil || a.graph.Graph == nil {
+		return false
+	}
+
+	// Check if graph is frozen (BuiltAtMilli > 0)
+	if a.graph.BuiltAtMilli == 0 {
+		return false
+	}
+
+	// Check if graph has nodes and edges
+	nodeCount := a.graph.NodeCount()
+	edgeCount := a.graph.EdgeCount()
+
+	// Graph must have at least 1 node to be considered ready
+	// (Even a minimal project has a main function)
+	return nodeCount > 0 && edgeCount >= 0
+}
+
+// =============================================================================
 // Hotspot Detection
 // =============================================================================
 

@@ -1,0 +1,191 @@
+# GR-17: Graph Tools Tests (JavaScript Language)
+#
+# Verifies that graph analysis tools work correctly for JavaScript code.
+# Tests tool invocation, parameters, and JavaScript-specific adaptations.
+
+metadata:
+  feature: GR-17
+  title: "Graph Analysis Tools"
+  language: javascript
+  project: express
+  ticket: tickets/merged/GR-17_graph_tools.md
+  description: >
+    Tests CRS graph tool integration for JavaScript code. Verifies that
+    specialized graph analysis tools work correctly for JavaScript modules,
+    middleware chains, and Express application structure.
+
+tests:
+  - id: 291
+    name: js_find_articulation_basic
+    category: FIND_ARTICULATION
+    description: >
+      Basic find_articulation_points tool query for JavaScript code.
+      Should identify critical middleware in Express app whose removal
+      would disconnect the module graph.
+    query: |
+      What are the single points of failure in this Express application?
+    expected_state: COMPLETE
+    validations:
+      - type: find_articulation_points_tool_used
+
+  - id: 292
+    name: js_find_articulation_bridges
+    category: FIND_ARTICULATION
+    description: >
+      find_articulation_points with include_bridges for JavaScript code.
+      Should find both critical middleware and critical require() edges.
+    query: |
+      Find critical bottleneck middleware and the critical requires connecting them
+    expected_state: COMPLETE
+    validations:
+      - type: find_articulation_points_bridges
+
+  - id: 294
+    name: js_find_dominators_basic
+    category: FIND_DOMINATORS
+    description: >
+      Basic find_dominators tool query for JavaScript code.
+      Should find all middleware that must execute before reaching
+      a target route handler in Express.
+    query: |
+      What middleware dominates the main API route handler?
+    expected_state: COMPLETE
+    validations:
+      - type: find_dominators_tool_used
+
+  - id: 295
+    name: js_find_dominators_tree
+    category: FIND_DOMINATORS
+    description: >
+      find_dominators with show_tree for JavaScript code.
+      Should return the dominator tree structure for Express middleware.
+    query: |
+      Show the dominator tree starting from the main router
+    expected_state: COMPLETE
+    validations:
+      - type: find_dominators_tree
+
+  - id: 297
+    name: js_find_merge_points_basic
+    category: FIND_MERGE_POINTS
+    description: >
+      Basic find_merge_points tool query for JavaScript code.
+      Should find convergence points in Express request handling
+      where different middleware chains merge.
+    query: |
+      Where do different middleware paths converge in this Express app?
+    expected_state: COMPLETE
+    validations:
+      - type: find_merge_points_tool_used
+
+  - id: 298
+    name: js_find_merge_points_sources
+    category: FIND_MERGE_POINTS
+    description: >
+      find_merge_points with specific sources for JavaScript code.
+      Should find where user router and product router merge in Express.
+    query: |
+      Find merge points for user router and product router functions
+    expected_state: COMPLETE
+    validations:
+      - type: find_merge_points_sources
+
+  - id: 300
+    name: js_find_loops_basic
+    category: FIND_LOOPS
+    description: >
+      Basic find_loops tool query for JavaScript code.
+      Should detect recursive patterns and circular requires
+      in JavaScript modules.
+    query: |
+      Find recursive functions and circular requires in this Express application
+    expected_state: COMPLETE
+    validations:
+      - type: find_loops_tool_used
+
+  - id: 301
+    name: js_find_loops_min_size
+    category: FIND_LOOPS
+    description: >
+      find_loops with min_size for JavaScript code.
+      Should find mutual recursion with at least N functions involved.
+    query: |
+      Find mutual recursion patterns with at least 2 functions involved
+    expected_state: COMPLETE
+    validations:
+      - type: find_loops_min_size
+
+  - id: 303
+    name: js_find_common_dependency_basic
+    category: FIND_COMMON_DEPENDENCY
+    description: >
+      Basic find_common_dependency tool query for JavaScript code.
+      Should find the lowest common dependency between two Express
+      middleware or routers.
+    query: |
+      What is the common dependency between auth middleware and validation middleware?
+    expected_state: COMPLETE
+    validations:
+      - type: find_common_dependency_tool_used
+
+  - id: 304
+    name: js_find_common_dependency_entry
+    category: FIND_COMMON_DEPENDENCY
+    description: >
+      find_common_dependency with entry point for JavaScript code.
+      Should find LCD relative to app setup entry point.
+    query: |
+      Find the lowest common dominator of UserController and ProductController from app setup
+    expected_state: COMPLETE
+    validations:
+      - type: find_common_dependency_entry
+
+  - id: 306
+    name: js_find_control_deps_basic
+    category: FIND_CONTROL_DEPS
+    description: >
+      Basic find_control_dependencies tool query for JavaScript code.
+      Should identify which conditionals control whether
+      an Express route handler executes.
+    query: |
+      What conditionals control whether the protected route handler executes
+    expected_state: COMPLETE
+    validations:
+      - type: find_control_deps_tool_used
+
+  - id: 307
+    name: js_find_control_deps_depth
+    category: FIND_CONTROL_DEPS
+    description: >
+      find_control_dependencies with depth for JavaScript code.
+      Should limit search depth for control dependencies.
+    query: |
+      Show control dependencies for createUser function with depth 3
+    expected_state: COMPLETE
+    validations:
+      - type: find_control_deps_depth
+
+  - id: 309
+    name: js_find_extractable_basic
+    category: FIND_EXTRACTABLE
+    description: >
+      Basic find_extractable_regions tool query for JavaScript code.
+      Should find SESE regions in Express app that can be extracted
+      into separate middleware functions.
+    query: |
+      Find code regions in this Express app that can be safely extracted into separate middleware
+    expected_state: COMPLETE
+    validations:
+      - type: find_extractable_tool_used
+
+  - id: 310
+    name: js_find_extractable_size
+    category: FIND_EXTRACTABLE
+    description: >
+      find_extractable_regions with size for JavaScript code.
+      Should find SESE regions within a specific size range.
+    query: |
+      Find extractable regions between 5 and 30 nodes in size
+    expected_state: COMPLETE
+    validations:
+      - type: find_extractable_size

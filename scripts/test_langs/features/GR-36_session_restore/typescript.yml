@@ -1,0 +1,51 @@
+# GR-36: Session Restore Tests (TypeScript Language)
+#
+# Verifies that learned state persists across sessions via CRS checkpoint/restore.
+# Tests using NestJS web framework codebase.
+
+metadata:
+  feature: GR-36
+  title: "Session Restore"
+  language: typescript
+  project: nest
+  ticket: tickets/merged/GR-36_session_restore.md
+  description: >
+    Tests CRS session persistence on TypeScript code. Session 2 should restore
+    learned state from session 1, providing speedup through cached reasoning.
+
+tests:
+  - id: 301
+    name: ts_session1_baseline
+    category: SESSION_RESTORE
+    description: >
+      TypeScript-specific session restore test. Learn NestJS application
+      structure in session 1 and verify state is persisted.
+    query: |
+      What is the main application bootstrap function in this NestJS app?
+    expected_state: COMPLETE
+    validations: []
+
+  - id: 302
+    name: ts_session2_restore
+    category: SESSION_RESTORE
+    description: >
+      Verify session restore works across TypeScript module structure with decorators.
+      Should remember NestJS app details from previous query without re-parsing.
+    query: |
+      Based on our previous conversation about the bootstrap function, what modules does it import?
+    expected_state: COMPLETE
+    validations: []
+
+  - id: 303
+    name: ts_session2_speedup
+    category: SESSION_RESTORE
+    description: >
+      Verify CRS speedup for TypeScript code analysis.
+      Should be 30%+ faster due to restored MCTS proof numbers.
+    query: |
+      What controllers are defined in the controllers directory?
+    expected_state: COMPLETE
+    validations:
+      - type: faster_than_first
+        baseline_test: 301
+        min_speedup_percent: 30

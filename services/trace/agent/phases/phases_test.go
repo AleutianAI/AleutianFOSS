@@ -13,6 +13,7 @@ package phases
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -443,6 +444,208 @@ func TestReflectPhase_LooksStuck(t *testing.T) {
 			result := phase.looksStuck(input)
 			if result != tt.expected {
 				t.Errorf("looksStuck() = %v, want %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestReflectPhase_LooksComplete_NotFoundAnswer(t *testing.T) {
+	phase := NewReflectPhase()
+
+	tests := []struct {
+		name         string
+		lastResponse string
+		results      []agent.ToolResult
+		want         bool
+	}{
+		{
+			name:         "symbol not found is complete",
+			lastResponse: "I searched the codebase but the symbol 'Foo' was not found.",
+			results:      []agent.ToolResult{{Success: false}},
+			want:         true,
+		},
+		{
+			name:         "function does not exist is complete",
+			lastResponse: "After analyzing the code, the function 'Bar' does not exist.",
+			results:      []agent.ToolResult{{Success: false}},
+			want:         true,
+		},
+		{
+			name:         "unable to find is complete",
+			lastResponse: "I looked through all files but was unable to find 'Baz'.",
+			results:      []agent.ToolResult{{Success: false}},
+			want:         true,
+		},
+		{
+			name:         "no matches is complete",
+			lastResponse: "Queried the codebase but found no matches for the requested symbol.",
+			results:      []agent.ToolResult{{Success: false}},
+			want:         true,
+		},
+		{
+			name:         "checked and not found is complete",
+			lastResponse: "I checked all available symbols but the function 'test' was not found.",
+			results:      []agent.ToolResult{{Success: false}},
+			want:         true,
+		},
+		{
+			name:         "not found without search context is incomplete",
+			lastResponse: "The symbol was not found.",
+			results:      []agent.ToolResult{{Success: false}},
+			want:         false,
+		},
+		{
+			name:         "error message is not complete",
+			lastResponse: "Error: failed to execute query.",
+			results:      []agent.ToolResult{{Success: false}},
+			want:         false,
+		},
+		{
+			name:         "does not exist without search context is incomplete",
+			lastResponse: "The function does not exist.",
+			results:      []agent.ToolResult{{Success: false}},
+			want:         false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := &ReflectionInput{
+				LastResponse:  tt.lastResponse,
+				RecentResults: tt.results,
+			}
+
+			got := phase.looksComplete(input)
+			if got != tt.want {
+				t.Errorf("looksComplete() = %v, want %v for response: %s",
+					got, tt.want, tt.lastResponse)
+			}
+		})
+	}
+}
+
+func TestReflectPhase_LooksStuck_NotFoundAnswer(t *testing.T) {
+	phase := NewReflectPhase()
+
+	tests := []struct {
+		name         string
+		lastResponse string
+		results      []agent.ToolResult
+		want         bool
+	}{
+		{
+			name:         "not found answer is not stuck",
+			lastResponse: "The symbol was not found in the codebase.",
+			results:      []agent.ToolResult{{Success: false}, {Success: false}, {Success: false}},
+			want:         false, // Should NOT be stuck
+		},
+		{
+			name:         "does not exist answer is not stuck",
+			lastResponse: "The function does not exist.",
+			results:      []agent.ToolResult{{Success: false}, {Success: false}, {Success: false}},
+			want:         false, // Should NOT be stuck
+		},
+		{
+			name:         "multiple failures without not found IS stuck",
+			lastResponse: "Error executing query.",
+			results:      []agent.ToolResult{{Success: false}, {Success: false}, {Success: false}},
+			want:         true, // Should be stuck
+		},
+		{
+			name:         "empty response with failures IS stuck",
+			lastResponse: "",
+			results:      []agent.ToolResult{{Success: false}, {Success: false}, {Success: false}},
+			want:         true, // Should be stuck
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := &ReflectionInput{
+				LastResponse:  tt.lastResponse,
+				RecentResults: tt.results,
+			}
+
+			got := phase.looksStuck(input)
+			if got != tt.want {
+				t.Errorf("looksStuck() = %v, want %v for response: %s",
+					got, tt.want, tt.lastResponse)
+			}
+		})
+	}
+}
+
+func TestReflectPhase_LooksComplete_EmptyResponseLoop(t *testing.T) {
+	phase := NewReflectPhase()
+
+	tests := []struct {
+		name         string
+		lastResponse string
+		results      []agent.ToolResult
+		want         bool
+	}{
+		{
+			name:         "empty response with mostly failed results is complete",
+			lastResponse: "",
+			results: []agent.ToolResult{
+				{Success: false, Output: ""},
+				{Success: false, Output: "error"},
+				{Success: false, Output: ""},
+			},
+			want: true, // Empty loop detected
+		},
+		{
+			name:         "empty response with all tiny outputs is complete",
+			lastResponse: "",
+			results: []agent.ToolResult{
+				{Success: true, Output: "No results"}, // < 100 chars
+				{Success: true, Output: "Not found"},  // < 100 chars
+				{Success: false, Output: ""},
+			},
+			want: true, // Empty loop detected
+		},
+		{
+			name:         "empty response with substantial output is NOT complete",
+			lastResponse: "",
+			results: []agent.ToolResult{
+				{Success: true, Output: strings.Repeat("Valid output with substantial content that indicates real progress. ", 5)}, // > 100 chars
+				{Success: true, Output: "small"},
+				{Success: false, Output: ""},
+			},
+			want: false, // Has real progress
+		},
+		{
+			name:         "empty response with only 2 results is NOT complete",
+			lastResponse: "",
+			results: []agent.ToolResult{
+				{Success: false, Output: ""},
+				{Success: false, Output: ""},
+			},
+			want: false, // Need >= 3 results
+		},
+		{
+			name:         "non-empty response doesn't trigger empty loop detection",
+			lastResponse: "Some response text",
+			results: []agent.ToolResult{
+				{Success: false, Output: ""},
+				{Success: false, Output: ""},
+				{Success: false, Output: ""},
+			},
+			want: false, // LastResponse is not empty
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := &ReflectionInput{
+				LastResponse:  tt.lastResponse,
+				RecentResults: tt.results,
+			}
+
+			got := phase.looksComplete(input)
+			if got != tt.want {
+				t.Errorf("looksComplete() = %v, want %v for empty_response=%v, results=%d",
+					got, tt.want, tt.lastResponse == "", len(tt.results))
 			}
 		})
 	}

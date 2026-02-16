@@ -260,7 +260,9 @@ func (b *Builder) Build(ctx context.Context, results []*ast.ParseResult) (*Build
 	// Phase 1: Collect symbols as nodes
 	if err := b.collectPhase(ctx, state, results); err != nil {
 		state.result.Incomplete = true
-		state.result.Stats.DurationMilli = time.Since(state.startTime).Milliseconds()
+		duration := time.Since(state.startTime)
+		state.result.Stats.DurationMilli = duration.Milliseconds()
+		state.result.Stats.DurationMicro = duration.Microseconds()
 		setBuildSpanResult(span, state.result.Stats.NodesCreated, state.result.Stats.EdgesCreated, true)
 		recordBuildMetrics(ctx, time.Since(state.startTime), state.result.Stats.NodesCreated, state.result.Stats.EdgesCreated, false)
 		return state.result, nil
@@ -269,7 +271,9 @@ func (b *Builder) Build(ctx context.Context, results []*ast.ParseResult) (*Build
 	// Phase 2: Extract edges
 	if err := b.extractEdgesPhase(ctx, state, results); err != nil {
 		state.result.Incomplete = true
-		state.result.Stats.DurationMilli = time.Since(state.startTime).Milliseconds()
+		duration := time.Since(state.startTime)
+		state.result.Stats.DurationMilli = duration.Milliseconds()
+		state.result.Stats.DurationMicro = duration.Microseconds()
 		setBuildSpanResult(span, state.result.Stats.NodesCreated, state.result.Stats.EdgesCreated, true)
 		recordBuildMetrics(ctx, time.Since(state.startTime), state.result.Stats.NodesCreated, state.result.Stats.EdgesCreated, false)
 		return state.result, nil
@@ -277,7 +281,9 @@ func (b *Builder) Build(ctx context.Context, results []*ast.ParseResult) (*Build
 
 	// Phase 3: Finalize
 	state.graph.Freeze()
-	state.result.Stats.DurationMilli = time.Since(state.startTime).Milliseconds()
+	duration := time.Since(state.startTime)
+	state.result.Stats.DurationMilli = duration.Milliseconds()
+	state.result.Stats.DurationMicro = duration.Microseconds()
 
 	b.reportProgress(state, ProgressPhaseFinalizing, len(results), len(results))
 

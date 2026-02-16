@@ -1,0 +1,146 @@
+# GR-16: Control Flow Analysis Tests (TypeScript Language)
+#
+# Verifies that control flow graph algorithms work correctly for TypeScript code.
+# Tests articulation points, dominators, post-dominators, dominance frontier,
+# control dependence, loop detection, LCD, and SESE regions.
+
+metadata:
+  feature: GR-16
+  title: "Control Flow Analysis"
+  language: typescript
+  project: nest
+  ticket: tickets/merged/GR-16_control_flow.md
+  description: >
+    Tests CRS control flow graph algorithms on TypeScript code. Verifies that
+    advanced CFG algorithms work correctly for TypeScript decorators,
+    dependency injection, and NestJS module structure.
+
+tests:
+  - id: 370
+    name: ts_articulation_basic
+    category: ARTICULATION
+    description: >
+      Basic articulation point detection for TypeScript code.
+      This query should identify critical services in NestJS
+      whose removal would break the application dependency graph.
+    query: |
+      Find the single points of failure in this NestJS application
+    expected_state: COMPLETE
+    validations:
+      - type: articulation_points_found
+
+  - id: 372
+    name: ts_articulation_perf
+    category: ARTICULATION
+    description: >
+      Performance check - articulation point detection should be fast
+      even for TypeScript codebases with complex decorator chains
+      and dependency injection.
+    query: |
+      Find architectural bottlenecks that are single points of failure
+    expected_state: COMPLETE
+    validations:
+      - type: fast_articulation_detection
+
+  - id: 373
+    name: ts_dominator_basic
+    category: DOMINATOR
+    description: >
+      Basic dominator query for TypeScript code.
+      Find services that must be injected before reaching a target
+      controller in NestJS.
+    query: |
+      What services must be injected before reaching the main controller?
+    expected_state: COMPLETE
+    validations:
+      - type: dominators_found
+
+  - id: 376
+    name: ts_dominator_perf
+    category: DOMINATOR
+    description: >
+      Performance check - dominator computation should be fast
+      for TypeScript module and decorator dependency graphs.
+    query: |
+      Find the mandatory module import sequence from bootstrap to the API module
+    expected_state: COMPLETE
+    validations:
+      - type: fast_dominator_detection
+
+  - id: 377
+    name: ts_post_dominator_basic
+    category: POST_DOMINATOR
+    description: >
+      Basic post-dominator query for TypeScript code.
+      Find interceptors and guards that must be called after a
+      NestJS controller method completes.
+    query: |
+      What interceptors must be called after the request handler returns?
+    expected_state: COMPLETE
+    validations:
+      - type: post_dominators_found
+
+  - id: 379
+    name: ts_dominance_frontier_basic
+    category: DOMINANCE_FRONTIER
+    description: >
+      Basic dominance frontier query for TypeScript code.
+      Find merge points where different guard and interceptor chains
+      converge in the NestJS request lifecycle.
+    query: |
+      Find the merge points in the control flow where different guard paths converge
+    expected_state: COMPLETE
+    validations:
+      - type: merge_points_found
+
+  - id: 381
+    name: ts_control_dependence_basic
+    category: CONTROL_DEPENDENCE
+    description: >
+      Basic control dependence query for TypeScript code.
+      Identify which guards determine whether a NestJS controller
+      method executes.
+    query: |
+      Find what guards control whether the authentication service executes
+    expected_state: COMPLETE
+    validations:
+      - type: control_dependencies_found
+
+  - id: 383
+    name: ts_loop_detection_basic
+    category: LOOP_DETECTION
+    description: >
+      Basic loop detection for TypeScript code.
+      Find recursive patterns and back edges in TypeScript method calls
+      and dependency injection cycles.
+    query: |
+      Find all recursive call patterns and circular dependencies in this NestJS application
+    expected_state: COMPLETE
+    validations:
+      - type: loops_found
+
+  - id: 386
+    name: ts_lcd_basic
+    category: LCD
+    description: >
+      Basic LCD query for TypeScript code.
+      Find the lowest common dominator representing shared dependencies
+      between two NestJS modules.
+    query: |
+      What is the common dependency between the auth module and the user module?
+    expected_state: COMPLETE
+    validations:
+      - type: lcd_found
+
+  - id: 388
+    name: ts_sese_basic
+    category: SESE
+    description: >
+      Basic SESE detection for TypeScript code.
+      Find Single-Entry Single-Exit regions that can be safely extracted
+      into separate services for refactoring.
+    query: |
+      What code regions in this NestJS app can be safely extracted into separate services?
+    expected_state: COMPLETE
+    validations:
+      - type: sese_regions_found

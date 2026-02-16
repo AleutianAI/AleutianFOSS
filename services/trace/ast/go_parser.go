@@ -258,17 +258,17 @@ func (p *GoParser) Parse(ctx context.Context, content []byte, filePath string) (
 		result.Errors = append(result.Errors, "source contains syntax errors")
 	}
 
-	// Extract package name
-	p.extractPackage(rootNode, content, filePath, result)
+	// Extract package name (returns package name for use in other symbols)
+	packageName := p.extractPackage(rootNode, content, filePath, result)
 
 	// Extract imports
 	p.extractImports(rootNode, content, filePath, result)
 
 	// Extract functions (GR-41: now extracts call sites too)
-	p.extractFunctions(ctx, rootNode, content, filePath, result)
+	p.extractFunctions(ctx, rootNode, content, filePath, packageName, result)
 
 	// Extract methods (GR-41: now extracts call sites too)
-	p.extractMethods(ctx, rootNode, content, filePath, result)
+	p.extractMethods(ctx, rootNode, content, filePath, packageName, result)
 
 	// Extract types (structs, interfaces, type aliases)
 	p.extractTypes(rootNode, content, filePath, result)
@@ -316,7 +316,8 @@ func (p *GoParser) Extensions() []string {
 }
 
 // extractPackage extracts the package declaration from the AST.
-func (p *GoParser) extractPackage(root *sitter.Node, content []byte, filePath string, result *ParseResult) {
+// Returns the package name string for use in setting Package field on other symbols.
+func (p *GoParser) extractPackage(root *sitter.Node, content []byte, filePath string, result *ParseResult) string {
 	// Find package_clause node
 	for i := 0; i < int(root.ChildCount()); i++ {
 		child := root.Child(i)
@@ -344,11 +345,12 @@ func (p *GoParser) extractPackage(root *sitter.Node, content []byte, filePath st
 					sym.DocComment = p.getPrecedingComment(root, child, content)
 
 					result.Symbols = append(result.Symbols, sym)
-					return
+					return name // Return package name for use in other symbols
 				}
 			}
 		}
 	}
+	return "" // No package declaration found
 }
 
 // extractImports extracts import declarations from the AST.
@@ -438,18 +440,18 @@ func (p *GoParser) processImportSpec(node *sitter.Node, content []byte, filePath
 
 // extractFunctions extracts function declarations from the AST.
 // GR-41: Now accepts context for call site extraction.
-func (p *GoParser) extractFunctions(ctx context.Context, root *sitter.Node, content []byte, filePath string, result *ParseResult) {
+func (p *GoParser) extractFunctions(ctx context.Context, root *sitter.Node, content []byte, filePath string, packageName string, result *ParseResult) {
 	for i := 0; i < int(root.ChildCount()); i++ {
 		child := root.Child(i)
 		if child.Type() == "function_declaration" {
-			p.processFunctionDecl(ctx, child, content, filePath, result, root)
+			p.processFunctionDecl(ctx, child, content, filePath, packageName, result, root)
 		}
 	}
 }
 
 // processFunctionDecl extracts a single function declaration.
 // GR-41: Now accepts context and extracts call sites from function body.
-func (p *GoParser) processFunctionDecl(ctx context.Context, node *sitter.Node, content []byte, filePath string, result *ParseResult, root *sitter.Node) {
+func (p *GoParser) processFunctionDecl(ctx context.Context, node *sitter.Node, content []byte, filePath string, packageName string, result *ParseResult, root *sitter.Node) {
 	var name string
 	var signature string
 	var params string
@@ -499,6 +501,7 @@ func (p *GoParser) processFunctionDecl(ctx context.Context, node *sitter.Node, c
 		Name:      name,
 		Kind:      SymbolKindFunction,
 		FilePath:  filePath,
+		Package:   packageName, // GR-17: Set package name for entry point detection
 		Language:  "go",
 		Exported:  exported,
 		Signature: signature,
@@ -521,18 +524,18 @@ func (p *GoParser) processFunctionDecl(ctx context.Context, node *sitter.Node, c
 
 // extractMethods extracts method declarations from the AST.
 // GR-41: Now accepts context for call site extraction.
-func (p *GoParser) extractMethods(ctx context.Context, root *sitter.Node, content []byte, filePath string, result *ParseResult) {
+func (p *GoParser) extractMethods(ctx context.Context, root *sitter.Node, content []byte, filePath string, packageName string, result *ParseResult) {
 	for i := 0; i < int(root.ChildCount()); i++ {
 		child := root.Child(i)
 		if child.Type() == "method_declaration" {
-			p.processMethodDecl(ctx, child, content, filePath, result, root)
+			p.processMethodDecl(ctx, child, content, filePath, packageName, result, root)
 		}
 	}
 }
 
 // processMethodDecl extracts a single method declaration.
 // GR-41: Now accepts context and extracts call sites from method body.
-func (p *GoParser) processMethodDecl(ctx context.Context, node *sitter.Node, content []byte, filePath string, result *ParseResult, root *sitter.Node) {
+func (p *GoParser) processMethodDecl(ctx context.Context, node *sitter.Node, content []byte, filePath string, packageName string, result *ParseResult, root *sitter.Node) {
 	var name string
 	var receiverStr string
 	var params string
@@ -588,6 +591,7 @@ func (p *GoParser) processMethodDecl(ctx context.Context, node *sitter.Node, con
 		Name:      name,
 		Kind:      SymbolKindMethod,
 		FilePath:  filePath,
+		Package:   packageName, // GR-17: Set package name for entry point detection
 		Language:  "go",
 		Exported:  exported,
 		Signature: signature,
