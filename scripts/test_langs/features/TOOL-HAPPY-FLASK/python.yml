@@ -583,3 +583,36 @@ tests:
       Each caller needs a URL adapter to map between endpoints and URLs.
     validations:
       - type: graph_tool_used
+  # -- Additional find_callees tests (42-43) -- expected_state: COMPLETE --
+  - id: 6042
+    name: flask_find_callees_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against Flask (test B). Target: full_dispatch_request method.
+
+    query: |
+      What functions does full_dispatch_request call?
+    expected_state: COMPLETE
+    reference_answer: |
+      full_dispatch_request calls request_started.send to emit the signal,
+      preprocess_request to run before_request hooks, dispatch_request
+      to invoke the view function, handle_user_exception for error handling,
+      and finalize_request to run after_request hooks and build the response.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6043
+    name: flask_find_callees_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against Flask (test C). Target: send_file function.
+
+    query: |
+      What functions does send_file call?
+    expected_state: COMPLETE
+    reference_answer: |
+      send_file calls _prepare_send_file_kwargs to gather configuration
+      like max_age and X-Sendfile settings, then delegates to
+      werkzeug.utils.send_file to construct the file response.
+    validations:
+      - type: graph_tool_used

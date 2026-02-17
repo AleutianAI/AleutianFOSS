@@ -397,6 +397,133 @@ func TestResolveTypeDotMethod(t *testing.T) {
 	})
 }
 
+// R3-P1d: resolveTypeDotMethod should find @property methods (SymbolKindProperty).
+func TestResolveTypeDotMethod_Property(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+
+	// Build an index with a class that has a @property child
+	idx := index.NewSymbolIndex()
+	symbols := []*ast.Symbol{
+		{
+			ID:        "model.py:1:User",
+			Name:      "User",
+			Kind:      ast.SymbolKindClass,
+			FilePath:  "model.py",
+			StartLine: 1,
+			EndLine:   50,
+			Package:   "model",
+			Exported:  true,
+			Language:  "python",
+			Children: []*ast.Symbol{
+				{
+					ID:        "model.py:10:full_name",
+					Name:      "full_name",
+					Kind:      ast.SymbolKindProperty,
+					FilePath:  "model.py",
+					StartLine: 10,
+					EndLine:   15,
+					Package:   "model",
+					Exported:  true,
+					Language:  "python",
+				},
+				{
+					ID:        "model.py:20:save",
+					Name:      "save",
+					Kind:      ast.SymbolKindMethod,
+					FilePath:  "model.py",
+					StartLine: 20,
+					EndLine:   30,
+					Package:   "model",
+					Exported:  true,
+					Language:  "python",
+				},
+			},
+		},
+		// Flat index entries for children
+		{
+			ID:        "model.py:10:full_name",
+			Name:      "full_name",
+			Kind:      ast.SymbolKindProperty,
+			FilePath:  "model.py",
+			StartLine: 10,
+			EndLine:   15,
+			Package:   "model",
+			Exported:  true,
+			Language:  "python",
+		},
+		{
+			ID:        "model.py:20:save",
+			Name:      "save",
+			Kind:      ast.SymbolKindMethod,
+			FilePath:  "model.py",
+			StartLine: 20,
+			EndLine:   30,
+			Package:   "model",
+			Exported:  true,
+			Language:  "python",
+		},
+	}
+	for _, sym := range symbols {
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("failed to add symbol %s: %v", sym.ID, err)
+		}
+	}
+
+	t.Run("Property child resolved via Strategy 1 (receiver match)", func(t *testing.T) {
+		// Add a property with Receiver set (e.g., from a language that sets it)
+		propWithReceiver := &ast.Symbol{
+			ID:        "model.py:40:email",
+			Name:      "email",
+			Kind:      ast.SymbolKindProperty,
+			FilePath:  "model.py",
+			StartLine: 40,
+			EndLine:   45,
+			Receiver:  "User",
+			Package:   "model",
+			Exported:  true,
+			Language:  "python",
+		}
+		if err := idx.Add(propWithReceiver); err != nil {
+			t.Fatalf("failed to add: %v", err)
+		}
+
+		sym, err := resolveTypeDotMethod(ctx, idx, "User", "email", logger)
+		if err != nil {
+			t.Fatalf("R3-P1d: resolveTypeDotMethod should find Property via receiver match, got error: %v", err)
+		}
+		if sym.Kind != ast.SymbolKindProperty {
+			t.Errorf("expected Property kind, got %s", sym.Kind)
+		}
+		if sym.Name != "email" {
+			t.Errorf("expected name 'email', got %q", sym.Name)
+		}
+	})
+
+	t.Run("Property child resolved via Strategy 3 (parent class children)", func(t *testing.T) {
+		sym, err := resolveTypeDotMethod(ctx, idx, "User", "full_name", logger)
+		if err != nil {
+			t.Fatalf("R3-P1d: resolveTypeDotMethod should find Property via class children, got error: %v", err)
+		}
+		if sym.Kind != ast.SymbolKindProperty {
+			t.Errorf("expected Property kind, got %s", sym.Kind)
+		}
+		if sym.Name != "full_name" {
+			t.Errorf("expected name 'full_name', got %q", sym.Name)
+		}
+	})
+
+	t.Run("Method still resolves normally alongside Property", func(t *testing.T) {
+		sym, err := resolveTypeDotMethod(ctx, idx, "User", "save", logger)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if sym.Kind != ast.SymbolKindMethod {
+			t.Errorf("expected Method kind, got %s", sym.Kind)
+		}
+	})
+}
+
 func TestResolveFunctionWithFuzzy_DotNotation(t *testing.T) {
 	ctx := context.Background()
 	logger := testLogger()
@@ -475,6 +602,282 @@ func TestPickBestCandidate(t *testing.T) {
 		best := pickBestCandidate(candidates)
 		if best.ID != "a.go:1:foo" {
 			t.Errorf("expected the only candidate, got %q", best.ID)
+		}
+	})
+
+	t.Run("prefers non-overload over overload stub", func(t *testing.T) {
+		candidates := []*ast.Symbol{
+			{
+				ID:       "generic.py:3000:to_csv",
+				Name:     "to_csv",
+				Metadata: &ast.SymbolMetadata{Decorators: []string{"overload"}},
+			},
+			{
+				ID:       "generic.py:3789:to_csv",
+				Name:     "to_csv",
+				Metadata: &ast.SymbolMetadata{Decorators: []string{"final"}},
+				Calls:    []ast.CallSite{{Target: "isinstance"}},
+			},
+		}
+		best := pickBestCandidate(candidates)
+		if best.ID != "generic.py:3789:to_csv" {
+			t.Errorf("expected non-overload candidate, got %q (overload stub won)", best.ID)
+		}
+	})
+
+	t.Run("prefers candidate with calls over empty calls", func(t *testing.T) {
+		candidates := []*ast.Symbol{
+			{ID: "a.py:10:foo", Name: "foo", Calls: nil},
+			{ID: "a.py:30:foo", Name: "foo", Calls: []ast.CallSite{{Target: "bar"}}},
+		}
+		best := pickBestCandidate(candidates)
+		if best.ID != "a.py:30:foo" {
+			t.Errorf("expected candidate with calls, got %q", best.ID)
+		}
+	})
+}
+
+// ─── R3-P2a: isOverloadStub ───
+
+func TestIsOverloadStub(t *testing.T) {
+	t.Run("nil symbol", func(t *testing.T) {
+		if isOverloadStub(nil) {
+			t.Error("expected false for nil symbol")
+		}
+	})
+
+	t.Run("nil metadata", func(t *testing.T) {
+		sym := &ast.Symbol{Name: "foo"}
+		if isOverloadStub(sym) {
+			t.Error("expected false for nil metadata")
+		}
+	})
+
+	t.Run("no decorators", func(t *testing.T) {
+		sym := &ast.Symbol{Name: "foo", Metadata: &ast.SymbolMetadata{}}
+		if isOverloadStub(sym) {
+			t.Error("expected false for no decorators")
+		}
+	})
+
+	t.Run("overload decorator", func(t *testing.T) {
+		sym := &ast.Symbol{
+			Name:     "to_csv",
+			Metadata: &ast.SymbolMetadata{Decorators: []string{"overload"}},
+		}
+		if !isOverloadStub(sym) {
+			t.Error("expected true for @overload decorator")
+		}
+	})
+
+	t.Run("other decorator", func(t *testing.T) {
+		sym := &ast.Symbol{
+			Name:     "to_csv",
+			Metadata: &ast.SymbolMetadata{Decorators: []string{"final"}},
+		}
+		if isOverloadStub(sym) {
+			t.Error("expected false for @final decorator")
+		}
+	})
+
+	t.Run("mixed decorators with overload", func(t *testing.T) {
+		sym := &ast.Symbol{
+			Name:     "to_csv",
+			Metadata: &ast.SymbolMetadata{Decorators: []string{"deprecated", "overload"}},
+		}
+		if !isOverloadStub(sym) {
+			t.Error("expected true when @overload is among decorators")
+		}
+	})
+}
+
+// ─── R3-P2a: resolveTypeDotMethod with overload filtering ───
+
+func TestResolveTypeDotMethod_OverloadFiltering(t *testing.T) {
+	t.Run("skips overload stubs and returns real implementation", func(t *testing.T) {
+		// NDFrame class has 2 @overload stubs + 1 real to_csv
+		overloadStub1 := &ast.Symbol{
+			ID:        "generic.py:3000:to_csv",
+			Name:      "to_csv",
+			Kind:      ast.SymbolKindMethod,
+			FilePath:  "generic.py",
+			StartLine: 3000,
+			EndLine:   3010,
+			Package:   "generic",
+			Exported:  true,
+			Language:  "python",
+			Metadata:  &ast.SymbolMetadata{Decorators: []string{"overload"}},
+		}
+		overloadStub2 := &ast.Symbol{
+			ID:        "generic.py:3020:to_csv",
+			Name:      "to_csv",
+			Kind:      ast.SymbolKindMethod,
+			FilePath:  "generic.py",
+			StartLine: 3020,
+			EndLine:   3030,
+			Package:   "generic",
+			Exported:  true,
+			Language:  "python",
+			Metadata:  &ast.SymbolMetadata{Decorators: []string{"overload"}},
+		}
+		realImpl := &ast.Symbol{
+			ID:        "generic.py:3789:to_csv",
+			Name:      "to_csv",
+			Kind:      ast.SymbolKindMethod,
+			FilePath:  "generic.py",
+			StartLine: 3789,
+			EndLine:   3850,
+			Package:   "generic",
+			Exported:  true,
+			Language:  "python",
+			Metadata:  &ast.SymbolMetadata{Decorators: []string{"final"}},
+			Calls:     []ast.CallSite{{Target: "isinstance"}, {Target: "self.to_frame"}},
+		}
+
+		ndframeClass := &ast.Symbol{
+			ID:        "generic.py:100:NDFrame",
+			Name:      "NDFrame",
+			Kind:      ast.SymbolKindClass,
+			FilePath:  "generic.py",
+			StartLine: 100,
+			EndLine:   4000,
+			Package:   "generic",
+			Exported:  true,
+			Language:  "python",
+			Children:  []*ast.Symbol{overloadStub1, overloadStub2, realImpl},
+		}
+
+		// Build index — class and flat entries for children
+		idx := index.NewSymbolIndex()
+		for _, sym := range []*ast.Symbol{ndframeClass, overloadStub1, overloadStub2, realImpl} {
+			if err := idx.Add(sym); err != nil {
+				t.Fatalf("failed to add symbol %s: %v", sym.ID, err)
+			}
+		}
+
+		logger := testLogger()
+		sym, err := resolveTypeDotMethod(context.Background(), idx, "NDFrame", "to_csv", logger)
+		if err != nil {
+			t.Fatalf("resolveTypeDotMethod failed: %v", err)
+		}
+		if sym.ID != realImpl.ID {
+			t.Errorf("expected real implementation %q, got %q (overload stub was returned)", realImpl.ID, sym.ID)
+		}
+	})
+
+	t.Run("returns overload stub when no real impl exists", func(t *testing.T) {
+		// Edge case: only overload stubs (e.g., Protocol or ABC)
+		stub := &ast.Symbol{
+			ID:        "protocol.py:10:process",
+			Name:      "process",
+			Kind:      ast.SymbolKindMethod,
+			FilePath:  "protocol.py",
+			StartLine: 10,
+			EndLine:   20,
+			Package:   "protocol",
+			Exported:  true,
+			Language:  "python",
+			Metadata:  &ast.SymbolMetadata{Decorators: []string{"overload"}},
+		}
+
+		protoClass := &ast.Symbol{
+			ID:        "protocol.py:5:Handler",
+			Name:      "Handler",
+			Kind:      ast.SymbolKindClass,
+			FilePath:  "protocol.py",
+			StartLine: 5,
+			EndLine:   30,
+			Package:   "protocol",
+			Exported:  true,
+			Language:  "python",
+			Children:  []*ast.Symbol{stub},
+		}
+
+		idx := index.NewSymbolIndex()
+		for _, sym := range []*ast.Symbol{protoClass, stub} {
+			if err := idx.Add(sym); err != nil {
+				t.Fatalf("failed to add symbol %s: %v", sym.ID, err)
+			}
+		}
+
+		logger := testLogger()
+		sym, err := resolveTypeDotMethod(context.Background(), idx, "Handler", "process", logger)
+		if err != nil {
+			t.Fatalf("resolveTypeDotMethod failed: %v", err)
+		}
+		if sym.ID != stub.ID {
+			t.Errorf("expected overload stub (only option), got %q", sym.ID)
+		}
+	})
+
+	t.Run("inheritance walk also filters overloads", func(t *testing.T) {
+		// DataFrame extends NDFrame. NDFrame has overload stubs + real impl.
+		overloadStub := &ast.Symbol{
+			ID:        "generic.py:3000:to_csv",
+			Name:      "to_csv",
+			Kind:      ast.SymbolKindMethod,
+			FilePath:  "generic.py",
+			StartLine: 3000,
+			EndLine:   3010,
+			Package:   "generic",
+			Exported:  true,
+			Language:  "python",
+			Metadata:  &ast.SymbolMetadata{Decorators: []string{"overload"}},
+		}
+		realImpl := &ast.Symbol{
+			ID:        "generic.py:3789:to_csv",
+			Name:      "to_csv",
+			Kind:      ast.SymbolKindMethod,
+			FilePath:  "generic.py",
+			StartLine: 3789,
+			EndLine:   3850,
+			Package:   "generic",
+			Exported:  true,
+			Language:  "python",
+			Metadata:  &ast.SymbolMetadata{Decorators: []string{"final"}},
+			Calls:     []ast.CallSite{{Target: "isinstance"}},
+		}
+
+		ndframeClass := &ast.Symbol{
+			ID:        "generic.py:100:NDFrame",
+			Name:      "NDFrame",
+			Kind:      ast.SymbolKindClass,
+			FilePath:  "generic.py",
+			StartLine: 100,
+			EndLine:   4000,
+			Package:   "generic",
+			Exported:  true,
+			Language:  "python",
+			Children:  []*ast.Symbol{overloadStub, realImpl},
+		}
+
+		dfClass := &ast.Symbol{
+			ID:        "frame.py:10:DataFrame",
+			Name:      "DataFrame",
+			Kind:      ast.SymbolKindClass,
+			FilePath:  "frame.py",
+			StartLine: 10,
+			EndLine:   500,
+			Package:   "frame",
+			Exported:  true,
+			Language:  "python",
+			Metadata:  &ast.SymbolMetadata{Extends: "NDFrame"},
+		}
+
+		idx := index.NewSymbolIndex()
+		for _, sym := range []*ast.Symbol{ndframeClass, overloadStub, realImpl, dfClass} {
+			if err := idx.Add(sym); err != nil {
+				t.Fatalf("failed to add symbol %s: %v", sym.ID, err)
+			}
+		}
+
+		logger := testLogger()
+		sym, err := resolveTypeDotMethod(context.Background(), idx, "DataFrame", "to_csv", logger)
+		if err != nil {
+			t.Fatalf("resolveTypeDotMethod failed: %v", err)
+		}
+		if sym.ID != realImpl.ID {
+			t.Errorf("expected real implementation via inheritance, got %q", sym.ID)
 		}
 	})
 }

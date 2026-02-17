@@ -1041,43 +1041,43 @@ run_crs_test() {
     echo ""
     echo -e "  ${BLUE}─── Server Log Analysis ───${NC}"
 
-    # GR-39b: Check for count-based circuit breaker
-    local gr39b_logs=$(ssh_cmd "grep -i 'GR-39b' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
+    # GR-39b: Check for count-based circuit breaker (filtered by session)
+    local gr39b_logs=$(ssh_cmd "grep 'GR-39b' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | grep '$session_actual' | tail -5" || echo "")
     if [ -n "$gr39b_logs" ]; then
         echo -e "  ${YELLOW}GR-39b (Count Circuit Breaker):${NC}"
         echo "$gr39b_logs" | sed 's/^/    /'
     fi
 
-    # CB-30c: Check for semantic repetition
-    local cb30c_logs=$(ssh_cmd "grep -i 'CB-30c\|[Ss]emantic repetition' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
+    # CB-30c: Check for semantic repetition (filtered by session)
+    local cb30c_logs=$(ssh_cmd "grep -E 'CB-30c|[Ss]emantic repetition' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | grep '$session_actual' | tail -5" || echo "")
     if [ -n "$cb30c_logs" ]; then
         echo -e "  ${YELLOW}CB-30c (Semantic Repetition):${NC}"
         echo "$cb30c_logs" | sed 's/^/    /'
     fi
 
-    # CRS-02: Check for proof number updates
-    local crs02_logs=$(ssh_cmd "grep -i 'CRS-02\|proof.*number\|disproven' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
+    # CRS-02: Check for proof number updates (filtered by session)
+    local crs02_logs=$(ssh_cmd "grep -E 'CRS-02|proof.*number|disproven' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | grep '$session_actual' | tail -3" || echo "")
     if [ -n "$crs02_logs" ]; then
         echo -e "  ${YELLOW}CRS-02 (Proof Numbers):${NC}"
         echo "$crs02_logs" | sed 's/^/    /'
     fi
 
-    # CRS-04: Check for learning events
-    local crs04_logs=$(ssh_cmd "grep -i 'CRS-04\|learnFromFailure\|CDCL' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
+    # CRS-04: Check for learning events (filtered by session)
+    local crs04_logs=$(ssh_cmd "grep -E 'CRS-04|learnFromFailure|CDCL' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | grep '$session_actual' | tail -3" || echo "")
     if [ -n "$crs04_logs" ]; then
         echo -e "  ${YELLOW}CRS-04 (CDCL Learning):${NC}"
         echo "$crs04_logs" | sed 's/^/    /'
     fi
 
-    # CRS-06: Check for coordinator events
-    local crs06_logs=$(ssh_cmd "grep -i 'CRS-06\|EventCircuitBreaker\|EventSemanticRepetition' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -3" || echo "")
+    # CRS-06: Check for coordinator events (filtered by session)
+    local crs06_logs=$(ssh_cmd "grep -E 'CRS-06|EventCircuitBreaker|EventSemanticRepetition' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | grep '$session_actual' | tail -3" || echo "")
     if [ -n "$crs06_logs" ]; then
         echo -e "  ${YELLOW}CRS-06 (Coordinator Events):${NC}"
         echo "$crs06_logs" | sed 's/^/    /'
     fi
 
-    # Check for any errors or warnings
-    local error_logs=$(ssh_cmd "grep -i 'ERROR\|WARN' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | tail -5" || echo "")
+    # Check for any errors or warnings (R2-4: filtered by session, R2-5: case-sensitive level prefix)
+    local error_logs=$(ssh_cmd "grep -E '(ERROR|WARN) ' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null | grep '$session_actual' | tail -5" || echo "")
     if [ -n "$error_logs" ]; then
         echo -e "  ${RED}Errors/Warnings:${NC}"
         echo "$error_logs" | sed 's/^/    /'
@@ -1119,8 +1119,8 @@ run_crs_test() {
     if [ "$state" = "$expected_state" ]; then
         echo -e "  ${GREEN}════ PASSED ════${NC} State: $state (${duration}ms)"
 
-        # Run extra checks if specified
-        if [ -n "$extra_check" ]; then
+        # Run extra checks if specified (M-3: guard against undefined function)
+        if [ -n "$extra_check" ] && type -t run_extra_check &>/dev/null; then
             run_extra_check "$extra_check" "$response" "$duration" "$session_actual"
         fi
 
@@ -1194,6 +1194,10 @@ resolve_tool_indices() {
             indices+=(0 40 41)
             continue
         fi
+        if [ "$part" = "find_callees_all" ]; then
+            indices+=(1 42 43)
+            continue
+        fi
 
         if [[ "$part" =~ ^[0-9]+$ ]]; then
             # Numeric index
@@ -1210,7 +1214,7 @@ resolve_tool_indices() {
                 for i in "${!TOOL_NAMES[@]}"; do
                     printf "  %02d  %s\n" "$i" "${TOOL_NAMES[$i]}" >&2
                 done
-                echo -e "${YELLOW}Aliases: find_callers_all (= 0,40,41)${NC}" >&2
+                echo -e "${YELLOW}Aliases: find_callers_all (= 0,40,41), find_callees_all (= 1,42,43)${NC}" >&2
                 return 1
             fi
         fi

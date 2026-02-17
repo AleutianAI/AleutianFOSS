@@ -333,14 +333,34 @@ func (p *PythonParser) extractModuleDocstring(root *sitter.Node, content []byte,
 }
 
 // extractImports extracts import statements from the AST.
+//
+// Description:
+//
+//	R3-P2b-Inline: Walks the ENTIRE AST tree (not just top-level children) to capture
+//	inline imports inside function bodies. Python uses inline imports to avoid circular
+//	dependencies, and these must be visible to the import name map for call resolution.
 func (p *PythonParser) extractImports(root *sitter.Node, content []byte, filePath string, result *ParseResult) {
-	for i := 0; i < int(root.ChildCount()); i++ {
-		child := root.Child(i)
+	p.extractImportsRecursive(root, content, filePath, result, 0)
+}
+
+// extractImportsRecursive walks the AST tree and extracts all import statements.
+func (p *PythonParser) extractImportsRecursive(node *sitter.Node, content []byte, filePath string, result *ParseResult, depth int) {
+	if node == nil || depth > MaxCallExpressionDepth {
+		return
+	}
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child == nil {
+			continue
+		}
 		switch child.Type() {
 		case "import_statement":
 			p.processImportStatement(child, content, filePath, result)
 		case "import_from_statement":
 			p.processImportFromStatement(child, content, filePath, result)
+		default:
+			// Recurse into other nodes (function bodies, if blocks, etc.)
+			p.extractImportsRecursive(child, content, filePath, result, depth+1)
 		}
 	}
 }

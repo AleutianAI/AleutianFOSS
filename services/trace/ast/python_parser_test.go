@@ -1829,3 +1829,169 @@ func callTargetNames(calls []CallSite) []string {
 	}
 	return names
 }
+
+// IT-02 R2: Python overload + delegation pattern test (reproducing pandas to_csv/merge issues)
+const pythonOverloadDelegationSource = `
+from typing import overload
+from pandas.io.formats.format import DataFrameFormatter
+from pandas.io.formats.render import DataFrameRenderer
+
+class NDFrame:
+    """Base class with overloaded methods and delegation patterns."""
+
+    def _check_copy_deprecation(self, copy):
+        if copy is not None:
+            import warnings
+            warnings.warn("copy is deprecated", FutureWarning)
+
+    @overload
+    def to_csv(self, path_or_buf=None) -> str: ...
+
+    @overload
+    def to_csv(self, path_or_buf="file.csv") -> None: ...
+
+    def to_csv(
+        self,
+        path_or_buf=None,
+        sep=",",
+        na_rep="",
+    ):
+        """Long docstring that spans
+        multiple lines to simulate
+        the pandas pattern."""
+        df = self if isinstance(self, DataFrame) else self.to_frame()
+        formatter = DataFrameFormatter(frame=df, header=True)
+        return DataFrameRenderer(formatter).to_csv(
+            path_or_buf,
+            sep=sep,
+        )
+
+    def merge(self, right, how="inner", copy=None):
+        self._check_copy_deprecation(copy)
+        from pandas.core.reshape.merge import merge
+        return merge(self, right, how=how)
+
+class DataFrame(NDFrame):
+    def to_frame(self):
+        return self
+`
+
+func TestPythonParser_ExtractCallSites_OverloadAndDelegation(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonOverloadDelegationSource), "generic.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find the NDFrame class
+	var ndFrame *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "NDFrame" {
+			ndFrame = sym
+			break
+		}
+	}
+	if ndFrame == nil {
+		t.Fatal("NDFrame class not found")
+	}
+
+	// Map children by name (there will be multiple to_csv)
+	var overloadStubs []*Symbol
+	var realToCsv *Symbol
+	var mergeMethod *Symbol
+
+	for _, child := range ndFrame.Children {
+		switch {
+		case child.Name == "to_csv" && len(child.Calls) == 0:
+			overloadStubs = append(overloadStubs, child)
+		case child.Name == "to_csv" && len(child.Calls) > 0:
+			realToCsv = child
+		case child.Name == "merge":
+			mergeMethod = child
+		}
+	}
+
+	t.Run("overload_stubs_have_zero_calls", func(t *testing.T) {
+		if len(overloadStubs) != 2 {
+			t.Fatalf("expected 2 overload stubs, got %d", len(overloadStubs))
+		}
+		for i, stub := range overloadStubs {
+			if len(stub.Calls) != 0 {
+				t.Errorf("overload stub %d should have 0 calls, got %d: %v",
+					i, len(stub.Calls), callTargetNames(stub.Calls))
+			}
+		}
+	})
+
+	t.Run("real_to_csv_extracts_all_calls", func(t *testing.T) {
+		if realToCsv == nil {
+			t.Fatal("real to_csv implementation not found (expected method with calls)")
+		}
+
+		callTargets := make(map[string]bool)
+		for _, call := range realToCsv.Calls {
+			key := call.Target
+			if call.IsMethod {
+				key = call.Receiver + "." + call.Target
+			}
+			callTargets[key] = true
+		}
+
+		t.Logf("to_csv extracted %d calls: %v", len(realToCsv.Calls), callTargetNames(realToCsv.Calls))
+
+		// isinstance() — simple function call
+		if !callTargets["isinstance"] {
+			t.Error("missing call to isinstance()")
+		}
+		// self.to_frame() — self method call
+		if !callTargets["self.to_frame"] {
+			t.Error("missing call to self.to_frame()")
+		}
+		// DataFrameFormatter() — constructor call
+		if !callTargets["DataFrameFormatter"] {
+			t.Error("missing call to DataFrameFormatter()")
+		}
+		// DataFrameRenderer() — constructor call
+		if !callTargets["DataFrameRenderer"] {
+			t.Error("missing call to DataFrameRenderer()")
+		}
+		// .to_csv() — chained method call on DataFrameRenderer(formatter)
+		// The receiver will be the full expression text
+		hasCsvChain := false
+		for _, call := range realToCsv.Calls {
+			if call.Target == "to_csv" && call.IsMethod {
+				hasCsvChain = true
+				break
+			}
+		}
+		if !hasCsvChain {
+			t.Error("missing chained .to_csv() call on DataFrameRenderer")
+		}
+	})
+
+	t.Run("merge_extracts_self_and_function_calls", func(t *testing.T) {
+		if mergeMethod == nil {
+			t.Fatal("merge method not found")
+		}
+
+		callTargets := make(map[string]bool)
+		for _, call := range mergeMethod.Calls {
+			key := call.Target
+			if call.IsMethod {
+				key = call.Receiver + "." + call.Target
+			}
+			callTargets[key] = true
+		}
+
+		t.Logf("merge extracted %d calls: %v", len(mergeMethod.Calls), callTargetNames(mergeMethod.Calls))
+
+		// self._check_copy_deprecation() — self method
+		if !callTargets["self._check_copy_deprecation"] {
+			t.Error("missing call to self._check_copy_deprecation()")
+		}
+		// merge() — function call (from inline import)
+		if !callTargets["merge"] {
+			t.Error("missing call to merge() (inline-imported function)")
+		}
+	})
+}

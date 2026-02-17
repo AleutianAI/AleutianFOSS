@@ -2726,3 +2726,678 @@ func TestBuilder_FindOwnerClassName(t *testing.T) {
 		}
 	})
 }
+
+// R3-P1b: Constructor call edges should be allowed by validateEdgeType.
+// When a function calls DataFrameFormatter(...), the resolved target is a Class symbol.
+// The edge should NOT be silently dropped.
+func TestBuilder_ExtractCallEdges_ConstructorCall(t *testing.T) {
+	// Create a method that calls a class constructor
+	callerSym := testSymbolWithCalls("process", ast.SymbolKindFunction, "main.py", 10, []ast.CallSite{
+		{
+			Target: "DataFrameFormatter",
+			Location: ast.Location{
+				FilePath:  "main.py",
+				StartLine: 12,
+			},
+		},
+	})
+	callerSym.Language = "python"
+
+	// The target is a Class symbol (constructor call)
+	classSym := &ast.Symbol{
+		ID:        "format.py:5:DataFrameFormatter",
+		Name:      "DataFrameFormatter",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "format.py",
+		StartLine: 5,
+		EndLine:   50,
+		Language:  "python",
+	}
+
+	result := &ast.ParseResult{
+		FilePath: "main.py",
+		Language: "python",
+		Symbols:  []*ast.Symbol{callerSym, classSym},
+		Package:  "test",
+	}
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Check that a call edge was created FROM function TO class (constructor)
+	graph := buildResult.Graph
+	callerNode, ok := graph.GetNode(callerSym.ID)
+	if !ok {
+		t.Fatal("Caller node not found in graph")
+	}
+
+	hasCallEdge := false
+	for _, edge := range callerNode.Outgoing {
+		if edge.Type == EdgeTypeCalls && edge.ToID == classSym.ID {
+			hasCallEdge = true
+			break
+		}
+	}
+
+	if !hasCallEdge {
+		t.Error("R3-P1b: Expected EdgeTypeCalls from function to Class (constructor call), but edge was not created. " +
+			"validateEdgeType/isCallable rejects SymbolKindClass as a call target.")
+	}
+}
+
+// R3-P1b: Struct constructor calls should also create edges (Go: SomeStruct{}, TS: new SomeClass()).
+func TestBuilder_ExtractCallEdges_StructConstructorCall(t *testing.T) {
+	callerSym := testSymbolWithCalls("NewServer", ast.SymbolKindFunction, "server.go", 10, []ast.CallSite{
+		{
+			Target:   "Config",
+			Location: ast.Location{FilePath: "server.go", StartLine: 12},
+		},
+	})
+
+	structSym := &ast.Symbol{
+		ID:        "config.go:5:Config",
+		Name:      "Config",
+		Kind:      ast.SymbolKindStruct,
+		FilePath:  "config.go",
+		StartLine: 5,
+		EndLine:   20,
+		Language:  "go",
+	}
+
+	result := testParseResult("server.go", []*ast.Symbol{callerSym, structSym}, nil)
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	graph := buildResult.Graph
+	callerNode, ok := graph.GetNode(callerSym.ID)
+	if !ok {
+		t.Fatal("Caller node not found in graph")
+	}
+
+	hasCallEdge := false
+	for _, edge := range callerNode.Outgoing {
+		if edge.Type == EdgeTypeCalls && edge.ToID == structSym.ID {
+			hasCallEdge = true
+			break
+		}
+	}
+
+	if !hasCallEdge {
+		t.Error("R3-P1b: Expected EdgeTypeCalls from function to Struct (constructor call), but edge was not created.")
+	}
+}
+
+// R3-P1d: Property methods should have their call edges extracted.
+// When a @property method calls other functions, those call edges should appear in the graph.
+func TestBuilder_ExtractCallEdges_PropertyMethod(t *testing.T) {
+	// Create a @property method that calls a function
+	propertySym := testSymbolWithCalls("name", ast.SymbolKindProperty, "model.py", 10, []ast.CallSite{
+		{
+			Target:   "format_name",
+			Location: ast.Location{FilePath: "model.py", StartLine: 12},
+		},
+	})
+	propertySym.Language = "python"
+
+	helperSym := &ast.Symbol{
+		ID:        "model.py:30:format_name",
+		Name:      "format_name",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "model.py",
+		StartLine: 30,
+		EndLine:   40,
+		Language:  "python",
+	}
+
+	result := &ast.ParseResult{
+		FilePath: "model.py",
+		Language: "python",
+		Symbols:  []*ast.Symbol{propertySym, helperSym},
+		Package:  "test",
+	}
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	graph := buildResult.Graph
+	propertyNode, ok := graph.GetNode(propertySym.ID)
+	if !ok {
+		t.Fatal("Property node not found in graph")
+	}
+
+	hasCallEdge := false
+	for _, edge := range propertyNode.Outgoing {
+		if edge.Type == EdgeTypeCalls && edge.ToID == helperSym.ID {
+			hasCallEdge = true
+			break
+		}
+	}
+
+	if !hasCallEdge {
+		t.Error("R3-P1d: Expected EdgeTypeCalls from Property to Function, but edge was not created. " +
+			"extractSymbolEdges does not handle SymbolKindProperty.")
+	}
+}
+
+// R3-P1d: A method calling a @property should create a call edge TO the property.
+func TestBuilder_ExtractCallEdges_CallToProperty(t *testing.T) {
+	// A function calls a property (e.g., obj.name where name is @property)
+	callerSym := testSymbolWithCalls("process", ast.SymbolKindFunction, "main.py", 5, []ast.CallSite{
+		{
+			Target:   "name",
+			IsMethod: true,
+			Receiver: "self",
+			Location: ast.Location{FilePath: "main.py", StartLine: 7},
+		},
+	})
+	callerSym.Language = "python"
+
+	// The property target — with a parent class
+	classSym := &ast.Symbol{
+		ID:        "main.py:1:Model",
+		Name:      "Model",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "main.py",
+		StartLine: 1,
+		EndLine:   50,
+		Language:  "python",
+		Children: []*ast.Symbol{
+			callerSym,
+		},
+	}
+
+	propertySym := &ast.Symbol{
+		ID:        "main.py:20:name",
+		Name:      "name",
+		Kind:      ast.SymbolKindProperty,
+		FilePath:  "main.py",
+		StartLine: 20,
+		EndLine:   25,
+		Language:  "python",
+	}
+
+	// Add property as child of class too
+	classSym.Children = append(classSym.Children, propertySym)
+
+	result := &ast.ParseResult{
+		FilePath: "main.py",
+		Language: "python",
+		Symbols:  []*ast.Symbol{classSym, callerSym, propertySym},
+		Package:  "test",
+	}
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	graph := buildResult.Graph
+	callerNode, ok := graph.GetNode(callerSym.ID)
+	if !ok {
+		t.Fatal("Caller node not found in graph")
+	}
+
+	hasCallEdge := false
+	for _, edge := range callerNode.Outgoing {
+		if edge.Type == EdgeTypeCalls && edge.ToID == propertySym.ID {
+			hasCallEdge = true
+			break
+		}
+	}
+
+	if !hasCallEdge {
+		t.Error("R3-P1d: Expected EdgeTypeCalls from Function to Property, but edge was not created. " +
+			"isCallable/validateEdgeType rejects SymbolKindProperty as a call target.")
+	}
+}
+
+// R3-P1b + R3-P1d combined: isCallable unit test verifying the allowed kinds.
+func TestIsCallable(t *testing.T) {
+	tests := []struct {
+		kind     ast.SymbolKind
+		name     string
+		expected bool
+	}{
+		{ast.SymbolKindFunction, "Function", true},
+		{ast.SymbolKindMethod, "Method", true},
+		{ast.SymbolKindExternal, "External", true},
+		{ast.SymbolKindProperty, "Property (R3-P1d)", true},
+		{ast.SymbolKindVariable, "Variable", false},
+		{ast.SymbolKindConstant, "Constant", false},
+		{ast.SymbolKindField, "Field", false},
+		{ast.SymbolKindImport, "Import", false},
+		{ast.SymbolKindInterface, "Interface", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isCallable(tt.kind)
+			if got != tt.expected {
+				t.Errorf("isCallable(%s) = %v, want %v", tt.name, got, tt.expected)
+			}
+		})
+	}
+}
+
+// R3-P1b: isCallTarget should allow Class and Struct as valid call targets (constructor calls).
+func TestIsCallTarget(t *testing.T) {
+	tests := []struct {
+		kind     ast.SymbolKind
+		name     string
+		expected bool
+	}{
+		// Everything callable is also a valid target
+		{ast.SymbolKindFunction, "Function", true},
+		{ast.SymbolKindMethod, "Method", true},
+		{ast.SymbolKindExternal, "External", true},
+		{ast.SymbolKindProperty, "Property", true},
+		// Constructor targets
+		{ast.SymbolKindClass, "Class (R3-P1b)", true},
+		{ast.SymbolKindStruct, "Struct (R3-P1b)", true},
+		// Not valid targets
+		{ast.SymbolKindVariable, "Variable", false},
+		{ast.SymbolKindConstant, "Constant", false},
+		{ast.SymbolKindField, "Field", false},
+		{ast.SymbolKindImport, "Import", false},
+		{ast.SymbolKindInterface, "Interface", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isCallTarget(tt.kind)
+			if got != tt.expected {
+				t.Errorf("isCallTarget(%s) = %v, want %v", tt.name, got, tt.expected)
+			}
+		})
+	}
+}
+
+// ─── R3-P2 Step 0: resolveThisSelfCall Property filter ───
+
+func TestBuilder_ResolveCallTarget_SelfPropertyCall(t *testing.T) {
+	// Simulates Python: class User { @property name(); def greet(self): self.name() }
+	// self.name should resolve to User.name even though name is a Property.
+	nameProperty := &ast.Symbol{
+		ID:        "user.py:20:name",
+		Name:      "name",
+		Kind:      ast.SymbolKindProperty,
+		FilePath:  "user.py",
+		StartLine: 20,
+		EndLine:   25,
+		Language:  "python",
+	}
+
+	greetMethod := &ast.Symbol{
+		ID:        "user.py:30:greet",
+		Name:      "greet",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "user.py",
+		StartLine: 30,
+		EndLine:   40,
+		Language:  "python",
+		Calls: []ast.CallSite{
+			{
+				Target:   "name",
+				IsMethod: true,
+				Receiver: "self",
+				Location: ast.Location{FilePath: "user.py", StartLine: 35},
+			},
+		},
+	}
+
+	userClass := &ast.Symbol{
+		ID:        "user.py:10:User",
+		Name:      "User",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "user.py",
+		StartLine: 10,
+		EndLine:   50,
+		Language:  "python",
+		Children:  []*ast.Symbol{nameProperty, greetMethod},
+	}
+
+	result := testParseResult("user.py", []*ast.Symbol{userClass}, nil)
+	result.Language = "python"
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	g := buildResult.Graph
+	greetNode, ok := g.GetNode(greetMethod.ID)
+	if !ok {
+		t.Fatal("greet node not found")
+	}
+
+	foundName := false
+	for _, edge := range greetNode.Outgoing {
+		if edge.Type == EdgeTypeCalls && edge.ToID == nameProperty.ID {
+			foundName = true
+		}
+	}
+
+	if !foundName {
+		t.Error("Expected call edge from greet to User.name (@property) via self resolution")
+		for _, edge := range greetNode.Outgoing {
+			t.Logf("  edge: %s -> %s (%s)", edge.FromID, edge.ToID, edge.Type)
+		}
+	}
+}
+
+// ─── R3-P2 Step 2: Self-referential filter in Strategy 1 ───
+
+func TestBuilder_ResolveCallTarget_SelfReferentialSkipFallthrough(t *testing.T) {
+	// Simulates: class DataFrame { def merge(self): merge() }
+	// where merge() is imported from another file (reshape/merge.py).
+	// Strategy 1 should skip same-file DataFrame.merge (self-referential)
+	// and resolve to the cross-file merge function.
+
+	mergeFunction := &ast.Symbol{
+		ID:        "reshape/merge.py:10:merge",
+		Name:      "merge",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "reshape/merge.py",
+		StartLine: 10,
+		EndLine:   100,
+		Language:  "python",
+	}
+
+	mergeMethod := &ast.Symbol{
+		ID:        "frame.py:50:merge",
+		Name:      "merge",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "frame.py",
+		StartLine: 50,
+		EndLine:   70,
+		Language:  "python",
+		Calls: []ast.CallSite{
+			{
+				Target:   "merge",
+				IsMethod: false,
+				Receiver: "",
+				Location: ast.Location{FilePath: "frame.py", StartLine: 55},
+			},
+		},
+	}
+
+	dfClass := &ast.Symbol{
+		ID:        "frame.py:10:DataFrame",
+		Name:      "DataFrame",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "frame.py",
+		StartLine: 10,
+		EndLine:   100,
+		Language:  "python",
+		Children:  []*ast.Symbol{mergeMethod},
+	}
+
+	result1 := testParseResult("frame.py", []*ast.Symbol{dfClass}, nil)
+	result1.Language = "python"
+	result2 := testParseResult("reshape/merge.py", []*ast.Symbol{mergeFunction}, nil)
+	result2.Language = "python"
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result1, result2})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	g := buildResult.Graph
+	mergeNode, ok := g.GetNode(mergeMethod.ID)
+	if !ok {
+		t.Fatal("merge method node not found")
+	}
+
+	foundCrossFileTarget := false
+	for _, edge := range mergeNode.Outgoing {
+		if edge.Type == EdgeTypeCalls && edge.ToID == mergeFunction.ID {
+			foundCrossFileTarget = true
+		}
+	}
+
+	if !foundCrossFileTarget {
+		t.Error("Expected call edge from DataFrame.merge to reshape/merge.merge (cross-file target)")
+		t.Log("Strategy 1 should skip self-referential same-file match and fall through to cross-file candidates")
+		for _, edge := range mergeNode.Outgoing {
+			t.Logf("  edge: %s -> %s (%s)", edge.FromID, edge.ToID, edge.Type)
+		}
+	}
+}
+
+// ─── R3-P2 Step 3: Import-aware call resolution ───
+
+func TestBuilder_ResolveCallTarget_ImportAwareResolution(t *testing.T) {
+	// Simulates: frame.py has `from pandas.core.reshape.merge import merge`
+	// DataFrame.query() calls merge() — should resolve to reshape/merge.py:merge
+	// even though there are other functions named "merge" in other files.
+
+	t.Run("import map resolves to correct file", func(t *testing.T) {
+		realMerge := &ast.Symbol{
+			ID:        "pandas/core/reshape/merge.py:10:merge",
+			Name:      "merge",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "pandas/core/reshape/merge.py",
+			StartLine: 10,
+			EndLine:   100,
+			Language:  "python",
+		}
+
+		wrongMerge := &ast.Symbol{
+			ID:        "utils/merge.py:5:merge",
+			Name:      "merge",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "utils/merge.py",
+			StartLine: 5,
+			EndLine:   20,
+			Language:  "python",
+		}
+
+		queryMethod := &ast.Symbol{
+			ID:        "pandas/core/frame.py:50:query",
+			Name:      "query",
+			Kind:      ast.SymbolKindMethod,
+			FilePath:  "pandas/core/frame.py",
+			StartLine: 50,
+			EndLine:   70,
+			Language:  "python",
+			Calls: []ast.CallSite{
+				{
+					Target:   "merge",
+					IsMethod: false,
+					Receiver: "",
+					Location: ast.Location{FilePath: "pandas/core/frame.py", StartLine: 55},
+				},
+			},
+		}
+
+		dfClass := &ast.Symbol{
+			ID:        "pandas/core/frame.py:10:DataFrame",
+			Name:      "DataFrame",
+			Kind:      ast.SymbolKindClass,
+			FilePath:  "pandas/core/frame.py",
+			StartLine: 10,
+			EndLine:   100,
+			Language:  "python",
+			Children:  []*ast.Symbol{queryMethod},
+		}
+
+		result1 := testParseResult("pandas/core/frame.py", []*ast.Symbol{dfClass}, []ast.Import{
+			{
+				Path:  "pandas.core.reshape.merge",
+				Names: []string{"merge"},
+			},
+		})
+		result1.Language = "python"
+
+		result2 := testParseResult("pandas/core/reshape/merge.py", []*ast.Symbol{realMerge}, nil)
+		result2.Language = "python"
+
+		result3 := testParseResult("utils/merge.py", []*ast.Symbol{wrongMerge}, nil)
+		result3.Language = "python"
+
+		builder := NewBuilder()
+		buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result1, result2, result3})
+		if err != nil {
+			t.Fatalf("Build failed: %v", err)
+		}
+
+		g := buildResult.Graph
+		queryNode, ok := g.GetNode(queryMethod.ID)
+		if !ok {
+			t.Fatal("query node not found")
+		}
+
+		foundRealMerge := false
+		foundWrongMerge := false
+		for _, edge := range queryNode.Outgoing {
+			if edge.Type == EdgeTypeCalls {
+				if edge.ToID == realMerge.ID {
+					foundRealMerge = true
+				}
+				if edge.ToID == wrongMerge.ID {
+					foundWrongMerge = true
+				}
+			}
+		}
+
+		if !foundRealMerge {
+			t.Error("Expected call edge to pandas/core/reshape/merge.py:merge (import-resolved)")
+			for _, edge := range queryNode.Outgoing {
+				t.Logf("  edge: %s -> %s (%s)", edge.FromID, edge.ToID, edge.Type)
+			}
+		}
+		if foundWrongMerge {
+			t.Error("Did not expect call edge to utils/merge.py:merge")
+		}
+	})
+
+	t.Run("aliased import resolves correctly", func(t *testing.T) {
+		realConcat := &ast.Symbol{
+			ID:        "pandas/core/reshape/concat.py:10:concat",
+			Name:      "concat",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "pandas/core/reshape/concat.py",
+			StartLine: 10,
+			EndLine:   50,
+			Language:  "python",
+		}
+
+		caller := &ast.Symbol{
+			ID:        "app.py:10:process",
+			Name:      "process",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "app.py",
+			StartLine: 10,
+			EndLine:   30,
+			Language:  "python",
+			Calls: []ast.CallSite{
+				{
+					Target:   "pd_concat",
+					IsMethod: false,
+					Receiver: "",
+					Location: ast.Location{FilePath: "app.py", StartLine: 15},
+				},
+			},
+		}
+
+		result1 := testParseResult("app.py", []*ast.Symbol{caller}, []ast.Import{
+			{
+				Path:  "pandas.core.reshape.concat",
+				Names: []string{"concat as pd_concat"},
+			},
+		})
+		result1.Language = "python"
+
+		result2 := testParseResult("pandas/core/reshape/concat.py", []*ast.Symbol{realConcat}, nil)
+		result2.Language = "python"
+
+		builder := NewBuilder()
+		buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result1, result2})
+		if err != nil {
+			t.Fatalf("Build failed: %v", err)
+		}
+
+		g := buildResult.Graph
+		callerNode, ok := g.GetNode(caller.ID)
+		if !ok {
+			t.Fatal("caller node not found")
+		}
+
+		foundConcat := false
+		for _, edge := range callerNode.Outgoing {
+			if edge.Type == EdgeTypeCalls && edge.ToID == realConcat.ID {
+				foundConcat = true
+			}
+		}
+
+		if !foundConcat {
+			t.Error("Expected call edge to concat via aliased import (pd_concat -> concat)")
+			for _, edge := range callerNode.Outgoing {
+				t.Logf("  edge: %s -> %s (%s)", edge.FromID, edge.ToID, edge.Type)
+			}
+		}
+	})
+}
+
+func TestMatchesImportPath(t *testing.T) {
+	tests := []struct {
+		name       string
+		filePath   string
+		importPath string
+		expected   bool
+	}{
+		{"exact match", "pandas/core/reshape/merge.py", "pandas.core.reshape.merge", true},
+		{"with init", "pandas/core/reshape/merge/__init__.py", "pandas.core.reshape.merge", true},
+		{"prefix pollution", "my_pandas/core/reshape/merge.py", "pandas.core.reshape.merge", false},
+		{"suffix pollution", "pandas/core/reshape/merge_utils.py", "pandas.core.reshape.merge", false},
+		{"partial match", "reshape/merge.py", "pandas.core.reshape.merge", false},
+		{"simple module", "utils.py", "utils", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := matchesImportPath(tt.filePath, tt.importPath)
+			if got != tt.expected {
+				t.Errorf("matchesImportPath(%q, %q) = %v, want %v", tt.filePath, tt.importPath, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestParseAliasedName(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        string
+		wantLocal    string
+		wantOriginal string
+	}{
+		{"no alias", "merge", "merge", "merge"},
+		{"with alias", "concat as pd_concat", "pd_concat", "concat"},
+		{"spaced alias", "merge as pd_merge", "pd_merge", "merge"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			local, original := parseAliasedName(tt.input)
+			if local != tt.wantLocal {
+				t.Errorf("parseAliasedName(%q) local = %q, want %q", tt.input, local, tt.wantLocal)
+			}
+			if original != tt.wantOriginal {
+				t.Errorf("parseAliasedName(%q) original = %q, want %q", tt.input, original, tt.wantOriginal)
+			}
+		})
+	}
+}

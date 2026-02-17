@@ -724,42 +724,71 @@ func (o *OllamaClient) ChatWithTools(ctx context.Context, messages []datatypes.M
 		return nil, fmt.Errorf("failed to marshal chat request to Ollama: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", chatURL, bytes.NewBuffer(reqBody))
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return nil, fmt.Errorf("failed to create chat request to Ollama: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
+	const maxToolParseRetries = 2
+	const toolParseRetryDelay = 500 * time.Millisecond
 
-	resp, err := o.httpClient.Do(req)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		return nil, fmt.Errorf("failed to send request to %s: %v", chatURL, err)
-	}
-	defer resp.Body.Close()
-
-	respBody, readErr := io.ReadAll(resp.Body)
-	if readErr != nil {
-		span.RecordError(readErr)
-		span.SetStatus(codes.Error, readErr.Error())
-		return nil, fmt.Errorf("failed to read response body: %v", readErr)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		httpErr := fmt.Errorf("ollama chat failed with status %d: %s", resp.StatusCode, string(respBody))
-		slog.Error("Ollama chat returned an error",
-			"status_code", resp.StatusCode,
-			"response", string(respBody),
-		)
-		span.RecordError(httpErr)
-		span.SetStatus(codes.Error, httpErr.Error())
-		return nil, httpErr
-	}
-
+	var respBody []byte
 	var ollamaResp ollamaChatResponse
-	if err = json.Unmarshal(respBody, &ollamaResp); err != nil {
+
+	for attempt := 0; attempt <= maxToolParseRetries; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, "POST", chatURL, bytes.NewBuffer(reqBody))
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return nil, fmt.Errorf("failed to create chat request to Ollama: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := o.httpClient.Do(req)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return nil, fmt.Errorf("failed to send request to %s: %v", chatURL, err)
+		}
+
+		respBody, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return nil, fmt.Errorf("failed to read response body: %v", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			respStr := string(respBody)
+
+			// Retry on LLM tool call JSON parse errors (intermittent formatting issue)
+			if resp.StatusCode == http.StatusInternalServerError &&
+				strings.Contains(respStr, "error parsing tool call") &&
+				attempt < maxToolParseRetries {
+
+				slog.Info("LLM produced malformed tool call JSON, retrying",
+					slog.Int("attempt", attempt+1),
+					slog.Int("max_retries", maxToolParseRetries),
+					slog.String("error", respStr),
+				)
+				span.AddEvent("tool_call_parse_retry", trace.WithAttributes(
+					attribute.Int("attempt", attempt+1),
+				))
+				time.Sleep(toolParseRetryDelay)
+				continue
+			}
+
+			httpErr := fmt.Errorf("ollama chat failed with status %d: %s", resp.StatusCode, respStr)
+			slog.Error("Ollama chat returned an error",
+				"status_code", resp.StatusCode,
+				"response", respStr,
+			)
+			span.RecordError(httpErr)
+			span.SetStatus(codes.Error, httpErr.Error())
+			return nil, httpErr
+		}
+
+		// Success — break out of retry loop
+		break
+	}
+
+	if err := json.Unmarshal(respBody, &ollamaResp); err != nil {
 		slog.Error("Failed to parse JSON chat response from Ollama",
 			"error", err,
 			"response", string(respBody),

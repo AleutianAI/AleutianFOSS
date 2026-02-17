@@ -586,3 +586,37 @@ tests:
       packages/common, packages/microservices, and packages/websockets.
     validations:
       - type: graph_tool_used
+  # -- Additional find_callees tests (42-43) -- expected_state: COMPLETE --
+  - id: 8042
+    name: nestjs_find_callees_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against NestJS (test B). Target: NestFactory.create method.
+
+    query: |
+      What functions does NestFactory.create call?
+    expected_state: COMPLETE
+    reference_answer: |
+      NestFactory.create calls createHttpAdapter, creates new ApplicationConfig
+      and NestContainer instances, calls createGraphInspector,
+      setAbortOnError, registerLoggerConfiguration, and initialize
+      to bootstrap the application, then creates a new NestApplication.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8043
+    name: nestjs_find_callees_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against NestJS (test C). Target: NestApplication.registerModules method.
+
+    query: |
+      What functions does NestApplication.registerModules call?
+    expected_state: COMPLETE
+    reference_answer: |
+      NestApplication.registerModules calls registerWsModule for WebSocket setup,
+      microservicesModule.register and microservicesModule.setupClients for
+      microservice integration, and middlewareModule.register to initialize
+      the middleware pipeline.
+    validations:
+      - type: graph_tool_used

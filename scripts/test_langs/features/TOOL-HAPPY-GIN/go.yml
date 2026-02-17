@@ -583,3 +583,35 @@ tests:
       radix tree with the specified middleware chain.
     validations:
       - type: graph_tool_used
+  # -- Additional find_callees tests (42-43) -- expected_state: COMPLETE --
+  - id: 5242
+    name: gin_find_callees_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against Gin (test B). Target: Engine.ServeHTTP method.
+
+    query: |
+      What functions does Engine.ServeHTTP call?
+    expected_state: COMPLETE
+    reference_answer: |
+      Engine.ServeHTTP calls pool.Get to acquire a Context from the sync pool,
+      writermem.reset and c.reset to initialize the context, handleHTTPRequest
+      to route and dispatch the request, and pool.Put to return the context.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5243
+    name: gin_find_callees_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against Gin (test C). Target: Context.ShouldBind method.
+
+    query: |
+      What functions does Context.ShouldBind call?
+    expected_state: COMPLETE
+    reference_answer: |
+      Context.ShouldBind calls binding.Default to select the appropriate
+      binder based on the HTTP method and Content-Type, then delegates
+      to ShouldBindWith to perform the actual data binding.
+    validations:
+      - type: graph_tool_used

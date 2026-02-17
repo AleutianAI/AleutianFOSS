@@ -583,3 +583,37 @@ tests:
       user code outside the engine source.
     validations:
       - type: graph_tool_used
+  # -- Additional find_callees tests (42-43) -- expected_state: COMPLETE --
+  - id: 7142
+    name: babylonjs_find_callees_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against BabylonJS (test B). Target: Scene.render method.
+
+    query: |
+      What functions does Scene.render call?
+    expected_state: COMPLETE
+    reference_answer: |
+      Scene.render orchestrates the full frame rendering pipeline, calling
+      _registerTransientComponents, resetCachedMaterial, animate for
+      animation updates, camera.update, _renderRenderTarget for render
+      targets, and notifyObservers for before/after render callbacks.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7143
+    name: babylonjs_find_callees_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against BabylonJS (test C). Target: Scene.dispose method.
+
+    query: |
+      What functions does Scene.dispose call?
+    expected_state: COMPLETE
+    reference_answer: |
+      Scene.dispose performs comprehensive cleanup by calling clear on all
+      rendering stage lists, stopAllAnimations, resetCachedMaterial,
+      disposing the rendering manager, active meshes, particle systems,
+      and skeletons, and finally notifying dispose observers.
+    validations:
+      - type: graph_tool_used

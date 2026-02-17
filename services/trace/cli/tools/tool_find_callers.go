@@ -155,8 +155,9 @@ func (t *findCallersTool) Definition() ToolDefinition {
 	return ToolDefinition{
 		Name: "find_callers",
 		Description: "Find all functions that CALL a given function (upstream dependencies). " +
-			"Use when asked 'who calls X?' or 'what calls X?' or 'find usages of X'. " +
-			"NOT for 'what does X call' - use find_callees for that instead. " +
+			"The target function is the OBJECT being called. " +
+			"Use when asked 'who calls X?' or 'find usages of X' or 'where is X called from?'. " +
+			"NOT for 'what does X call?' - use find_callees for that instead. " +
 			"Returns the list of callers with file locations and signatures.",
 		Parameters: map[string]ParamDef{
 			"function_name": {
@@ -176,15 +177,20 @@ func (t *findCallersTool) Definition() ToolDefinition {
 		Requires:    []string{"graph_initialized"},
 		SideEffects: false,
 		Timeout:     5 * time.Second,
+		// IT-02 H-3: Removed ambiguous "what calls" keyword, added grammar hint
 		WhenToUse: WhenToUse{
 			Keywords: []string{
-				"who calls", "what calls", "find callers", "callers of",
+				"who calls", "find callers", "callers of",
 				"usages of", "incoming calls", "upstream", "called from",
 				"references to", "uses of", "invocations of",
+				"where is it called", "find references",
 			},
 			UseWhen: "User asks WHO or WHAT calls a specific function. " +
-				"Questions like 'who calls X?', 'what calls X?', 'find usages of X', 'callers of X'.",
-			AvoidWhen: "User asks what a function CALLS or what it depends on. " +
+				"The target function is the OBJECT being called. " +
+				"Questions like 'who calls parseConfig?', 'find usages of Process', " +
+				"'where is Open called from?', 'callers of X'.",
+			AvoidWhen: "User asks what a function CALLS or depends on. " +
+				"The target function is the SUBJECT doing the calling. " +
 				"Questions like 'what does X call?', 'what functions does X call?'. " +
 				"Use find_callees instead for those.",
 		},

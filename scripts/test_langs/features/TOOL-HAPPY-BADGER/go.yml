@@ -583,3 +583,34 @@ tests:
       writes for bulk data ingestion and database restore operations.
     validations:
       - type: graph_tool_used
+  # -- Additional find_callees tests (42-43) -- expected_state: COMPLETE --
+  - id: 5142
+    name: badger_find_callees_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against Badger (test B). Target: Txn.Commit method.
+
+    query: |
+      What functions does Txn.Commit call?
+    expected_state: COMPLETE
+    reference_answer: |
+      Txn.Commit calls Discard (deferred cleanup), commitPrecheck
+      (validates transaction state), and commitAndSend (submits
+      the write request to the database's write channel).
+    validations:
+      - type: graph_tool_used
+
+  - id: 5143
+    name: badger_find_callees_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against Badger (test C). Target: DB.batchSet method.
+
+    query: |
+      What functions does DB.batchSet call?
+    expected_state: COMPLETE
+    reference_answer: |
+      DB.batchSet calls sendToWriteCh to submit entries to the write
+      channel and req.Wait to block until the write is committed.
+    validations:
+      - type: graph_tool_used

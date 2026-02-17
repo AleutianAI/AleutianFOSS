@@ -422,6 +422,7 @@ func (g *Graph) FindCalleesByID(ctx context.Context, symbolID string, opts ...Qu
 		return result, nil
 	}
 
+	seen := make(map[string]bool)
 	for _, edge := range node.Outgoing {
 		if err := ctx.Err(); err != nil {
 			result.Truncated = true
@@ -439,7 +440,8 @@ func (g *Graph) FindCalleesByID(ctx context.Context, symbolID string, opts ...Qu
 		}
 
 		calleeNode, exists := g.nodes[edge.ToID]
-		if exists {
+		if exists && !seen[calleeNode.Symbol.ID] {
+			seen[calleeNode.Symbol.ID] = true
 			result.Symbols = append(result.Symbols, calleeNode.Symbol)
 		}
 	}

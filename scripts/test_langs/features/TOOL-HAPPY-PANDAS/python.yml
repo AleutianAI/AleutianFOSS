@@ -45,8 +45,9 @@ tests:
       What functions does DataFrame.merge call?
     expected_state: COMPLETE
     reference_answer: |
-      DataFrame.merge calls merge_ordered, _MergeOperation, and various
-      index alignment and dtype validation functions in core/reshape/merge.py.
+      DataFrame.merge calls _check_copy_deprecation (in core/generic.py to
+      handle the deprecated copy parameter) and the top-level merge() function
+      in core/reshape/merge.py which performs the actual join logic.
     validations:
       - type: graph_tool_used
 
@@ -582,5 +583,37 @@ tests:
       builder), _get_multiindex_indexer (handles MultiIndex join cases), and
       _get_join_keys itself (recursive call for nested key resolution).
       These are all in core/reshape/merge.py handling join key extraction.
+    validations:
+      - type: graph_tool_used
+  # -- Additional find_callees tests (42-43) -- expected_state: COMPLETE --
+  - id: 6142
+    name: pandas_find_callees_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against Pandas (test B). Target: concat function.
+
+    query: |
+      What functions does concat call?
+    expected_state: COMPLETE
+    reference_answer: |
+      concat calls _clean_keys_and_objs to validate inputs, _get_sample_object
+      to select a reference object, _sanitize_mixed_ndim for dimension
+      normalization, and _get_result to perform the actual concatenation.
+    validations:
+      - type: graph_tool_used
+
+  - id: 6143
+    name: pandas_find_callees_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against Pandas (test C). Target: DataFrame.to_csv method.
+
+    query: |
+      What functions does DataFrame.to_csv call?
+    expected_state: COMPLETE
+    reference_answer: |
+      DataFrame.to_csv calls DataFrameFormatter to format the data and
+      DataFrameRenderer to handle the actual CSV output writing, delegating
+      the serialization to the rendering pipeline.
     validations:
       - type: graph_tool_used

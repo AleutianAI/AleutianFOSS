@@ -118,10 +118,11 @@ func ResolveFunctionWithFuzzy(
 		return nil, false, fmt.Errorf("no match found for '%s'", name)
 	}
 
-	// Filter matches to only functions and methods (BEFORE selecting best match!)
+	// Filter matches to only functions, methods, and properties (BEFORE selecting best match!)
+	// R3-P1d: Include Property symbols (Python @property, TS get/set accessors).
 	var functionsOnly []*ast.Symbol
 	for _, match := range fuzzyMatches {
-		if match.Kind == ast.SymbolKindFunction || match.Kind == ast.SymbolKindMethod {
+		if match.Kind == ast.SymbolKindFunction || match.Kind == ast.SymbolKindMethod || match.Kind == ast.SymbolKindProperty {
 			functionsOnly = append(functionsOnly, match)
 		}
 	}
@@ -271,7 +272,8 @@ func resolveTypeDotMethod(
 
 	var candidates []*ast.Symbol
 	for _, sym := range methodMatches {
-		if sym.Kind != ast.SymbolKindMethod && sym.Kind != ast.SymbolKindFunction {
+		// R3-P1d: Include Property symbols (Python @property, TS get/set accessors).
+		if sym.Kind != ast.SymbolKindMethod && sym.Kind != ast.SymbolKindFunction && sym.Kind != ast.SymbolKindProperty {
 			continue
 		}
 
@@ -311,17 +313,41 @@ func resolveTypeDotMethod(
 			continue
 		}
 
+		// R3-P2a: Collect matching children, partition by overload status.
+		// Prefer non-overload (real implementation) over @overload stubs.
+		var nonOverloadMatch *ast.Symbol
+		var overloadFallback *ast.Symbol
 		for _, child := range typeSym.Children {
+			// R3-P1d: Include Property symbols in class children search.
 			if child.Name == methodName &&
-				(child.Kind == ast.SymbolKindMethod || child.Kind == ast.SymbolKindFunction) {
-				logger.Debug("resolveTypeDotMethod: matched via parent class children",
-					slog.String("type", typeName),
-					slog.String("method", methodName),
-					slog.String("resolved_id", child.ID),
-					slog.String("parent_id", typeSym.ID),
-				)
-				return child, nil
+				(child.Kind == ast.SymbolKindMethod || child.Kind == ast.SymbolKindFunction || child.Kind == ast.SymbolKindProperty) {
+				if isOverloadStub(child) {
+					if overloadFallback == nil {
+						overloadFallback = child
+					}
+				} else {
+					nonOverloadMatch = child
+					break // Non-overload wins immediately
+				}
 			}
+		}
+		if nonOverloadMatch != nil {
+			logger.Debug("resolveTypeDotMethod: matched via parent class children (non-overload)",
+				slog.String("type", typeName),
+				slog.String("method", methodName),
+				slog.String("resolved_id", nonOverloadMatch.ID),
+				slog.String("parent_id", typeSym.ID),
+			)
+			return nonOverloadMatch, nil
+		}
+		if overloadFallback != nil {
+			logger.Debug("resolveTypeDotMethod: matched via parent class children (overload fallback)",
+				slog.String("type", typeName),
+				slog.String("method", methodName),
+				slog.String("resolved_id", overloadFallback.ID),
+				slog.String("parent_id", typeSym.ID),
+			)
+			return overloadFallback, nil
 		}
 	}
 
@@ -348,6 +374,36 @@ func resolveTypeDotMethod(
 	return nil, fmt.Errorf("no method '%s' found on type '%s'", methodName, typeName)
 }
 
+// isOverloadStub returns true if the symbol is a Python @overload typing stub.
+//
+// Description:
+//
+//	Checks the symbol's Metadata.Decorators for "overload". These stubs exist
+//	only for the type checker and have no body (or an ellipsis body). They should
+//	be deprioritized in favor of the real implementation when resolving symbols
+//	for call graph queries.
+//
+// Inputs:
+//
+//	sym - The symbol to check. May be nil (returns false).
+//
+// Outputs:
+//
+//	bool - True if the symbol has an @overload decorator.
+//
+// Thread Safety: This function is safe for concurrent use.
+func isOverloadStub(sym *ast.Symbol) bool {
+	if sym == nil || sym.Metadata == nil {
+		return false
+	}
+	for _, dec := range sym.Metadata.Decorators {
+		if dec == "overload" {
+			return true
+		}
+	}
+	return false
+}
+
 // pickBestCandidate selects the best symbol from a list of candidates.
 // Prefers symbols with Receiver set, then shortest ID (most specific).
 //
@@ -363,6 +419,28 @@ func pickBestCandidate(candidates []*ast.Symbol) *ast.Symbol {
 
 	best := candidates[0]
 	for _, c := range candidates[1:] {
+		// R3-P2a: Prefer non-overload over overload stub
+		bestIsStub := isOverloadStub(best)
+		cIsStub := isOverloadStub(c)
+		if !cIsStub && bestIsStub {
+			best = c
+			continue
+		}
+		if cIsStub && !bestIsStub {
+			continue
+		}
+
+		// R3-P2a: Prefer candidate with calls over empty calls (stub heuristic)
+		bestHasCalls := len(best.Calls) > 0
+		cHasCalls := len(c.Calls) > 0
+		if cHasCalls && !bestHasCalls {
+			best = c
+			continue
+		}
+		if !cHasCalls && bestHasCalls {
+			continue
+		}
+
 		// Prefer symbols with Receiver set (more explicit match)
 		if c.Receiver != "" && best.Receiver == "" {
 			best = c

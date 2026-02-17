@@ -587,3 +587,38 @@ tests:
       parent Component.computeLayout for base layout calculations.
     validations:
       - type: graph_tool_used
+  # -- Additional find_callees tests (42-43) -- expected_state: COMPLETE --
+  - id: 8142
+    name: plottable_find_callees_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against Plottable (test B). Target: Component.renderTo method.
+
+    query: |
+      What functions does Component.renderTo call?
+    expected_state: COMPLETE
+    reference_answer: |
+      Component.renderTo calls detach to remove from any existing parent,
+      d3.select to wrap the target element, isElement and coerceExternalD3
+      for validation, this.anchor to attach to the DOM element, and
+      RenderController.registerToComputeLayoutAndRender plus flush
+      to trigger the initial layout and render cycle.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8143
+    name: plottable_find_callees_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against Plottable (test C). Target: Plot.destroy method.
+
+    query: |
+      What functions does Plot.destroy call?
+    expected_state: COMPLETE
+    reference_answer: |
+      Plot.destroy calls super.destroy for base Component cleanup, then
+      iterates all scales via _scales and calls scale.offUpdate on each
+      to unsubscribe from scale change notifications, preventing memory
+      leaks from stale update callbacks.
+    validations:
+      - type: graph_tool_used
