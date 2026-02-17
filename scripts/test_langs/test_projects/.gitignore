@@ -11,3 +11,10 @@ typescript/playwright/
 !.gitignore
 !*/
 !README.md
+/go/orchestrator/.idea/runConfigurations/AleutianOrchestrator.xml
+/go/orchestrator/pkg/utils/prompts/distiller_v3.json
+/go/orchestrator/.idea/material_theme_project_new.xml
+/go/orchestrator/.idea/modules.xml
+/go/orchestrator/.idea/dictionaries/project.xml
+/go/orchestrator/.idea/inspectionProfiles/Project_Default.xml
+/go/orchestrator/.idea/vcs.xml

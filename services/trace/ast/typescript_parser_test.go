@@ -1211,3 +1211,215 @@ func BenchmarkTypeScriptParser_Parse_Concurrent(b *testing.B) {
 		}
 	})
 }
+
+// GR-41: Tests for TypeScript call site extraction
+
+const tsCallsSource = `
+export class NestFactory {
+    static async create(module: any): Promise<INestApplication> {
+        const container = new NestContainer();
+        await container.initialize(module);
+        const app = this.createNestInstance(container);
+        return app;
+    }
+
+    private static createNestInstance(container: NestContainer): INestApplication {
+        const httpAdapter = container.getHttpAdapter();
+        return new NestApplication(httpAdapter);
+    }
+}
+
+export class AppController {
+    constructor(private readonly appService: AppService) {}
+
+    getHello(): string {
+        return this.appService.getHello();
+    }
+
+    async handleRequest(req: Request): Promise<Response> {
+        const validated = this.validate(req);
+        const result = await this.appService.process(validated);
+        return formatResponse(result);
+    }
+}
+
+function formatResponse(data: any): Response {
+    const serialized = JSON.stringify(data);
+    return createResponse(serialized);
+}
+`
+
+func TestTypeScriptParser_ExtractCallSites_ThisMethodCalls(t *testing.T) {
+	parser := NewTypeScriptParser(WithTypeScriptParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(tsCallsSource), "nest.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find AppController.handleRequest method
+	var handleMethod *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "AppController" {
+			for _, child := range sym.Children {
+				if child.Name == "handleRequest" {
+					handleMethod = child
+					break
+				}
+			}
+		}
+	}
+
+	if handleMethod == nil {
+		t.Fatal("AppController.handleRequest method not found")
+	}
+
+	if len(handleMethod.Calls) == 0 {
+		t.Fatal("handleRequest should have call sites extracted")
+	}
+
+	callTargets := make(map[string]bool)
+	for _, call := range handleMethod.Calls {
+		callTargets[call.Target] = true
+	}
+
+	if !callTargets["validate"] {
+		t.Errorf("expected call to validate, got: %v", tsCallTargetNames(handleMethod.Calls))
+	}
+
+	// Verify this.method() calls
+	for _, call := range handleMethod.Calls {
+		if call.Target == "validate" {
+			if !call.IsMethod {
+				t.Errorf("call to validate should be IsMethod=true")
+			}
+			if call.Receiver != "this" {
+				t.Errorf("call to validate should have Receiver='this', got %q", call.Receiver)
+			}
+		}
+	}
+}
+
+func TestTypeScriptParser_ExtractCallSites_StaticMethodCalls(t *testing.T) {
+	parser := NewTypeScriptParser(WithTypeScriptParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(tsCallsSource), "nest.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find NestFactory.create method
+	var createMethod *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "NestFactory" {
+			for _, child := range sym.Children {
+				if child.Name == "create" {
+					createMethod = child
+					break
+				}
+			}
+		}
+	}
+
+	if createMethod == nil {
+		t.Fatal("NestFactory.create method not found")
+	}
+
+	if len(createMethod.Calls) == 0 {
+		t.Fatal("create should have call sites extracted")
+	}
+
+	callTargets := make(map[string]bool)
+	for _, call := range createMethod.Calls {
+		callTargets[call.Target] = true
+	}
+
+	if !callTargets["initialize"] {
+		t.Errorf("expected call to initialize, got: %v", tsCallTargetNames(createMethod.Calls))
+	}
+	if !callTargets["createNestInstance"] {
+		t.Errorf("expected call to createNestInstance, got: %v", tsCallTargetNames(createMethod.Calls))
+	}
+}
+
+func TestTypeScriptParser_ExtractCallSites_SimpleFunctionCalls(t *testing.T) {
+	parser := NewTypeScriptParser(WithTypeScriptParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(tsCallsSource), "nest.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var formatFn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "formatResponse" {
+			formatFn = sym
+			break
+		}
+	}
+
+	if formatFn == nil {
+		t.Fatal("formatResponse function not found")
+	}
+
+	if len(formatFn.Calls) < 1 {
+		t.Errorf("expected at least 1 call, got %d", len(formatFn.Calls))
+	}
+
+	callTargets := make(map[string]bool)
+	for _, call := range formatFn.Calls {
+		callTargets[call.Target] = true
+	}
+
+	if !callTargets["createResponse"] {
+		t.Errorf("expected call to createResponse, got: %v", tsCallTargetNames(formatFn.Calls))
+	}
+}
+
+func TestTypeScriptParser_ExtractCallSites_ChainedPropertyCalls(t *testing.T) {
+	parser := NewTypeScriptParser(WithTypeScriptParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(tsCallsSource), "nest.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find AppController.handleRequest — has this.appService.process() (chained)
+	var handleMethod *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "AppController" {
+			for _, child := range sym.Children {
+				if child.Name == "handleRequest" {
+					handleMethod = child
+					break
+				}
+			}
+		}
+	}
+
+	if handleMethod == nil {
+		t.Fatal("handleRequest not found")
+	}
+
+	// Should extract process() call with receiver "this.appService"
+	found := false
+	for _, call := range handleMethod.Calls {
+		if call.Target == "process" {
+			found = true
+			if !call.IsMethod {
+				t.Error("process should be a method call")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("expected call to process, got: %v", tsCallTargetNames(handleMethod.Calls))
+	}
+}
+
+func tsCallTargetNames(calls []CallSite) []string {
+	names := make([]string, len(calls))
+	for i, call := range calls {
+		if call.IsMethod {
+			names[i] = call.Receiver + "." + call.Target
+		} else {
+			names[i] = call.Target
+		}
+	}
+	return names
+}

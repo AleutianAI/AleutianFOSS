@@ -186,7 +186,7 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 		if deps.Session != nil {
 			callCount := toolCounts[inv.Tool]
 			if callCount >= crs.DefaultCircuitBreakerThreshold {
-				slog.Warn("GR-39b: Count-based circuit breaker fired in LLM path",
+				slog.Info("GR-39b: Count-based circuit breaker fired in LLM path",
 					slog.String("session_id", deps.Session.ID),
 					slog.String("tool", inv.Tool),
 					slog.Int("call_count", callCount),
@@ -267,7 +267,7 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 			if toolQuery != "" {
 				isRepetitive, similarity, similarQuery := p.checkSemanticRepetition(ctx, deps, inv.Tool, toolQuery)
 				if isRepetitive {
-					slog.Warn("CB-30c: Blocking semantically repetitive tool call",
+					slog.Info("CB-30c: Blocking semantically repetitive tool call",
 						slog.String("session_id", deps.Session.ID),
 						slog.String("tool", inv.Tool),
 						slog.String("query", toolQuery),
@@ -350,15 +350,15 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 					result.TokensUsed = len(infoText) / 4 // Estimate tokens (simple heuristic)
 				}
 				results[len(results)-1] = result // Update the result we just added
-				errMsg = "" // Clear error since we converted to success
+				errMsg = ""                      // Clear error since we converted to success
 			}
 
 			// P0-3: Detect validation errors and force synthesis (Feb 14, 2026)
 			// If tool failed due to parameter validation, mark circuit breaker as active
 			// to force synthesis from existing tool results instead of retrying.
 			if strings.Contains(errMsg, "parameter validation") ||
-			   strings.Contains(errMsg, "required parameter missing") ||
-			   strings.Contains(errMsg, "validation failed") {
+				strings.Contains(errMsg, "required parameter missing") ||
+				strings.Contains(errMsg, "validation failed") {
 				slog.Warn("P0-3: Validation error detected, will force synthesis",
 					slog.String("session_id", deps.Session.ID),
 					slog.String("tool", inv.Tool),

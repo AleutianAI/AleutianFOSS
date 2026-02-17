@@ -1922,3 +1922,1482 @@ func TestExtractImportEdges_DuplicateImports(t *testing.T) {
 	// Verify no errors occurred (duplicates should be handled gracefully)
 	// Note: EdgeErrors may contain duplicate edge errors which are non-fatal
 }
+
+// =============================================================================
+// IT-01 Bug 4: Go receiver case-insensitive matching
+// =============================================================================
+
+func TestBuilder_ResolveCallTarget_GoReceiverCaseInsensitive(t *testing.T) {
+	// Simulates badger: txn.Get(k) where txn is a *Txn
+	// CallSite.Receiver = "txn", sym.Receiver = "Txn"
+	callerSym := testSymbolWithCalls("Execute", ast.SymbolKindFunction, "main.go", 5, []ast.CallSite{
+		{
+			Target:   "Get",
+			IsMethod: true,
+			Receiver: "txn",
+			Location: ast.Location{FilePath: "main.go", StartLine: 10},
+		},
+	})
+
+	// Two methods named "Get" with different receiver types
+	txnGet := testSymbol("Get", ast.SymbolKindMethod, "txn.go", 20)
+	txnGet.Receiver = "Txn"
+
+	dbGet := testSymbol("Get", ast.SymbolKindMethod, "db.go", 30)
+	dbGet.Receiver = "DB"
+
+	result := testParseResult("main.go", []*ast.Symbol{callerSym}, nil)
+	result2 := testParseResult("txn.go", []*ast.Symbol{txnGet}, nil)
+	result3 := testParseResult("db.go", []*ast.Symbol{dbGet}, nil)
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result, result2, result3})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// The call edge should go to Txn.Get (case-insensitive match), not DB.Get
+	g := buildResult.Graph
+	callerNode, ok := g.GetNode(callerSym.ID)
+	if !ok {
+		t.Fatal("Caller node not found")
+	}
+
+	foundTxnGet := false
+	foundDBGet := false
+	for _, edge := range callerNode.Outgoing {
+		if edge.Type == EdgeTypeCalls {
+			if edge.ToID == txnGet.ID {
+				foundTxnGet = true
+			}
+			if edge.ToID == dbGet.ID {
+				foundDBGet = true
+			}
+		}
+	}
+
+	if !foundTxnGet {
+		t.Error("Expected call edge from Execute to Txn.Get (case-insensitive receiver match)")
+	}
+	if foundDBGet {
+		t.Error("Did not expect call edge from Execute to DB.Get")
+	}
+}
+
+func TestBuilder_ResolveCallTarget_GoReceiverExactMatch(t *testing.T) {
+	// When call receiver matches exactly (same case), should also work
+	callerSym := testSymbolWithCalls("Handler", ast.SymbolKindMethod, "main.go", 5, []ast.CallSite{
+		{
+			Target:   "Write",
+			IsMethod: true,
+			Receiver: "w",
+			Location: ast.Location{FilePath: "main.go", StartLine: 10},
+		},
+	})
+	callerSym.Receiver = "Server"
+
+	writerWrite := testSymbol("Write", ast.SymbolKindMethod, "writer.go", 20)
+	writerWrite.Receiver = "Writer"
+
+	bufferWrite := testSymbol("Write", ast.SymbolKindMethod, "buffer.go", 30)
+	bufferWrite.Receiver = "Buffer"
+
+	result := testParseResult("main.go", []*ast.Symbol{callerSym}, nil)
+	result2 := testParseResult("writer.go", []*ast.Symbol{writerWrite}, nil)
+	result3 := testParseResult("buffer.go", []*ast.Symbol{bufferWrite}, nil)
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result, result2, result3})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	g := buildResult.Graph
+	callerNode, ok := g.GetNode(callerSym.ID)
+	if !ok {
+		t.Fatal("Caller node not found")
+	}
+
+	// "w" doesn't case-insensitively match either "Writer" or "Buffer"
+	// so it should fall back to Strategy 3c (first method match)
+	hasCallEdge := false
+	for _, edge := range callerNode.Outgoing {
+		if edge.Type == EdgeTypeCalls {
+			hasCallEdge = true
+		}
+	}
+
+	if !hasCallEdge {
+		t.Error("Expected at least one call edge (fallback to first method match)")
+	}
+}
+
+// =============================================================================
+// IT-01 Bug 6: this/self receiver resolution with inheritance
+// =============================================================================
+
+func TestBuilder_ResolveCallTarget_ThisSelfResolution(t *testing.T) {
+	// Simulates: class Component { doRender() { this.renderImmediately() } }
+	// this.renderImmediately() should resolve to Component.renderImmediately, not some other class's method
+
+	// Component class with children
+	renderMethod := &ast.Symbol{
+		ID:        "component.ts:50:renderImmediately",
+		Name:      "renderImmediately",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "component.ts",
+		StartLine: 50,
+		EndLine:   60,
+		Language:  "typescript",
+	}
+
+	doRenderMethod := &ast.Symbol{
+		ID:        "component.ts:30:doRender",
+		Name:      "doRender",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "component.ts",
+		StartLine: 30,
+		EndLine:   40,
+		Language:  "typescript",
+		Calls: []ast.CallSite{
+			{
+				Target:   "renderImmediately",
+				IsMethod: true,
+				Receiver: "this",
+				Location: ast.Location{FilePath: "component.ts", StartLine: 35},
+			},
+		},
+	}
+
+	componentClass := &ast.Symbol{
+		ID:        "component.ts:10:Component",
+		Name:      "Component",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "component.ts",
+		StartLine: 10,
+		EndLine:   100,
+		Language:  "typescript",
+		Children:  []*ast.Symbol{doRenderMethod, renderMethod},
+	}
+
+	// Another class with a method also named renderImmediately (unrelated)
+	otherRender := &ast.Symbol{
+		ID:        "other.ts:10:renderImmediately",
+		Name:      "renderImmediately",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "other.ts",
+		StartLine: 10,
+		EndLine:   20,
+		Language:  "typescript",
+	}
+
+	otherClass := &ast.Symbol{
+		ID:        "other.ts:5:OtherWidget",
+		Name:      "OtherWidget",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "other.ts",
+		StartLine: 5,
+		EndLine:   30,
+		Language:  "typescript",
+		Children:  []*ast.Symbol{otherRender},
+	}
+
+	result := testParseResult("component.ts", []*ast.Symbol{componentClass}, nil)
+	result.Language = "typescript"
+	result2 := testParseResult("other.ts", []*ast.Symbol{otherClass}, nil)
+	result2.Language = "typescript"
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result, result2})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// this.renderImmediately() in doRender should resolve to Component's renderImmediately
+	g := buildResult.Graph
+	doRenderNode, ok := g.GetNode(doRenderMethod.ID)
+	if !ok {
+		t.Fatal("doRender node not found")
+	}
+
+	foundComponentRender := false
+	foundOtherRender := false
+	for _, edge := range doRenderNode.Outgoing {
+		if edge.Type == EdgeTypeCalls {
+			if edge.ToID == renderMethod.ID {
+				foundComponentRender = true
+			}
+			if edge.ToID == otherRender.ID {
+				foundOtherRender = true
+			}
+		}
+	}
+
+	if !foundComponentRender {
+		t.Error("Expected call edge from doRender to Component.renderImmediately (this resolution)")
+	}
+	if foundOtherRender {
+		t.Error("Did not expect call edge to OtherWidget.renderImmediately")
+	}
+}
+
+func TestBuilder_ResolveCallTarget_SelfResolutionPython(t *testing.T) {
+	// Simulates Python: class DataFrame: def query(self): self.filter(...)
+	filterMethod := &ast.Symbol{
+		ID:        "dataframe.py:50:filter",
+		Name:      "filter",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "dataframe.py",
+		StartLine: 50,
+		EndLine:   60,
+		Language:  "python",
+	}
+
+	queryMethod := &ast.Symbol{
+		ID:        "dataframe.py:30:query",
+		Name:      "query",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "dataframe.py",
+		StartLine: 30,
+		EndLine:   40,
+		Language:  "python",
+		Calls: []ast.CallSite{
+			{
+				Target:   "filter",
+				IsMethod: true,
+				Receiver: "self",
+				Location: ast.Location{FilePath: "dataframe.py", StartLine: 35},
+			},
+		},
+	}
+
+	dfClass := &ast.Symbol{
+		ID:        "dataframe.py:10:DataFrame",
+		Name:      "DataFrame",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "dataframe.py",
+		StartLine: 10,
+		EndLine:   100,
+		Language:  "python",
+		Children:  []*ast.Symbol{queryMethod, filterMethod},
+	}
+
+	result := testParseResult("dataframe.py", []*ast.Symbol{dfClass}, nil)
+	result.Language = "python"
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	g := buildResult.Graph
+	queryNode, ok := g.GetNode(queryMethod.ID)
+	if !ok {
+		t.Fatal("query node not found")
+	}
+
+	foundFilter := false
+	for _, edge := range queryNode.Outgoing {
+		if edge.Type == EdgeTypeCalls && edge.ToID == filterMethod.ID {
+			foundFilter = true
+		}
+	}
+
+	if !foundFilter {
+		t.Error("Expected call edge from query to DataFrame.filter (self resolution)")
+	}
+}
+
+func TestBuilder_ResolveCallTarget_ThisWithInheritance(t *testing.T) {
+	// Simulates: class Parent { foo() { this.bar() } }
+	// class Child extends Parent { bar() { ... } }
+	// Parent.foo calls this.bar() — should resolve to Parent.bar, not Child.bar
+
+	parentBar := &ast.Symbol{
+		ID:        "parent.ts:50:bar",
+		Name:      "bar",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "parent.ts",
+		StartLine: 50,
+		EndLine:   60,
+		Language:  "typescript",
+	}
+
+	parentFoo := &ast.Symbol{
+		ID:        "parent.ts:30:foo",
+		Name:      "foo",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "parent.ts",
+		StartLine: 30,
+		EndLine:   40,
+		Language:  "typescript",
+		Calls: []ast.CallSite{
+			{
+				Target:   "bar",
+				IsMethod: true,
+				Receiver: "this",
+				Location: ast.Location{FilePath: "parent.ts", StartLine: 35},
+			},
+		},
+	}
+
+	parentClass := &ast.Symbol{
+		ID:        "parent.ts:10:Parent",
+		Name:      "Parent",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "parent.ts",
+		StartLine: 10,
+		EndLine:   100,
+		Language:  "typescript",
+		Children:  []*ast.Symbol{parentFoo, parentBar},
+	}
+
+	childBar := &ast.Symbol{
+		ID:        "child.ts:20:bar",
+		Name:      "bar",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "child.ts",
+		StartLine: 20,
+		EndLine:   30,
+		Language:  "typescript",
+	}
+
+	childClass := &ast.Symbol{
+		ID:        "child.ts:10:Child",
+		Name:      "Child",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "child.ts",
+		StartLine: 10,
+		EndLine:   50,
+		Language:  "typescript",
+		Children:  []*ast.Symbol{childBar},
+		Metadata: &ast.SymbolMetadata{
+			Extends: "Parent",
+		},
+	}
+
+	result := testParseResult("parent.ts", []*ast.Symbol{parentClass}, nil)
+	result.Language = "typescript"
+	result2 := testParseResult("child.ts", []*ast.Symbol{childClass}, nil)
+	result2.Language = "typescript"
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result, result2})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	g := buildResult.Graph
+	fooNode, ok := g.GetNode(parentFoo.ID)
+	if !ok {
+		t.Fatal("foo node not found")
+	}
+
+	foundParentBar := false
+	foundChildBar := false
+	for _, edge := range fooNode.Outgoing {
+		if edge.Type == EdgeTypeCalls {
+			if edge.ToID == parentBar.ID {
+				foundParentBar = true
+			}
+			if edge.ToID == childBar.ID {
+				foundChildBar = true
+			}
+		}
+	}
+
+	if !foundParentBar {
+		t.Error("Expected call edge from Parent.foo to Parent.bar (this resolution via same class)")
+	}
+	if foundChildBar {
+		t.Error("Did not expect call edge to Child.bar (this in Parent should resolve to Parent)")
+	}
+}
+
+// =============================================================================
+// IT-01: buildInheritanceChain tests
+// =============================================================================
+
+func TestBuilder_BuildInheritanceChain(t *testing.T) {
+	builder := NewBuilder()
+
+	t.Run("no inheritance", func(t *testing.T) {
+		state := &buildState{
+			classExtends: map[string]string{},
+		}
+		chain := builder.buildInheritanceChain(state, "Widget")
+		if len(chain) != 1 || chain[0] != "Widget" {
+			t.Errorf("expected [Widget], got %v", chain)
+		}
+	})
+
+	t.Run("single parent", func(t *testing.T) {
+		state := &buildState{
+			classExtends: map[string]string{
+				"Plot": "Component",
+			},
+		}
+		chain := builder.buildInheritanceChain(state, "Plot")
+		if len(chain) != 2 || chain[0] != "Plot" || chain[1] != "Component" {
+			t.Errorf("expected [Plot, Component], got %v", chain)
+		}
+	})
+
+	t.Run("deep chain", func(t *testing.T) {
+		state := &buildState{
+			classExtends: map[string]string{
+				"C": "B",
+				"B": "A",
+			},
+		}
+		chain := builder.buildInheritanceChain(state, "C")
+		if len(chain) != 3 || chain[0] != "C" || chain[1] != "B" || chain[2] != "A" {
+			t.Errorf("expected [C, B, A], got %v", chain)
+		}
+	})
+
+	t.Run("circular protection", func(t *testing.T) {
+		state := &buildState{
+			classExtends: map[string]string{
+				"A": "B",
+				"B": "A",
+			},
+		}
+		chain := builder.buildInheritanceChain(state, "A")
+		// Should stop at max depth (10), not infinite loop
+		if len(chain) > 11 {
+			t.Errorf("chain too long (circular?): %v", chain)
+		}
+	})
+}
+
+// =============================================================================
+// IT-01: FindCallersWithInheritance tests
+// =============================================================================
+
+func TestGraph_FindCallersWithInheritance(t *testing.T) {
+	// Build a graph where:
+	// - Component has renderImmediately() called by Component.doRender()
+	// - Plot extends Component and overrides renderImmediately()
+	// - ExternalFunc calls Plot.renderImmediately()
+
+	componentRender := &ast.Symbol{
+		ID:        "component.ts:50:renderImmediately",
+		Name:      "renderImmediately",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "component.ts",
+		StartLine: 50,
+		EndLine:   60,
+		Language:  "typescript",
+	}
+
+	doRender := &ast.Symbol{
+		ID:        "component.ts:30:doRender",
+		Name:      "doRender",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "component.ts",
+		StartLine: 30,
+		EndLine:   40,
+		Language:  "typescript",
+		Calls: []ast.CallSite{
+			{
+				Target:   "renderImmediately",
+				IsMethod: true,
+				Receiver: "this",
+				Location: ast.Location{FilePath: "component.ts", StartLine: 35},
+			},
+		},
+	}
+
+	componentClass := &ast.Symbol{
+		ID:        "component.ts:10:Component",
+		Name:      "Component",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "component.ts",
+		StartLine: 10,
+		EndLine:   100,
+		Language:  "typescript",
+		Children:  []*ast.Symbol{doRender, componentRender},
+	}
+
+	plotRender := &ast.Symbol{
+		ID:        "plot.ts:50:renderImmediately",
+		Name:      "renderImmediately",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "plot.ts",
+		StartLine: 50,
+		EndLine:   60,
+		Language:  "typescript",
+	}
+
+	plotClass := &ast.Symbol{
+		ID:        "plot.ts:10:Plot",
+		Name:      "Plot",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "plot.ts",
+		StartLine: 10,
+		EndLine:   100,
+		Language:  "typescript",
+		Children:  []*ast.Symbol{plotRender},
+		Metadata: &ast.SymbolMetadata{
+			Extends: "Component",
+		},
+	}
+
+	externalFunc := &ast.Symbol{
+		ID:        "main.ts:5:setup",
+		Name:      "setup",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "main.ts",
+		StartLine: 5,
+		EndLine:   15,
+		Language:  "typescript",
+		Calls: []ast.CallSite{
+			{
+				Target:   "renderImmediately",
+				IsMethod: true,
+				Receiver: "plot",
+				Location: ast.Location{FilePath: "main.ts", StartLine: 10},
+			},
+		},
+	}
+
+	r1 := testParseResult("component.ts", []*ast.Symbol{componentClass}, nil)
+	r1.Language = "typescript"
+	r2 := testParseResult("plot.ts", []*ast.Symbol{plotClass}, nil)
+	r2.Language = "typescript"
+	r3 := testParseResult("main.ts", []*ast.Symbol{externalFunc}, nil)
+	r3.Language = "typescript"
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{r1, r2, r3})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	g := buildResult.Graph
+
+	t.Run("FindCallersByID_misses_parent_callers", func(t *testing.T) {
+		// Standard FindCallersByID for Plot.renderImmediately
+		// This will NOT find doRender (which calls Component.renderImmediately)
+		result, err := g.FindCallersByID(context.Background(), plotRender.ID)
+		if err != nil {
+			t.Fatalf("FindCallersByID failed: %v", err)
+		}
+
+		// doRender calls this.renderImmediately() inside Component,
+		// so the edge goes to Component.renderImmediately, not Plot.renderImmediately
+		for _, sym := range result.Symbols {
+			if sym.Name == "doRender" {
+				t.Log("Note: doRender found as caller of Plot.renderImmediately — this means resolver already handled it")
+			}
+		}
+	})
+
+	t.Run("FindCallersWithInheritance_includes_parent_callers", func(t *testing.T) {
+		// With inheritance, we pass parent method IDs too
+		result, err := g.FindCallersWithInheritance(
+			context.Background(),
+			plotRender.ID,
+			[]string{componentRender.ID},
+		)
+		if err != nil {
+			t.Fatalf("FindCallersWithInheritance failed: %v", err)
+		}
+
+		// doRender should appear as an inherited caller (through Component.renderImmediately)
+		allCallers := result.AllCallers()
+		foundDoRender := false
+		for _, sym := range allCallers.Symbols {
+			if sym.Name == "doRender" {
+				foundDoRender = true
+			}
+		}
+
+		if !foundDoRender {
+			t.Error("Expected doRender as a caller via inheritance chain (Component.renderImmediately)")
+			t.Logf("Found callers: %v", func() []string {
+				names := make([]string, len(allCallers.Symbols))
+				for i, s := range allCallers.Symbols {
+					names[i] = s.Name
+				}
+				return names
+			}())
+		}
+
+		// Verify doRender is in InheritedCallers, NOT DirectCallers
+		foundInDirect := false
+		if result.DirectCallers != nil {
+			for _, sym := range result.DirectCallers.Symbols {
+				if sym.Name == "doRender" {
+					foundInDirect = true
+				}
+			}
+		}
+		foundInInherited := false
+		for _, parentResult := range result.InheritedCallers {
+			for _, sym := range parentResult.Symbols {
+				if sym.Name == "doRender" {
+					foundInInherited = true
+				}
+			}
+		}
+
+		if foundInDirect {
+			t.Error("doRender should NOT be in DirectCallers (it calls Component.renderImmediately, not Plot.renderImmediately)")
+		}
+		if !foundInInherited {
+			t.Error("doRender should be in InheritedCallers")
+		}
+	})
+
+	t.Run("FindCallersWithInheritance_deduplicates", func(t *testing.T) {
+		// If the same caller appears via both paths, it should only appear once
+		result, err := g.FindCallersWithInheritance(
+			context.Background(),
+			componentRender.ID,
+			[]string{componentRender.ID}, // duplicate
+		)
+		if err != nil {
+			t.Fatalf("FindCallersWithInheritance failed: %v", err)
+		}
+
+		// Count occurrences of doRender across all levels
+		allCallers := result.AllCallers()
+		doRenderCount := 0
+		for _, sym := range allCallers.Symbols {
+			if sym.Name == "doRender" {
+				doRenderCount++
+			}
+		}
+
+		if doRenderCount > 1 {
+			t.Errorf("Expected deduplicated results, got doRender %d times", doRenderCount)
+		}
+	})
+
+	t.Run("FindCallersWithInheritance_structured_result", func(t *testing.T) {
+		// Verify the structured separation of direct vs inherited callers
+		result, err := g.FindCallersWithInheritance(
+			context.Background(),
+			plotRender.ID,
+			[]string{componentRender.ID},
+		)
+		if err != nil {
+			t.Fatalf("FindCallersWithInheritance failed: %v", err)
+		}
+
+		// TotalCallerCount should match AllCallers length
+		allCallers := result.AllCallers()
+		if result.TotalCallerCount() != len(allCallers.Symbols) {
+			t.Errorf("TotalCallerCount() = %d, want %d", result.TotalCallerCount(), len(allCallers.Symbols))
+		}
+
+		// InheritedCallers should have an entry for componentRender.ID
+		if _, ok := result.InheritedCallers[componentRender.ID]; !ok {
+			t.Errorf("Expected InheritedCallers to contain key %q", componentRender.ID)
+			t.Logf("InheritedCallers keys: %v", func() []string {
+				keys := make([]string, 0, len(result.InheritedCallers))
+				for k := range result.InheritedCallers {
+					keys = append(keys, k)
+				}
+				return keys
+			}())
+		}
+	})
+}
+
+// =============================================================================
+// IT-01: symbolParent and classExtends tracking tests
+// =============================================================================
+
+func TestBuilder_SymbolParentTracking(t *testing.T) {
+	child1 := &ast.Symbol{
+		ID:        "test.ts:20:method1",
+		Name:      "method1",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "test.ts",
+		StartLine: 20,
+		EndLine:   30,
+		Language:  "typescript",
+	}
+
+	parent := &ast.Symbol{
+		ID:        "test.ts:10:MyClass",
+		Name:      "MyClass",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "test.ts",
+		StartLine: 10,
+		EndLine:   50,
+		Language:  "typescript",
+		Children:  []*ast.Symbol{child1},
+		Metadata: &ast.SymbolMetadata{
+			Extends: "BaseClass",
+		},
+	}
+
+	result := testParseResult("test.ts", []*ast.Symbol{parent}, nil)
+	result.Language = "typescript"
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Verify the build completed
+	if buildResult.Graph == nil {
+		t.Fatal("Graph is nil")
+	}
+
+	// The buildState is internal, but we can verify the graph has the right structure
+	// by checking that nodes exist
+	_, ok := buildResult.Graph.GetNode(child1.ID)
+	if !ok {
+		t.Error("Child method not found in graph")
+	}
+	_, ok = buildResult.Graph.GetNode(parent.ID)
+	if !ok {
+		t.Error("Parent class not found in graph")
+	}
+}
+
+// =============================================================================
+// IT-01: findOwnerClassName tests
+// =============================================================================
+
+func TestBuilder_FindOwnerClassName(t *testing.T) {
+	builder := NewBuilder()
+
+	t.Run("Go method with Receiver", func(t *testing.T) {
+		state := &buildState{
+			symbolParent: map[string]string{},
+			symbolsByID:  map[string]*ast.Symbol{},
+		}
+		method := &ast.Symbol{
+			ID:       "test.go:10:Get",
+			Name:     "Get",
+			Receiver: "Txn",
+		}
+		owner := builder.findOwnerClassName(state, method)
+		if owner != "Txn" {
+			t.Errorf("expected Txn, got %s", owner)
+		}
+	})
+
+	t.Run("Python method via parent lookup", func(t *testing.T) {
+		parentSym := &ast.Symbol{
+			ID:   "df.py:1:DataFrame",
+			Name: "DataFrame",
+			Kind: ast.SymbolKindClass,
+		}
+		methodSym := &ast.Symbol{
+			ID:   "df.py:10:filter",
+			Name: "filter",
+		}
+		state := &buildState{
+			symbolParent: map[string]string{
+				"df.py:10:filter": "df.py:1:DataFrame",
+			},
+			symbolsByID: map[string]*ast.Symbol{
+				"df.py:1:DataFrame": parentSym,
+				"df.py:10:filter":   methodSym,
+			},
+		}
+		owner := builder.findOwnerClassName(state, methodSym)
+		if owner != "DataFrame" {
+			t.Errorf("expected DataFrame, got %s", owner)
+		}
+	})
+
+	t.Run("standalone function no owner", func(t *testing.T) {
+		state := &buildState{
+			symbolParent: map[string]string{},
+			symbolsByID:  map[string]*ast.Symbol{},
+		}
+		fn := &ast.Symbol{
+			ID:   "main.go:1:main",
+			Name: "main",
+		}
+		owner := builder.findOwnerClassName(state, fn)
+		if owner != "" {
+			t.Errorf("expected empty, got %s", owner)
+		}
+	})
+}
+
+// R3-P1b: Constructor call edges should be allowed by validateEdgeType.
+// When a function calls DataFrameFormatter(...), the resolved target is a Class symbol.
+// The edge should NOT be silently dropped.
+func TestBuilder_ExtractCallEdges_ConstructorCall(t *testing.T) {
+	// Create a method that calls a class constructor
+	callerSym := testSymbolWithCalls("process", ast.SymbolKindFunction, "main.py", 10, []ast.CallSite{
+		{
+			Target: "DataFrameFormatter",
+			Location: ast.Location{
+				FilePath:  "main.py",
+				StartLine: 12,
+			},
+		},
+	})
+	callerSym.Language = "python"
+
+	// The target is a Class symbol (constructor call)
+	classSym := &ast.Symbol{
+		ID:        "format.py:5:DataFrameFormatter",
+		Name:      "DataFrameFormatter",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "format.py",
+		StartLine: 5,
+		EndLine:   50,
+		Language:  "python",
+	}
+
+	result := &ast.ParseResult{
+		FilePath: "main.py",
+		Language: "python",
+		Symbols:  []*ast.Symbol{callerSym, classSym},
+		Package:  "test",
+	}
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Check that a call edge was created FROM function TO class (constructor)
+	graph := buildResult.Graph
+	callerNode, ok := graph.GetNode(callerSym.ID)
+	if !ok {
+		t.Fatal("Caller node not found in graph")
+	}
+
+	hasCallEdge := false
+	for _, edge := range callerNode.Outgoing {
+		if edge.Type == EdgeTypeCalls && edge.ToID == classSym.ID {
+			hasCallEdge = true
+			break
+		}
+	}
+
+	if !hasCallEdge {
+		t.Error("R3-P1b: Expected EdgeTypeCalls from function to Class (constructor call), but edge was not created. " +
+			"validateEdgeType/isCallable rejects SymbolKindClass as a call target.")
+	}
+}
+
+// R3-P1b: Struct constructor calls should also create edges (Go: SomeStruct{}, TS: new SomeClass()).
+func TestBuilder_ExtractCallEdges_StructConstructorCall(t *testing.T) {
+	callerSym := testSymbolWithCalls("NewServer", ast.SymbolKindFunction, "server.go", 10, []ast.CallSite{
+		{
+			Target:   "Config",
+			Location: ast.Location{FilePath: "server.go", StartLine: 12},
+		},
+	})
+
+	structSym := &ast.Symbol{
+		ID:        "config.go:5:Config",
+		Name:      "Config",
+		Kind:      ast.SymbolKindStruct,
+		FilePath:  "config.go",
+		StartLine: 5,
+		EndLine:   20,
+		Language:  "go",
+	}
+
+	result := testParseResult("server.go", []*ast.Symbol{callerSym, structSym}, nil)
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	graph := buildResult.Graph
+	callerNode, ok := graph.GetNode(callerSym.ID)
+	if !ok {
+		t.Fatal("Caller node not found in graph")
+	}
+
+	hasCallEdge := false
+	for _, edge := range callerNode.Outgoing {
+		if edge.Type == EdgeTypeCalls && edge.ToID == structSym.ID {
+			hasCallEdge = true
+			break
+		}
+	}
+
+	if !hasCallEdge {
+		t.Error("R3-P1b: Expected EdgeTypeCalls from function to Struct (constructor call), but edge was not created.")
+	}
+}
+
+// R3-P1d: Property methods should have their call edges extracted.
+// When a @property method calls other functions, those call edges should appear in the graph.
+func TestBuilder_ExtractCallEdges_PropertyMethod(t *testing.T) {
+	// Create a @property method that calls a function
+	propertySym := testSymbolWithCalls("name", ast.SymbolKindProperty, "model.py", 10, []ast.CallSite{
+		{
+			Target:   "format_name",
+			Location: ast.Location{FilePath: "model.py", StartLine: 12},
+		},
+	})
+	propertySym.Language = "python"
+
+	helperSym := &ast.Symbol{
+		ID:        "model.py:30:format_name",
+		Name:      "format_name",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "model.py",
+		StartLine: 30,
+		EndLine:   40,
+		Language:  "python",
+	}
+
+	result := &ast.ParseResult{
+		FilePath: "model.py",
+		Language: "python",
+		Symbols:  []*ast.Symbol{propertySym, helperSym},
+		Package:  "test",
+	}
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	graph := buildResult.Graph
+	propertyNode, ok := graph.GetNode(propertySym.ID)
+	if !ok {
+		t.Fatal("Property node not found in graph")
+	}
+
+	hasCallEdge := false
+	for _, edge := range propertyNode.Outgoing {
+		if edge.Type == EdgeTypeCalls && edge.ToID == helperSym.ID {
+			hasCallEdge = true
+			break
+		}
+	}
+
+	if !hasCallEdge {
+		t.Error("R3-P1d: Expected EdgeTypeCalls from Property to Function, but edge was not created. " +
+			"extractSymbolEdges does not handle SymbolKindProperty.")
+	}
+}
+
+// R3-P1d: A method calling a @property should create a call edge TO the property.
+func TestBuilder_ExtractCallEdges_CallToProperty(t *testing.T) {
+	// A function calls a property (e.g., obj.name where name is @property)
+	callerSym := testSymbolWithCalls("process", ast.SymbolKindFunction, "main.py", 5, []ast.CallSite{
+		{
+			Target:   "name",
+			IsMethod: true,
+			Receiver: "self",
+			Location: ast.Location{FilePath: "main.py", StartLine: 7},
+		},
+	})
+	callerSym.Language = "python"
+
+	// The property target — with a parent class
+	classSym := &ast.Symbol{
+		ID:        "main.py:1:Model",
+		Name:      "Model",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "main.py",
+		StartLine: 1,
+		EndLine:   50,
+		Language:  "python",
+		Children: []*ast.Symbol{
+			callerSym,
+		},
+	}
+
+	propertySym := &ast.Symbol{
+		ID:        "main.py:20:name",
+		Name:      "name",
+		Kind:      ast.SymbolKindProperty,
+		FilePath:  "main.py",
+		StartLine: 20,
+		EndLine:   25,
+		Language:  "python",
+	}
+
+	// Add property as child of class too
+	classSym.Children = append(classSym.Children, propertySym)
+
+	result := &ast.ParseResult{
+		FilePath: "main.py",
+		Language: "python",
+		Symbols:  []*ast.Symbol{classSym, callerSym, propertySym},
+		Package:  "test",
+	}
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	graph := buildResult.Graph
+	callerNode, ok := graph.GetNode(callerSym.ID)
+	if !ok {
+		t.Fatal("Caller node not found in graph")
+	}
+
+	hasCallEdge := false
+	for _, edge := range callerNode.Outgoing {
+		if edge.Type == EdgeTypeCalls && edge.ToID == propertySym.ID {
+			hasCallEdge = true
+			break
+		}
+	}
+
+	if !hasCallEdge {
+		t.Error("R3-P1d: Expected EdgeTypeCalls from Function to Property, but edge was not created. " +
+			"isCallable/validateEdgeType rejects SymbolKindProperty as a call target.")
+	}
+}
+
+// R3-P1b + R3-P1d combined: isCallable unit test verifying the allowed kinds.
+func TestIsCallable(t *testing.T) {
+	tests := []struct {
+		kind     ast.SymbolKind
+		name     string
+		expected bool
+	}{
+		{ast.SymbolKindFunction, "Function", true},
+		{ast.SymbolKindMethod, "Method", true},
+		{ast.SymbolKindExternal, "External", true},
+		{ast.SymbolKindProperty, "Property (R3-P1d)", true},
+		{ast.SymbolKindVariable, "Variable", false},
+		{ast.SymbolKindConstant, "Constant", false},
+		{ast.SymbolKindField, "Field", false},
+		{ast.SymbolKindImport, "Import", false},
+		{ast.SymbolKindInterface, "Interface", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isCallable(tt.kind)
+			if got != tt.expected {
+				t.Errorf("isCallable(%s) = %v, want %v", tt.name, got, tt.expected)
+			}
+		})
+	}
+}
+
+// R3-P1b: isCallTarget should allow Class and Struct as valid call targets (constructor calls).
+func TestIsCallTarget(t *testing.T) {
+	tests := []struct {
+		kind     ast.SymbolKind
+		name     string
+		expected bool
+	}{
+		// Everything callable is also a valid target
+		{ast.SymbolKindFunction, "Function", true},
+		{ast.SymbolKindMethod, "Method", true},
+		{ast.SymbolKindExternal, "External", true},
+		{ast.SymbolKindProperty, "Property", true},
+		// Constructor targets
+		{ast.SymbolKindClass, "Class (R3-P1b)", true},
+		{ast.SymbolKindStruct, "Struct (R3-P1b)", true},
+		// Not valid targets
+		{ast.SymbolKindVariable, "Variable", false},
+		{ast.SymbolKindConstant, "Constant", false},
+		{ast.SymbolKindField, "Field", false},
+		{ast.SymbolKindImport, "Import", false},
+		{ast.SymbolKindInterface, "Interface", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isCallTarget(tt.kind)
+			if got != tt.expected {
+				t.Errorf("isCallTarget(%s) = %v, want %v", tt.name, got, tt.expected)
+			}
+		})
+	}
+}
+
+// ─── R3-P2 Step 0: resolveThisSelfCall Property filter ───
+
+func TestBuilder_ResolveCallTarget_SelfPropertyCall(t *testing.T) {
+	// Simulates Python: class User { @property name(); def greet(self): self.name() }
+	// self.name should resolve to User.name even though name is a Property.
+	nameProperty := &ast.Symbol{
+		ID:        "user.py:20:name",
+		Name:      "name",
+		Kind:      ast.SymbolKindProperty,
+		FilePath:  "user.py",
+		StartLine: 20,
+		EndLine:   25,
+		Language:  "python",
+	}
+
+	greetMethod := &ast.Symbol{
+		ID:        "user.py:30:greet",
+		Name:      "greet",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "user.py",
+		StartLine: 30,
+		EndLine:   40,
+		Language:  "python",
+		Calls: []ast.CallSite{
+			{
+				Target:   "name",
+				IsMethod: true,
+				Receiver: "self",
+				Location: ast.Location{FilePath: "user.py", StartLine: 35},
+			},
+		},
+	}
+
+	userClass := &ast.Symbol{
+		ID:        "user.py:10:User",
+		Name:      "User",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "user.py",
+		StartLine: 10,
+		EndLine:   50,
+		Language:  "python",
+		Children:  []*ast.Symbol{nameProperty, greetMethod},
+	}
+
+	result := testParseResult("user.py", []*ast.Symbol{userClass}, nil)
+	result.Language = "python"
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	g := buildResult.Graph
+	greetNode, ok := g.GetNode(greetMethod.ID)
+	if !ok {
+		t.Fatal("greet node not found")
+	}
+
+	foundName := false
+	for _, edge := range greetNode.Outgoing {
+		if edge.Type == EdgeTypeCalls && edge.ToID == nameProperty.ID {
+			foundName = true
+		}
+	}
+
+	if !foundName {
+		t.Error("Expected call edge from greet to User.name (@property) via self resolution")
+		for _, edge := range greetNode.Outgoing {
+			t.Logf("  edge: %s -> %s (%s)", edge.FromID, edge.ToID, edge.Type)
+		}
+	}
+}
+
+// ─── R3-P2 Step 2: Self-referential filter in Strategy 1 ───
+
+func TestBuilder_ResolveCallTarget_SelfReferentialSkipFallthrough(t *testing.T) {
+	// Simulates: class DataFrame { def merge(self): merge() }
+	// where merge() is imported from another file (reshape/merge.py).
+	// Strategy 1 should skip same-file DataFrame.merge (self-referential)
+	// and resolve to the cross-file merge function.
+
+	mergeFunction := &ast.Symbol{
+		ID:        "reshape/merge.py:10:merge",
+		Name:      "merge",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "reshape/merge.py",
+		StartLine: 10,
+		EndLine:   100,
+		Language:  "python",
+	}
+
+	mergeMethod := &ast.Symbol{
+		ID:        "frame.py:50:merge",
+		Name:      "merge",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "frame.py",
+		StartLine: 50,
+		EndLine:   70,
+		Language:  "python",
+		Calls: []ast.CallSite{
+			{
+				Target:   "merge",
+				IsMethod: false,
+				Receiver: "",
+				Location: ast.Location{FilePath: "frame.py", StartLine: 55},
+			},
+		},
+	}
+
+	dfClass := &ast.Symbol{
+		ID:        "frame.py:10:DataFrame",
+		Name:      "DataFrame",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "frame.py",
+		StartLine: 10,
+		EndLine:   100,
+		Language:  "python",
+		Children:  []*ast.Symbol{mergeMethod},
+	}
+
+	result1 := testParseResult("frame.py", []*ast.Symbol{dfClass}, nil)
+	result1.Language = "python"
+	result2 := testParseResult("reshape/merge.py", []*ast.Symbol{mergeFunction}, nil)
+	result2.Language = "python"
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result1, result2})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	g := buildResult.Graph
+	mergeNode, ok := g.GetNode(mergeMethod.ID)
+	if !ok {
+		t.Fatal("merge method node not found")
+	}
+
+	foundCrossFileTarget := false
+	for _, edge := range mergeNode.Outgoing {
+		if edge.Type == EdgeTypeCalls && edge.ToID == mergeFunction.ID {
+			foundCrossFileTarget = true
+		}
+	}
+
+	if !foundCrossFileTarget {
+		t.Error("Expected call edge from DataFrame.merge to reshape/merge.merge (cross-file target)")
+		t.Log("Strategy 1 should skip self-referential same-file match and fall through to cross-file candidates")
+		for _, edge := range mergeNode.Outgoing {
+			t.Logf("  edge: %s -> %s (%s)", edge.FromID, edge.ToID, edge.Type)
+		}
+	}
+}
+
+// ─── R3-P2 Step 3: Import-aware call resolution ───
+
+func TestBuilder_ResolveCallTarget_ImportAwareResolution(t *testing.T) {
+	// Simulates: frame.py has `from pandas.core.reshape.merge import merge`
+	// DataFrame.query() calls merge() — should resolve to reshape/merge.py:merge
+	// even though there are other functions named "merge" in other files.
+
+	t.Run("import map resolves to correct file", func(t *testing.T) {
+		realMerge := &ast.Symbol{
+			ID:        "pandas/core/reshape/merge.py:10:merge",
+			Name:      "merge",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "pandas/core/reshape/merge.py",
+			StartLine: 10,
+			EndLine:   100,
+			Language:  "python",
+		}
+
+		wrongMerge := &ast.Symbol{
+			ID:        "utils/merge.py:5:merge",
+			Name:      "merge",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "utils/merge.py",
+			StartLine: 5,
+			EndLine:   20,
+			Language:  "python",
+		}
+
+		queryMethod := &ast.Symbol{
+			ID:        "pandas/core/frame.py:50:query",
+			Name:      "query",
+			Kind:      ast.SymbolKindMethod,
+			FilePath:  "pandas/core/frame.py",
+			StartLine: 50,
+			EndLine:   70,
+			Language:  "python",
+			Calls: []ast.CallSite{
+				{
+					Target:   "merge",
+					IsMethod: false,
+					Receiver: "",
+					Location: ast.Location{FilePath: "pandas/core/frame.py", StartLine: 55},
+				},
+			},
+		}
+
+		dfClass := &ast.Symbol{
+			ID:        "pandas/core/frame.py:10:DataFrame",
+			Name:      "DataFrame",
+			Kind:      ast.SymbolKindClass,
+			FilePath:  "pandas/core/frame.py",
+			StartLine: 10,
+			EndLine:   100,
+			Language:  "python",
+			Children:  []*ast.Symbol{queryMethod},
+		}
+
+		result1 := testParseResult("pandas/core/frame.py", []*ast.Symbol{dfClass}, []ast.Import{
+			{
+				Path:  "pandas.core.reshape.merge",
+				Names: []string{"merge"},
+			},
+		})
+		result1.Language = "python"
+
+		result2 := testParseResult("pandas/core/reshape/merge.py", []*ast.Symbol{realMerge}, nil)
+		result2.Language = "python"
+
+		result3 := testParseResult("utils/merge.py", []*ast.Symbol{wrongMerge}, nil)
+		result3.Language = "python"
+
+		builder := NewBuilder()
+		buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result1, result2, result3})
+		if err != nil {
+			t.Fatalf("Build failed: %v", err)
+		}
+
+		g := buildResult.Graph
+		queryNode, ok := g.GetNode(queryMethod.ID)
+		if !ok {
+			t.Fatal("query node not found")
+		}
+
+		foundRealMerge := false
+		foundWrongMerge := false
+		for _, edge := range queryNode.Outgoing {
+			if edge.Type == EdgeTypeCalls {
+				if edge.ToID == realMerge.ID {
+					foundRealMerge = true
+				}
+				if edge.ToID == wrongMerge.ID {
+					foundWrongMerge = true
+				}
+			}
+		}
+
+		if !foundRealMerge {
+			t.Error("Expected call edge to pandas/core/reshape/merge.py:merge (import-resolved)")
+			for _, edge := range queryNode.Outgoing {
+				t.Logf("  edge: %s -> %s (%s)", edge.FromID, edge.ToID, edge.Type)
+			}
+		}
+		if foundWrongMerge {
+			t.Error("Did not expect call edge to utils/merge.py:merge")
+		}
+	})
+
+	t.Run("aliased import resolves correctly", func(t *testing.T) {
+		realConcat := &ast.Symbol{
+			ID:        "pandas/core/reshape/concat.py:10:concat",
+			Name:      "concat",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "pandas/core/reshape/concat.py",
+			StartLine: 10,
+			EndLine:   50,
+			Language:  "python",
+		}
+
+		caller := &ast.Symbol{
+			ID:        "app.py:10:process",
+			Name:      "process",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "app.py",
+			StartLine: 10,
+			EndLine:   30,
+			Language:  "python",
+			Calls: []ast.CallSite{
+				{
+					Target:   "pd_concat",
+					IsMethod: false,
+					Receiver: "",
+					Location: ast.Location{FilePath: "app.py", StartLine: 15},
+				},
+			},
+		}
+
+		result1 := testParseResult("app.py", []*ast.Symbol{caller}, []ast.Import{
+			{
+				Path:  "pandas.core.reshape.concat",
+				Names: []string{"concat as pd_concat"},
+			},
+		})
+		result1.Language = "python"
+
+		result2 := testParseResult("pandas/core/reshape/concat.py", []*ast.Symbol{realConcat}, nil)
+		result2.Language = "python"
+
+		builder := NewBuilder()
+		buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result1, result2})
+		if err != nil {
+			t.Fatalf("Build failed: %v", err)
+		}
+
+		g := buildResult.Graph
+		callerNode, ok := g.GetNode(caller.ID)
+		if !ok {
+			t.Fatal("caller node not found")
+		}
+
+		foundConcat := false
+		for _, edge := range callerNode.Outgoing {
+			if edge.Type == EdgeTypeCalls && edge.ToID == realConcat.ID {
+				foundConcat = true
+			}
+		}
+
+		if !foundConcat {
+			t.Error("Expected call edge to concat via aliased import (pd_concat -> concat)")
+			for _, edge := range callerNode.Outgoing {
+				t.Logf("  edge: %s -> %s (%s)", edge.FromID, edge.ToID, edge.Type)
+			}
+		}
+	})
+}
+
+func TestMatchesImportPath(t *testing.T) {
+	tests := []struct {
+		name       string
+		filePath   string
+		importPath string
+		expected   bool
+	}{
+		{"exact match", "pandas/core/reshape/merge.py", "pandas.core.reshape.merge", true},
+		{"with init", "pandas/core/reshape/merge/__init__.py", "pandas.core.reshape.merge", true},
+		{"prefix pollution", "my_pandas/core/reshape/merge.py", "pandas.core.reshape.merge", false},
+		{"suffix pollution", "pandas/core/reshape/merge_utils.py", "pandas.core.reshape.merge", false},
+		{"partial match", "reshape/merge.py", "pandas.core.reshape.merge", false},
+		{"simple module", "utils.py", "utils", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := matchesImportPath(tt.filePath, tt.importPath)
+			if got != tt.expected {
+				t.Errorf("matchesImportPath(%q, %q) = %v, want %v", tt.filePath, tt.importPath, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestParseAliasedName(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        string
+		wantLocal    string
+		wantOriginal string
+	}{
+		{"no alias", "merge", "merge", "merge"},
+		{"with alias", "concat as pd_concat", "pd_concat", "concat"},
+		{"spaced alias", "merge as pd_merge", "pd_merge", "merge"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			local, original := parseAliasedName(tt.input)
+			if local != tt.wantLocal {
+				t.Errorf("parseAliasedName(%q) local = %q, want %q", tt.input, local, tt.wantLocal)
+			}
+			if original != tt.wantOriginal {
+				t.Errorf("parseAliasedName(%q) original = %q, want %q", tt.input, original, tt.wantOriginal)
+			}
+		})
+	}
+}

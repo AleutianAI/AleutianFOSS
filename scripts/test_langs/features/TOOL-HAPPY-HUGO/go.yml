@@ -28,8 +28,9 @@ tests:
       Who calls the Publish function in this codebase?
     expected_state: COMPLETE
     reference_answer: |
-      The Publish function in hugolib is called from commands/hugobuilder.go
-      during site building. It orchestrates the full build and publish pipeline.
+      The Publish function has 4 callers: publish, publishDestAlias,
+      renderResources, and renderAndWritePage. These are in the hugolib
+      package and handle the final stage of writing rendered content to disk.
     validations:
       - type: graph_tool_used
 
@@ -547,3 +548,71 @@ tests:
     reference_answer: |
       TODO: Tool not yet registered as standalone.
     validations: []
+
+  # -- Additional find_callers tests (40-41) -- expected_state: COMPLETE --
+
+  - id: 5040
+    name: hugo_find_callers_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callers tool against Hugo (test B). Target: newPage function in hugolib.
+    query: |
+      Who calls the newPage function in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      newPage has 8 callers: AddFi (called twice with different page types),
+      addPagesFromGoTmplFi, assembleTermsAndTranslations, addStandalonePages,
+      addMissingRootSections (called twice), and addMissingTaxonomies. These
+      are all in the hugolib page assembly pipeline that constructs the page
+      tree during the build process.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5041
+    name: hugo_find_callers_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callers tool against Hugo (test C). Target: AddPage function in hugolib.
+    query: |
+      Who calls the AddPage function in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      AddPage is called from the page assembly pipeline in hugolib during
+      site building. Callers include page collection functions that add
+      newly created pages to the site's page tree after construction
+      by newPage and related factory functions.
+    validations:
+      - type: graph_tool_used
+  # -- Additional find_callees tests (42-43) -- expected_state: COMPLETE --
+  - id: 5042
+    name: hugo_find_callees_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against Hugo (test B). Target: Site.assembleMenus method.
+
+    query: |
+      What functions does Site.assembleMenus call?
+    expected_state: COMPLETE
+    reference_answer: |
+      Site.assembleMenus calls navigation helpers to build Hugo's menu system,
+      including getPage, createNodeMenuEntryURL, navigation.SetPageValues,
+      and pageMap.forEachPage to iterate over all pages and collect menu entries.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5043
+    name: hugo_find_callees_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against Hugo (test C). Target: newPage function.
+
+    query: |
+      What functions does the newPage function call in hugolib?
+    expected_state: COMPLETE
+    reference_answer: |
+      newPage initializes a page by calling page state setup, content
+      providers initialization, and page output format configuration.
+      It delegates to helper functions for resource management and
+      page metadata processing.
+    validations:
+      - type: graph_tool_used

@@ -15,9 +15,14 @@ get_project_repo() {
     local project_key="$1"
     case "$project_key" in
         go/hugo) echo "https://github.com/gohugoio/hugo" ;;
+        go/badger) echo "https://github.com/dgraph-io/badger" ;;
+        go/gin) echo "https://github.com/gin-gonic/gin" ;;
         python/flask) echo "https://github.com/pallets/flask" ;;
+        python/pandas) echo "https://github.com/pandas-dev/pandas" ;;
         javascript/express) echo "https://github.com/expressjs/express" ;;
+        javascript/babylonjs) echo "https://github.com/BabylonJS/Babylon.js" ;;
         typescript/nestjs) echo "https://github.com/nestjs/nest" ;;
+        typescript/plottable) echo "https://github.com/palantir/plottable" ;;
         *) echo "" ;;
     esac
 }
@@ -27,9 +32,14 @@ get_project_tag() {
     local project_key="$1"
     case "$project_key" in
         go/hugo) echo "v0.139.4" ;;
+        go/badger) echo "v4.5.1" ;;
+        go/gin) echo "v1.10.0" ;;
         python/flask) echo "3.1.0" ;;
+        python/pandas) echo "v2.2.3" ;;
         javascript/express) echo "4.21.2" ;;
+        javascript/babylonjs) echo "7.39.0" ;;
         typescript/nestjs) echo "v10.4.15" ;;
+        typescript/plottable) echo "3.7.0" ;;
         *) echo "" ;;
     esac
 }
@@ -39,9 +49,14 @@ get_project_size() {
     local project_key="$1"
     case "$project_key" in
         go/hugo) echo "65K" ;;
+        go/badger) echo "30K" ;;
+        go/gin) echo "15K" ;;
         python/flask) echo "15K" ;;
+        python/pandas) echo "300K" ;;
         javascript/express) echo "6K" ;;
+        javascript/babylonjs) echo "500K" ;;
         typescript/nestjs) echo "50K" ;;
+        typescript/plottable) echo "20K" ;;
         *) echo "unknown" ;;
     esac
 }
@@ -49,9 +64,14 @@ get_project_size() {
 # List all known project keys
 list_known_projects() {
     echo "go/hugo"
+    echo "go/badger"
+    echo "go/gin"
     echo "python/flask"
+    echo "python/pandas"
     echo "javascript/express"
+    echo "javascript/babylonjs"
     echo "typescript/nestjs"
+    echo "typescript/plottable"
 }
 
 # Get the absolute path to the test_langs directory
@@ -358,9 +378,14 @@ setup_all_test_projects() {
 
     local projects=(
         "go hugo"
+        "go badger"
+        "go gin"
         "python flask"
+        "python pandas"
         "javascript express"
+        "javascript babylonjs"
         "typescript nestjs"
+        "typescript plottable"
     )
 
     local success_count=0

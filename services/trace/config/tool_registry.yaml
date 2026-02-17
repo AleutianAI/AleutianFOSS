@@ -15,11 +15,15 @@ tools:
   # =============================================================================
   # GRAPH QUERY TOOLS (P0 - Critical for routing)
   # =============================================================================
+  # IT-02 H-3: Disambiguated keywords to prevent router misclassification.
+  # Key grammar rule: find_callers = "who/what calls [X]?" (X is the OBJECT being called)
+  #                   find_callees = "what does [X] call?" (X is the SUBJECT doing the calling)
   - name: find_callers
     keywords:
       - callers
       - who calls
-      - what calls
+      - find callers
+      - callers of
       - upstream
       - incoming calls
       - call sites
@@ -27,8 +31,10 @@ tools:
       - references to
       - called by
       - where is it called
-    use_when: "User asks who or what calls a specific function"
-    avoid_when: "User asks what a function calls (use find_callees instead)"
+      - usages of
+      - find references
+    use_when: "User asks who or what calls a specific function. The target function is the OBJECT being called. Examples: 'who calls parseConfig?', 'what calls the validate function?', 'find usages of Process', 'where is Open called from?'. NEVER use for 'what does X call' or 'what functions does X call' — those are find_callees queries."
+    avoid_when: "User asks what a function calls or depends on. The target function is the SUBJECT doing the calling. Examples: 'what does X call?', 'what functions does Build call?', 'what methods does X invoke?'. Use find_callees instead."
     instead_of:
       - tool: Grep
         when: "Searching for function call patterns in code"
@@ -38,19 +44,26 @@ tools:
   - name: find_callees
     keywords:
       - callees
-      - calls
       - what does it call
+      - what does call
+      - what functions does
+      - what methods does
       - downstream
       - outgoing calls
-      - dependencies
+      - dependencies of
+      - depends on
       - invokes
       - functions called by
       - what it calls
-    use_when: "User asks what functions are called by a specific function"
-    avoid_when: "User asks who calls a function (use find_callers instead)"
+      - calls what
+      - makes calls to
+    use_when: "USE THIS when user asks what functions a specific function calls or depends on. The target function is the SUBJECT doing the calling. Examples: 'what does Engine.Run call?', 'what functions does Build call?', 'what does make_response depend on?', 'what methods does X invoke?'. This is the correct tool for 'what does X call' queries."
+    avoid_when: "User asks who calls a function. The target function is the OBJECT being called. Examples: 'who calls X?', 'find usages of X'. Use find_callers instead."
     instead_of:
       - tool: Grep
         when: "Searching for function calls inside a function"
+      - tool: find_callers
+        when: "Query asks 'what does X call' or 'what functions does X call' — these are find_callees queries, not find_callers"
     requires:
       - graph_initialized
 

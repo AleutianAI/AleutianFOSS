@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
@@ -76,6 +77,23 @@ func ResolveFunctionWithFuzzy(
 		return exactMatches[0], false, nil
 	}
 
+	// Try Type.Method dot notation split (e.g., "Plot.render" → type "Plot", method "render")
+	if strings.Contains(name, ".") {
+		parts := strings.SplitN(name, ".", 2)
+		typeName, methodName := parts[0], parts[1]
+		if sym, err := resolveTypeDotMethod(ctx, index, typeName, methodName, logger); err == nil {
+			logger.Info("Symbol resolution: dot notation match",
+				slog.String("query", name),
+				slog.String("type", typeName),
+				slog.String("method", methodName),
+				slog.String("resolved", sym.Name),
+				slog.String("file", sym.FilePath),
+			)
+			return sym, false, nil
+		}
+		// Fall through to fuzzy search if dot notation didn't work
+	}
+
 	// Fallback: Try fuzzy search (slower, requires context timeout)
 	logger.Info("Symbol resolution: exact match failed, trying fuzzy search",
 		slog.String("query", name),
@@ -100,10 +118,11 @@ func ResolveFunctionWithFuzzy(
 		return nil, false, fmt.Errorf("no match found for '%s'", name)
 	}
 
-	// Filter matches to only functions and methods (BEFORE selecting best match!)
+	// Filter matches to only functions, methods, and properties (BEFORE selecting best match!)
+	// R3-P1d: Include Property symbols (Python @property, TS get/set accessors).
 	var functionsOnly []*ast.Symbol
 	for _, match := range fuzzyMatches {
-		if match.Kind == ast.SymbolKindFunction || match.Kind == ast.SymbolKindMethod {
+		if match.Kind == ast.SymbolKindFunction || match.Kind == ast.SymbolKindMethod || match.Kind == ast.SymbolKindProperty {
 			functionsOnly = append(functionsOnly, match)
 		}
 	}
@@ -208,4 +227,233 @@ func ResolveMultipleFunctionsWithFuzzy(
 	}
 
 	return symbols, fuzzyFlags, nil
+}
+
+// resolveTypeDotMethod resolves a Type.Method query by finding a method named
+// methodName that belongs to the type named typeName.
+//
+// Description:
+//
+//	Handles dot-notation queries like "Plot.render", "Context.JSON", or
+//	"DataFrame.__init__" by splitting the query and matching the method to
+//	its owning type via three strategies:
+//	  1. Receiver field match (Go, JS): sym.Receiver == typeName
+//	  2. ID contains match (JS fallback): sym.ID contains "typeName.methodName"
+//	  3. Parent class match (Python, TS): type symbol's Children contain the method
+//
+// Inputs:
+//   - ctx: Context for cancellation. Must not be nil.
+//   - idx: Symbol index to search. Must not be nil.
+//   - typeName: The type/class part of the query (e.g., "Plot").
+//   - methodName: The method part of the query (e.g., "render").
+//   - logger: Logger for debugging. Must not be nil.
+//
+// Outputs:
+//   - *ast.Symbol: The resolved method symbol. Never nil on success.
+//   - error: Non-nil if no matching method could be found.
+//
+// Thread Safety: This function is safe for concurrent use.
+func resolveTypeDotMethod(
+	ctx context.Context,
+	idx *index.SymbolIndex,
+	typeName string,
+	methodName string,
+	logger *slog.Logger,
+) (*ast.Symbol, error) {
+	if idx == nil {
+		return nil, fmt.Errorf("symbol index is nil")
+	}
+	if typeName == "" || methodName == "" {
+		return nil, fmt.Errorf("typeName and methodName must not be empty")
+	}
+
+	// Strategy 1 & 2: Look up all symbols named methodName and filter
+	methodMatches := idx.GetByName(methodName)
+
+	var candidates []*ast.Symbol
+	for _, sym := range methodMatches {
+		// R3-P1d: Include Property symbols (Python @property, TS get/set accessors).
+		if sym.Kind != ast.SymbolKindMethod && sym.Kind != ast.SymbolKindFunction && sym.Kind != ast.SymbolKindProperty {
+			continue
+		}
+
+		// Strategy 1: Receiver field match (Go, JS set this)
+		if sym.Receiver == typeName {
+			candidates = append(candidates, sym)
+			continue
+		}
+
+		// Strategy 2: ID contains "typeName.methodName" (JS fallback)
+		if strings.Contains(sym.ID, typeName+"."+methodName) {
+			candidates = append(candidates, sym)
+			continue
+		}
+	}
+
+	// If we found candidates via receiver/ID, pick the best one
+	if len(candidates) > 0 {
+		best := pickBestCandidate(candidates)
+		logger.Debug("resolveTypeDotMethod: matched via receiver/ID",
+			slog.String("type", typeName),
+			slog.String("method", methodName),
+			slog.String("resolved_id", best.ID),
+			slog.Int("candidates", len(candidates)),
+		)
+		return best, nil
+	}
+
+	// Strategy 3: Parent class match (Python, TS — Receiver may be empty)
+	// Find the type/class symbol, then check its Children for the method
+	typeMatches := idx.GetByName(typeName)
+	for _, typeSym := range typeMatches {
+		if typeSym.Kind != ast.SymbolKindClass &&
+			typeSym.Kind != ast.SymbolKindStruct &&
+			typeSym.Kind != ast.SymbolKindInterface &&
+			typeSym.Kind != ast.SymbolKindType {
+			continue
+		}
+
+		// R3-P2a: Collect matching children, partition by overload status.
+		// Prefer non-overload (real implementation) over @overload stubs.
+		var nonOverloadMatch *ast.Symbol
+		var overloadFallback *ast.Symbol
+		for _, child := range typeSym.Children {
+			// R3-P1d: Include Property symbols in class children search.
+			if child.Name == methodName &&
+				(child.Kind == ast.SymbolKindMethod || child.Kind == ast.SymbolKindFunction || child.Kind == ast.SymbolKindProperty) {
+				if isOverloadStub(child) {
+					if overloadFallback == nil {
+						overloadFallback = child
+					}
+				} else {
+					nonOverloadMatch = child
+					break // Non-overload wins immediately
+				}
+			}
+		}
+		if nonOverloadMatch != nil {
+			logger.Debug("resolveTypeDotMethod: matched via parent class children (non-overload)",
+				slog.String("type", typeName),
+				slog.String("method", methodName),
+				slog.String("resolved_id", nonOverloadMatch.ID),
+				slog.String("parent_id", typeSym.ID),
+			)
+			return nonOverloadMatch, nil
+		}
+		if overloadFallback != nil {
+			logger.Debug("resolveTypeDotMethod: matched via parent class children (overload fallback)",
+				slog.String("type", typeName),
+				slog.String("method", methodName),
+				slog.String("resolved_id", overloadFallback.ID),
+				slog.String("parent_id", typeSym.ID),
+			)
+			return overloadFallback, nil
+		}
+	}
+
+	// Strategy 4: Inheritance chain walk
+	// If the type extends a parent, recursively search for the method on the parent.
+	for _, typeSym := range typeMatches {
+		if typeSym.Kind != ast.SymbolKindClass && typeSym.Kind != ast.SymbolKindStruct &&
+			typeSym.Kind != ast.SymbolKindInterface && typeSym.Kind != ast.SymbolKindType {
+			continue
+		}
+		if typeSym.Metadata == nil || typeSym.Metadata.Extends == "" {
+			continue
+		}
+		logger.Debug("resolveTypeDotMethod: trying inheritance chain",
+			slog.String("type", typeName),
+			slog.String("extends", typeSym.Metadata.Extends),
+		)
+		parentSym, err := resolveTypeDotMethod(ctx, idx, typeSym.Metadata.Extends, methodName, logger)
+		if err == nil {
+			return parentSym, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no method '%s' found on type '%s'", methodName, typeName)
+}
+
+// isOverloadStub returns true if the symbol is a Python @overload typing stub.
+//
+// Description:
+//
+//	Checks the symbol's Metadata.Decorators for "overload". These stubs exist
+//	only for the type checker and have no body (or an ellipsis body). They should
+//	be deprioritized in favor of the real implementation when resolving symbols
+//	for call graph queries.
+//
+// Inputs:
+//
+//	sym - The symbol to check. May be nil (returns false).
+//
+// Outputs:
+//
+//	bool - True if the symbol has an @overload decorator.
+//
+// Thread Safety: This function is safe for concurrent use.
+func isOverloadStub(sym *ast.Symbol) bool {
+	if sym == nil || sym.Metadata == nil {
+		return false
+	}
+	for _, dec := range sym.Metadata.Decorators {
+		if dec == "overload" {
+			return true
+		}
+	}
+	return false
+}
+
+// pickBestCandidate selects the best symbol from a list of candidates.
+// Prefers symbols with Receiver set, then shortest ID (most specific).
+//
+// Inputs:
+//   - candidates: Non-empty slice of candidate symbols.
+//
+// Outputs:
+//   - *ast.Symbol: The best candidate. Never nil when input is non-empty.
+func pickBestCandidate(candidates []*ast.Symbol) *ast.Symbol {
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+
+	best := candidates[0]
+	for _, c := range candidates[1:] {
+		// R3-P2a: Prefer non-overload over overload stub
+		bestIsStub := isOverloadStub(best)
+		cIsStub := isOverloadStub(c)
+		if !cIsStub && bestIsStub {
+			best = c
+			continue
+		}
+		if cIsStub && !bestIsStub {
+			continue
+		}
+
+		// R3-P2a: Prefer candidate with calls over empty calls (stub heuristic)
+		bestHasCalls := len(best.Calls) > 0
+		cHasCalls := len(c.Calls) > 0
+		if cHasCalls && !bestHasCalls {
+			best = c
+			continue
+		}
+		if !cHasCalls && bestHasCalls {
+			continue
+		}
+
+		// Prefer symbols with Receiver set (more explicit match)
+		if c.Receiver != "" && best.Receiver == "" {
+			best = c
+			continue
+		}
+		if c.Receiver == "" && best.Receiver != "" {
+			continue
+		}
+		// Among equal receiver status, prefer shorter ID (more specific)
+		if len(c.ID) < len(best.ID) {
+			best = c
+		}
+	}
+
+	return best
 }

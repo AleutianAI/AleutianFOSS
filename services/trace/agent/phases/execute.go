@@ -902,8 +902,10 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 			}
 
 			if !alreadyCorrected {
-				// Only log warning on first correction
-				slog.Warn("GR-Phase1: Router selection semantically corrected",
+				// Log at INFO — the semantic correction is working as designed,
+				// not indicating a problem. The router model simply can't distinguish
+				// callers vs callees grammar; the correction layer fixes it.
+				slog.Info("GR-Phase1: Router selection semantically corrected",
 					slog.String("session_id", deps.Session.ID),
 					slog.String("original_tool", originalTool),
 					slog.String("corrected_tool", correctedTool),
@@ -1068,7 +1070,7 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 	}
 
 	if cbShouldFire {
-		slog.Warn("Circuit breaker: forcing answer due to proof status",
+		slog.Info("Circuit breaker: forcing answer due to proof status",
 			slog.String("session_id", deps.Session.ID),
 			slog.String("suggested_tool", selection.Tool),
 			slog.String("reason", cbReason),
@@ -1113,7 +1115,7 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 			srReason := fmt.Sprintf("semantic repetition: query %.0f%% similar to previous '%s'",
 				similarity*100, truncateQuery(similarQuery, 30))
 
-			slog.Warn("CB-30c Semantic repetition: forcing answer",
+			slog.Info("CB-30c Semantic repetition: forcing answer",
 				slog.String("session_id", deps.Session.ID),
 				slog.String("tool", selection.Tool),
 				slog.Float64("similarity", similarity),
@@ -1942,9 +1944,11 @@ var graphToolsWithSubstantiveResults = map[string]bool{
 //
 // Thread Safety: Safe for concurrent use (read-only operations).
 func (p *ExecutePhase) shouldForceSynthesisAfterGraphTools(deps *Dependencies, toolResults []*tools.Result, stepNumber int) bool {
-	// Only consider forcing synthesis after at least 2 steps
-	// This gives the agent a chance to explore before we intervene
-	if stepNumber < 2 {
+	// Only consider forcing synthesis after at least 1 step
+	// Step 0 is the initial tool execution — give it a chance to explore.
+	// After step 0, if a graph tool returned substantive results (including
+	// forced tool calls at step 1), force synthesis to avoid circuit breaker.
+	if stepNumber < 1 {
 		return false
 	}
 

@@ -246,6 +246,67 @@ func TestGraph_FindCalleesByID(t *testing.T) {
 			t.Errorf("got %d callees, want 0", len(result.Symbols))
 		}
 	})
+
+	t.Run("duplicate edges to same callee are deduplicated", func(t *testing.T) {
+		g2 := NewGraph("/test")
+		caller := &ast.Symbol{
+			ID: "a.go:1:caller", Name: "caller", Kind: ast.SymbolKindFunction,
+		}
+		callee := &ast.Symbol{
+			ID: "b.go:1:callee", Name: "callee", Kind: ast.SymbolKindFunction,
+		}
+		g2.AddNode(caller)
+		g2.AddNode(callee)
+		// Add multiple edges to the same callee (e.g., multiple call sites)
+		for i := 0; i < 5; i++ {
+			g2.AddEdge(caller.ID, callee.ID, EdgeTypeCalls, ast.Location{StartLine: i + 1})
+		}
+		g2.Freeze()
+
+		result, err := g2.FindCalleesByID(ctx, caller.ID)
+		if err != nil {
+			t.Fatalf("FindCalleesByID() error = %v", err)
+		}
+		if len(result.Symbols) != 1 {
+			t.Errorf("got %d callees, want 1 (should deduplicate)", len(result.Symbols))
+		}
+		if result.Truncated {
+			t.Error("Truncated = true, want false (duplicates should not fill limit)")
+		}
+	})
+
+	t.Run("duplicate edges do not consume limit budget", func(t *testing.T) {
+		g2 := NewGraph("/test")
+		caller := &ast.Symbol{
+			ID: "a.go:1:caller", Name: "caller", Kind: ast.SymbolKindFunction,
+		}
+		calleeA := &ast.Symbol{
+			ID: "b.go:1:calleeA", Name: "calleeA", Kind: ast.SymbolKindFunction,
+		}
+		calleeB := &ast.Symbol{
+			ID: "c.go:1:calleeB", Name: "calleeB", Kind: ast.SymbolKindFunction,
+		}
+		g2.AddNode(caller)
+		g2.AddNode(calleeA)
+		g2.AddNode(calleeB)
+		// 50 edges to calleeA, then 1 edge to calleeB
+		for i := 0; i < 50; i++ {
+			g2.AddEdge(caller.ID, calleeA.ID, EdgeTypeCalls, ast.Location{StartLine: i + 1})
+		}
+		g2.AddEdge(caller.ID, calleeB.ID, EdgeTypeCalls, ast.Location{StartLine: 100})
+		g2.Freeze()
+
+		result, err := g2.FindCalleesByID(ctx, caller.ID, WithLimit(10))
+		if err != nil {
+			t.Fatalf("FindCalleesByID() error = %v", err)
+		}
+		if len(result.Symbols) != 2 {
+			t.Errorf("got %d callees, want 2 (duplicates should not consume limit)", len(result.Symbols))
+		}
+		if result.Truncated {
+			t.Error("Truncated = true, want false")
+		}
+	})
 }
 
 func TestGraph_FindImplementationsByID(t *testing.T) {

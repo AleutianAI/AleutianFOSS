@@ -23,13 +23,17 @@ tests:
     name: nestjs_find_callers
     category: TOOL_HAPPY_PATH
     description: >
-      find_callers tool against NestJS. Target: NestFactory.create method.
+      find_callers tool against NestJS. Target: MetadataScanner.getAllMethodNames method.
     query: |
-      Who calls the NestFactory.create method?
+      Who calls the MetadataScanner.getAllMethodNames method?
     expected_state: COMPLETE
     reference_answer: |
-      NestFactory.create is called from application bootstrap functions and
-      test setup utilities to instantiate a new NestJS application instance.
+      MetadataScanner.getAllMethodNames is called by 7 callers:
+      PathsExplorer.explore, GatewayMetadataExplorer.explore,
+      InstanceMetadataFactory.create, reflectParamInjectables,
+      ListenerMetadataExplorer.explore, MethodsReplFn.action,
+      and getAllFilteredMethodNames. These are spread across the core
+      and microservices packages for scanning controller/provider methods.
     validations:
       - type: graph_tool_used
 
@@ -547,3 +551,72 @@ tests:
     reference_answer: |
       TODO: Tool not yet registered as standalone.
     validations: []
+
+  # -- Additional find_callers tests (40-41) -- expected_state: COMPLETE --
+
+  - id: 8040
+    name: nestjs_find_callers_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callers tool against NestJS (test B). Target: MetadataScanner.scanFromPrototype method.
+    query: |
+      Who calls the MetadataScanner.scanFromPrototype method?
+    expected_state: COMPLETE
+    reference_answer: |
+      MetadataScanner.scanFromPrototype has 1+ callers including internal
+      scanner utilities and test suites. It is the lower-level method that
+      getAllMethodNames delegates to for walking the prototype chain and
+      collecting method names from a given class.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8041
+    name: nestjs_find_callers_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callers tool against NestJS (test C). Target: isFunction utility.
+    query: |
+      Who calls the isFunction utility?
+    expected_state: COMPLETE
+    reference_answer: |
+      isFunction has 80+ callers spread across the entire NestJS framework.
+      It is a core type-checking utility in packages/common/utils/shared.utils.ts
+      used pervasively for parameter validation, decorator processing,
+      provider resolution, and lifecycle hook detection throughout packages/core,
+      packages/common, packages/microservices, and packages/websockets.
+    validations:
+      - type: graph_tool_used
+  # -- Additional find_callees tests (42-43) -- expected_state: COMPLETE --
+  - id: 8042
+    name: nestjs_find_callees_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against NestJS (test B). Target: NestFactory.create method.
+
+    query: |
+      What functions does NestFactory.create call?
+    expected_state: COMPLETE
+    reference_answer: |
+      NestFactory.create calls createHttpAdapter, creates new ApplicationConfig
+      and NestContainer instances, calls createGraphInspector,
+      setAbortOnError, registerLoggerConfiguration, and initialize
+      to bootstrap the application, then creates a new NestApplication.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8043
+    name: nestjs_find_callees_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against NestJS (test C). Target: NestApplication.registerModules method.
+
+    query: |
+      What functions does NestApplication.registerModules call?
+    expected_state: COMPLETE
+    reference_answer: |
+      NestApplication.registerModules calls registerWsModule for WebSocket setup,
+      microservicesModule.register and microservicesModule.setupClients for
+      microservice integration, and middlewareModule.register to initialize
+      the middleware pipeline.
+    validations:
+      - type: graph_tool_used

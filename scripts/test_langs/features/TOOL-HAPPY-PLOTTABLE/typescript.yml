@@ -23,13 +23,16 @@ tests:
     name: plottable_find_callers
     category: TOOL_HAPPY_PATH
     description: >
-      find_callers tool against Plottable. Target: Plot.render method.
+      find_callers tool against Plottable. Target: Plot.renderImmediately method
+      (defined on Plot at src/plots/plot.ts:434, not inherited from Component).
     query: |
-      Who calls the Plot.render method?
+      Who calls the Plot.renderImmediately method?
     expected_state: COMPLETE
     reference_answer: |
-      Plot.render is called from Component.renderTo and internal layout
-      computations when the chart is attached to a DOM element.
+      Plot.renderImmediately has 1 caller: flush (via the Component.renderImmediately
+      inheritance chain). The flush function triggers the full render pipeline
+      which calls renderImmediately on each anchored component, including
+      Plot subclasses that override it to add plot-specific SVG drawing.
     validations:
       - type: graph_tool_used
 
@@ -547,3 +550,75 @@ tests:
     reference_answer: |
       TODO: Tool not yet registered as standalone.
     validations: []
+
+  # -- Additional find_callers tests (40-41) -- expected_state: COMPLETE --
+
+  - id: 8140
+    name: plottable_find_callers_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callers tool against Plottable (test B). Target: Component.render method.
+    query: |
+      Who calls the Component.render method?
+    expected_state: COMPLETE
+    reference_answer: |
+      Component.render has 10+ callers including: flush (the main render trigger),
+      Plot.setProjector, Plot._updateYDomainOnDatasetChange, and various
+      scatter/stacked/pie plot property setters (e.g., x(), y(), innerRadius()),
+      as well as Axis scale change handlers. Any property change that
+      invalidates the visual state triggers a re-render via Component.render.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8141
+    name: plottable_find_callers_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callers tool against Plottable (test C). Target: Component.computeLayout method.
+    query: |
+      Who calls the Component.computeLayout method?
+    expected_state: COMPLETE
+    reference_answer: |
+      Component.computeLayout has 9+ callers: flush (top-level layout trigger),
+      Group.computeLayout, Table.computeLayout, Axis.computeLayout,
+      CategoryAxis.computeLayout, BarPlot.computeLayout, PiePlot.computeLayout,
+      XYPlot.computeLayout, and GuideLineLayer.computeLayout. Each composite
+      or specialized component overrides computeLayout and delegates to the
+      parent Component.computeLayout for base layout calculations.
+    validations:
+      - type: graph_tool_used
+  # -- Additional find_callees tests (42-43) -- expected_state: COMPLETE --
+  - id: 8142
+    name: plottable_find_callees_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against Plottable (test B). Target: Component.renderTo method.
+
+    query: |
+      What functions does Component.renderTo call?
+    expected_state: COMPLETE
+    reference_answer: |
+      Component.renderTo calls detach to remove from any existing parent,
+      d3.select to wrap the target element, isElement and coerceExternalD3
+      for validation, this.anchor to attach to the DOM element, and
+      RenderController.registerToComputeLayoutAndRender plus flush
+      to trigger the initial layout and render cycle.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8143
+    name: plottable_find_callees_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against Plottable (test C). Target: Plot.destroy method.
+
+    query: |
+      What functions does Plot.destroy call?
+    expected_state: COMPLETE
+    reference_answer: |
+      Plot.destroy calls super.destroy for base Component cleanup, then
+      iterates all scales via _scales and calls scale.offUpdate on each
+      to unsubscribe from scale change notifications, preventing memory
+      leaks from stale update callbacks.
+    validations:
+      - type: graph_tool_used

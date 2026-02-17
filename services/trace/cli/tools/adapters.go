@@ -1415,5 +1415,60 @@ func StaticToolDefinitions() []ToolDefinition {
 			SideEffects: false,
 			Timeout:     30 * time.Second,
 		},
+		// IT-02 H-1: Add find_callers and find_callees — the two most fundamental
+		// graph query tools were missing from static definitions, causing the LLM
+		// classifier to lack awareness for tool routing.
+		{
+			Name: "find_callers",
+			Description: "Find all functions that CALL a given function (upstream dependencies). " +
+				"The target function is the OBJECT being called. " +
+				"Use when asked 'who calls X?' or 'find usages of X' or 'where is X called from?'. " +
+				"DO NOT use this when the query asks 'what does X call' or 'what functions does X call' — use find_callees instead. " +
+				"Returns the list of callers with file locations and signatures.",
+			Parameters: map[string]ParamDef{
+				"function_name": {
+					Type:        ParamTypeString,
+					Description: "Name of the function to find callers for. Use Type.Method format for methods (e.g., 'Context.JSON', 'DB.Open'). For standalone functions, just the name (e.g., 'parseConfig').",
+					Required:    true,
+				},
+				"limit": {
+					Type:        ParamTypeInt,
+					Description: "Maximum number of callers to return",
+					Required:    false,
+					Default:     50,
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    95,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     5 * time.Second,
+		},
+		{
+			Name: "find_callees",
+			Description: "Find all functions that a given function CALLS (downstream dependencies). " +
+				"The target function is the SUBJECT doing the calling — 'what does X call?' " +
+				"USE THIS when asked 'what does X call?', 'what functions does X call?', 'what functions does X depend on?', or 'what methods does X invoke?'. " +
+				"NOT for 'who calls X' — use find_callers for that instead (where X is the OBJECT being called). " +
+				"Returns the list of called functions with file locations.",
+			Parameters: map[string]ParamDef{
+				"function_name": {
+					Type:        ParamTypeString,
+					Description: "Name of the function to find callees for. Use Type.Method format for methods (e.g., 'Context.JSON', 'DB.Open'). For standalone functions, just the name (e.g., 'parseConfig').",
+					Required:    true,
+				},
+				"limit": {
+					Type:        ParamTypeInt,
+					Description: "Maximum number of callees to return",
+					Required:    false,
+					Default:     50,
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    94,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     5 * time.Second,
+		},
 	}
 }

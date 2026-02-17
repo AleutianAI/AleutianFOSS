@@ -1114,6 +1114,381 @@ func TestFindCalleesTool_ContextCancellation(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// IT-02: Additional find_callees tests (M-4)
+// =============================================================================
+
+// TestFindCalleesTool_DotNotationResolution tests Type.Method dot-notation resolution.
+func TestFindCalleesTool_DotNotationResolution(t *testing.T) {
+	g, idx := createTestGraphForDotNotation(t)
+	ctx := context.Background()
+	tool := NewFindCalleesTool(g, idx)
+
+	t.Run("resolves Type.Method when method exists on type", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"function_name": "Server.Start",
+		})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindCalleesOutput)
+		if !ok {
+			t.Fatalf("Output is not FindCalleesOutput, got %T", result.Output)
+		}
+		if output.TotalCount == 0 {
+			t.Error("Expected callees for Server.Start, got none")
+		}
+		if output.ResolvedCount < 1 {
+			t.Errorf("Expected at least 1 resolved callee, got %d", output.ResolvedCount)
+		}
+	})
+
+	t.Run("IT-02 C-1: falls back to bare name when dot-notation fails", func(t *testing.T) {
+		// "DB.Open" where Open is a package-level function, not a method on DB
+		result, err := tool.Execute(ctx, map[string]any{
+			"function_name": "DB.Open",
+		})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindCalleesOutput)
+		if !ok {
+			t.Fatalf("Output is not FindCalleesOutput, got %T", result.Output)
+		}
+		// Should find callees via bare-name fallback to "Open"
+		if output.TotalCount == 0 {
+			t.Error("Expected callees for Open (bare name fallback), got none")
+		}
+	})
+}
+
+// TestFindCalleesTool_ExternalCallees tests external/stdlib callee classification.
+func TestFindCalleesTool_ExternalCallees(t *testing.T) {
+	g, idx := createTestGraphForDotNotation(t)
+	ctx := context.Background()
+	tool := NewFindCalleesTool(g, idx)
+
+	result, err := tool.Execute(ctx, map[string]any{
+		"function_name": "Open",
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+
+	output, ok := result.Output.(FindCalleesOutput)
+	if !ok {
+		t.Fatalf("Output is not FindCalleesOutput, got %T", result.Output)
+	}
+
+	// Open calls both in-codebase and external functions
+	if output.ExternalCount == 0 {
+		t.Error("Expected external callees, got none")
+	}
+	if output.ResolvedCount == 0 {
+		t.Error("Expected resolved callees, got none")
+	}
+}
+
+// TestFindCalleesTool_EmptyCallees tests the empty-result message formatting.
+func TestFindCalleesTool_EmptyCallees(t *testing.T) {
+	g, idx := createTestGraphForDotNotation(t)
+	ctx := context.Background()
+	tool := NewFindCalleesTool(g, idx)
+
+	result, err := tool.Execute(ctx, map[string]any{
+		"function_name": "leafFunction",
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+
+	output, ok := result.Output.(FindCalleesOutput)
+	if !ok {
+		t.Fatalf("Output is not FindCalleesOutput, got %T", result.Output)
+	}
+
+	if output.TotalCount != 0 {
+		t.Errorf("Expected 0 callees for leaf function, got %d", output.TotalCount)
+	}
+
+	// Verify output text contains the "no callees" message
+	if !strings.Contains(result.OutputText, "No callees of 'leafFunction'") {
+		t.Errorf("OutputText should contain 'No callees' message, got: %s", result.OutputText)
+	}
+}
+
+// TestFindCalleesTool_LimitClamping tests limit parameter edge cases.
+func TestFindCalleesTool_LimitClamping(t *testing.T) {
+	g, idx := createTestGraphForDotNotation(t)
+	ctx := context.Background()
+	tool := NewFindCalleesTool(g, idx)
+
+	t.Run("limit zero clamped to 1", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"function_name": "Open",
+			"limit":         0,
+		})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+	})
+
+	t.Run("limit above 1000 clamped", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"function_name": "Open",
+			"limit":         5000,
+		})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+	})
+}
+
+// TestFindCalleesTool_ResolvedDedup tests that resolved callees are deduplicated (L-1).
+func TestFindCalleesTool_ResolvedDedup(t *testing.T) {
+	g, idx := createTestGraphWithDuplicateCallees(t)
+	ctx := context.Background()
+	tool := NewFindCalleesTool(g, idx)
+
+	result, err := tool.Execute(ctx, map[string]any{
+		"function_name": "dispatch",
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+
+	output, ok := result.Output.(FindCalleesOutput)
+	if !ok {
+		t.Fatalf("Output is not FindCalleesOutput, got %T", result.Output)
+	}
+
+	// Both "dispatch" symbols call "process" — but process should only appear once
+	if output.ResolvedCount != 1 {
+		t.Errorf("Expected 1 unique resolved callee (process), got %d", output.ResolvedCount)
+	}
+}
+
+// TestFindCalleesTool_FormatTextOutput verifies text formatting for various scenarios.
+func TestFindCalleesTool_FormatTextOutput(t *testing.T) {
+	g, idx := createTestGraphForDotNotation(t)
+	ctx := context.Background()
+	tool := NewFindCalleesTool(g, idx)
+
+	t.Run("output contains In-Codebase and External sections", func(t *testing.T) {
+		result, err := tool.Execute(ctx, map[string]any{
+			"function_name": "Open",
+		})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		if !strings.Contains(result.OutputText, "In-Codebase Callees") {
+			t.Error("OutputText should contain 'In-Codebase Callees' section")
+		}
+		if !strings.Contains(result.OutputText, "External/Stdlib Callees") {
+			t.Error("OutputText should contain 'External/Stdlib Callees' section")
+		}
+	})
+}
+
+// TestFindCalleesTool_StaticDefinitions verifies find_callees is in StaticToolDefinitions.
+func TestFindCalleesTool_StaticDefinitions(t *testing.T) {
+	defs := StaticToolDefinitions()
+	found := false
+	for _, def := range defs {
+		if def.Name == "find_callees" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("find_callees not found in StaticToolDefinitions()")
+	}
+}
+
+// TestFindCallersTool_StaticDefinitions verifies find_callers is in StaticToolDefinitions.
+func TestFindCallersTool_StaticDefinitions(t *testing.T) {
+	defs := StaticToolDefinitions()
+	found := false
+	for _, def := range defs {
+		if def.Name == "find_callers" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("find_callers not found in StaticToolDefinitions()")
+	}
+}
+
+// =============================================================================
+// IT-02: Test fixtures
+// =============================================================================
+
+// createTestGraphForDotNotation creates a test graph with:
+// - Server.Start method that calls logInfo and listen
+// - Open package-level function (NOT a method on DB) that calls validateOpts and externalLib
+// - leafFunction with no callees
+// - externalLib as an external symbol (no file path)
+func createTestGraphForDotNotation(t *testing.T) (*graph.Graph, *index.SymbolIndex) {
+	t.Helper()
+
+	g := graph.NewGraph("/test")
+	idx := index.NewSymbolIndex()
+
+	// Server type
+	server := &ast.Symbol{
+		ID: "server/server.go:5:Server", Name: "Server",
+		Kind: ast.SymbolKindStruct, FilePath: "server/server.go",
+		StartLine: 5, EndLine: 10, Package: "server", Language: "go",
+	}
+
+	// Server.Start method (has Receiver set)
+	serverStart := &ast.Symbol{
+		ID: "server/server.go:15:Start", Name: "Start",
+		Kind: ast.SymbolKindMethod, FilePath: "server/server.go",
+		StartLine: 15, EndLine: 30, Package: "server", Language: "go",
+		Receiver: "Server",
+	}
+
+	// Package-level Open function (NOT a method on DB)
+	openFunc := &ast.Symbol{
+		ID: "db/db.go:10:Open", Name: "Open",
+		Kind: ast.SymbolKindFunction, FilePath: "db/db.go",
+		StartLine: 10, EndLine: 50, Package: "db", Language: "go",
+		Signature: "func Open(opt Options) (*DB, error)",
+	}
+
+	// DB type (exists but Open is NOT a method on it)
+	dbType := &ast.Symbol{
+		ID: "db/db.go:5:DB", Name: "DB",
+		Kind: ast.SymbolKindStruct, FilePath: "db/db.go",
+		StartLine: 5, EndLine: 8, Package: "db", Language: "go",
+	}
+
+	// logInfo — in-codebase callee
+	logInfo := &ast.Symbol{
+		ID: "log/logger.go:20:logInfo", Name: "logInfo",
+		Kind: ast.SymbolKindFunction, FilePath: "log/logger.go",
+		StartLine: 20, EndLine: 25, Package: "log", Language: "go",
+	}
+
+	// listen — in-codebase callee
+	listen := &ast.Symbol{
+		ID: "server/server.go:40:listen", Name: "listen",
+		Kind: ast.SymbolKindFunction, FilePath: "server/server.go",
+		StartLine: 40, EndLine: 50, Package: "server", Language: "go",
+	}
+
+	// validateOpts — in-codebase callee for Open
+	validateOpts := &ast.Symbol{
+		ID: "db/validate.go:5:validateOpts", Name: "validateOpts",
+		Kind: ast.SymbolKindFunction, FilePath: "db/validate.go",
+		StartLine: 5, EndLine: 15, Package: "db", Language: "go",
+	}
+
+	// externalLib — external callee (no file path)
+	externalLib := &ast.Symbol{
+		ID: "external:os:MkdirAll", Name: "MkdirAll",
+		Kind: ast.SymbolKindExternal, FilePath: "",
+		StartLine: 0, EndLine: 0, Package: "os", Language: "go",
+	}
+
+	// leafFunction — no outgoing calls
+	leafFunction := &ast.Symbol{
+		ID: "util/leaf.go:5:leafFunction", Name: "leafFunction",
+		Kind: ast.SymbolKindFunction, FilePath: "util/leaf.go",
+		StartLine: 5, EndLine: 10, Package: "util", Language: "go",
+	}
+
+	// Add all nodes to graph and index (external symbols only to graph, not index)
+	indexable := []*ast.Symbol{server, serverStart, openFunc, dbType, logInfo, listen, validateOpts, leafFunction}
+	for _, sym := range indexable {
+		g.AddNode(sym)
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("Failed to add %s: %v", sym.Name, err)
+		}
+	}
+	// External symbol only in graph (index rejects empty FilePath)
+	g.AddNode(externalLib)
+
+	// Edges: Server.Start calls logInfo, listen
+	g.AddEdge(serverStart.ID, logInfo.ID, graph.EdgeTypeCalls, ast.Location{FilePath: serverStart.FilePath, StartLine: 20})
+	g.AddEdge(serverStart.ID, listen.ID, graph.EdgeTypeCalls, ast.Location{FilePath: serverStart.FilePath, StartLine: 25})
+
+	// Edges: Open calls validateOpts, MkdirAll (external)
+	g.AddEdge(openFunc.ID, validateOpts.ID, graph.EdgeTypeCalls, ast.Location{FilePath: openFunc.FilePath, StartLine: 15})
+	g.AddEdge(openFunc.ID, externalLib.ID, graph.EdgeTypeCalls, ast.Location{FilePath: openFunc.FilePath, StartLine: 20})
+
+	g.Freeze()
+	return g, idx
+}
+
+// createTestGraphWithDuplicateCallees creates a graph where two "dispatch" symbols
+// both call the same "process" symbol, testing L-1 deduplication.
+func createTestGraphWithDuplicateCallees(t *testing.T) (*graph.Graph, *index.SymbolIndex) {
+	t.Helper()
+
+	g := graph.NewGraph("/test")
+	idx := index.NewSymbolIndex()
+
+	dispatch1 := &ast.Symbol{
+		ID: "cmd/a.go:10:dispatch", Name: "dispatch",
+		Kind: ast.SymbolKindFunction, FilePath: "cmd/a.go",
+		StartLine: 10, EndLine: 20, Package: "cmd", Language: "go",
+	}
+	dispatch2 := &ast.Symbol{
+		ID: "cmd/b.go:10:dispatch", Name: "dispatch",
+		Kind: ast.SymbolKindFunction, FilePath: "cmd/b.go",
+		StartLine: 10, EndLine: 20, Package: "cmd", Language: "go",
+	}
+	process := &ast.Symbol{
+		ID: "core/process.go:5:process", Name: "process",
+		Kind: ast.SymbolKindFunction, FilePath: "core/process.go",
+		StartLine: 5, EndLine: 15, Package: "core", Language: "go",
+	}
+
+	for _, sym := range []*ast.Symbol{dispatch1, dispatch2, process} {
+		g.AddNode(sym)
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("Failed to add %s: %v", sym.Name, err)
+		}
+	}
+
+	// Both dispatch symbols call the same process
+	g.AddEdge(dispatch1.ID, process.ID, graph.EdgeTypeCalls, ast.Location{FilePath: dispatch1.FilePath, StartLine: 15})
+	g.AddEdge(dispatch2.ID, process.ID, graph.EdgeTypeCalls, ast.Location{FilePath: dispatch2.FilePath, StartLine: 15})
+
+	g.Freeze()
+	return g, idx
+}
+
 // TestFindImplementationsTool_ContextCancellation tests context cancellation.
 func TestFindImplementationsTool_ContextCancellation(t *testing.T) {
 	g, idx := createTestGraphWithCallers(t)

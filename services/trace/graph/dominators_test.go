@@ -4306,11 +4306,17 @@ func TestDominanceFrontier_EmptyDomTree(t *testing.T) {
 	}
 
 	df, err := analytics.ComputeDominanceFrontier(ctx, emptyDomTree)
-	if err != nil {
-		t.Fatalf("unexpected error for empty dominator tree: %v", err)
+
+	// GR-17b: empty dominator tree with valid entry is now an error
+	// (indicates graph not fully populated / initialization race condition)
+	if err == nil {
+		t.Fatal("expected error for empty dominator tree, got nil")
 	}
 
-	// Should return empty frontier
+	// Should still return empty frontier structure (not nil)
+	if df == nil {
+		t.Fatal("expected non-nil result even on error")
+	}
 	if len(df.Frontier) != 0 {
 		t.Errorf("expected empty frontier for empty domTree, got %v", df.Frontier)
 	}

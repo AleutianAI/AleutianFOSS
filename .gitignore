@@ -3497,3 +3497,10 @@ __pycache__/
 
 # Local development files
 claude.md
+/scripts/test_langs/test_projects/go/orchestrator/.idea/runConfigurations/AleutianOrchestrator.xml
+/scripts/test_langs/test_projects/go/orchestrator/pkg/utils/prompts/distiller_v3.json
+/scripts/test_langs/test_projects/go/orchestrator/.idea/material_theme_project_new.xml
+/scripts/test_langs/test_projects/go/orchestrator/.idea/modules.xml
+/scripts/test_langs/test_projects/go/orchestrator/.idea/dictionaries/project.xml
+/scripts/test_langs/test_projects/go/orchestrator/.idea/inspectionProfiles/Project_Default.xml
+/scripts/test_langs/test_projects/go/orchestrator/.idea/vcs.xml

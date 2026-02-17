@@ -27,8 +27,10 @@ tests:
       Who calls the Scene.render method in this codebase?
     expected_state: COMPLETE
     reference_answer: |
-      Scene.render is called from Engine.runRenderLoop and related rendering
-      pipeline entry points that drive the per-frame rendering cycle.
+      Scene.render has 5 callers: CreateScreenshotUsingRenderTarget,
+      _renderForCamera, _renderRenderTarget, Main (playground entry point),
+      and _handleClientMessage. These represent both the internal rendering
+      pipeline and external entry points that trigger frame rendering.
     validations:
       - type: graph_tool_used
 
@@ -546,3 +548,72 @@ tests:
     reference_answer: |
       TODO: Tool not yet registered as standalone.
     validations: []
+
+  # -- Additional find_callers tests (40-41) -- expected_state: COMPLETE --
+
+  - id: 7140
+    name: babylonjs_find_callers_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callers tool against Babylon.js (test B). Target: Node.computeWorldMatrix method.
+    query: |
+      Who calls the Node.computeWorldMatrix method?
+    expected_state: COMPLETE
+    reference_answer: |
+      Node.computeWorldMatrix has 10+ callers including: markAsDirty, dispose,
+      rayHelper.update, lightGizmo event handlers, CSG operations,
+      subMesh.getBoxPosition, and various transform-dependent methods across
+      the scene graph. It is a core method that recomputes the world transform
+      matrix whenever a node's local transform changes.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7141
+    name: babylonjs_find_callers_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callers tool against Babylon.js (test C). Target: Engine.runRenderLoop method.
+    query: |
+      Who calls the Engine.runRenderLoop method?
+    expected_state: COMPLETE
+    reference_answer: |
+      Engine.runRenderLoop has 1 caller: FilesInput._processInput. This is
+      the entry point that sets up the render loop callback when loading a
+      scene from file input. Most other render loop setups happen in
+      user code outside the engine source.
+    validations:
+      - type: graph_tool_used
+  # -- Additional find_callees tests (42-43) -- expected_state: COMPLETE --
+  - id: 7142
+    name: babylonjs_find_callees_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against BabylonJS (test B). Target: Scene.render method.
+
+    query: |
+      What functions does Scene.render call?
+    expected_state: COMPLETE
+    reference_answer: |
+      Scene.render orchestrates the full frame rendering pipeline, calling
+      _registerTransientComponents, resetCachedMaterial, animate for
+      animation updates, camera.update, _renderRenderTarget for render
+      targets, and notifyObservers for before/after render callbacks.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7143
+    name: babylonjs_find_callees_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against BabylonJS (test C). Target: Scene.dispose method.
+
+    query: |
+      What functions does Scene.dispose call?
+    expected_state: COMPLETE
+    reference_answer: |
+      Scene.dispose performs comprehensive cleanup by calling clear on all
+      rendering stage lists, stopAllAnimations, resetCachedMaterial,
+      disposing the rendering manager, active meshes, particle systems,
+      and skeletons, and finally notifying dispose observers.
+    validations:
+      - type: graph_tool_used

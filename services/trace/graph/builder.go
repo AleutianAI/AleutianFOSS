@@ -210,6 +210,38 @@ type buildState struct {
 	placeholders  map[string]*Node        // external ID -> placeholder node
 	mu            sync.Mutex              // protects placeholders
 	startTime     time.Time
+
+	// symbolParent maps a child symbol ID to its parent symbol ID.
+	// Built during collectPhase to enable O(1) method → owning class lookup.
+	// Used by resolveCallTarget for this/self receiver resolution.
+	symbolParent map[string]string
+
+	// classExtends maps a class/struct name to its parent class name.
+	// Built from Metadata.Extends during collectPhase.
+	// Used by resolveCallTarget for inheritance-aware method resolution.
+	classExtends map[string]string
+
+	// importNameMap maps filePath → localName → importEntry.
+	// R3-P2b: Built from fileImports during collectPhase. Enables import-aware
+	// call resolution: when "merge" is called in frame.py and the file imports
+	// "merge" from "pandas.core.reshape.merge", we can resolve to the right symbol.
+	importNameMap map[string]map[string]importEntry
+}
+
+// importEntry represents a single imported name with its source module path
+// and original name (for aliased imports).
+//
+// Description:
+//
+//	R3-P2b: For `from pandas.core.reshape.merge import merge as pd_merge`:
+//	  - ModulePath: "pandas.core.reshape.merge"
+//	  - OriginalName: "merge" (the name in the source module)
+//	The importNameMap key would be "pd_merge" (the local name used in code).
+//
+// Thread Safety: Immutable after construction.
+type importEntry struct {
+	ModulePath   string // "pandas.core.reshape.merge"
+	OriginalName string // "merge" (the name in the source module)
 }
 
 // Build constructs a graph from the given parse results.
@@ -253,6 +285,9 @@ func (b *Builder) Build(ctx context.Context, results []*ast.ParseResult) (*Build
 		symbolsByName: make(map[string][]*ast.Symbol),
 		fileImports:   make(map[string][]ast.Import),
 		placeholders:  make(map[string]*Node),
+		symbolParent:  make(map[string]string),
+		classExtends:  make(map[string]string),
+		importNameMap: make(map[string]map[string]importEntry),
 		startTime:     time.Now(),
 	}
 	state.result.Graph = state.graph
@@ -267,6 +302,9 @@ func (b *Builder) Build(ctx context.Context, results []*ast.ParseResult) (*Build
 		recordBuildMetrics(ctx, time.Since(state.startTime), state.result.Stats.NodesCreated, state.result.Stats.EdgesCreated, false)
 		return state.result, nil
 	}
+
+	// R3-P2b: Build import name map from fileImports (populated during collectPhase).
+	b.buildImportNameMap(state)
 
 	// Phase 2: Extract edges
 	if err := b.extractEdgesPhase(ctx, state, results); err != nil {
@@ -342,8 +380,13 @@ func (b *Builder) collectPhase(ctx context.Context, state *buildState, results [
 			state.symbolsByName[sym.Name] = append(state.symbolsByName[sym.Name], sym)
 			state.result.Stats.NodesCreated++
 
-			// Recursively add children
-			b.addChildSymbols(state, sym.Children)
+			// Track class inheritance from Metadata.Extends
+			if sym.Metadata != nil && sym.Metadata.Extends != "" {
+				state.classExtends[sym.Name] = sym.Metadata.Extends
+			}
+
+			// Recursively add children with parent tracking
+			b.addChildSymbols(state, sym.Children, sym.ID)
 		}
 
 		state.result.Stats.FilesProcessed++
@@ -354,7 +397,8 @@ func (b *Builder) collectPhase(ctx context.Context, state *buildState, results [
 }
 
 // addChildSymbols recursively adds child symbols to the graph.
-func (b *Builder) addChildSymbols(state *buildState, children []*ast.Symbol) {
+// parentID tracks the owning symbol for reverse parent lookup.
+func (b *Builder) addChildSymbols(state *buildState, children []*ast.Symbol, parentID string) {
 	for _, child := range children {
 		if child == nil {
 			continue
@@ -370,8 +414,18 @@ func (b *Builder) addChildSymbols(state *buildState, children []*ast.Symbol) {
 		state.symbolsByName[child.Name] = append(state.symbolsByName[child.Name], child)
 		state.result.Stats.NodesCreated++
 
+		// Track parent-child relationship for receiver resolution
+		if parentID != "" {
+			state.symbolParent[child.ID] = parentID
+		}
+
+		// Track class inheritance from Metadata.Extends
+		if child.Metadata != nil && child.Metadata.Extends != "" {
+			state.classExtends[child.Name] = child.Metadata.Extends
+		}
+
 		// Recurse
-		b.addChildSymbols(state, child.Children)
+		b.addChildSymbols(state, child.Children, child.ID)
 	}
 }
 
@@ -620,8 +674,9 @@ func (b *Builder) extractSymbolEdges(ctx context.Context, state *buildState, sym
 		}
 		fallthrough // Methods can also have calls, returns, etc.
 
-	case ast.SymbolKindFunction:
-		// GR-41: Extract call edges from function/method body
+	case ast.SymbolKindFunction, ast.SymbolKindProperty:
+		// GR-41: Extract call edges from function/method/property body.
+		// R3-P1d: @property methods in Python have bodies with calls that need edges.
 		if len(sym.Calls) > 0 {
 			b.extractCallEdges(ctx, state, sym)
 		}
@@ -914,7 +969,25 @@ func (b *Builder) resolveCallTarget(state *buildState, call ast.CallSite, caller
 	// For simple calls like "DoWork()"
 	if !strings.Contains(target, ".") && !call.IsMethod {
 		candidates := b.resolveSymbolByName(state, target, caller.FilePath)
+		// R3-P2b-Self: Filter out the caller itself to prevent self-referential
+		// false matches. When DataFrame.merge calls bare merge(), same-file priority
+		// returns DataFrame.merge first, which then gets skipped as self-referential
+		// at line 879 and resolution gives up. By filtering here, we fall through
+		// to cross-file candidates.
+		candidates = filterOutID(candidates, caller.ID)
+
+		// R3-P2b-Self: If same-file candidates were all self-referential, try all files.
+		if len(candidates) == 0 {
+			allCandidates := b.resolveAllSymbolsByName(state, target)
+			candidates = filterOutID(allCandidates, caller.ID)
+		}
+
+		// R3-P2b-ImportMap: Try import-aware resolution first to disambiguate
+		// among cross-file candidates.
 		if len(candidates) > 0 {
+			if resolved := b.resolveViaImportMap(state, target, caller.FilePath, candidates); resolved != "" {
+				return resolved
+			}
 			// Prefer functions/methods, not types
 			for _, id := range candidates {
 				if sym, ok := state.symbolsByID[id]; ok {
@@ -925,6 +998,12 @@ func (b *Builder) resolveCallTarget(state *buildState, call ast.CallSite, caller
 			}
 			// Fall back to first match
 			return candidates[0]
+		}
+
+		// R3-P2b-ImportMap: Even with no candidates, try import map
+		// (for aliased imports where the local name doesn't match any symbol name).
+		if resolved := b.resolveViaImportMap(state, target, caller.FilePath, nil); resolved != "" {
+			return resolved
 		}
 	}
 
@@ -944,11 +1023,40 @@ func (b *Builder) resolveCallTarget(state *buildState, call ast.CallSite, caller
 	// Strategy 3: Method call using receiver
 	// For calls like "obj.Method()" where call.Receiver = "obj", call.Target = "Method"
 	if call.IsMethod && call.Receiver != "" {
-		// Try to find methods matching the target name
 		candidates := b.resolveSymbolByName(state, target, caller.FilePath)
+
+		// Sub-strategy 3a: this/self receiver → resolve to caller's owning class
+		if call.Receiver == "this" || call.Receiver == "self" {
+			if resolved := b.resolveThisSelfCall(state, candidates, caller); resolved != "" {
+				return resolved
+			}
+		}
+
+		// Sub-strategy 3b: Go-style receiver matching (case-insensitive)
+		// Handles: txn.Get() → Txn.Get, ctx.Done() → Context.Done
+		if call.Receiver != "this" && call.Receiver != "self" {
+			if resolved := b.resolveReceiverCaseInsensitive(state, candidates, call.Receiver); resolved != "" {
+				return resolved
+			}
+
+			// Sub-strategy 3b2: Receiver matching failed on same-file candidates.
+			// Try ALL candidates across all files. This handles cross-file method
+			// calls like Application.handle calling router.handle() where Router.handle
+			// is in a different file. resolveSymbolByName prefers same-file matches,
+			// which may not include the correct receiver-matched target.
+			allCandidates := b.resolveAllSymbolsByName(state, target)
+			if len(allCandidates) > len(candidates) {
+				if resolved := b.resolveReceiverCaseInsensitive(state, allCandidates, call.Receiver); resolved != "" {
+					return resolved
+				}
+			}
+		}
+
+		// Sub-strategy 3c: Fallback — first method/property match (original behavior)
+		// R3-P1d: Include Property symbols so self.some_property resolves correctly.
 		for _, id := range candidates {
 			if sym, ok := state.symbolsByID[id]; ok {
-				if sym.Kind == ast.SymbolKindMethod {
+				if sym.Kind == ast.SymbolKindMethod || sym.Kind == ast.SymbolKindProperty {
 					return id
 				}
 			}
@@ -957,6 +1065,162 @@ func (b *Builder) resolveCallTarget(state *buildState, call ast.CallSite, caller
 
 	// Unresolved - caller will create placeholder
 	return ""
+}
+
+// resolveThisSelfCall resolves method calls on this/self to the caller's owning class.
+//
+// Description:
+//
+//	When a method calls this.foo() or self.foo(), the target should resolve to
+//	a method on the same class (or a parent class via inheritance). This function
+//	finds the caller's owning class and matches the target method.
+//
+// Inputs:
+//
+//	state - Build state with symbol indexes and parent maps.
+//	candidates - Symbol IDs that match the target method name.
+//	caller - The calling function/method symbol.
+//
+// Outputs:
+//
+//	string - Resolved symbol ID, or empty if no match found.
+func (b *Builder) resolveThisSelfCall(state *buildState, candidates []string, caller *ast.Symbol) string {
+	// Find the caller's owning class
+	ownerClassName := b.findOwnerClassName(state, caller)
+	if ownerClassName == "" {
+		return ""
+	}
+
+	// Try to find a candidate method that belongs to this class or a parent class
+	classChain := b.buildInheritanceChain(state, ownerClassName)
+
+	for _, className := range classChain {
+		for _, id := range candidates {
+			sym, ok := state.symbolsByID[id]
+			if !ok {
+				continue
+			}
+			// R3-P1d: Include Property symbols (Python @property, TS get/set accessors).
+			if sym.Kind != ast.SymbolKindMethod && sym.Kind != ast.SymbolKindFunction && sym.Kind != ast.SymbolKindProperty {
+				continue
+			}
+
+			// Check 1: sym.Receiver matches the class name (Go, JS)
+			if sym.Receiver == className {
+				return id
+			}
+
+			// Check 2: sym is a child of the class (Python, TS — Receiver often empty)
+			parentID, hasParent := state.symbolParent[id]
+			if hasParent {
+				if parentSym, ok := state.symbolsByID[parentID]; ok {
+					if parentSym.Name == className {
+						return id
+					}
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+// resolveReceiverCaseInsensitive matches a call receiver to a method's declared receiver type
+// using case-insensitive comparison.
+//
+// Description:
+//
+//	In Go, variable names are conventionally lowercase abbreviations of their types:
+//	txn → Txn, ctx → Context, r → Router. This function exploits that convention
+//	by doing case-insensitive matching between call.Receiver and sym.Receiver.
+//
+// Inputs:
+//
+//	state - Build state with symbol indexes.
+//	candidates - Symbol IDs that match the target method name.
+//	callReceiver - The receiver expression from the call site (e.g., "txn").
+//
+// Outputs:
+//
+//	string - Resolved symbol ID, or empty if no match found.
+func (b *Builder) resolveReceiverCaseInsensitive(state *buildState, candidates []string, callReceiver string) string {
+	for _, id := range candidates {
+		sym, ok := state.symbolsByID[id]
+		if !ok {
+			continue
+		}
+		if sym.Kind != ast.SymbolKindMethod {
+			continue
+		}
+		if sym.Receiver != "" && strings.EqualFold(callReceiver, sym.Receiver) {
+			return id
+		}
+	}
+	return ""
+}
+
+// findOwnerClassName finds the class/struct name that owns the given method.
+//
+// Description:
+//
+//	Uses multiple strategies to find the owning class:
+//	1. sym.Receiver field (Go, JS — directly set by parser)
+//	2. symbolParent reverse index (Python, TS — method is a child of class)
+//
+// Inputs:
+//
+//	state - Build state with symbol and parent indexes.
+//	method - The method symbol to find the owner for.
+//
+// Outputs:
+//
+//	string - The owning class/struct name, or empty if not found.
+func (b *Builder) findOwnerClassName(state *buildState, method *ast.Symbol) string {
+	// Strategy 1: Receiver field (Go, JS)
+	if method.Receiver != "" {
+		return method.Receiver
+	}
+
+	// Strategy 2: Parent symbol lookup (Python, TS)
+	parentID, ok := state.symbolParent[method.ID]
+	if ok {
+		if parent, exists := state.symbolsByID[parentID]; exists {
+			if parent.Kind == ast.SymbolKindClass || parent.Kind == ast.SymbolKindStruct {
+				return parent.Name
+			}
+		}
+	}
+
+	return ""
+}
+
+// buildInheritanceChain builds the chain of class names from the given class up through its parents.
+//
+// Description:
+//
+//	Walks the classExtends map to build [className, parentName, grandparentName, ...].
+//	Stops at a maximum depth of 10 to prevent infinite loops from circular inheritance.
+//
+// Inputs:
+//
+//	state - Build state with classExtends map.
+//	className - Starting class name.
+//
+// Outputs:
+//
+//	[]string - Class names from child to root, including className itself.
+func (b *Builder) buildInheritanceChain(state *buildState, className string) []string {
+	chain := []string{className}
+	current := className
+	for i := 0; i < 10; i++ {
+		parent, ok := state.classExtends[current]
+		if !ok || parent == "" {
+			break
+		}
+		chain = append(chain, parent)
+		current = parent
+	}
+	return chain
 }
 
 // resolveSymbolByName finds symbols matching the given name.
@@ -992,6 +1256,35 @@ func (b *Builder) resolveSymbolByName(state *buildState, name string, currentFil
 	return other
 }
 
+// resolveAllSymbolsByName returns ALL symbol IDs matching a name across all files.
+//
+// Description:
+//
+//	Unlike resolveSymbolByName which prefers same-file/same-package matches,
+//	this returns every symbol with the given name. Used as a fallback when
+//	receiver-based disambiguation fails on the filtered candidate set—the
+//	correct target may be in a different file.
+//
+// Inputs:
+//
+//	state - Build state with symbol indexes.
+//	name - The symbol name to look up.
+//
+// Outputs:
+//
+//	[]string - All symbol IDs matching the name, or nil if none found.
+func (b *Builder) resolveAllSymbolsByName(state *buildState, name string) []string {
+	candidates := state.symbolsByName[name]
+	if len(candidates) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(candidates))
+	for _, sym := range candidates {
+		ids = append(ids, sym.ID)
+	}
+	return ids
+}
+
 // samePackage checks if two files are in the same package.
 // This is a simple heuristic based on directory.
 func (b *Builder) samePackage(file1, file2 string) bool {
@@ -1007,6 +1300,156 @@ func extractDir(path string) string {
 		return ""
 	}
 	return path[:lastSlash]
+}
+
+// filterOutID returns a copy of ids with the specified id removed.
+//
+// Description:
+//
+//	R3-P2b-Self: Used to remove the caller's own ID from resolution candidates,
+//	preventing self-referential false matches where DataFrame.merge resolves
+//	bare merge() to itself.
+//
+// Thread Safety: This function is safe for concurrent use.
+func filterOutID(ids []string, exclude string) []string {
+	result := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id != exclude {
+			result = append(result, id)
+		}
+	}
+	return result
+}
+
+// buildImportNameMap builds the import name lookup table from fileImports.
+//
+// Description:
+//
+//	R3-P2b: Processes all file imports collected during collectPhase and builds
+//	a fast lookup map: importNameMap[filePath][localName] → importEntry.
+//	Handles aliased imports (e.g., "merge as pd_merge"), skips wildcards
+//	and bare module imports (no Names).
+//
+// Thread Safety: Must be called before edge extraction (single-threaded phase).
+func (b *Builder) buildImportNameMap(state *buildState) {
+	entries := 0
+	for filePath, imports := range state.fileImports {
+		for _, imp := range imports {
+			if imp.IsWildcard || len(imp.Names) == 0 {
+				continue
+			}
+
+			if state.importNameMap[filePath] == nil {
+				state.importNameMap[filePath] = make(map[string]importEntry)
+			}
+
+			for _, name := range imp.Names {
+				localName, originalName := parseAliasedName(name)
+				state.importNameMap[filePath][localName] = importEntry{
+					ModulePath:   imp.Path,
+					OriginalName: originalName,
+				}
+				entries++
+			}
+		}
+	}
+
+	if entries > 0 {
+		slog.Debug("R3-P2b: import name map built",
+			slog.Int("entries", entries),
+			slog.Int("files", len(state.importNameMap)),
+		)
+	}
+}
+
+// resolveViaImportMap attempts to resolve a call target using import information.
+//
+// Description:
+//
+//	R3-P2b: When a file imports "merge" from "pandas.core.reshape.merge", and code
+//	calls bare merge(), this function finds the correct cross-file target by matching
+//	the candidate's file path against the import's module path.
+//
+// Inputs:
+//
+//	state - Build state with importNameMap populated.
+//	target - The call target name (e.g., "merge").
+//	callerFile - The calling file's path.
+//	candidates - Pre-resolved candidate IDs (self-filtered).
+//
+// Outputs:
+//
+//	string - Resolved symbol ID, or empty string if no import match found.
+//
+// Thread Safety: This function is safe for concurrent use.
+func (b *Builder) resolveViaImportMap(state *buildState, target string, callerFile string, candidates []string) string {
+	fileMap := state.importNameMap[callerFile]
+	if fileMap == nil {
+		return ""
+	}
+
+	entry, ok := fileMap[target]
+	if !ok {
+		return ""
+	}
+
+	// Look through ALL symbols named originalName (not just candidates,
+	// which may be filtered to same-file).
+	allCandidates := b.resolveAllSymbolsByName(state, entry.OriginalName)
+	for _, id := range allCandidates {
+		sym := state.symbolsByID[id]
+		if sym != nil && matchesImportPath(sym.FilePath, entry.ModulePath) {
+			slog.Debug("R3-P2b: import-aware resolution succeeded",
+				slog.String("target", target),
+				slog.String("import_path", entry.ModulePath),
+				slog.String("original_name", entry.OriginalName),
+				slog.String("resolved_id", id),
+			)
+			return id
+		}
+	}
+
+	return ""
+}
+
+// matchesImportPath checks if a symbol's file path corresponds to an import module path.
+//
+// Description:
+//
+//	R3-P2b: Converts a Python module path like "pandas.core.reshape.merge" to a file
+//	path fragment "pandas/core/reshape/merge" and checks if the symbol's file path
+//	ends with it. Uses HasSuffix (not Contains) to prevent false positives from
+//	prefix pollution (e.g., "my_pandas/core/reshape/merge.py").
+//
+// Thread Safety: This function is safe for concurrent use.
+func matchesImportPath(filePath string, importPath string) bool {
+	pathFragment := strings.ReplaceAll(importPath, ".", "/")
+	// Handle both "merge.py" and "merge/__init__.py" (Python package)
+	normalized := strings.TrimSuffix(filePath, ".py")
+	normalized = strings.TrimSuffix(normalized, "/__init__")
+	// Must match at path boundary: either the entire path, or preceded by "/"
+	if normalized == pathFragment {
+		return true
+	}
+	return strings.HasSuffix(normalized, "/"+pathFragment)
+}
+
+// parseAliasedName splits a Python import name that may contain "as" alias.
+//
+// Description:
+//
+//	R3-P2b: For "concat as pd_concat", returns ("pd_concat", "concat").
+//	For "merge" (no alias), returns ("merge", "merge").
+//
+// Thread Safety: This function is safe for concurrent use.
+func parseAliasedName(name string) (localName, originalName string) {
+	parts := strings.SplitN(name, " as ", 2)
+	originalName = strings.TrimSpace(parts[0])
+	localName = originalName
+	if len(parts) == 2 {
+		localName = strings.TrimSpace(parts[1])
+	}
+	return localName, originalName
 }
 
 // extractTypeName extracts a simple type name from a type expression.
@@ -1103,7 +1546,9 @@ func (b *Builder) validateEdgeType(state *buildState, fromID, toID string, edgeT
 
 	switch edgeType {
 	case EdgeTypeCalls:
-		return isCallable(fromSym.Kind) && isCallable(toSym.Kind)
+		// R3-P1b: The TO side uses isCallTarget which additionally allows Class/Struct
+		// (constructor calls like DataFrameFormatter(), new Router()).
+		return isCallable(fromSym.Kind) && isCallTarget(toSym.Kind)
 	case EdgeTypeImplements:
 		return toSym.Kind == ast.SymbolKindInterface
 	case EdgeTypeEmbeds:
@@ -1113,11 +1558,23 @@ func (b *Builder) validateEdgeType(state *buildState, fromID, toID string, edgeT
 	}
 }
 
-// isCallable returns true if the symbol kind can make calls.
+// isCallable returns true if the symbol kind can be the source (FROM) of a call edge.
+// R3-P1d: Property methods in Python have bodies that make calls.
 func isCallable(kind ast.SymbolKind) bool {
 	return kind == ast.SymbolKindFunction ||
 		kind == ast.SymbolKindMethod ||
-		kind == ast.SymbolKindExternal
+		kind == ast.SymbolKindExternal ||
+		kind == ast.SymbolKindProperty
+}
+
+// isCallTarget returns true if the symbol kind can be the target (TO) of a call edge.
+// This is a superset of isCallable: it additionally allows Class and Struct symbols
+// because constructor calls (e.g., DataFrameFormatter(), new Router()) target class/struct symbols.
+// R3-P1b: Fixes silently dropped constructor call edges.
+func isCallTarget(kind ast.SymbolKind) bool {
+	return isCallable(kind) ||
+		kind == ast.SymbolKindClass ||
+		kind == ast.SymbolKindStruct
 }
 
 // validateParseResult checks if a ParseResult is valid for building.

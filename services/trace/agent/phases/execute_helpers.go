@@ -15,6 +15,7 @@ package phases
 
 import (
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strconv"
 	"strings"
@@ -241,6 +242,30 @@ func extractPackageNameFromQuery(query string) string {
 func extractFunctionNameFromQuery(query string) string {
 	lowerQuery := strings.ToLower(query)
 
+	// IT-01 Bug 3: Pattern 0 — "X method/function on (the) Y type/class/struct"
+	// Handles: "Who calls the Get method on the Transaction type?" → "Transaction.Get"
+	// Handles: "Who calls the render method on the Scene type?" → "Scene.render"
+	// Must come first because "Get" is in skipWords and would be lost by later patterns.
+	if dotName := extractTypeDotMethodFromQuery(query); dotName != "" {
+		return dotName
+	}
+
+	// Pattern 0b: Direct dot-notation in query — "Who calls Transaction.Get?"
+	// If the query contains an explicit Type.Method token, extract it directly.
+	for _, word := range strings.Fields(query) {
+		candidate := strings.Trim(word, "?,.()")
+		if strings.Contains(candidate, ".") {
+			parts := strings.SplitN(candidate, ".", 2)
+			if len(parts) == 2 && isValidTypeName(parts[0]) && len(parts[1]) > 0 {
+				// Validate the method part starts with a letter (reject "Foo.123")
+				methodFirstRune := rune(parts[1][0])
+				if unicode.IsLetter(methodFirstRune) || parts[1][0] == '_' {
+					return candidate
+				}
+			}
+		}
+	}
+
 	// Pattern 1: "what does X call" or "what functions does X call"
 	if strings.Contains(lowerQuery, "call") {
 		words := strings.Fields(query) // Keep original case
@@ -384,6 +409,143 @@ func isFunctionLikeName(s string) bool {
 	hasDigit := strings.ContainsAny(s, "0123456789")
 
 	return hasUpperInMiddle || hasUnderscore || hasDigit || len(s) <= 15
+}
+
+// extractTypeDotMethodFromQuery extracts "Type.Method" from natural language queries
+// that mention a method on a type.
+//
+// Description:
+//
+//	Recognizes patterns like:
+//	  "the Get method on the Transaction type" → "Transaction.Get"
+//	  "the render method on Scene" → "Scene.render"
+//	  "the __init__ method on the DataFrame class" → "DataFrame.__init__"
+//	  "the create method on NestFactory" → "NestFactory.create"
+//
+// The pattern searched is: <method> method/function on (the) <type> (type|class|struct)?
+//
+// Inputs:
+//
+//   - query: The user's natural language query.
+//
+// Outputs:
+//
+//   - string: "Type.Method" dot notation, or "" if pattern not found.
+//
+// Limitations:
+//
+//   - Only matches when the query contains "method" or "function" keyword
+//   - Does not handle "the X on Y" without method/function keyword
+//   - Type name must start with uppercase letter (excludes Python lowercase module names)
+//
+// Assumptions:
+//
+//   - Query is in English
+//   - Type names follow Go/JS/TS/Python naming conventions (uppercase first letter)
+func extractTypeDotMethodFromQuery(query string) string {
+	words := strings.Fields(query)
+	lowerWords := make([]string, len(words))
+	for i, w := range words {
+		lowerWords[i] = strings.ToLower(w)
+	}
+
+	// Look for pattern: <method> method/function on [the] <Type> [type/class/struct]
+	for i := 0; i < len(lowerWords)-1; i++ {
+		if lowerWords[i+1] != "method" && lowerWords[i+1] != "function" {
+			continue
+		}
+
+		methodName := strings.Trim(words[i], "?,.()")
+		if methodName == "" || strings.ToLower(methodName) == "the" {
+			continue
+		}
+
+		// Look for "on [the] <Type>" after "method/function"
+		j := i + 2
+		if j >= len(lowerWords) {
+			continue
+		}
+		if lowerWords[j] != "on" {
+			continue
+		}
+		j++
+		if j >= len(lowerWords) {
+			continue
+		}
+
+		// Skip optional "the"
+		if lowerWords[j] == "the" {
+			j++
+			if j >= len(lowerWords) {
+				continue
+			}
+		}
+
+		typeName := strings.Trim(words[j], "?,.()")
+		if typeName == "" {
+			continue
+		}
+
+		// Validate the type name starts with uppercase (Go/JS/TS convention)
+		// or is a valid identifier for Python (e.g., DataFrame)
+		if isValidTypeName(typeName) {
+			result := typeName + "." + methodName
+			slog.Debug("extractTypeDotMethodFromQuery: matched",
+				slog.String("query", query),
+				slog.String("type", typeName),
+				slog.String("method", methodName),
+				slog.String("result", result),
+			)
+			return result
+		}
+	}
+
+	slog.Debug("extractTypeDotMethodFromQuery: no match",
+		slog.String("query", query),
+	)
+	return ""
+}
+
+// isValidTypeName checks if a string looks like a type/class name.
+//
+// Description:
+//
+//	Returns true if the name starts with an uppercase letter and contains
+//	only alphanumeric characters. This matches Go types (Context, Transaction),
+//	JS/TS classes (Scene, Router), and Python classes (DataFrame).
+//
+// Inputs:
+//
+//   - s: The candidate type name string.
+//
+// Outputs:
+//
+//   - bool: True if the string looks like a valid type/class name.
+//
+// Limitations:
+//
+//   - Rejects lowercase-first names, which excludes some Python module names
+//   - Maximum 100 characters
+//
+// Assumptions:
+//
+//   - Type names follow Go/JS/TS/Python class naming conventions (PascalCase)
+func isValidTypeName(s string) bool {
+	if len(s) == 0 || len(s) > 100 {
+		return false
+	}
+	// Must start with uppercase letter (using unicode for consistency with loop body)
+	firstRune := rune(s[0])
+	if !unicode.IsUpper(firstRune) {
+		return false
+	}
+	// Must contain only alphanumeric characters
+	for _, c := range s {
+		if !unicode.IsLetter(c) && !unicode.IsDigit(c) {
+			return false
+		}
+	}
+	return true
 }
 
 // extractFunctionNameFromContext tries to extract a function name from previous context.

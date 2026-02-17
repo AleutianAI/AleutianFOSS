@@ -24,6 +24,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/telemetry"
 )
 
 // =============================================================================
@@ -150,13 +151,14 @@ func (t *findCalleesTool) Definition() ToolDefinition {
 	return ToolDefinition{
 		Name: "find_callees",
 		Description: "Find all functions that a given function CALLS (downstream dependencies). " +
+			"The target function is the SUBJECT doing the calling. " +
 			"Use when asked 'what does X call?' or 'what functions does X call?' or 'what does X depend on?'. " +
-			"NOT for 'who calls X' - use find_callers for that instead. " +
+			"NOT for 'who calls X?' - use find_callers for that instead. " +
 			"Returns the list of called functions with file locations.",
 		Parameters: map[string]ParamDef{
 			"function_name": {
 				Type:        ParamTypeString,
-				Description: "Name of the function to find callees for",
+				Description: "Name of the function to find callees for. Use Type.Method format for methods (e.g., 'Context.JSON', 'DB.Open', 'Txn.Get'). For standalone functions, just the name (e.g., 'parseConfig').",
 				Required:    true,
 			},
 			"limit": {
@@ -171,15 +173,20 @@ func (t *findCalleesTool) Definition() ToolDefinition {
 		Requires:    []string{"graph_initialized"},
 		SideEffects: false,
 		Timeout:     5 * time.Second,
+		// IT-02 H-3: Added specific callee keywords and grammar hint
 		WhenToUse: WhenToUse{
 			Keywords: []string{
-				"what does call", "functions called by", "find callees", "callees of",
-				"calls to", "outgoing calls", "downstream", "dependencies of",
-				"what X calls", "what functions X calls",
+				"what does call", "what functions does", "what methods does",
+				"functions called by", "find callees", "callees of",
+				"outgoing calls", "downstream", "dependencies of",
+				"depends on", "invokes", "calls what", "makes calls to",
 			},
-			UseWhen: "User asks what functions a specific function CALLS. " +
-				"Questions like 'what does X call?', 'what functions does X call?', 'dependencies of X'.",
+			UseWhen: "User asks what functions a specific function CALLS or depends on. " +
+				"The target function is the SUBJECT doing the calling. " +
+				"Questions like 'what does Engine.Run call?', 'what functions does Build call?', " +
+				"'what does make_response depend on?'.",
 			AvoidWhen: "User asks WHO calls a function. " +
+				"The target function is the OBJECT being called. " +
 				"Questions like 'who calls X?', 'find usages of X', 'callers of X'. " +
 				"Use find_callers instead for those.",
 		},
@@ -210,23 +217,73 @@ func (t *findCalleesTool) Execute(ctx context.Context, params map[string]any) (*
 	)
 	defer span.End()
 
+	// M-2: Use trace-enriched logger for all log entries in this execution
+	logger := telemetry.LoggerWithTrace(ctx, t.logger)
+
 	// GR-01: Use index first for O(1) lookup
 	var results map[string]*graph.QueryResult
 	var queryErrors int
 
 	if t.index != nil {
-		symbols := t.index.GetByName(p.FunctionName)
+		var symbols []*ast.Symbol
 
-		// P1: If no exact match, try fuzzy search (Feb 14, 2026)
-		if len(symbols) == 0 {
-			symbol, fuzzy, err := ResolveFunctionWithFuzzy(ctx, t.index, p.FunctionName, t.logger)
-			if err == nil && fuzzy {
-				t.logger.Info("P1: Using fuzzy match for function",
+		// IT-01 SI-2: If name contains ".", skip exact match (dot-notation names like
+		// "Txn.Get" are never stored as-is in the index) and go straight to fuzzy resolution.
+		if strings.Contains(p.FunctionName, ".") {
+			symbol, _, err := ResolveFunctionWithFuzzy(ctx, t.index, p.FunctionName, logger)
+			if err == nil {
+				logger.Info("dot-notation resolved",
 					slog.String("tool", "find_callees"),
 					slog.String("query", p.FunctionName),
 					slog.String("matched", symbol.Name),
 				)
 				symbols = []*ast.Symbol{symbol}
+			} else {
+				// IT-02 C-1: When dot-notation resolution fails (e.g., "DB.Open" where Open
+				// is a package-level function, not a method on DB), fall back to bare method name.
+				parts := strings.SplitN(p.FunctionName, ".", 2)
+				bareName := parts[1]
+				bareSymbols := t.index.GetByName(bareName)
+				if len(bareSymbols) > 0 {
+					symbols = bareSymbols
+					logger.Info("IT-02 C-1: dot-notation fallback to bare name",
+						slog.String("tool", "find_callees"),
+						slog.String("query", p.FunctionName),
+						slog.String("bare_name", bareName),
+						slog.Int("matches", len(bareSymbols)),
+					)
+					span.SetAttributes(attribute.Bool("dot_notation_fallback", true))
+				} else {
+					// Also try fuzzy on bare name as last resort
+					bareSym, fuzzy, bareErr := ResolveFunctionWithFuzzy(ctx, t.index, bareName, logger)
+					if bareErr == nil {
+						symbols = []*ast.Symbol{bareSym}
+						logger.Info("IT-02 C-1: dot-notation fallback to bare fuzzy",
+							slog.String("tool", "find_callees"),
+							slog.String("query", p.FunctionName),
+							slog.String("bare_name", bareName),
+							slog.String("matched", bareSym.Name),
+							slog.Bool("fuzzy", fuzzy),
+						)
+						span.SetAttributes(attribute.Bool("dot_notation_bare_fuzzy", true))
+					}
+				}
+			}
+		} else {
+			// O(1) index lookup for bare names
+			symbols = t.index.GetByName(p.FunctionName)
+
+			// P1: If no exact match, try fuzzy search (Feb 14, 2026)
+			if len(symbols) == 0 {
+				symbol, fuzzy, err := ResolveFunctionWithFuzzy(ctx, t.index, p.FunctionName, logger)
+				if err == nil && fuzzy {
+					logger.Info("P1: Using fuzzy match for function",
+						slog.String("tool", "find_callees"),
+						slog.String("query", p.FunctionName),
+						slog.String("matched", symbol.Name),
+					)
+					symbols = []*ast.Symbol{symbol}
+				}
 			}
 		}
 
@@ -248,7 +305,7 @@ func (t *findCalleesTool) Execute(ctx context.Context, params map[string]any) (*
 				result, qErr := t.graph.FindCalleesByID(ctx, sym.ID, graph.WithLimit(p.Limit))
 				if qErr != nil {
 					queryErrors++
-					t.logger.Warn("graph query failed",
+					logger.Warn("graph query failed",
 						slog.String("tool", "find_callees"),
 						slog.String("operation", "FindCalleesByID"),
 						slog.String("symbol_id", sym.ID),
@@ -266,7 +323,7 @@ func (t *findCalleesTool) Execute(ctx context.Context, params map[string]any) (*
 			results = make(map[string]*graph.QueryResult)
 		}
 	} else {
-		t.logger.Warn("graph query fallback",
+		logger.Warn("graph query fallback",
 			slog.String("tool", "find_callees"),
 			slog.String("reason", "index_unavailable"),
 			slog.String("function_name", p.FunctionName),
@@ -283,11 +340,11 @@ func (t *findCalleesTool) Execute(ctx context.Context, params map[string]any) (*
 		}
 	}
 
-	// Build typed output
+	// Build typed output (single classification pass)
 	output := t.buildOutput(p.FunctionName, results)
 
-	// Format text output
-	outputText := t.formatText(p.FunctionName, results)
+	// M-1: Format text from typed output (eliminates duplicate classification)
+	outputText := t.formatText(p.FunctionName, output)
 
 	span.SetAttributes(
 		attribute.Int("resolved_count", output.ResolvedCount),
@@ -340,9 +397,18 @@ func (t *findCalleesTool) parseParams(params map[string]any) (FindCalleesParams,
 }
 
 // buildOutput creates the typed output struct.
+//
+// Description:
+//
+//	Classifies callees into resolved (in-codebase) and external (stdlib/external).
+//	Deduplicates both resolved and external callees.
+//
+// L-1: Deduplicates resolved callees by symbol ID to prevent duplicates when
+// multiple source symbols resolve to the same callee.
 func (t *findCalleesTool) buildOutput(functionName string, results map[string]*graph.QueryResult) FindCalleesOutput {
 	var resolvedCallees []CalleeInfo
 	var externalCallees []string
+	seenResolved := make(map[string]bool)
 
 	for symbolID, result := range results {
 		if result == nil {
@@ -357,13 +423,19 @@ func (t *findCalleesTool) buildOutput(functionName string, results map[string]*g
 			if sym.FilePath == "" || sym.Kind == ast.SymbolKindExternal {
 				externalCallees = append(externalCallees, sym.Name)
 			} else {
+				// L-1: Deduplicate resolved callees by symbol ID
+				if seenResolved[sym.ID] {
+					continue
+				}
+				seenResolved[sym.ID] = true
 				resolvedCallees = append(resolvedCallees, CalleeInfo{
 					Name:      sym.Name,
 					File:      sym.FilePath,
 					Line:      sym.StartLine,
 					Package:   sym.Package,
 					Signature: sym.Signature,
-					SourceID:  symbolID,
+					// L-2: CallerID is the symbol whose callees we queried (not the callee's own ID)
+					SourceID: symbolID,
 				})
 			}
 		}
@@ -389,50 +461,14 @@ func (t *findCalleesTool) buildOutput(functionName string, results map[string]*g
 	}
 }
 
-// formatText creates a human-readable text summary.
-func (t *findCalleesTool) formatText(functionName string, results map[string]*graph.QueryResult) string {
+// formatText creates a human-readable text summary from the typed output.
+//
+// M-1: Refactored to accept FindCalleesOutput instead of raw results,
+// eliminating the duplicate classification logic that was in the previous version.
+func (t *findCalleesTool) formatText(functionName string, output FindCalleesOutput) string {
 	var sb strings.Builder
 
-	// Separate resolved and external callees
-	var resolvedCallees []struct {
-		name     string
-		file     string
-		line     int
-		sourceID string
-	}
-	var externalCallees []string
-
-	for symbolID, result := range results {
-		if result == nil {
-			continue
-		}
-		for _, sym := range result.Symbols {
-			if sym == nil {
-				continue
-			}
-			if sym.FilePath == "" || sym.Kind == ast.SymbolKindExternal {
-				externalCallees = append(externalCallees, sym.Name)
-			} else {
-				resolvedCallees = append(resolvedCallees, struct {
-					name     string
-					file     string
-					line     int
-					sourceID string
-				}{
-					name:     sym.Name,
-					file:     sym.FilePath,
-					line:     sym.StartLine,
-					sourceID: symbolID,
-				})
-			}
-		}
-	}
-
-	totalResolved := len(resolvedCallees)
-	totalExternal := len(externalCallees)
-	totalCallees := totalResolved + totalExternal
-
-	if totalCallees == 0 {
+	if output.TotalCount == 0 {
 		sb.WriteString(fmt.Sprintf("## GRAPH RESULT: No callees of '%s'\n\n", functionName))
 		sb.WriteString(fmt.Sprintf("The function '%s' does not call any other functions.\n", functionName))
 		sb.WriteString("The graph has been fully indexed - this is the definitive answer.\n\n")
@@ -441,41 +477,33 @@ func (t *findCalleesTool) formatText(functionName string, results map[string]*gr
 	}
 
 	// Header with clear breakdown
-	sb.WriteString(fmt.Sprintf("Function '%s' calls %d functions", functionName, totalCallees))
-	if totalResolved > 0 && totalExternal > 0 {
-		sb.WriteString(fmt.Sprintf(" (%d in-codebase, %d external/stdlib)", totalResolved, totalExternal))
+	sb.WriteString(fmt.Sprintf("Function '%s' calls %d functions", functionName, output.TotalCount))
+	if output.ResolvedCount > 0 && output.ExternalCount > 0 {
+		sb.WriteString(fmt.Sprintf(" (%d in-codebase, %d external/stdlib)", output.ResolvedCount, output.ExternalCount))
 	}
 	sb.WriteString(":\n\n")
 
 	// Show resolved (in-codebase) callees first
-	if totalResolved > 0 {
+	if output.ResolvedCount > 0 {
 		sb.WriteString("## In-Codebase Callees (navigable)\n")
-		for _, callee := range resolvedCallees {
-			sb.WriteString(fmt.Sprintf("  → %s() in %s:%d\n", callee.name, callee.file, callee.line))
+		for _, callee := range output.ResolvedCallees {
+			sb.WriteString(fmt.Sprintf("  → %s() in %s:%d\n", callee.Name, callee.File, callee.Line))
 		}
 		sb.WriteString("\n")
 	}
 
-	// Summarize external callees
-	if totalExternal > 0 {
+	// Summarize external callees (already deduplicated by buildOutput)
+	if output.ExternalCount > 0 {
 		sb.WriteString("## External/Stdlib Callees (not in codebase)\n")
-		seen := make(map[string]bool)
-		var uniqueExternal []string
-		for _, name := range externalCallees {
-			if !seen[name] {
-				seen[name] = true
-				uniqueExternal = append(uniqueExternal, name)
-			}
-		}
-		if len(uniqueExternal) <= 10 {
-			for _, name := range uniqueExternal {
+		if len(output.ExternalCallees) <= 10 {
+			for _, name := range output.ExternalCallees {
 				sb.WriteString(fmt.Sprintf("  → %s() (external)\n", name))
 			}
 		} else {
-			for _, name := range uniqueExternal[:10] {
+			for _, name := range output.ExternalCallees[:10] {
 				sb.WriteString(fmt.Sprintf("  → %s() (external)\n", name))
 			}
-			sb.WriteString(fmt.Sprintf("  ... and %d more external calls\n", len(uniqueExternal)-10))
+			sb.WriteString(fmt.Sprintf("  ... and %d more external calls\n", len(output.ExternalCallees)-10))
 		}
 	}
 

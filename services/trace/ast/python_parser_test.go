@@ -1506,3 +1506,492 @@ func BenchmarkABCDetection(b *testing.B) {
 		_, _ = parser.Parse(ctx, []byte(pythonABCSource), "abc.py")
 	}
 }
+
+// GR-41: Tests for Python call site extraction
+
+const pythonCallsSource = `
+class Flask:
+    """A minimal Flask-like app."""
+
+    def wsgi_app(self, environ, start_response):
+        """The WSGI application."""
+        ctx = self.request_context(environ)
+        response = self.full_dispatch_request()
+        return response(environ, start_response)
+
+    def full_dispatch_request(self):
+        """Dispatch the request."""
+        self.try_trigger_before_first_request_functions()
+        rv = self.dispatch_request()
+        return self.finalize_request(rv)
+
+    def dispatch_request(self):
+        """Dispatch to the handler."""
+        rule = self.url_map.match()
+        return self.view_functions[rule.endpoint]()
+
+def standalone_function():
+    """A top-level function that calls other functions."""
+    result = helper()
+    data = process_data(result)
+    return format_output(data)
+
+class Server:
+    def start(self):
+        db.connect()
+        self.listen()
+        logger.info("started")
+
+    def handle_request(self, request):
+        validated = validate(request)
+        response = self.process(validated)
+        self.send_response(response)
+`
+
+func TestPythonParser_ExtractCallSites_SelfMethodCalls(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonCallsSource), "flask_app.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find the wsgi_app method
+	var wsgiApp *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Flask" {
+			for _, child := range sym.Children {
+				if child.Name == "wsgi_app" {
+					wsgiApp = child
+					break
+				}
+			}
+		}
+	}
+
+	if wsgiApp == nil {
+		t.Fatal("wsgi_app method not found")
+	}
+
+	if len(wsgiApp.Calls) == 0 {
+		t.Fatal("wsgi_app should have call sites extracted")
+	}
+
+	// wsgi_app calls: self.request_context(), self.full_dispatch_request(), response()
+	callTargets := make(map[string]bool)
+	for _, call := range wsgiApp.Calls {
+		callTargets[call.Target] = true
+	}
+
+	if !callTargets["request_context"] {
+		t.Error("expected call to request_context, got calls:", callTargetNames(wsgiApp.Calls))
+	}
+	if !callTargets["full_dispatch_request"] {
+		t.Error("expected call to full_dispatch_request, got calls:", callTargetNames(wsgiApp.Calls))
+	}
+
+	// Verify self.method() calls have IsMethod=true and Receiver="self"
+	for _, call := range wsgiApp.Calls {
+		if call.Target == "request_context" || call.Target == "full_dispatch_request" {
+			if !call.IsMethod {
+				t.Errorf("call to %s should be IsMethod=true", call.Target)
+			}
+			if call.Receiver != "self" {
+				t.Errorf("call to %s should have Receiver='self', got %q", call.Target, call.Receiver)
+			}
+		}
+	}
+}
+
+func TestPythonParser_ExtractCallSites_FullDispatchRequest(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonCallsSource), "flask_app.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find full_dispatch_request method
+	var fullDispatch *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Flask" {
+			for _, child := range sym.Children {
+				if child.Name == "full_dispatch_request" {
+					fullDispatch = child
+					break
+				}
+			}
+		}
+	}
+
+	if fullDispatch == nil {
+		t.Fatal("full_dispatch_request method not found")
+	}
+
+	// full_dispatch_request calls: self.try_trigger_before_first_request_functions(),
+	// self.dispatch_request(), self.finalize_request()
+	if len(fullDispatch.Calls) < 3 {
+		t.Errorf("expected at least 3 calls, got %d: %v", len(fullDispatch.Calls), callTargetNames(fullDispatch.Calls))
+	}
+
+	callTargets := make(map[string]bool)
+	for _, call := range fullDispatch.Calls {
+		callTargets[call.Target] = true
+	}
+
+	for _, expected := range []string{"try_trigger_before_first_request_functions", "dispatch_request", "finalize_request"} {
+		if !callTargets[expected] {
+			t.Errorf("expected call to %s, got: %v", expected, callTargetNames(fullDispatch.Calls))
+		}
+	}
+}
+
+func TestPythonParser_ExtractCallSites_SimpleFunctionCalls(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonCallsSource), "flask_app.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find standalone_function
+	var standaloneFn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "standalone_function" {
+			standaloneFn = sym
+			break
+		}
+	}
+
+	if standaloneFn == nil {
+		t.Fatal("standalone_function not found")
+	}
+
+	if len(standaloneFn.Calls) < 3 {
+		t.Errorf("expected at least 3 calls, got %d: %v", len(standaloneFn.Calls), callTargetNames(standaloneFn.Calls))
+	}
+
+	callTargets := make(map[string]bool)
+	for _, call := range standaloneFn.Calls {
+		callTargets[call.Target] = true
+	}
+
+	for _, expected := range []string{"helper", "process_data", "format_output"} {
+		if !callTargets[expected] {
+			t.Errorf("expected call to %s, got: %v", expected, callTargetNames(standaloneFn.Calls))
+		}
+	}
+
+	// These should NOT be method calls
+	for _, call := range standaloneFn.Calls {
+		if call.IsMethod {
+			t.Errorf("call to %s should not be IsMethod (receiver=%q)", call.Target, call.Receiver)
+		}
+	}
+}
+
+func TestPythonParser_ExtractCallSites_MixedCalls(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonCallsSource), "flask_app.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find Server.handle_request — has both simple calls and self.method() calls
+	var handleRequest *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Server" {
+			for _, child := range sym.Children {
+				if child.Name == "handle_request" {
+					handleRequest = child
+					break
+				}
+			}
+		}
+	}
+
+	if handleRequest == nil {
+		t.Fatal("handle_request method not found")
+	}
+
+	// handle_request calls: validate(request), self.process(validated), self.send_response(response)
+	if len(handleRequest.Calls) < 3 {
+		t.Errorf("expected at least 3 calls, got %d: %v", len(handleRequest.Calls), callTargetNames(handleRequest.Calls))
+	}
+
+	for _, call := range handleRequest.Calls {
+		switch call.Target {
+		case "validate":
+			if call.IsMethod {
+				t.Error("validate should not be a method call")
+			}
+		case "process":
+			if !call.IsMethod || call.Receiver != "self" {
+				t.Errorf("process should be self.process, got IsMethod=%v, Receiver=%q", call.IsMethod, call.Receiver)
+			}
+		case "send_response":
+			if !call.IsMethod || call.Receiver != "self" {
+				t.Errorf("send_response should be self.send_response, got IsMethod=%v, Receiver=%q", call.IsMethod, call.Receiver)
+			}
+		}
+	}
+}
+
+func TestPythonParser_ExtractCallSites_ObjectMethodCalls(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonCallsSource), "flask_app.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find Server.start — has obj.method() calls (db.connect, logger.info)
+	var startMethod *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Server" {
+			for _, child := range sym.Children {
+				if child.Name == "start" {
+					startMethod = child
+					break
+				}
+			}
+		}
+	}
+
+	if startMethod == nil {
+		t.Fatal("start method not found")
+	}
+
+	// start calls: db.connect(), self.listen(), logger.info()
+	callMap := make(map[string]*CallSite)
+	for i := range startMethod.Calls {
+		callMap[startMethod.Calls[i].Target] = &startMethod.Calls[i]
+	}
+
+	if call, ok := callMap["connect"]; ok {
+		if !call.IsMethod || call.Receiver != "db" {
+			t.Errorf("db.connect should have IsMethod=true, Receiver='db', got %v, %q", call.IsMethod, call.Receiver)
+		}
+	} else {
+		t.Error("expected call to connect (from db.connect)")
+	}
+
+	if call, ok := callMap["listen"]; ok {
+		if !call.IsMethod || call.Receiver != "self" {
+			t.Errorf("self.listen should have IsMethod=true, Receiver='self', got %v, %q", call.IsMethod, call.Receiver)
+		}
+	} else {
+		t.Error("expected call to listen (from self.listen)")
+	}
+
+	if call, ok := callMap["info"]; ok {
+		if !call.IsMethod || call.Receiver != "logger" {
+			t.Errorf("logger.info should have IsMethod=true, Receiver='logger', got %v, %q", call.IsMethod, call.Receiver)
+		}
+	} else {
+		t.Error("expected call to info (from logger.info)")
+	}
+}
+
+func TestPythonParser_ExtractCallSites_CallLocations(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonCallsSource), "flask_app.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify that call locations have valid line numbers
+	for _, sym := range result.Symbols {
+		checkCallLocations(t, sym)
+		for _, child := range sym.Children {
+			checkCallLocations(t, child)
+		}
+	}
+}
+
+func checkCallLocations(t *testing.T, sym *Symbol) {
+	t.Helper()
+	for _, call := range sym.Calls {
+		if call.Location.StartLine <= 0 {
+			t.Errorf("call to %s in %s has invalid StartLine: %d", call.Target, sym.Name, call.Location.StartLine)
+		}
+		if call.Location.FilePath != "flask_app.py" {
+			t.Errorf("call to %s in %s has wrong FilePath: %q", call.Target, sym.Name, call.Location.FilePath)
+		}
+	}
+}
+
+// callTargetNames is a helper to extract call target names for error messages.
+func callTargetNames(calls []CallSite) []string {
+	names := make([]string, len(calls))
+	for i, call := range calls {
+		if call.IsMethod {
+			names[i] = call.Receiver + "." + call.Target
+		} else {
+			names[i] = call.Target
+		}
+	}
+	return names
+}
+
+// IT-02 R2: Python overload + delegation pattern test (reproducing pandas to_csv/merge issues)
+const pythonOverloadDelegationSource = `
+from typing import overload
+from pandas.io.formats.format import DataFrameFormatter
+from pandas.io.formats.render import DataFrameRenderer
+
+class NDFrame:
+    """Base class with overloaded methods and delegation patterns."""
+
+    def _check_copy_deprecation(self, copy):
+        if copy is not None:
+            import warnings
+            warnings.warn("copy is deprecated", FutureWarning)
+
+    @overload
+    def to_csv(self, path_or_buf=None) -> str: ...
+
+    @overload
+    def to_csv(self, path_or_buf="file.csv") -> None: ...
+
+    def to_csv(
+        self,
+        path_or_buf=None,
+        sep=",",
+        na_rep="",
+    ):
+        """Long docstring that spans
+        multiple lines to simulate
+        the pandas pattern."""
+        df = self if isinstance(self, DataFrame) else self.to_frame()
+        formatter = DataFrameFormatter(frame=df, header=True)
+        return DataFrameRenderer(formatter).to_csv(
+            path_or_buf,
+            sep=sep,
+        )
+
+    def merge(self, right, how="inner", copy=None):
+        self._check_copy_deprecation(copy)
+        from pandas.core.reshape.merge import merge
+        return merge(self, right, how=how)
+
+class DataFrame(NDFrame):
+    def to_frame(self):
+        return self
+`
+
+func TestPythonParser_ExtractCallSites_OverloadAndDelegation(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonOverloadDelegationSource), "generic.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find the NDFrame class
+	var ndFrame *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "NDFrame" {
+			ndFrame = sym
+			break
+		}
+	}
+	if ndFrame == nil {
+		t.Fatal("NDFrame class not found")
+	}
+
+	// Map children by name (there will be multiple to_csv)
+	var overloadStubs []*Symbol
+	var realToCsv *Symbol
+	var mergeMethod *Symbol
+
+	for _, child := range ndFrame.Children {
+		switch {
+		case child.Name == "to_csv" && len(child.Calls) == 0:
+			overloadStubs = append(overloadStubs, child)
+		case child.Name == "to_csv" && len(child.Calls) > 0:
+			realToCsv = child
+		case child.Name == "merge":
+			mergeMethod = child
+		}
+	}
+
+	t.Run("overload_stubs_have_zero_calls", func(t *testing.T) {
+		if len(overloadStubs) != 2 {
+			t.Fatalf("expected 2 overload stubs, got %d", len(overloadStubs))
+		}
+		for i, stub := range overloadStubs {
+			if len(stub.Calls) != 0 {
+				t.Errorf("overload stub %d should have 0 calls, got %d: %v",
+					i, len(stub.Calls), callTargetNames(stub.Calls))
+			}
+		}
+	})
+
+	t.Run("real_to_csv_extracts_all_calls", func(t *testing.T) {
+		if realToCsv == nil {
+			t.Fatal("real to_csv implementation not found (expected method with calls)")
+		}
+
+		callTargets := make(map[string]bool)
+		for _, call := range realToCsv.Calls {
+			key := call.Target
+			if call.IsMethod {
+				key = call.Receiver + "." + call.Target
+			}
+			callTargets[key] = true
+		}
+
+		t.Logf("to_csv extracted %d calls: %v", len(realToCsv.Calls), callTargetNames(realToCsv.Calls))
+
+		// isinstance() — simple function call
+		if !callTargets["isinstance"] {
+			t.Error("missing call to isinstance()")
+		}
+		// self.to_frame() — self method call
+		if !callTargets["self.to_frame"] {
+			t.Error("missing call to self.to_frame()")
+		}
+		// DataFrameFormatter() — constructor call
+		if !callTargets["DataFrameFormatter"] {
+			t.Error("missing call to DataFrameFormatter()")
+		}
+		// DataFrameRenderer() — constructor call
+		if !callTargets["DataFrameRenderer"] {
+			t.Error("missing call to DataFrameRenderer()")
+		}
+		// .to_csv() — chained method call on DataFrameRenderer(formatter)
+		// The receiver will be the full expression text
+		hasCsvChain := false
+		for _, call := range realToCsv.Calls {
+			if call.Target == "to_csv" && call.IsMethod {
+				hasCsvChain = true
+				break
+			}
+		}
+		if !hasCsvChain {
+			t.Error("missing chained .to_csv() call on DataFrameRenderer")
+		}
+	})
+
+	t.Run("merge_extracts_self_and_function_calls", func(t *testing.T) {
+		if mergeMethod == nil {
+			t.Fatal("merge method not found")
+		}
+
+		callTargets := make(map[string]bool)
+		for _, call := range mergeMethod.Calls {
+			key := call.Target
+			if call.IsMethod {
+				key = call.Receiver + "." + call.Target
+			}
+			callTargets[key] = true
+		}
+
+		t.Logf("merge extracted %d calls: %v", len(mergeMethod.Calls), callTargetNames(mergeMethod.Calls))
+
+		// self._check_copy_deprecation() — self method
+		if !callTargets["self._check_copy_deprecation"] {
+			t.Error("missing call to self._check_copy_deprecation()")
+		}
+		// merge() — function call (from inline import)
+		if !callTargets["merge"] {
+			t.Error("missing call to merge() (inline-imported function)")
+		}
+	})
+}

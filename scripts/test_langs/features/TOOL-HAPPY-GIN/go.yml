@@ -28,8 +28,10 @@ tests:
       Who calls the Context.JSON method?
     expected_state: COMPLETE
     reference_answer: |
-      The Context.JSON method is called from handler functions and middleware
-      throughout the codebase to write JSON HTTP responses.
+      Context.JSON has 3 callers: AbortWithStatusJSON, Negotiate, and
+      ErrorLoggerT. AbortWithStatusJSON aborts the handler chain and writes
+      JSON, Negotiate uses JSON as a content-type option, and ErrorLoggerT
+      writes error responses as JSON.
     validations:
       - type: graph_tool_used
 
@@ -547,3 +549,69 @@ tests:
     reference_answer: |
       TODO: Tool not yet registered as standalone.
     validations: []
+
+  # -- Additional find_callers tests (40-41) -- expected_state: COMPLETE --
+
+  - id: 5240
+    name: gin_find_callers_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callers tool against Gin (test B). Target: Context.Abort method.
+    query: |
+      Who calls the Context.Abort method?
+    expected_state: COMPLETE
+    reference_answer: |
+      Context.Abort has 5 callers: AbortWithStatus, AbortWithStatusPureJSON,
+      AbortWithStatusJSON, Render, and CustomRecoveryWithWriter. These methods
+      all terminate the handler chain by calling Abort before writing a response
+      or recovering from a panic.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5241
+    name: gin_find_callers_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callers tool against Gin (test C). Target: RouterGroup.handle method.
+    query: |
+      Who calls the RouterGroup.handle method?
+    expected_state: COMPLETE
+    reference_answer: |
+      RouterGroup.handle has 10 callers: Handle, POST, GET, DELETE, PATCH,
+      PUT, OPTIONS, HEAD, Any, and Match. Each HTTP method shortcut and the
+      generic Handle method delegate to handle() to register routes into the
+      radix tree with the specified middleware chain.
+    validations:
+      - type: graph_tool_used
+  # -- Additional find_callees tests (42-43) -- expected_state: COMPLETE --
+  - id: 5242
+    name: gin_find_callees_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against Gin (test B). Target: Engine.ServeHTTP method.
+
+    query: |
+      What functions does Engine.ServeHTTP call?
+    expected_state: COMPLETE
+    reference_answer: |
+      Engine.ServeHTTP calls pool.Get to acquire a Context from the sync pool,
+      writermem.reset and c.reset to initialize the context, handleHTTPRequest
+      to route and dispatch the request, and pool.Put to return the context.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5243
+    name: gin_find_callees_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_callees tool against Gin (test C). Target: Context.ShouldBind method.
+
+    query: |
+      What functions does Context.ShouldBind call?
+    expected_state: COMPLETE
+    reference_answer: |
+      Context.ShouldBind calls binding.Default to select the appropriate
+      binder based on the HTTP method and Content-Type, then delegates
+      to ShouldBindWith to perform the actual data binding.
+    validations:
+      - type: graph_tool_used
