@@ -671,7 +671,13 @@ func (p *GoParser) processTypeSpec(node *sitter.Node, content []byte, filePath s
 		child := node.Child(i)
 		switch child.Type() {
 		case "type_identifier":
-			name = string(content[child.StartByte():child.EndByte()])
+			// Phase 20-C: Only set name from the FIRST type_identifier child.
+			// For type aliases like `type nopPage int`, tree-sitter produces two
+			// type_identifier children: "nopPage" (the name) and "int" (the aliased type).
+			// Without this guard, "int" overwrites "nopPage" and method association fails.
+			if name == "" {
+				name = string(content[child.StartByte():child.EndByte()])
+			}
 		case "struct_type":
 			kind = SymbolKindStruct
 			typeNode = child
@@ -729,6 +735,21 @@ func (p *GoParser) processTypeSpec(node *sitter.Node, content []byte, filePath s
 				}
 				sym.Metadata.Methods = methods
 			}
+
+			// Phase 18: Extract embedded interface names for transitive resolution.
+			// Interfaces can embed other interfaces (e.g., ReadWriter embeds Reader + Writer).
+			// Store them in Extends/Implements like struct embeds so the builder's
+			// extractEmbedsEdges() creates EMBEDS edges for transitive method resolution.
+			embeddedIfaces := p.extractInterfaceEmbeds(typeNode, content)
+			if len(embeddedIfaces) > 0 {
+				if sym.Metadata == nil {
+					sym.Metadata = &SymbolMetadata{}
+				}
+				sym.Metadata.Extends = embeddedIfaces[0]
+				if len(embeddedIfaces) > 1 {
+					sym.Metadata.Implements = embeddedIfaces[1:]
+				}
+			}
 		}
 
 		// IT-03 H-3: For structs, detect embedded (anonymous) fields and set Extends.
@@ -740,6 +761,16 @@ func (p *GoParser) processTypeSpec(node *sitter.Node, content []byte, filePath s
 					sym.Metadata = &SymbolMetadata{}
 				}
 				sym.Metadata.Extends = embeddedTypes[0]
+				// IT-03a Phase 16 G-1: Store additional embeds in Implements.
+				// NOTE: For Go structs, Metadata.Implements holds additional embedded types,
+				// NOT interface implementations. Go structs never use explicit "implements"
+				// syntax. The builder's extractEmbedsEdges creates EMBEDS edges (not IMPLEMENTS)
+				// for these entries when sym.Kind == SymbolKindStruct. The builder also calls
+				// extractImplementsEdges, but validateEdgeType prevents incorrect IMPLEMENTS
+				// edges when the target is not an interface.
+				if len(embeddedTypes) > 1 {
+					sym.Metadata.Implements = embeddedTypes[1:]
+				}
 			}
 		}
 	}
@@ -881,6 +912,108 @@ func (p *GoParser) extractEmbeddedTypes(structNode *sitter.Node, content []byte)
 	return embedded
 }
 
+// extractInterfaceEmbeds extracts embedded interface names from an interface_type node.
+//
+// Description:
+//
+//	Walks the children of an interface_type AST node and collects embedded interface
+//	names. In Go, interface children are either method_elem (method declarations) or
+//	type_identifier/qualified_type (embedded interfaces). This function collects the
+//	latter, analogous to extractEmbeddedTypes for struct nodes.
+//
+// Inputs:
+//   - ifaceNode: A tree-sitter node of type "interface_type". Must not be nil.
+//   - content: Raw source bytes for extracting text from AST nodes.
+//
+// Outputs:
+//   - []string: Names of embedded interfaces (e.g., ["Reader", "Writer", "Stringer"]).
+//     Empty slice if no embedded interfaces found.
+//
+// Example:
+//
+//	For `type ReadWriter interface { Reader; Writer; Close() error }`,
+//	returns ["Reader", "Writer"]. Close() is a method_elem, not an embed.
+//
+// Limitations:
+//   - Single-file analysis: cannot resolve cross-package interface methods.
+//     The builder handles transitive method resolution via EMBEDS edges.
+//
+// Assumptions:
+//   - ifaceNode is a valid interface_type node from tree-sitter.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (p *GoParser) extractInterfaceEmbeds(ifaceNode *sitter.Node, content []byte) []string {
+	if ifaceNode == nil || ifaceNode.Type() != "interface_type" {
+		return nil
+	}
+
+	var embedded []string
+
+	contentLen := len(content)
+
+	for i := 0; i < int(ifaceNode.ChildCount()); i++ {
+		child := ifaceNode.Child(i)
+		if child == nil {
+			continue
+		}
+		switch child.Type() {
+		case "type_elem":
+			// tree-sitter wraps embedded interfaces in a type_elem node.
+			// Walk its children for type_identifier, qualified_type, or pointer_type.
+			for j := 0; j < int(child.ChildCount()); j++ {
+				inner := child.Child(j)
+				if inner == nil {
+					continue
+				}
+				switch inner.Type() {
+				case "type_identifier":
+					// CR-20-2: Bounds check prevents panic if AST node range exceeds content.
+					if int(inner.EndByte()) > contentLen {
+						continue
+					}
+					name := string(content[inner.StartByte():inner.EndByte()])
+					if name != "" {
+						embedded = append(embedded, name)
+					}
+				case "qualified_type":
+					name := p.extractQualifiedTypeName(inner, content)
+					if name != "" {
+						embedded = append(embedded, name)
+					}
+				case "pointer_type":
+					name := p.unwrapPointerType(inner, content)
+					if name != "" {
+						embedded = append(embedded, name)
+					}
+				}
+			}
+		case "type_identifier":
+			// Fallback: some tree-sitter versions may place embeds directly.
+			// CR-20-2: Bounds check prevents panic if AST node range exceeds content.
+			if int(child.EndByte()) > contentLen {
+				continue
+			}
+			name := string(content[child.StartByte():child.EndByte()])
+			if name != "" {
+				embedded = append(embedded, name)
+			}
+		case "qualified_type":
+			name := p.extractQualifiedTypeName(child, content)
+			if name != "" {
+				embedded = append(embedded, name)
+			}
+		case "pointer_type":
+			name := p.unwrapPointerType(child, content)
+			if name != "" {
+				embedded = append(embedded, name)
+			}
+		}
+		// Skip method_elem, "{", "}", "\n", comment nodes — they are not embeds
+	}
+
+	return embedded
+}
+
 // extractEmbeddedTypeName extracts the type name from an embedded field declaration.
 //
 // Description:
@@ -913,10 +1046,18 @@ func (p *GoParser) extractEmbeddedTypeName(fieldNode *sitter.Node, content []byt
 
 // unwrapPointerType extracts the type name from a pointer_type node (*T or *pkg.T).
 func (p *GoParser) unwrapPointerType(node *sitter.Node, content []byte) string {
+	contentLen := len(content)
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
+		if child == nil {
+			continue
+		}
 		switch child.Type() {
 		case "type_identifier":
+			// CR-20-2 R-5: Bounds check on content slicing.
+			if int(child.EndByte()) > contentLen {
+				continue
+			}
 			return string(content[child.StartByte():child.EndByte()])
 		case "qualified_type":
 			return p.extractQualifiedTypeName(child, content)
@@ -929,9 +1070,17 @@ func (p *GoParser) unwrapPointerType(node *sitter.Node, content []byte) string {
 func (p *GoParser) extractQualifiedTypeName(node *sitter.Node, content []byte) string {
 	// qualified_type has children: package_identifier "." type_identifier
 	// Return the type_identifier (last part).
+	contentLen := len(content)
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
+		if child == nil {
+			continue
+		}
 		if child.Type() == "type_identifier" {
+			// CR-20-2 R-5: Bounds check on content slicing.
+			if int(child.EndByte()) > contentLen {
+				continue
+			}
 			return string(content[child.StartByte():child.EndByte()])
 		}
 	}

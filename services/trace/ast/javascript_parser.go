@@ -255,7 +255,7 @@ func (p *JavaScriptParser) extractSymbols(ctx context.Context, node *sitter.Node
 		// Check for CommonJS require() first
 		p.extractCommonJSImport(node, content, filePath, result)
 		// Then extract variables
-		syms := p.extractVariables(node, content, filePath, exported)
+		syms := p.extractVariables(ctx, node, content, filePath, exported)
 		for _, sym := range syms {
 			if p.options.IncludePrivate || sym.Exported {
 				result.Symbols = append(result.Symbols, sym)
@@ -267,12 +267,11 @@ func (p *JavaScriptParser) extractSymbols(ctx context.Context, node *sitter.Node
 		// Patterns: proto.handle = function handle() {...}
 		//           app.init = function init() {...}
 		//           req.get = req.header = function header() {...}
-		if len(exportAliases) > 0 {
-			syms := p.extractPrototypeMethodAssignment(ctx, node, content, filePath, exportAliases)
-			for _, sym := range syms {
-				if p.options.IncludePrivate || sym.Exported {
-					result.Symbols = append(result.Symbols, sym)
-				}
+		// IT-03a Phase 16 J-2: Also handles Constructor.prototype.method without export aliases
+		syms := p.extractPrototypeMethodAssignment(ctx, node, content, filePath, exportAliases)
+		for _, sym := range syms {
+			if p.options.IncludePrivate || sym.Exported {
+				result.Symbols = append(result.Symbols, sym)
 			}
 		}
 
@@ -437,7 +436,7 @@ func (p *JavaScriptParser) extractExport(ctx context.Context, node *sitter.Node,
 			}
 
 		case jsNodeLexicalDeclaration, jsNodeVariableDeclaration:
-			syms := p.extractVariables(child, content, filePath, true)
+			syms := p.extractVariables(ctx, child, content, filePath, true)
 			for _, sym := range syms {
 				sym.Exported = true
 				if docComment != "" && sym.DocComment == "" {
@@ -663,6 +662,10 @@ func (p *JavaScriptParser) extractClass(ctx context.Context, node *sitter.Node, 
 		}
 	}
 
+	// IT-03a Phase 12 F-3: Collect MethodSignatures from class Children.
+	// Ensures Metadata.Methods is populated for graph integrity.
+	p.collectJSClassMethods(sym)
+
 	return sym
 }
 
@@ -846,7 +849,7 @@ func (p *JavaScriptParser) extractField(node *sitter.Node, content []byte, fileP
 }
 
 // extractVariables extracts variable declarations.
-func (p *JavaScriptParser) extractVariables(node *sitter.Node, content []byte, filePath string, exported bool) []*Symbol {
+func (p *JavaScriptParser) extractVariables(ctx context.Context, node *sitter.Node, content []byte, filePath string, exported bool) []*Symbol {
 	var symbols []*Symbol
 	isConst := false
 	docComment := p.getPrecedingComment(node, content)
@@ -857,7 +860,7 @@ func (p *JavaScriptParser) extractVariables(node *sitter.Node, content []byte, f
 		case jsNodeConst:
 			isConst = true
 		case jsNodeVariableDeclarator:
-			sym := p.extractVariableDeclarator(child, content, filePath, exported, isConst, docComment)
+			sym := p.extractVariableDeclarator(ctx, child, content, filePath, exported, isConst, docComment)
 			if sym != nil {
 				symbols = append(symbols, sym)
 			}
@@ -868,11 +871,12 @@ func (p *JavaScriptParser) extractVariables(node *sitter.Node, content []byte, f
 }
 
 // extractVariableDeclarator extracts a single variable declarator.
-func (p *JavaScriptParser) extractVariableDeclarator(node *sitter.Node, content []byte, filePath string, exported bool, isConst bool, docComment string) *Symbol {
+func (p *JavaScriptParser) extractVariableDeclarator(ctx context.Context, node *sitter.Node, content []byte, filePath string, exported bool, isConst bool, docComment string) *Symbol {
 	name := ""
 	isArrowFunction := false
 	isAsync := false
 	var params []string
+	var arrowBodyNode *sitter.Node
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
@@ -894,6 +898,17 @@ func (p *JavaScriptParser) extractVariableDeclarator(node *sitter.Node, content 
 				case jsNodeIdentifier:
 					// Single parameter without parens
 					params = []string{string(content[gc.StartByte():gc.EndByte()])}
+				case "statement_block":
+					// IT-03a Phase 13 J-1: Capture body for call site extraction
+					arrowBodyNode = gc
+				case "call_expression", "parenthesized_expression", "object", "array",
+					"template_string", "binary_expression", "ternary_expression",
+					"await_expression", "new_expression":
+					// IT-03a Phase 13 J-1: Expression-body arrow functions
+					// e.g., const f = (x) => doSomething(x)
+					if arrowBodyNode == nil {
+						arrowBodyNode = gc
+					}
 				}
 			}
 		}
@@ -948,6 +963,11 @@ func (p *JavaScriptParser) extractVariableDeclarator(node *sitter.Node, content 
 		}
 	}
 
+	// IT-03a Phase 13 J-1: Extract call sites from arrow function body
+	if isArrowFunction && arrowBodyNode != nil {
+		sym.Calls = p.extractCallSites(ctx, arrowBodyNode, content, filePath)
+	}
+
 	return sym
 }
 
@@ -986,10 +1006,12 @@ func (p *JavaScriptParser) extractParameters(node *sitter.Node, content []byte) 
 // extractCommonJSImport extracts CommonJS require() imports.
 func (p *JavaScriptParser) extractCommonJSImport(node *sitter.Node, content []byte, filePath string, result *ParseResult) {
 	// Look for: const foo = require('bar')
+	// Also: const { Router, Request } = require('express')  (IT-03a Phase 16 J-3)
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
 		if child.Type() == jsNodeVariableDeclarator {
 			varName := ""
+			var destructuredNames []string
 			requirePath := ""
 
 			for j := 0; j < int(child.ChildCount()); j++ {
@@ -997,60 +1019,157 @@ func (p *JavaScriptParser) extractCommonJSImport(node *sitter.Node, content []by
 				switch gc.Type() {
 				case jsNodeIdentifier:
 					varName = string(content[gc.StartByte():gc.EndByte()])
+				case "object_pattern":
+					// IT-03a Phase 16 J-3: const { Router, Request } = require('express')
+					destructuredNames = p.extractDestructuredNames(gc, content)
 				case jsNodeCallExpression:
 					// Check if it's require()
-					for k := 0; k < int(gc.ChildCount()); k++ {
-						ggc := gc.Child(k)
-						if ggc.Type() == jsNodeIdentifier && string(content[ggc.StartByte():ggc.EndByte()]) == "require" {
-							// Found require, get the argument
-							for l := 0; l < int(gc.ChildCount()); l++ {
-								arg := gc.Child(l)
-								if arg.Type() == jsNodeArguments {
-									for m := 0; m < int(arg.ChildCount()); m++ {
-										argChild := arg.Child(m)
-										if argChild.Type() == jsNodeString {
-											requirePath = p.extractStringContent(argChild, content)
-										}
-									}
-								}
-							}
+					requirePath = p.extractRequirePath(gc, content)
+				}
+			}
+
+			if requirePath == "" {
+				continue
+			}
+
+			loc := Location{
+				FilePath:  filePath,
+				StartLine: int(node.StartPoint().Row) + 1,
+				EndLine:   int(node.EndPoint().Row) + 1,
+				StartCol:  int(node.StartPoint().Column),
+				EndCol:    int(node.EndPoint().Column),
+			}
+
+			if varName != "" {
+				// Simple: const foo = require('bar')
+				result.Imports = append(result.Imports, Import{
+					Path:       requirePath,
+					Alias:      varName,
+					IsCommonJS: true,
+					Location:   loc,
+				})
+			} else if len(destructuredNames) > 0 {
+				// IT-03a Phase 16 J-3: Destructured: const { Router, Request } = require('express')
+				for _, name := range destructuredNames {
+					result.Imports = append(result.Imports, Import{
+						Path:       requirePath,
+						Alias:      name,
+						IsCommonJS: true,
+						Location:   loc,
+					})
+				}
+			}
+
+			// Add import symbol
+			sym := &Symbol{
+				ID:            GenerateID(filePath, int(node.StartPoint().Row)+1, requirePath),
+				Name:          requirePath,
+				Kind:          SymbolKindImport,
+				FilePath:      filePath,
+				StartLine:     int(node.StartPoint().Row) + 1,
+				EndLine:       int(node.EndPoint().Row) + 1,
+				StartCol:      int(node.StartPoint().Column),
+				EndCol:        int(node.EndPoint().Column),
+				Language:      "javascript",
+				ParsedAtMilli: time.Now().UnixMilli(),
+			}
+			result.Symbols = append(result.Symbols, sym)
+		}
+	}
+}
+
+// extractRequirePath checks if a call expression is require('...') and returns the module path.
+//
+// Description:
+//
+//	Inspects a call_expression node to determine if it is a CommonJS require() call.
+//	If so, extracts and returns the string argument (the module path).
+//
+// Inputs:
+//   - callNode: A tree-sitter call_expression node. May be nil (returns "").
+//   - content: Raw source bytes for text extraction.
+//
+// Outputs:
+//   - string: The module path from require('path'), or "" if not a require call.
+//
+// Limitations:
+//   - Only handles string literal arguments. Dynamic require (require(variable)) returns "".
+//   - Only checks the first string argument in the arguments list.
+//
+// Assumptions:
+//   - callNode is a "call_expression" node from tree-sitter JavaScript grammar.
+func (p *JavaScriptParser) extractRequirePath(callNode *sitter.Node, content []byte) string {
+	if callNode == nil {
+		return ""
+	}
+	for k := 0; k < int(callNode.ChildCount()); k++ {
+		child := callNode.Child(k)
+		if child.Type() == jsNodeIdentifier && string(content[child.StartByte():child.EndByte()]) == "require" {
+			for l := 0; l < int(callNode.ChildCount()); l++ {
+				arg := callNode.Child(l)
+				if arg.Type() == jsNodeArguments {
+					for m := 0; m < int(arg.ChildCount()); m++ {
+						argChild := arg.Child(m)
+						if argChild.Type() == jsNodeString {
+							return p.extractStringContent(argChild, content)
 						}
 					}
 				}
 			}
+		}
+	}
+	return ""
+}
 
-			if requirePath != "" && varName != "" {
-				imp := &Import{
-					Path:       requirePath,
-					Alias:      varName,
-					IsCommonJS: true,
-					Location: Location{
-						FilePath:  filePath,
-						StartLine: int(node.StartPoint().Row) + 1,
-						EndLine:   int(node.EndPoint().Row) + 1,
-						StartCol:  int(node.StartPoint().Column),
-						EndCol:    int(node.EndPoint().Column),
-					},
+// extractDestructuredNames extracts local binding names from an object_pattern node.
+//
+// Description:
+//
+//	Handles destructured CommonJS imports like const { Router, Request } = require('express').
+//	Supports both shorthand patterns ({ Router }) and aliased patterns ({ Router: MyRouter }).
+//	For aliased patterns, only the local binding name (right side) is returned.
+//
+// Inputs:
+//   - node: A tree-sitter object_pattern node. Must not be nil.
+//   - content: Raw source bytes for text extraction.
+//
+// Outputs:
+//   - []string: Local binding names extracted from the pattern. May be empty.
+//
+// Limitations:
+//   - Does not handle nested destructuring ({ a: { b, c } }).
+//   - Does not handle rest elements ({ ...rest }).
+//
+// Assumptions:
+//   - Node is an "object_pattern" from tree-sitter JavaScript grammar.
+//   - Children are "shorthand_property_identifier_pattern" or "pair_pattern".
+//
+// IT-03a Phase 16 J-3.
+func (p *JavaScriptParser) extractDestructuredNames(node *sitter.Node, content []byte) []string {
+	var names []string
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "shorthand_property_identifier_pattern":
+			// { Router } — shorthand, name is the identifier itself
+			names = append(names, string(content[child.StartByte():child.EndByte()]))
+		case "pair_pattern":
+			// { Router: MyRouter } — aliased, extract only the value (right side).
+			// pair_pattern has children: identifier("Router"), ":", identifier("MyRouter").
+			// We want only the last identifier — the local binding name.
+			var lastIdent string
+			for j := 0; j < int(child.ChildCount()); j++ {
+				gc := child.Child(j)
+				if gc.Type() == jsNodeIdentifier {
+					lastIdent = string(content[gc.StartByte():gc.EndByte()])
 				}
-				result.Imports = append(result.Imports, *imp)
-
-				// Also add as symbol
-				sym := &Symbol{
-					ID:            GenerateID(filePath, int(node.StartPoint().Row)+1, requirePath),
-					Name:          requirePath,
-					Kind:          SymbolKindImport,
-					FilePath:      filePath,
-					StartLine:     int(node.StartPoint().Row) + 1,
-					EndLine:       int(node.EndPoint().Row) + 1,
-					StartCol:      int(node.StartPoint().Column),
-					EndCol:        int(node.EndPoint().Column),
-					Language:      "javascript",
-					ParsedAtMilli: time.Now().UnixMilli(),
-				}
-				result.Symbols = append(result.Symbols, sym)
+			}
+			if lastIdent != "" {
+				names = append(names, lastIdent)
 			}
 		}
 	}
+	return names
 }
 
 // getPrecedingComment extracts JSDoc or comment before a node.
@@ -2089,6 +2208,7 @@ func (p *JavaScriptParser) extractMethodsFromAssignmentChain(ctx context.Context
 		objectName   string
 		propertyName string
 		line         int
+		isPrototype  bool // IT-03a Phase 16 J-2: true when from Constructor.prototype.method
 	}
 	var targets []memberTarget
 
@@ -2117,6 +2237,7 @@ func (p *JavaScriptParser) extractMethodsFromAssignmentChain(ctx context.Context
 						objectName:   constructorName,
 						propertyName: propName,
 						line:         int(leftNode.StartPoint().Row) + 1,
+						isPrototype:  true,
 					})
 				}
 			}
@@ -2133,10 +2254,14 @@ func (p *JavaScriptParser) extractMethodsFromAssignmentChain(ctx context.Context
 		funcNode = p.findDeepestRHSFunction(rightNode)
 		if funcNode == nil {
 			// No function found at end of chain — just return what the recursion found
-			// plus create our target if it's an alias
+			// plus create our target if it's an alias or prototype pattern
 			for _, tgt := range targets {
-				semanticType, isAlias := exportAliases[tgt.objectName]
-				if !isAlias {
+				var semanticType string
+				if tgt.isPrototype {
+					semanticType = tgt.objectName
+				} else if alias, isAlias := exportAliases[tgt.objectName]; isAlias {
+					semanticType = alias
+				} else {
 					continue
 				}
 				// Create a symbol that aliases the one from the chain
@@ -2232,11 +2357,16 @@ func (p *JavaScriptParser) extractMethodsFromAssignmentChain(ctx context.Context
 	}
 	sig += "(" + strings.Join(params, ", ") + ")"
 
-	// Create symbols for each target that is a known alias
+	// Create symbols for each target that is a known alias or prototype pattern
 	var symbols []*Symbol
 	for _, tgt := range targets {
-		semanticType, isAlias := exportAliases[tgt.objectName]
-		if !isAlias {
+		var semanticType string
+		if tgt.isPrototype {
+			// IT-03a Phase 16 J-2: Constructor.prototype.method — use constructor name directly
+			semanticType = tgt.objectName
+		} else if alias, isAlias := exportAliases[tgt.objectName]; isAlias {
+			semanticType = alias
+		} else {
 			continue
 		}
 
@@ -2354,6 +2484,57 @@ func deriveSemanticTypeName(filePath string) string {
 	runes := []rune(name)
 	runes[0] = unicode.ToUpper(runes[0])
 	return string(runes)
+}
+
+// collectJSClassMethods converts a class's Children of kind SymbolKindMethod
+// into MethodSignature entries in Metadata.Methods.
+//
+// Description:
+//
+//	Populates Metadata.Methods for JavaScript ES6 classes, ensuring graph integrity.
+//	Skips constructors since they are not part of behavioral contracts.
+//	JavaScript has no interface concept, so this doesn't affect implicit matching,
+//	but ensures the capability matrix claim of .Methods for JS classes is accurate.
+//
+// Inputs:
+//   - classSym: The class Symbol whose Children have been populated.
+//     Must not be nil.
+//
+// Outputs:
+//   - None. Mutates classSym.Metadata.Methods in place.
+//
+// Limitations:
+//   - Only collects instance methods from class body Children.
+//   - Prototype methods attached externally are separate symbols, not Children.
+//
+// Assumptions:
+//   - Children have already been populated by extractClassBody.
+func (p *JavaScriptParser) collectJSClassMethods(classSym *Symbol) {
+	if classSym == nil || len(classSym.Children) == 0 {
+		return
+	}
+
+	methods := make([]MethodSignature, 0, len(classSym.Children))
+	for _, child := range classSym.Children {
+		if child.Kind != SymbolKindMethod {
+			continue
+		}
+		// Skip constructor — not a behavioral contract method.
+		if child.Name == "constructor" {
+			continue
+		}
+		sig := MethodSignature{
+			Name: child.Name,
+		}
+		methods = append(methods, sig)
+	}
+
+	if len(methods) > 0 {
+		if classSym.Metadata == nil {
+			classSym.Metadata = &SymbolMetadata{}
+		}
+		classSym.Metadata.Methods = methods
+	}
 }
 
 // ensureMetadata ensures the metadata object exists.

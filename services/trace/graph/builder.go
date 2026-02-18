@@ -33,6 +33,12 @@ const (
 	// DefaultWorkerCount is the default number of parallel workers.
 	// Set to 0 to use runtime.NumCPU().
 	DefaultWorkerCount = 0
+
+	// maxEmbedResolutionDepth is the maximum recursion depth for resolvePromotedMethods
+	// and resolveInterfaceEmbedsRecursive. Prevents stack overflow on pathological
+	// interface/struct embedding chains. 20 is generous for any realistic codebase
+	// (Hugo's Page interface is 4 levels deep, the deepest known real-world case).
+	maxEmbedResolutionDepth = 20
 )
 
 // ProgressPhase indicates which phase of building is in progress.
@@ -690,8 +696,9 @@ func (b *Builder) extractSymbolEdges(ctx context.Context, state *buildState, sym
 		b.extractEmbedsEdges(state, sym)
 
 	case ast.SymbolKindInterface:
-		// Interfaces define contracts - no outgoing edges typically
-		break
+		// Phase 18: Interfaces can embed other interfaces — create EMBEDS edges
+		// for transitive method set resolution (e.g., ReadWriter embeds Reader + Writer).
+		b.extractInterfaceEmbedsEdges(state, sym)
 	}
 
 	// IT-03a A-3: Extract decorator argument edges for any symbol kind
@@ -852,6 +859,110 @@ func (b *Builder) extractEmbedsEdges(state *buildState, sym *ast.Symbol) {
 
 	if len(targets) > 1 {
 		state.result.Stats.AmbiguousResolves++
+	}
+
+	// IT-03a Phase 16 G-1: Additional embeds stored in Implements for Go structs.
+	// For Go structs, Metadata.Implements holds additional embedded types (not interface
+	// implementations). We create EMBEDS edges here. extractImplementsEdges also reads
+	// Metadata.Implements, but validateEdgeType prevents IMPLEMENTS edges when the target
+	// is not a SymbolKindInterface. When the target IS an interface (e.g., embedding io.Writer),
+	// both EMBEDS and IMPLEMENTS edges are created, which is semantically correct — embedding
+	// an interface in Go satisfies that interface.
+	if sym.Kind == ast.SymbolKindStruct && len(sym.Metadata.Implements) > 0 {
+		for _, additionalEmbed := range sym.Metadata.Implements {
+			addlTargets := b.resolveSymbolByName(state, additionalEmbed, sym.FilePath)
+			if len(addlTargets) == 0 {
+				targetID := b.getOrCreatePlaceholder(state, "", additionalEmbed)
+				addlTargets = []string{targetID}
+			}
+			for _, targetID := range addlTargets {
+				err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeEmbeds, sym.Location())
+				if err != nil {
+					state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+						FromID:   sym.ID,
+						ToID:     targetID,
+						EdgeType: EdgeTypeEmbeds,
+						Err:      err,
+					})
+					continue
+				}
+				state.result.Stats.EdgesCreated++
+			}
+		}
+	}
+}
+
+// extractInterfaceEmbedsEdges creates EMBEDS edges from an interface to its embedded interfaces.
+//
+// Description:
+//
+//	In Go, interfaces can embed other interfaces (e.g., ReadWriter embeds Reader and Writer).
+//	The parser stores embedded interface names in Metadata.Extends (first embed) and
+//	Metadata.Implements (additional embeds), mirroring the struct embedding storage pattern.
+//	This function creates EMBEDS edges so that resolveInterfaceMethodSets can walk them
+//	to build transitive method sets.
+//
+// Inputs:
+//   - state: Build state containing graph and resolution data.
+//   - sym: An interface symbol that may embed other interfaces.
+//
+// Outputs:
+//   - None. Modifies state.graph by adding EMBEDS edges.
+//
+// Thread Safety: Not safe for concurrent use on the same buildState.
+func (b *Builder) extractInterfaceEmbedsEdges(state *buildState, sym *ast.Symbol) {
+	// CR-20-9: Defense in depth — validate precondition even though caller already checks.
+	if sym.Kind != ast.SymbolKindInterface {
+		return
+	}
+	if sym.Metadata == nil || sym.Metadata.Extends == "" {
+		return
+	}
+
+	// First embedded interface (stored in Extends)
+	embeddedName := sym.Metadata.Extends
+	targets := b.resolveSymbolByName(state, embeddedName, sym.FilePath)
+	if len(targets) == 0 {
+		targetID := b.getOrCreatePlaceholder(state, "", embeddedName)
+		targets = []string{targetID}
+	}
+
+	for _, targetID := range targets {
+		err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeEmbeds, sym.Location())
+		if err != nil {
+			state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+				FromID:   sym.ID,
+				ToID:     targetID,
+				EdgeType: EdgeTypeEmbeds,
+				Err:      err,
+			})
+			continue
+		}
+		state.result.Stats.EdgesCreated++
+	}
+
+	// Additional embedded interfaces (stored in Implements for Go interfaces)
+	if len(sym.Metadata.Implements) > 0 {
+		for _, additionalEmbed := range sym.Metadata.Implements {
+			addlTargets := b.resolveSymbolByName(state, additionalEmbed, sym.FilePath)
+			if len(addlTargets) == 0 {
+				targetID := b.getOrCreatePlaceholder(state, "", additionalEmbed)
+				addlTargets = []string{targetID}
+			}
+			for _, targetID := range addlTargets {
+				err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeEmbeds, sym.Location())
+				if err != nil {
+					state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+						FromID:   sym.ID,
+						ToID:     targetID,
+						EdgeType: EdgeTypeEmbeds,
+						Err:      err,
+					})
+					continue
+				}
+				state.result.Stats.EdgesCreated++
+			}
+		}
 	}
 }
 
@@ -2127,9 +2238,15 @@ func (b *Builder) computeInterfaceImplementations(ctx context.Context, state *bu
 		if sym.Language != "go" && sym.Language != "python" && sym.Language != "typescript" {
 			continue
 		}
-		if sym.Metadata == nil || len(sym.Metadata.Methods) == 0 {
-			continue // Skip empty interfaces
+		// Phase 18: Don't skip interfaces with no direct methods yet — they may gain
+		// methods via embedded/extended interfaces (Go: ReadWriter embeds Reader + Writer,
+		// TS: interface ReadWriter extends Reader, Writer {}, Python: class Combined(ReadProto, WriteProto, Protocol)).
+		// We resolve embedded methods below via EMBEDS edges, then prune still-empty ones.
+		if sym.Metadata == nil {
+			// No metadata at all — truly empty, safe to skip
+			continue
 		}
+		// Collect even if Methods is empty — will resolve via EMBEDS edges
 
 		if interfacesByLang[sym.Language] == nil {
 			interfacesByLang[sym.Language] = make(map[string]map[string]bool)
@@ -2140,6 +2257,24 @@ func (b *Builder) computeInterfaceImplementations(ctx context.Context, state *bu
 			methodSet[m.Name] = true
 		}
 		interfacesByLang[sym.Language][sym.ID] = methodSet
+	}
+
+	// Phase 18: Resolve interface method sets by walking EMBEDS edges transitively.
+	// This fills in methods for composed interfaces (e.g., ReadWriter gets Read + Write).
+	interfaceMethodsAdded := b.resolveInterfaceMethodSets(state, interfacesByLang)
+	if interfaceMethodsAdded > 0 {
+		span.SetAttributes(attribute.Int("interface_methods_resolved", interfaceMethodsAdded))
+	}
+
+	// Phase 18: Prune interfaces that are still empty after resolution.
+	// These are purely compositional interfaces whose embedded targets weren't found.
+	// An empty method set would match everything via isMethodSuperset, causing false positives.
+	for _, ifaces := range interfacesByLang {
+		for ifaceID, methods := range ifaces {
+			if len(methods) == 0 {
+				delete(ifaces, ifaceID)
+			}
+		}
 	}
 
 	// Count interfaces for span attributes
@@ -2180,7 +2315,10 @@ func (b *Builder) computeInterfaceImplementations(ctx context.Context, state *bu
 		if sym.Metadata == nil {
 			continue
 		}
-		if len(sym.Metadata.Methods) == 0 && sym.Metadata.Extends == "" {
+		// CR-20-4: Check Implements slice too — Phase 16 G-1 stores additional Go struct
+		// embeds in Implements. A type with only Implements entries (no Extends, no Methods)
+		// would be incorrectly skipped without this check.
+		if len(sym.Metadata.Methods) == 0 && sym.Metadata.Extends == "" && len(sym.Metadata.Implements) == 0 {
 			continue // No methods and no embeds
 		}
 
@@ -2331,6 +2469,10 @@ func (b *Builder) computeInterfaceImplementations(ctx context.Context, state *bu
 //
 // Thread Safety: This function is safe for concurrent use.
 func isMethodSuperset(superset, subset map[string]bool) bool {
+	// CR-20-10 note: An empty subset matches any type (mathematical superset definition).
+	// This is correct mathematically but would produce false positives for interface
+	// matching. Callers MUST prune empty-method interfaces before calling this function.
+	// The Phase 18 prune in computeInterfaceImplementations (lines 2262-2268) handles this.
 	for methodName := range subset {
 		if !superset[methodName] {
 			return false
@@ -2362,7 +2504,20 @@ func isMethodSuperset(superset, subset map[string]bool) bool {
 //   - Only merges method names, not full signatures (consistent with isMethodSuperset).
 //
 // Thread Safety: Not safe for concurrent use on the same methodSet.
+//
+// CR-20-3: Depth-limited to maxEmbedResolutionDepth (20) to prevent stack overflow.
 func (b *Builder) resolvePromotedMethods(state *buildState, typeID string, methodSet map[string]bool, visited map[string]bool) int {
+	return b.resolvePromotedMethodsWithDepth(state, typeID, methodSet, visited, 0)
+}
+
+// resolvePromotedMethodsWithDepth is the depth-limited implementation of resolvePromotedMethods.
+//
+// CR-20-3: Added depth parameter to prevent stack overflow on pathological embedding chains.
+// Stops at maxEmbedResolutionDepth (20). Cycle detection via visited set is retained.
+func (b *Builder) resolvePromotedMethodsWithDepth(state *buildState, typeID string, methodSet map[string]bool, visited map[string]bool, depth int) int {
+	if depth > maxEmbedResolutionDepth {
+		return 0
+	}
 	if visited[typeID] {
 		return 0
 	}
@@ -2396,7 +2551,116 @@ func (b *Builder) resolvePromotedMethods(state *buildState, typeID string, metho
 		}
 
 		// Recurse: the embedded type may itself embed other types
-		added += b.resolvePromotedMethods(state, edge.ToID, methodSet, visited)
+		added += b.resolvePromotedMethodsWithDepth(state, edge.ToID, methodSet, visited, depth+1)
+	}
+
+	return added
+}
+
+// resolveInterfaceMethodSets walks EMBEDS edges from interfaces and merges
+// embedded interface methods into each interface's method set.
+//
+// Description:
+//
+//	In Go, composed interfaces like ReadWriter (embedding Reader + Writer) have no
+//	direct methods — their method set is the union of their embedded interfaces' methods.
+//	This function walks EMBEDS edges transitively (with cycle detection) and merges
+//	discovered methods into each interface's method set in interfacesByLang.
+//
+//	This is structurally analogous to resolvePromotedMethods for structs, but operates
+//	on the interfacesByLang map used by computeInterfaceImplementations.
+//
+// Inputs:
+//   - state: Build state containing graph nodes and symbol data.
+//   - interfacesByLang: Map of [language][interfaceID] → method set. Modified in place.
+//
+// Outputs:
+//   - int: Total number of methods added across all interfaces.
+//
+// Limitations:
+//   - Only follows EMBEDS edges (not IMPLEMENTS or CALLS).
+//   - Only merges method names, not full signatures (consistent with isMethodSuperset).
+//
+// Thread Safety: Not safe for concurrent use on the same interfacesByLang.
+func (b *Builder) resolveInterfaceMethodSets(state *buildState, interfacesByLang map[string]map[string]map[string]bool) int {
+	totalAdded := 0
+
+	for _, interfaces := range interfacesByLang {
+		for ifaceID, methodSet := range interfaces {
+			added := b.resolveInterfaceEmbedsRecursive(state, ifaceID, methodSet, make(map[string]bool))
+			totalAdded += added
+		}
+	}
+
+	return totalAdded
+}
+
+// resolveInterfaceEmbedsRecursive follows outgoing EMBEDS edges from an interface
+// and merges the embedded interface's methods into the given method set.
+//
+// Description:
+//
+//	Recursively walks EMBEDS edges from an interface, merging method sets from
+//	embedded interfaces. Uses a visited set for cycle detection.
+//
+// Inputs:
+//   - state: Build state containing graph nodes and symbol data.
+//   - ifaceID: The symbol ID of the interface to resolve.
+//   - methodSet: The interface's method set to merge embedded methods into. Modified in place.
+//   - visited: Set of already-visited interface IDs to prevent infinite cycles.
+//
+// Outputs:
+//   - int: Number of methods added to the method set.
+//
+// Thread Safety: Not safe for concurrent use on the same methodSet.
+//
+// CR-20-3: Depth-limited to maxEmbedResolutionDepth (20) to prevent stack overflow.
+func (b *Builder) resolveInterfaceEmbedsRecursive(state *buildState, ifaceID string, methodSet map[string]bool, visited map[string]bool) int {
+	return b.resolveInterfaceEmbedsRecursiveWithDepth(state, ifaceID, methodSet, visited, 0)
+}
+
+// resolveInterfaceEmbedsRecursiveWithDepth is the depth-limited implementation.
+//
+// CR-20-3: Added depth parameter to prevent stack overflow on pathological interface
+// embedding chains. Stops at maxEmbedResolutionDepth (20). Cycle detection via visited
+// set is retained as the primary guard; depth limit is defense-in-depth.
+func (b *Builder) resolveInterfaceEmbedsRecursiveWithDepth(state *buildState, ifaceID string, methodSet map[string]bool, visited map[string]bool, depth int) int {
+	if depth > maxEmbedResolutionDepth {
+		return 0
+	}
+	if visited[ifaceID] {
+		return 0
+	}
+	visited[ifaceID] = true
+
+	added := 0
+
+	node, exists := state.graph.GetNode(ifaceID)
+	if !exists || node == nil {
+		return 0
+	}
+
+	for _, edge := range node.Outgoing {
+		if edge.Type != EdgeTypeEmbeds {
+			continue
+		}
+
+		// Get the embedded interface's symbol to access its methods
+		embeddedSym := state.symbolsByID[edge.ToID]
+		if embeddedSym == nil || embeddedSym.Metadata == nil {
+			continue
+		}
+
+		// Merge the embedded interface's methods into our method set
+		for _, m := range embeddedSym.Metadata.Methods {
+			if !methodSet[m.Name] {
+				methodSet[m.Name] = true
+				added++
+			}
+		}
+
+		// Recurse: the embedded interface may itself embed other interfaces
+		added += b.resolveInterfaceEmbedsRecursiveWithDepth(state, edge.ToID, methodSet, visited, depth+1)
 	}
 
 	return added

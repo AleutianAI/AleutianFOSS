@@ -513,7 +513,21 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 					p.emitToolRouting(deps, hardForcing)
 				}
 
-				// Convert PhaseResult to state and return
+				// GR-59 Rev 5: For graph tools, force synthesis immediately.
+				// Graph tools return authoritative results (positive or negative).
+				// Returning StateExecute lets the LLM spiral into Grep/Glob loops
+				// trying to verify graph results, which wastes steps and triggers
+				// circuit breakers. Force the LLM to synthesize from the graph
+				// result directly — no further tool calls needed.
+				if graphToolsWithSubstantiveResults[hardForcing.Tool] {
+					slog.Info("GR-59 Rev 5: Graph tool completed — forcing immediate synthesis",
+						slog.String("session_id", deps.Session.ID),
+						slog.String("tool", hardForcing.Tool),
+					)
+					return p.forceLLMSynthesis(ctx, deps, request, stepStart, stepNumber)
+				}
+
+				// Non-graph tools: return to execution loop for further processing
 				return execResult.NextState, nil
 			}
 		}
@@ -2322,6 +2336,32 @@ func (p *ExecutePhase) forceLLMSynthesis(
 		slog.String("session_id", deps.Session.ID),
 		slog.Int("step_number", stepNumber),
 	)
+
+	// Phase 20: Check if tool results already contain a single authoritative graph result.
+	// If so, return it directly — calling the LLM risks hallucination that contradicts
+	// the tool's definitive answer (e.g., "Symbol not found" → LLM fabricates details).
+	if deps.Context != nil && len(deps.Context.ToolResults) > 0 {
+		if singleResult, ok := getSingleFormattedResult(deps.Context.ToolResults); ok {
+			slog.Info("GR-59 Rev 2: Pass-through — authoritative graph result found, skipping LLM synthesis",
+				slog.String("session_id", deps.Session.ID),
+			)
+			// Record trace step for observability
+			if deps.Session != nil {
+				deps.Session.RecordTraceStep(crs.TraceStep{
+					Timestamp: time.Now().UnixMilli(),
+					Action:    "synthesis",
+					Tool:      "tool_results",
+					Metadata:  map[string]string{"reason": "graph_passthrough"},
+				})
+			}
+			// Create a synthetic response with the pass-through content and delegate
+			// to handleCompletion for proper session state updates.
+			passthroughResponse := &llm.Response{
+				Content: singleResult,
+			}
+			return p.handleCompletion(ctx, deps, passthroughResponse, request, stepStart, stepNumber)
+		}
+	}
 
 	// Build request without tools — force text-only response.
 	synthRequest := llm.BuildRequest(deps.Context, nil, p.maxTokens)

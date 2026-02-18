@@ -2209,3 +2209,41 @@ tests:
     validations:
       - type: graph_tool_used
       - type: crs_trace_step_present
+
+  - id: 7151
+    name: express_crs_find_implementations_c
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      IT-03: Third CRS verification for find_implementations against Express.
+      Target: Router — a symbol that EXISTS in the graph but has no subclasses.
+      Tests the "exists but no implementations" path (distinct from "symbol not found").
+    query: |
+      What classes or prototypes extend the Router constructor in Express?
+    expected_state: COMPLETE
+    reference_answer: |
+      Router is defined at lib/router/index.js as a constructor function.
+      It is not subclassed or extended by any other type — Express uses a
+      flat prototype-based architecture. The tool should find the symbol and
+      report "no implementing or extending types."
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 7152
+    name: express_crs_find_implementations_d
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      IT-03: Fourth CRS verification for find_implementations against Express.
+      Target: View — a symbol that EXISTS in the graph but has no subclasses.
+      Tests the "exists but no implementations" path for a different symbol.
+    query: |
+      What classes extend the View constructor in Express?
+    expected_state: COMPLETE
+    reference_answer: |
+      View is defined at lib/view.js as a constructor function for template
+      engine lookup and rendering. It is not subclassed in Express — apps
+      configure View behavior through app.set() options rather than inheritance.
+      The tool should find the symbol and report "no implementing or extending types."
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present

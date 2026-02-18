@@ -540,8 +540,19 @@ func (p *PythonParser) processClass(ctx context.Context, node *sitter.Node, cont
 			// Extract base classes
 			for j := 0; j < int(child.ChildCount()); j++ {
 				arg := child.Child(j)
-				if arg.Type() == "identifier" || arg.Type() == "attribute" {
+				switch arg.Type() {
+				case "identifier", "attribute":
 					bases = append(bases, string(content[arg.StartByte():arg.EndByte()]))
+				case "subscript":
+					// IT-03a Phase 15 P-1: Handle Protocol[T], Generic[T], etc.
+					// Extract the base name before the bracket (e.g., "Protocol" from "Protocol[T]")
+					baseName := extractSubscriptBaseName(arg, content)
+					if baseName != "" {
+						bases = append(bases, baseName)
+					}
+				case "keyword_argument":
+					// IT-03a Phase 15 P-2: Handle metaclass=ABCMeta
+					p.extractKeywordBaseClass(arg, content, &bases)
 				}
 			}
 		case "block":
@@ -1206,6 +1217,87 @@ func isAllCaps(name string) bool {
 
 // === GR-40a: Python Protocol Implementation Detection ===
 
+// extractSubscriptBaseName extracts the base identifier from a subscript node.
+//
+// Description:
+//
+//	For tree-sitter subscript nodes like "Protocol[T]" or "Generic[T, U]",
+//	extracts the base name ("Protocol", "Generic") by finding the first
+//	identifier or attribute child.
+//
+// Inputs:
+//   - node: A tree-sitter subscript node. Must not be nil.
+//   - content: Raw source bytes for text extraction.
+//
+// Outputs:
+//   - string: The base name before the bracket, or "" if not found.
+//
+// Limitations:
+//   - Returns the first identifier/attribute child. For complex expressions
+//     like module.sub.Protocol[T], returns "module.sub.Protocol" (full attribute text).
+//
+// Assumptions:
+//   - Node is a "subscript" from tree-sitter Python grammar.
+//
+// IT-03a Phase 15 P-1: Enables detection of Protocol[T] as an interface.
+func extractSubscriptBaseName(node *sitter.Node, content []byte) string {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "identifier" || child.Type() == "attribute" {
+			return string(content[child.StartByte():child.EndByte()])
+		}
+	}
+	return ""
+}
+
+// extractKeywordBaseClass handles keyword arguments in class base lists.
+//
+// Description:
+//
+//	Detects metaclass=ABCMeta and metaclass=abc.ABCMeta patterns in class
+//	definitions. When found, adds "ABCMeta" or "abc.ABCMeta" to the bases
+//	list so that isABCClass can detect it. Ignores non-metaclass keywords
+//	(e.g., bar=True, slots=True).
+//
+// Inputs:
+//   - node: A tree-sitter keyword_argument node. Must not be nil.
+//   - content: Raw source bytes for text extraction.
+//   - bases: Pointer to the base class name slice. Mutated in place.
+//
+// Outputs:
+//   - None. Mutates *bases by appending when metaclass=ABCMeta is found.
+//
+// Limitations:
+//   - Only detects "ABCMeta" and "abc.ABCMeta" as metaclass values.
+//     Custom ABCMeta subclasses (e.g., MyMeta) are not detected.
+//   - Uses positional identifier matching (first=key, second=value) based
+//     on tree-sitter's keyword_argument node structure.
+//
+// Assumptions:
+//   - Node is a "keyword_argument" from tree-sitter Python grammar.
+//   - keyword_argument has structure: identifier("metaclass"), "=", identifier/attribute("ABCMeta").
+//
+// IT-03a Phase 15 P-2: Enables detection of ABCMeta metaclass.
+func (p *PythonParser) extractKeywordBaseClass(node *sitter.Node, content []byte, bases *[]string) {
+	var key, value string
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "identifier":
+			if key == "" {
+				key = string(content[child.StartByte():child.EndByte()])
+			} else {
+				value = string(content[child.StartByte():child.EndByte()])
+			}
+		case "attribute":
+			value = string(content[child.StartByte():child.EndByte()])
+		}
+	}
+	if key == "metaclass" && (value == "ABCMeta" || value == "abc.ABCMeta") {
+		*bases = append(*bases, value)
+	}
+}
+
 // isTypingProtocol checks if a class is a typing.Protocol (structural interface).
 //
 // Description:
@@ -1258,7 +1350,7 @@ func (p *PythonParser) isTypingProtocol(ctx context.Context, bases []string) boo
 // Thread Safety: This method is safe for concurrent use.
 func (p *PythonParser) isABCClass(ctx context.Context, bases []string) bool {
 	for _, base := range bases {
-		if base == "ABC" || base == "abc.ABC" {
+		if base == "ABC" || base == "abc.ABC" || base == "ABCMeta" || base == "abc.ABCMeta" {
 			return true
 		}
 	}

@@ -2388,3 +2388,141 @@ def bar():
 		}
 	}
 }
+
+// IT-03a Phase 15 P-1: Protocol[T] detection tests
+
+func TestPythonParser_ProtocolWithGeneric(t *testing.T) {
+	parser := NewPythonParser()
+
+	src := []byte(`
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class Comparable(Protocol[T]):
+    def compare(self, other: T) -> int:
+        ...
+
+class StringComparable:
+    def compare(self, other: str) -> int:
+        return 0
+`)
+
+	result, err := parser.Parse(context.Background(), src, "protocol_generic.py")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	var comparable *Symbol
+	var stringComparable *Symbol
+	for _, sym := range result.Symbols {
+		switch sym.Name {
+		case "Comparable":
+			comparable = sym
+		case "StringComparable":
+			stringComparable = sym
+		}
+	}
+
+	if comparable == nil {
+		t.Fatal("expected symbol 'Comparable'")
+	}
+	// Protocol[T] should be detected as an interface
+	if comparable.Kind != SymbolKindInterface {
+		t.Errorf("expected Comparable kind Interface, got %v", comparable.Kind)
+	}
+
+	if stringComparable == nil {
+		t.Fatal("expected symbol 'StringComparable'")
+	}
+	// Regular class should remain a class
+	if stringComparable.Kind != SymbolKindClass {
+		t.Errorf("expected StringComparable kind Class, got %v", stringComparable.Kind)
+	}
+}
+
+// IT-03a Phase 15 P-2: ABCMeta metaclass detection tests
+
+func TestPythonParser_ABCMetaMetaclass(t *testing.T) {
+	parser := NewPythonParser()
+
+	src := []byte(`
+from abc import ABCMeta, abstractmethod
+
+class Handler(metaclass=ABCMeta):
+    @abstractmethod
+    def handle(self, request):
+        pass
+
+    @abstractmethod
+    def validate(self, request):
+        pass
+
+class ConcreteHandler(Handler):
+    def handle(self, request):
+        return "handled"
+
+    def validate(self, request):
+        return True
+`)
+
+	result, err := parser.Parse(context.Background(), src, "abcmeta.py")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	var handler *Symbol
+	var concrete *Symbol
+	for _, sym := range result.Symbols {
+		switch sym.Name {
+		case "Handler":
+			handler = sym
+		case "ConcreteHandler":
+			concrete = sym
+		}
+	}
+
+	if handler == nil {
+		t.Fatal("expected symbol 'Handler'")
+	}
+	// ABCMeta metaclass with @abstractmethod should be detected as interface
+	if handler.Kind != SymbolKindInterface {
+		t.Errorf("expected Handler kind Interface (ABCMeta + abstractmethod), got %v", handler.Kind)
+	}
+
+	if concrete == nil {
+		t.Fatal("expected symbol 'ConcreteHandler'")
+	}
+	if concrete.Kind != SymbolKindClass {
+		t.Errorf("expected ConcreteHandler kind Class, got %v", concrete.Kind)
+	}
+}
+
+// TestPythonParser_KeywordArg_NonMetaclass verifies that non-metaclass keyword
+// arguments in class definitions do not incorrectly affect class classification.
+// Phase 17 COVERAGE-2: Negative test for extractKeywordBaseClass.
+func TestPythonParser_KeywordArg_NonMetaclass(t *testing.T) {
+	parser := NewPythonParser()
+
+	src := []byte(`
+class Config(slots=True, frozen=True):
+    name: str
+    value: int
+
+class TypedDict(total=False):
+    key: str
+`)
+
+	result, err := parser.Parse(context.Background(), src, "non_metaclass.py")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	for _, sym := range result.Symbols {
+		if sym.Name == "Config" || sym.Name == "TypedDict" {
+			// Non-metaclass keyword args should not change classification
+			if sym.Kind != SymbolKindClass {
+				t.Errorf("expected %s kind Class (non-metaclass keyword args), got %v", sym.Name, sym.Kind)
+			}
+		}
+	}
+}

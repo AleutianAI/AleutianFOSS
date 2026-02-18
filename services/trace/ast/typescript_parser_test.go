@@ -2259,3 +2259,607 @@ func TestTypeScriptParser_TypeNarrowing_NestedFunction(t *testing.T) {
 		}
 	}
 }
+
+// =============================================================================
+// IT-03a Phase 12: Metadata.Methods population tests
+// =============================================================================
+
+func TestTypeScriptParser_InterfaceMethodSignatures(t *testing.T) {
+	source := `export interface Repository {
+    findById(id: string): Promise<Entity>;
+    save(entity: Entity): Promise<void>;
+    delete(id: string): boolean;
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var iface *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindInterface && sym.Name == "Repository" {
+			iface = sym
+			break
+		}
+	}
+
+	if iface == nil {
+		t.Fatal("expected interface 'Repository'")
+	}
+
+	if iface.Metadata == nil {
+		t.Fatal("expected Metadata to be non-nil")
+	}
+
+	if len(iface.Metadata.Methods) != 3 {
+		t.Fatalf("expected 3 methods in Metadata.Methods, got %d", len(iface.Metadata.Methods))
+	}
+
+	expectedNames := map[string]bool{
+		"findById": false,
+		"save":     false,
+		"delete":   false,
+	}
+	for _, m := range iface.Metadata.Methods {
+		if _, ok := expectedNames[m.Name]; ok {
+			expectedNames[m.Name] = true
+		} else {
+			t.Errorf("unexpected method in Metadata.Methods: %s", m.Name)
+		}
+	}
+	for name, found := range expectedNames {
+		if !found {
+			t.Errorf("expected method %q in Metadata.Methods", name)
+		}
+	}
+}
+
+func TestTypeScriptParser_InterfaceMethodSignatures_Empty(t *testing.T) {
+	source := `export interface Config {
+    readonly host: string;
+    port: number;
+    debug?: boolean;
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var iface *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindInterface && sym.Name == "Config" {
+			iface = sym
+			break
+		}
+	}
+
+	if iface == nil {
+		t.Fatal("expected interface 'Config'")
+	}
+
+	// Interface with only properties should have no methods in Metadata.Methods
+	if iface.Metadata != nil && len(iface.Metadata.Methods) > 0 {
+		t.Errorf("expected no methods in Metadata.Methods for property-only interface, got %d", len(iface.Metadata.Methods))
+	}
+}
+
+func TestTypeScriptParser_InterfaceMethodSignatures_Mixed(t *testing.T) {
+	source := `export interface Service {
+    name: string;
+    start(): void;
+    stop(): void;
+    version?: number;
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var iface *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindInterface && sym.Name == "Service" {
+			iface = sym
+			break
+		}
+	}
+
+	if iface == nil {
+		t.Fatal("expected interface 'Service'")
+	}
+
+	if iface.Metadata == nil {
+		t.Fatal("expected Metadata to be non-nil")
+	}
+
+	// Only methods (start, stop), not properties (name, version)
+	if len(iface.Metadata.Methods) != 2 {
+		t.Fatalf("expected 2 methods in Metadata.Methods, got %d", len(iface.Metadata.Methods))
+	}
+
+	methodNames := make(map[string]bool)
+	for _, m := range iface.Metadata.Methods {
+		methodNames[m.Name] = true
+	}
+	if !methodNames["start"] {
+		t.Error("expected method 'start' in Metadata.Methods")
+	}
+	if !methodNames["stop"] {
+		t.Error("expected method 'stop' in Metadata.Methods")
+	}
+	if methodNames["name"] {
+		t.Error("property 'name' should NOT be in Metadata.Methods")
+	}
+}
+
+func TestTypeScriptParser_ClassMethodSignatures(t *testing.T) {
+	source := `export class UserService {
+    getUser(id: string): User {
+        return null;
+    }
+    saveUser(user: User): void {
+        // save
+    }
+    deleteUser(id: string): boolean {
+        return true;
+    }
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var cls *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindClass && sym.Name == "UserService" {
+			cls = sym
+			break
+		}
+	}
+
+	if cls == nil {
+		t.Fatal("expected class 'UserService'")
+	}
+
+	if cls.Metadata == nil {
+		t.Fatal("expected Metadata to be non-nil")
+	}
+
+	if len(cls.Metadata.Methods) != 3 {
+		t.Fatalf("expected 3 methods in Metadata.Methods, got %d", len(cls.Metadata.Methods))
+	}
+
+	expectedNames := map[string]bool{
+		"getUser":    false,
+		"saveUser":   false,
+		"deleteUser": false,
+	}
+	for _, m := range cls.Metadata.Methods {
+		if _, ok := expectedNames[m.Name]; ok {
+			expectedNames[m.Name] = true
+		} else {
+			t.Errorf("unexpected method in Metadata.Methods: %s", m.Name)
+		}
+	}
+	for name, found := range expectedNames {
+		if !found {
+			t.Errorf("expected method %q in Metadata.Methods", name)
+		}
+	}
+}
+
+func TestTypeScriptParser_ClassMethodSignatures_SkipConstructor(t *testing.T) {
+	source := `export class Handler {
+    constructor(private name: string) {}
+    handle(req: Request): Response {
+        return null;
+    }
+    dispose(): void {}
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var cls *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindClass && sym.Name == "Handler" {
+			cls = sym
+			break
+		}
+	}
+
+	if cls == nil {
+		t.Fatal("expected class 'Handler'")
+	}
+
+	if cls.Metadata == nil {
+		t.Fatal("expected Metadata to be non-nil")
+	}
+
+	// constructor should be excluded, only handle and dispose
+	if len(cls.Metadata.Methods) != 2 {
+		t.Fatalf("expected 2 methods (excluding constructor), got %d", len(cls.Metadata.Methods))
+	}
+
+	for _, m := range cls.Metadata.Methods {
+		if m.Name == "constructor" {
+			t.Error("constructor should NOT be in Metadata.Methods")
+		}
+	}
+}
+
+func TestTypeScriptParser_ClassMethodSignatures_SkipStatic(t *testing.T) {
+	source := `export class Factory {
+    static create(name: string): Factory {
+        return new Factory();
+    }
+    process(input: string): string {
+        return input;
+    }
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var cls *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindClass && sym.Name == "Factory" {
+			cls = sym
+			break
+		}
+	}
+
+	if cls == nil {
+		t.Fatal("expected class 'Factory'")
+	}
+
+	if cls.Metadata == nil {
+		t.Fatal("expected Metadata to be non-nil")
+	}
+
+	// static 'create' should be excluded, only 'process'
+	if len(cls.Metadata.Methods) != 1 {
+		t.Fatalf("expected 1 method (excluding static), got %d", len(cls.Metadata.Methods))
+	}
+
+	if cls.Metadata.Methods[0].Name != "process" {
+		t.Errorf("expected method 'process', got %q", cls.Metadata.Methods[0].Name)
+	}
+}
+
+func TestTypeScriptParser_ClassMethodSignatures_Empty(t *testing.T) {
+	source := `export class Config {
+    host: string = "localhost";
+    port: number = 8080;
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var cls *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindClass && sym.Name == "Config" {
+			cls = sym
+			break
+		}
+	}
+
+	if cls == nil {
+		t.Fatal("expected class 'Config'")
+	}
+
+	// Class with only fields should have no methods
+	if cls.Metadata != nil && len(cls.Metadata.Methods) > 0 {
+		t.Errorf("expected no methods in Metadata.Methods for field-only class, got %d", len(cls.Metadata.Methods))
+	}
+}
+
+// IT-03a Phase 13 T-3: Generic extends text stripping tests
+
+func TestTypeScriptParser_ClassHeritage_GenericExtendsStripped(t *testing.T) {
+	parser := NewTypeScriptParser()
+
+	src := []byte(`
+export class UserService extends BaseService<User> {
+  getUser(): User {
+    return new User();
+  }
+}
+
+export class Repo extends GenericRepository<Entity, string> implements Queryable<Entity> {
+  query(): Entity[] {
+    return [];
+  }
+}
+`)
+
+	result, err := parser.Parse(context.Background(), src, "generic_heritage.ts")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	// Find UserService
+	var userService *Symbol
+	var repo *Symbol
+	for _, sym := range result.Symbols {
+		switch sym.Name {
+		case "UserService":
+			userService = sym
+		case "Repo":
+			repo = sym
+		}
+	}
+
+	if userService == nil {
+		t.Fatal("expected symbol 'UserService'")
+	}
+	if userService.Metadata == nil {
+		t.Fatal("expected UserService to have metadata")
+	}
+	// Should be "BaseService" not "BaseService<User>"
+	if userService.Metadata.Extends != "BaseService" {
+		t.Errorf("expected Extends='BaseService', got %q", userService.Metadata.Extends)
+	}
+
+	if repo == nil {
+		t.Fatal("expected symbol 'Repo'")
+	}
+	if repo.Metadata == nil {
+		t.Fatal("expected Repo to have metadata")
+	}
+	// Should be "GenericRepository" not "GenericRepository<Entity, string>"
+	if repo.Metadata.Extends != "GenericRepository" {
+		t.Errorf("expected Extends='GenericRepository', got %q", repo.Metadata.Extends)
+	}
+	// Implements should be "Queryable" not "Queryable<Entity>"
+	found := false
+	for _, impl := range repo.Metadata.Implements {
+		if impl == "Queryable" {
+			found = true
+		}
+		if strings.Contains(impl, "<") {
+			t.Errorf("implements should not contain generic params, got %q", impl)
+		}
+	}
+	if !found {
+		t.Errorf("expected 'Queryable' in implements, got %v", repo.Metadata.Implements)
+	}
+}
+
+// IT-03a Phase 13 T-4: Non-exported abstract class tests
+
+func TestTypeScriptParser_NonExportedAbstractClass(t *testing.T) {
+	parser := NewTypeScriptParser()
+
+	src := []byte(`
+abstract class BaseHandler {
+  abstract handle(request: Request): Response;
+
+  log(msg: string): void {
+    console.log(msg);
+  }
+}
+
+export class ConcreteHandler extends BaseHandler {
+  handle(request: Request): Response {
+    return new Response();
+  }
+}
+`)
+
+	result, err := parser.Parse(context.Background(), src, "abstract.ts")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	// Find BaseHandler (non-exported abstract class)
+	var baseHandler *Symbol
+	var concreteHandler *Symbol
+	for _, sym := range result.Symbols {
+		switch sym.Name {
+		case "BaseHandler":
+			baseHandler = sym
+		case "ConcreteHandler":
+			concreteHandler = sym
+		}
+	}
+
+	if baseHandler == nil {
+		t.Fatal("expected non-exported abstract class 'BaseHandler' to be parsed")
+	}
+	if baseHandler.Kind != SymbolKindClass {
+		t.Errorf("expected kind Class, got %v", baseHandler.Kind)
+	}
+	if baseHandler.Metadata == nil || !baseHandler.Metadata.IsAbstract {
+		t.Error("expected BaseHandler.Metadata.IsAbstract to be true")
+	}
+
+	if concreteHandler == nil {
+		t.Fatal("expected symbol 'ConcreteHandler'")
+	}
+	if concreteHandler.Metadata == nil || concreteHandler.Metadata.Extends != "BaseHandler" {
+		t.Errorf("expected ConcreteHandler to extend BaseHandler")
+	}
+}
+
+// IT-03a Phase 14 T-1: TypeArguments on methods
+// IT-03a Phase 14 T-2: TypeNarrowings on methods
+
+func TestTypeScriptParser_Method_TypeArguments(t *testing.T) {
+	parser := NewTypeScriptParser()
+
+	src := []byte(`
+export class UserService {
+  getUsers(): Promise<User[]> {
+    return this.repo.findAll();
+  }
+
+  transform(input: Entity): Map<string, Result> {
+    return new Map();
+  }
+
+  simple(): void {
+    return;
+  }
+}
+`)
+
+	result, err := parser.Parse(context.Background(), src, "method_typeargs.ts")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	// Find the class, then its methods
+	var cls *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "UserService" {
+			cls = sym
+			break
+		}
+	}
+	if cls == nil {
+		t.Fatal("expected symbol 'UserService'")
+	}
+
+	methodMap := make(map[string]*Symbol)
+	for _, child := range cls.Children {
+		if child.Kind == SymbolKindMethod {
+			methodMap[child.Name] = child
+		}
+	}
+
+	// getUsers returns Promise<User[]> — should extract "User" as TypeArgument
+	getUsers := methodMap["getUsers"]
+	if getUsers == nil {
+		t.Fatal("expected method 'getUsers'")
+	}
+	if getUsers.Metadata == nil || len(getUsers.Metadata.TypeArguments) == 0 {
+		t.Fatal("expected getUsers to have TypeArguments from Promise<User[]>")
+	}
+	found := false
+	for _, ta := range getUsers.Metadata.TypeArguments {
+		if ta == "User" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'User' in TypeArguments, got %v", getUsers.Metadata.TypeArguments)
+	}
+
+	// transform returns Map<string, Result> — should extract "Result" (string is primitive, filtered)
+	transform := methodMap["transform"]
+	if transform == nil {
+		t.Fatal("expected method 'transform'")
+	}
+	if transform.Metadata == nil || len(transform.Metadata.TypeArguments) == 0 {
+		t.Fatal("expected transform to have TypeArguments from Map<string, Result>")
+	}
+	found = false
+	for _, ta := range transform.Metadata.TypeArguments {
+		if ta == "Result" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'Result' in TypeArguments, got %v", transform.Metadata.TypeArguments)
+	}
+
+	// simple returns void — should have no TypeArguments
+	simple := methodMap["simple"]
+	if simple == nil {
+		t.Fatal("expected method 'simple'")
+	}
+	if simple.Metadata != nil && len(simple.Metadata.TypeArguments) > 0 {
+		t.Errorf("expected no TypeArguments for void return, got %v", simple.Metadata.TypeArguments)
+	}
+}
+
+func TestTypeScriptParser_Method_TypeNarrowings(t *testing.T) {
+	parser := NewTypeScriptParser()
+
+	src := []byte(`
+export class Validator {
+  validate(input: unknown): boolean {
+    if (input instanceof Error) {
+      return false;
+    }
+    if (input instanceof CustomType) {
+      return true;
+    }
+    return false;
+  }
+
+  noNarrowings(): void {
+    console.log("hello");
+  }
+}
+`)
+
+	result, err := parser.Parse(context.Background(), src, "method_narrowings.ts")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	var cls *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Validator" {
+			cls = sym
+			break
+		}
+	}
+	if cls == nil {
+		t.Fatal("expected symbol 'Validator'")
+	}
+
+	methodMap := make(map[string]*Symbol)
+	for _, child := range cls.Children {
+		if child.Kind == SymbolKindMethod {
+			methodMap[child.Name] = child
+		}
+	}
+
+	// validate uses instanceof Error and instanceof CustomType
+	validate := methodMap["validate"]
+	if validate == nil {
+		t.Fatal("expected method 'validate'")
+	}
+	if validate.Metadata == nil || len(validate.Metadata.TypeNarrowings) == 0 {
+		t.Fatal("expected validate to have TypeNarrowings from instanceof checks")
+	}
+
+	narrowingSet := make(map[string]bool)
+	for _, n := range validate.Metadata.TypeNarrowings {
+		narrowingSet[n] = true
+	}
+	if !narrowingSet["Error"] {
+		t.Errorf("expected 'Error' in TypeNarrowings, got %v", validate.Metadata.TypeNarrowings)
+	}
+	if !narrowingSet["CustomType"] {
+		t.Errorf("expected 'CustomType' in TypeNarrowings, got %v", validate.Metadata.TypeNarrowings)
+	}
+
+	// noNarrowings should have no TypeNarrowings
+	noNarrowings := methodMap["noNarrowings"]
+	if noNarrowings == nil {
+		t.Fatal("expected method 'noNarrowings'")
+	}
+	if noNarrowings.Metadata != nil && len(noNarrowings.Metadata.TypeNarrowings) > 0 {
+		t.Errorf("expected no TypeNarrowings, got %v", noNarrowings.Metadata.TypeNarrowings)
+	}
+}

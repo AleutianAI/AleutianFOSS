@@ -541,6 +541,11 @@ func (p *TypeScriptParser) extractDeclarations(ctx context.Context, root *sitter
 			p.processLexicalDeclaration(child, content, filePath, result, false)
 		case "variable_declaration":
 			p.processVariableDeclaration(child, content, filePath, result, false)
+		case "abstract_class_declaration":
+			// IT-03a Phase 13 T-4: Handle non-exported abstract classes
+			if cls := p.processAbstractClass(ctx, child, content, filePath, nil, false); cls != nil {
+				result.Symbols = append(result.Symbols, cls)
+			}
 		}
 	}
 }
@@ -785,6 +790,10 @@ func (p *TypeScriptParser) processClass(ctx context.Context, node *sitter.Node, 
 	// Extract class members
 	if bodyNode != nil {
 		p.extractClassMembers(ctx, bodyNode, content, filePath, sym)
+		// IT-03a Phase 12 F-2: Collect MethodSignatures for implicit interface matching.
+		// Without this, computeInterfaceImplementations() skips all TS classes
+		// because Metadata.Methods is empty.
+		p.collectTSClassMethods(sym)
 	}
 
 	return sym
@@ -892,9 +901,23 @@ func (p *TypeScriptParser) processMethod(ctx context.Context, node *sitter.Node,
 		},
 	}
 
+	// IT-03a Phase 14 T-1: Extract type arguments from return type (parity with processFunction)
+	if returnType != "" {
+		typeArgs := extractTypeArgumentIdentifiers(returnType)
+		if len(typeArgs) > 0 {
+			sym.Metadata.TypeArguments = typeArgs
+		}
+	}
+
 	// GR-41: Extract call sites from method body
 	if bodyNode != nil {
 		sym.Calls = p.extractCallSites(ctx, bodyNode, content, filePath)
+
+		// IT-03a Phase 14 T-2: Extract type narrowings (parity with processFunction)
+		narrowings := p.extractTypeNarrowings(bodyNode, content)
+		if len(narrowings) > 0 {
+			sym.Metadata.TypeNarrowings = narrowings
+		}
 	}
 
 	return sym
@@ -1026,6 +1049,10 @@ func (p *TypeScriptParser) processInterface(node *sitter.Node, content []byte, f
 	// Extract interface members
 	if bodyNode != nil {
 		p.extractInterfaceMembers(bodyNode, content, filePath, sym)
+		// IT-03a Phase 12 F-1: Collect MethodSignatures for implicit interface matching.
+		// Without this, computeInterfaceImplementations() skips all TS interfaces
+		// because Metadata.Methods is empty.
+		p.collectTSInterfaceMethods(sym)
 	}
 
 	return sym
@@ -1473,21 +1500,64 @@ func (p *TypeScriptParser) extractClassHeritage(node *sitter.Node, content []byt
 		case "extends_clause":
 			for j := 0; j < int(child.ChildCount()); j++ {
 				gc := child.Child(j)
-				// Tree-sitter uses "identifier" for simple class names, "type_identifier" for type references
-				if gc.Type() == "identifier" || gc.Type() == "type_identifier" || gc.Type() == "generic_type" {
+				switch gc.Type() {
+				case "identifier", "type_identifier":
 					extends = string(content[gc.StartByte():gc.EndByte()])
+				case "generic_type":
+					// IT-03a Phase 13 T-3: Extract base type name, strip generic params
+					// e.g., "Base<T>" → "Base"
+					extends = extractGenericBaseName(gc, content)
 				}
 			}
 		case "implements_clause":
 			for j := 0; j < int(child.ChildCount()); j++ {
 				gc := child.Child(j)
-				if gc.Type() == "type_identifier" || gc.Type() == "generic_type" {
+				switch gc.Type() {
+				case "type_identifier":
 					implements = append(implements, string(content[gc.StartByte():gc.EndByte()]))
+				case "generic_type":
+					// IT-03a Phase 13 T-3: Extract base type name, strip generic params
+					implements = append(implements, extractGenericBaseName(gc, content))
 				}
 			}
 		}
 	}
 	return
+}
+
+// extractGenericBaseName extracts the base type identifier from a generic_type node.
+//
+// Description:
+//
+//	Given a tree-sitter generic_type node representing e.g. "Base<T, U>",
+//	extracts just the base type name "Base" by finding the first type_identifier
+//	or identifier child. Falls back to verbatim text if no identifier is found.
+//
+// Inputs:
+//   - node: A tree-sitter generic_type node. Must not be nil.
+//   - content: Raw source bytes for text extraction.
+//
+// Outputs:
+//   - string: The base type name without generic parameters.
+//
+// Limitations:
+//   - Does not handle nested generics as base types (e.g., Foo<T>.Bar<U>).
+//   - Fallback returns full text including angle brackets if no identifier child found.
+//
+// Assumptions:
+//   - Node is a "generic_type" from tree-sitter TypeScript grammar.
+//   - The first type_identifier or identifier child is the base type name.
+//
+// IT-03a Phase 13 T-3: Prevents "Base<T>" from being stored in Metadata.Extends.
+func extractGenericBaseName(node *sitter.Node, content []byte) string {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "type_identifier" || child.Type() == "identifier" {
+			return string(content[child.StartByte():child.EndByte()])
+		}
+	}
+	// Fallback: return full text if no identifier found (shouldn't happen for valid generic_type)
+	return string(content[node.StartByte():node.EndByte()])
 }
 
 // extractDecoratorName extracts the name from a decorator node.
@@ -1995,6 +2065,144 @@ func extractTypeArgumentIdentifiers(typeExpr string) []string {
 	}
 
 	return identifiers
+}
+
+// collectTSInterfaceMethods converts an interface's Children of kind SymbolKindMethod
+// into MethodSignature entries in Metadata.Methods.
+//
+// Description:
+//
+//	This bridges the gap between tree-sitter extraction (which creates Children)
+//	and the builder's computeInterfaceImplementations (which reads Metadata.Methods).
+//	Without this, all TS interfaces are skipped during implicit matching because
+//	Metadata.Methods is empty.
+//
+// Inputs:
+//   - ifaceSym: The interface Symbol whose Children have been populated.
+//     Must not be nil.
+//
+// Outputs:
+//   - None. Mutates ifaceSym.Metadata.Methods in place.
+//
+// Limitations:
+//   - Only collects methods (SymbolKindMethod), not properties (SymbolKindField).
+//   - ParamCount is derived from signature string parsing, not AST analysis.
+//
+// Assumptions:
+//   - Children have already been populated by extractInterfaceMembers.
+//   - Method Children have Signature populated with the method signature string.
+func (p *TypeScriptParser) collectTSInterfaceMethods(ifaceSym *Symbol) {
+	if ifaceSym == nil || len(ifaceSym.Children) == 0 {
+		return
+	}
+
+	methods := make([]MethodSignature, 0, len(ifaceSym.Children))
+	for _, child := range ifaceSym.Children {
+		if child.Kind != SymbolKindMethod {
+			continue
+		}
+		sig := MethodSignature{
+			Name:       child.Name,
+			ParamCount: countTSParams(child.Signature),
+		}
+		methods = append(methods, sig)
+	}
+
+	if len(methods) > 0 {
+		if ifaceSym.Metadata == nil {
+			ifaceSym.Metadata = &SymbolMetadata{}
+		}
+		ifaceSym.Metadata.Methods = methods
+	}
+}
+
+// collectTSClassMethods converts a class's Children of kind SymbolKindMethod
+// into MethodSignature entries in Metadata.Methods.
+//
+// Description:
+//
+//	Mirrors collectTSInterfaceMethods but for classes. Skips constructors and
+//	static methods since they are not part of interface contracts.
+//
+// Inputs:
+//   - classSym: The class Symbol whose Children have been populated.
+//     Must not be nil.
+//
+// Outputs:
+//   - None. Mutates classSym.Metadata.Methods in place.
+//
+// Limitations:
+//   - Only collects instance methods, not constructors or static methods.
+//   - ParamCount is derived from signature string parsing, not AST analysis.
+//
+// Assumptions:
+//   - Children have already been populated by extractClassMembers.
+//   - Method Children have Signature populated with the method signature string.
+//   - Static methods have Metadata.IsStatic == true.
+func (p *TypeScriptParser) collectTSClassMethods(classSym *Symbol) {
+	if classSym == nil || len(classSym.Children) == 0 {
+		return
+	}
+
+	methods := make([]MethodSignature, 0, len(classSym.Children))
+	for _, child := range classSym.Children {
+		if child.Kind != SymbolKindMethod {
+			continue
+		}
+		// Skip constructor — not part of interface contracts.
+		if child.Name == "constructor" {
+			continue
+		}
+		// Skip static methods — they don't satisfy instance-level interface contracts.
+		if child.Metadata != nil && child.Metadata.IsStatic {
+			continue
+		}
+		sig := MethodSignature{
+			Name:       child.Name,
+			ParamCount: countTSParams(child.Signature),
+		}
+		methods = append(methods, sig)
+	}
+
+	if len(methods) > 0 {
+		if classSym.Metadata == nil {
+			classSym.Metadata = &SymbolMetadata{}
+		}
+		classSym.Metadata.Methods = methods
+	}
+}
+
+// countTSParams extracts parameter count from a TypeScript method signature string.
+//
+// Description:
+//
+//	Parses a signature like "methodName(param1: type, param2: type): returnType"
+//	and counts the parameters between parentheses by counting commas + 1.
+//	Returns 0 for empty params "()" or if no parens found.
+//
+// Inputs:
+//   - signature: A TypeScript method signature string. May be empty.
+//
+// Outputs:
+//   - int: The number of parameters. 0 if no params or invalid format.
+//
+// Limitations:
+//   - Does not track angle bracket depth when counting commas. Generic parameter types
+//     containing commas (e.g., "Map<string, number>") or callback signatures
+//     (e.g., "(a: string, b: number) => void") cause overcounting. This is acceptable
+//     because isMethodSuperset() uses name-only matching — ParamCount is informational
+//     and not used in the current matching algorithm.
+func countTSParams(signature string) int {
+	start := strings.Index(signature, "(")
+	end := strings.Index(signature, ")")
+	if start < 0 || end <= start+1 {
+		return 0
+	}
+	paramStr := signature[start+1 : end]
+	if strings.TrimSpace(paramStr) == "" {
+		return 0
+	}
+	return strings.Count(paramStr, ",") + 1
 }
 
 // Compile-time interface compliance check.

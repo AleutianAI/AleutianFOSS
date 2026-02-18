@@ -4751,3 +4751,635 @@ func TestBuilder_TypeNarrowingEdges(t *testing.T) {
 		}
 	})
 }
+
+// =============================================================================
+// IT-03a Phase 12: End-to-end TS implicit interface matching via real parser
+// =============================================================================
+
+func TestBuildGraph_TSImplicitInterfaceMatching_EndToEnd(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	t.Run("parsed TS interface+class produces IMPLEMENTS edge", func(t *testing.T) {
+		// Parse real TypeScript source through the actual parser to verify
+		// that Metadata.Methods is populated by the parser, and the builder
+		// then creates EdgeTypeImplements.
+		tsParser := ast.NewTypeScriptParser()
+
+		ifaceSource := `export interface Repository {
+    findById(id: string): Entity;
+    save(entity: Entity): void;
+}
+`
+		classSource := `export class UserRepository {
+    findById(id: string): Entity {
+        return null;
+    }
+    save(entity: Entity): void {
+        // persist
+    }
+    count(): number {
+        return 0;
+    }
+}
+`
+
+		ifaceResult, err := tsParser.Parse(ctx, []byte(ifaceSource), "repo.ts")
+		if err != nil {
+			t.Fatalf("parse interface failed: %v", err)
+		}
+		classResult, err := tsParser.Parse(ctx, []byte(classSource), "user_repo.ts")
+		if err != nil {
+			t.Fatalf("parse class failed: %v", err)
+		}
+
+		// Verify parser populated Metadata.Methods (the fix this phase adds)
+		var iface *ast.Symbol
+		for _, sym := range ifaceResult.Symbols {
+			if sym.Kind == ast.SymbolKindInterface && sym.Name == "Repository" {
+				iface = sym
+				break
+			}
+		}
+		if iface == nil {
+			t.Fatal("expected interface 'Repository' in parse result")
+		}
+		if iface.Metadata == nil || len(iface.Metadata.Methods) == 0 {
+			t.Fatal("expected Metadata.Methods to be populated for TS interface (F-1 fix)")
+		}
+
+		var cls *ast.Symbol
+		for _, sym := range classResult.Symbols {
+			if sym.Kind == ast.SymbolKindClass && sym.Name == "UserRepository" {
+				cls = sym
+				break
+			}
+		}
+		if cls == nil {
+			t.Fatal("expected class 'UserRepository' in parse result")
+		}
+		if cls.Metadata == nil || len(cls.Metadata.Methods) == 0 {
+			t.Fatal("expected Metadata.Methods to be populated for TS class (F-2 fix)")
+		}
+
+		// Feed to builder — this should now create EdgeTypeImplements
+		result, err := builder.Build(ctx, []*ast.ParseResult{ifaceResult, classResult})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		classNode, ok := result.Graph.GetNode(cls.ID)
+		if !ok {
+			t.Fatal("UserRepository node not found in graph")
+		}
+
+		foundImplements := false
+		for _, edge := range classNode.Outgoing {
+			if edge.Type == EdgeTypeImplements && edge.ToID == iface.ID {
+				foundImplements = true
+				break
+			}
+		}
+		if !foundImplements {
+			t.Error("expected EdgeTypeImplements from UserRepository to Repository (TS implicit interface matching)")
+		}
+	})
+}
+
+func TestBuildGraph_TSImplicitInterfaceMatching_PartialMethods(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	t.Run("parsed TS class with partial methods does NOT match", func(t *testing.T) {
+		tsParser := ast.NewTypeScriptParser()
+
+		ifaceSource := `export interface Serializable {
+    serialize(): string;
+    deserialize(data: string): void;
+}
+`
+		classSource := `export class PartialImpl {
+    serialize(): string {
+        return "{}";
+    }
+}
+`
+
+		ifaceResult, err := tsParser.Parse(ctx, []byte(ifaceSource), "serial.ts")
+		if err != nil {
+			t.Fatalf("parse interface failed: %v", err)
+		}
+		classResult, err := tsParser.Parse(ctx, []byte(classSource), "partial.ts")
+		if err != nil {
+			t.Fatalf("parse class failed: %v", err)
+		}
+
+		// Verify parser populated Metadata.Methods
+		var iface *ast.Symbol
+		for _, sym := range ifaceResult.Symbols {
+			if sym.Kind == ast.SymbolKindInterface && sym.Name == "Serializable" {
+				iface = sym
+				break
+			}
+		}
+		if iface == nil {
+			t.Fatal("expected interface 'Serializable'")
+		}
+		if iface.Metadata == nil || len(iface.Metadata.Methods) != 2 {
+			t.Fatalf("expected 2 methods in interface Metadata.Methods, got %d",
+				func() int {
+					if iface.Metadata == nil {
+						return 0
+					}
+					return len(iface.Metadata.Methods)
+				}())
+		}
+
+		var cls *ast.Symbol
+		for _, sym := range classResult.Symbols {
+			if sym.Kind == ast.SymbolKindClass && sym.Name == "PartialImpl" {
+				cls = sym
+				break
+			}
+		}
+		if cls == nil {
+			t.Fatal("expected class 'PartialImpl'")
+		}
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{ifaceResult, classResult})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		classNode, ok := result.Graph.GetNode(cls.ID)
+		if !ok {
+			t.Fatal("PartialImpl node not found in graph")
+		}
+
+		for _, edge := range classNode.Outgoing {
+			if edge.Type == EdgeTypeImplements && edge.ToID == iface.ID {
+				t.Error("unexpected EdgeTypeImplements from PartialImpl to Serializable (missing deserialize)")
+			}
+		}
+	})
+}
+
+// Phase 18: Test that composed interfaces (embedding other interfaces) gain methods
+// transitively and that structs implementing all those methods get IMPLEMENTS edges
+// to the composed interface as well.
+func TestBuildGraph_GoComposedInterfaceResolution(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	// Interface Reader with method Read
+	readerIface := &ast.Symbol{
+		ID:        "iface.go:1:Reader",
+		Name:      "Reader",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "iface.go",
+		StartLine: 1, EndLine: 5, StartCol: 0, EndCol: 50,
+		Language: "go",
+		Metadata: &ast.SymbolMetadata{
+			Methods: []ast.MethodSignature{
+				{Name: "Read", ParamCount: 1, ReturnCount: 2},
+			},
+		},
+	}
+
+	// Interface Writer with method Write
+	writerIface := &ast.Symbol{
+		ID:        "iface.go:7:Writer",
+		Name:      "Writer",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "iface.go",
+		StartLine: 7, EndLine: 11, StartCol: 0, EndCol: 50,
+		Language: "go",
+		Metadata: &ast.SymbolMetadata{
+			Methods: []ast.MethodSignature{
+				{Name: "Write", ParamCount: 1, ReturnCount: 2},
+			},
+		},
+	}
+
+	// Composed interface ReadWriter: embeds Reader + Writer, no direct methods
+	readWriterIface := &ast.Symbol{
+		ID:        "iface.go:13:ReadWriter",
+		Name:      "ReadWriter",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "iface.go",
+		StartLine: 13, EndLine: 17, StartCol: 0, EndCol: 50,
+		Language: "go",
+		Metadata: &ast.SymbolMetadata{
+			Extends:    "Reader",
+			Implements: []string{"Writer"},
+		},
+	}
+
+	// Struct MyRW implements both Read and Write
+	myRW := &ast.Symbol{
+		ID:        "impl.go:1:MyRW",
+		Name:      "MyRW",
+		Kind:      ast.SymbolKindStruct,
+		FilePath:  "impl.go",
+		StartLine: 1, EndLine: 5, StartCol: 0, EndCol: 50,
+		Language: "go",
+		Metadata: &ast.SymbolMetadata{
+			Methods: []ast.MethodSignature{
+				{Name: "Read", ParamCount: 1, ReturnCount: 2, ReceiverType: "*MyRW"},
+				{Name: "Write", ParamCount: 1, ReturnCount: 2, ReceiverType: "*MyRW"},
+			},
+		},
+	}
+
+	parseResult1 := testParseResult("iface.go", []*ast.Symbol{readerIface, writerIface, readWriterIface}, nil)
+	parseResult2 := testParseResult("impl.go", []*ast.Symbol{myRW}, nil)
+
+	result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+	if err != nil {
+		t.Fatalf("build failed: %v", err)
+	}
+
+	myRWNode, ok := result.Graph.GetNode(myRW.ID)
+	if !ok {
+		t.Fatal("MyRW node not found")
+	}
+
+	implementsTargets := make(map[string]bool)
+	for _, edge := range myRWNode.Outgoing {
+		if edge.Type == EdgeTypeImplements {
+			implementsTargets[edge.ToID] = true
+		}
+	}
+
+	if !implementsTargets[readerIface.ID] {
+		t.Error("expected EdgeTypeImplements from MyRW to Reader")
+	}
+	if !implementsTargets[writerIface.ID] {
+		t.Error("expected EdgeTypeImplements from MyRW to Writer")
+	}
+	if !implementsTargets[readWriterIface.ID] {
+		t.Error("expected EdgeTypeImplements from MyRW to ReadWriter (composed interface)")
+	}
+}
+
+// Phase 18: Test deep composed interface resolution (3 levels, like Hugo's Page).
+func TestBuildGraph_GoDeepComposedInterface(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	// Level 1: TypeProvider with method ResourceType
+	typeProvider := &ast.Symbol{
+		ID:        "types.go:1:TypeProvider",
+		Name:      "TypeProvider",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "types.go",
+		StartLine: 1, EndLine: 5, StartCol: 0, EndCol: 50,
+		Language: "go",
+		Metadata: &ast.SymbolMetadata{
+			Methods: []ast.MethodSignature{
+				{Name: "ResourceType", ParamCount: 0, ReturnCount: 1},
+			},
+		},
+	}
+
+	// Level 2: ResourceWithoutMeta embeds TypeProvider, no direct methods
+	resourceWithoutMeta := &ast.Symbol{
+		ID:        "types.go:7:ResourceWithoutMeta",
+		Name:      "ResourceWithoutMeta",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "types.go",
+		StartLine: 7, EndLine: 11, StartCol: 0, EndCol: 50,
+		Language: "go",
+		Metadata: &ast.SymbolMetadata{
+			Extends: "TypeProvider",
+		},
+	}
+
+	// Level 3: Resource embeds ResourceWithoutMeta, no direct methods
+	resource := &ast.Symbol{
+		ID:        "types.go:13:Resource",
+		Name:      "Resource",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "types.go",
+		StartLine: 13, EndLine: 17, StartCol: 0, EndCol: 50,
+		Language: "go",
+		Metadata: &ast.SymbolMetadata{
+			Extends: "ResourceWithoutMeta",
+		},
+	}
+
+	// Struct GenericResource implements ResourceType
+	genericResource := &ast.Symbol{
+		ID:        "impl.go:1:GenericResource",
+		Name:      "GenericResource",
+		Kind:      ast.SymbolKindStruct,
+		FilePath:  "impl.go",
+		StartLine: 1, EndLine: 5, StartCol: 0, EndCol: 50,
+		Language: "go",
+		Metadata: &ast.SymbolMetadata{
+			Methods: []ast.MethodSignature{
+				{Name: "ResourceType", ParamCount: 0, ReturnCount: 1, ReceiverType: "*GenericResource"},
+			},
+		},
+	}
+
+	parseResult1 := testParseResult("types.go", []*ast.Symbol{typeProvider, resourceWithoutMeta, resource}, nil)
+	parseResult2 := testParseResult("impl.go", []*ast.Symbol{genericResource}, nil)
+
+	result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+	if err != nil {
+		t.Fatalf("build failed: %v", err)
+	}
+
+	grNode, ok := result.Graph.GetNode(genericResource.ID)
+	if !ok {
+		t.Fatal("GenericResource node not found")
+	}
+
+	implementsTargets := make(map[string]bool)
+	for _, edge := range grNode.Outgoing {
+		if edge.Type == EdgeTypeImplements {
+			implementsTargets[edge.ToID] = true
+		}
+	}
+
+	if !implementsTargets[typeProvider.ID] {
+		t.Error("expected EdgeTypeImplements from GenericResource to TypeProvider")
+	}
+	if !implementsTargets[resourceWithoutMeta.ID] {
+		t.Error("expected EdgeTypeImplements from GenericResource to ResourceWithoutMeta")
+	}
+	if !implementsTargets[resource.ID] {
+		t.Error("expected EdgeTypeImplements from GenericResource to Resource (3-level deep)")
+	}
+}
+
+// Phase 18: Test that an interface embedding a non-existent interface remains empty
+// and does NOT match any struct (avoids false-positive "implements everything").
+func TestBuildGraph_GoComposedInterface_EmptyAfterResolution(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	// Interface that embeds a non-existent interface (placeholder target)
+	emptyComposer := &ast.Symbol{
+		ID:        "iface.go:1:EmptyComposer",
+		Name:      "EmptyComposer",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "iface.go",
+		StartLine: 1, EndLine: 5, StartCol: 0, EndCol: 50,
+		Language: "go",
+		Metadata: &ast.SymbolMetadata{
+			Extends: "NonExistent",
+		},
+	}
+
+	// Struct with a method — should NOT implement EmptyComposer
+	anything := &ast.Symbol{
+		ID:        "impl.go:1:Anything",
+		Name:      "Anything",
+		Kind:      ast.SymbolKindStruct,
+		FilePath:  "impl.go",
+		StartLine: 1, EndLine: 5, StartCol: 0, EndCol: 50,
+		Language: "go",
+		Metadata: &ast.SymbolMetadata{
+			Methods: []ast.MethodSignature{
+				{Name: "Foo", ParamCount: 0, ReturnCount: 0, ReceiverType: "*Anything"},
+			},
+		},
+	}
+
+	parseResult1 := testParseResult("iface.go", []*ast.Symbol{emptyComposer}, nil)
+	parseResult2 := testParseResult("impl.go", []*ast.Symbol{anything}, nil)
+
+	result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+	if err != nil {
+		t.Fatalf("build failed: %v", err)
+	}
+
+	anythingNode, ok := result.Graph.GetNode(anything.ID)
+	if !ok {
+		t.Fatal("Anything node not found")
+	}
+
+	for _, edge := range anythingNode.Outgoing {
+		if edge.Type == EdgeTypeImplements && edge.ToID == emptyComposer.ID {
+			t.Error("unexpected EdgeTypeImplements from Anything to EmptyComposer (should remain empty)")
+		}
+	}
+}
+
+// Phase 18: Test that TypeScript composed interfaces (extending other interfaces)
+// gain methods transitively and that classes implementing all methods match.
+func TestBuildGraph_TSComposedInterfaceResolution(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	// interface Readable { read(): string }
+	readable := &ast.Symbol{
+		ID:        "io.ts:1:Readable",
+		Name:      "Readable",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "io.ts",
+		StartLine: 1, EndLine: 5, StartCol: 0, EndCol: 50,
+		Language: "typescript",
+		Metadata: &ast.SymbolMetadata{
+			Methods: []ast.MethodSignature{
+				{Name: "read", ParamCount: 0, ReturnCount: 1},
+			},
+		},
+	}
+
+	// interface Writable { write(data: string): void }
+	writable := &ast.Symbol{
+		ID:        "io.ts:7:Writable",
+		Name:      "Writable",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "io.ts",
+		StartLine: 7, EndLine: 11, StartCol: 0, EndCol: 50,
+		Language: "typescript",
+		Metadata: &ast.SymbolMetadata{
+			Methods: []ast.MethodSignature{
+				{Name: "write", ParamCount: 1, ReturnCount: 0},
+			},
+		},
+	}
+
+	// interface ReadWriteStream extends Readable, Writable {} — no own methods
+	readWriteStream := &ast.Symbol{
+		ID:        "io.ts:13:ReadWriteStream",
+		Name:      "ReadWriteStream",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "io.ts",
+		StartLine: 13, EndLine: 15, StartCol: 0, EndCol: 50,
+		Language: "typescript",
+		Metadata: &ast.SymbolMetadata{
+			Extends:    "Readable",
+			Implements: []string{"Writable"},
+		},
+	}
+
+	// class FileStream implements read + write
+	fileStream := &ast.Symbol{
+		ID:        "stream.ts:1:FileStream",
+		Name:      "FileStream",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "stream.ts",
+		StartLine: 1, EndLine: 10, StartCol: 0, EndCol: 50,
+		Language: "typescript",
+		Metadata: &ast.SymbolMetadata{
+			Methods: []ast.MethodSignature{
+				{Name: "read", ParamCount: 0, ReturnCount: 1},
+				{Name: "write", ParamCount: 1, ReturnCount: 0},
+			},
+		},
+	}
+
+	parseResult1 := &ast.ParseResult{
+		FilePath: "io.ts",
+		Language: "typescript",
+		Symbols:  []*ast.Symbol{readable, writable, readWriteStream},
+		Package:  "io",
+	}
+	parseResult2 := &ast.ParseResult{
+		FilePath: "stream.ts",
+		Language: "typescript",
+		Symbols:  []*ast.Symbol{fileStream},
+		Package:  "stream",
+	}
+
+	result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+	if err != nil {
+		t.Fatalf("build failed: %v", err)
+	}
+
+	fsNode, ok := result.Graph.GetNode(fileStream.ID)
+	if !ok {
+		t.Fatal("FileStream node not found")
+	}
+
+	implementsTargets := make(map[string]bool)
+	for _, edge := range fsNode.Outgoing {
+		if edge.Type == EdgeTypeImplements {
+			implementsTargets[edge.ToID] = true
+		}
+	}
+
+	if !implementsTargets[readable.ID] {
+		t.Error("expected EdgeTypeImplements from FileStream to Readable")
+	}
+	if !implementsTargets[writable.ID] {
+		t.Error("expected EdgeTypeImplements from FileStream to Writable")
+	}
+	if !implementsTargets[readWriteStream.ID] {
+		t.Error("expected EdgeTypeImplements from FileStream to ReadWriteStream (composed interface)")
+	}
+}
+
+// Phase 18: Test that Python composed Protocols (inheriting from other Protocols)
+// gain methods transitively and that classes implementing all methods match.
+func TestBuildGraph_PythonComposedProtocolResolution(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	// class Readable(Protocol): def read(self) -> str: ...
+	readable := &ast.Symbol{
+		ID:        "protocols.py:1:Readable",
+		Name:      "Readable",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "protocols.py",
+		StartLine: 1, EndLine: 5, StartCol: 0, EndCol: 50,
+		Language: "python",
+		Metadata: &ast.SymbolMetadata{
+			Extends: "Protocol",
+			Methods: []ast.MethodSignature{
+				{Name: "read", ParamCount: 1, ReturnCount: 1},
+			},
+		},
+	}
+
+	// class Writable(Protocol): def write(self, data: str) -> None: ...
+	writable := &ast.Symbol{
+		ID:        "protocols.py:7:Writable",
+		Name:      "Writable",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "protocols.py",
+		StartLine: 7, EndLine: 11, StartCol: 0, EndCol: 50,
+		Language: "python",
+		Metadata: &ast.SymbolMetadata{
+			Extends: "Protocol",
+			Methods: []ast.MethodSignature{
+				{Name: "write", ParamCount: 2, ReturnCount: 0},
+			},
+		},
+	}
+
+	// class ReadWrite(Readable, Writable, Protocol): pass — no own methods
+	readWrite := &ast.Symbol{
+		ID:        "protocols.py:13:ReadWrite",
+		Name:      "ReadWrite",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "protocols.py",
+		StartLine: 13, EndLine: 14, StartCol: 0, EndCol: 50,
+		Language: "python",
+		Metadata: &ast.SymbolMetadata{
+			Extends:    "Readable",
+			Implements: []string{"Writable", "Protocol"},
+		},
+	}
+
+	// class FileHandler: implements read + write
+	fileHandler := &ast.Symbol{
+		ID:        "handlers.py:1:FileHandler",
+		Name:      "FileHandler",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "handlers.py",
+		StartLine: 1, EndLine: 10, StartCol: 0, EndCol: 50,
+		Language: "python",
+		Metadata: &ast.SymbolMetadata{
+			Methods: []ast.MethodSignature{
+				{Name: "read", ParamCount: 1, ReturnCount: 1},
+				{Name: "write", ParamCount: 2, ReturnCount: 0},
+			},
+		},
+	}
+
+	parseResult1 := &ast.ParseResult{
+		FilePath: "protocols.py",
+		Language: "python",
+		Symbols:  []*ast.Symbol{readable, writable, readWrite},
+		Package:  "protocols",
+	}
+	parseResult2 := &ast.ParseResult{
+		FilePath: "handlers.py",
+		Language: "python",
+		Symbols:  []*ast.Symbol{fileHandler},
+		Package:  "handlers",
+	}
+
+	result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+	if err != nil {
+		t.Fatalf("build failed: %v", err)
+	}
+
+	fhNode, ok := result.Graph.GetNode(fileHandler.ID)
+	if !ok {
+		t.Fatal("FileHandler node not found")
+	}
+
+	implementsTargets := make(map[string]bool)
+	for _, edge := range fhNode.Outgoing {
+		if edge.Type == EdgeTypeImplements {
+			implementsTargets[edge.ToID] = true
+		}
+	}
+
+	if !implementsTargets[readable.ID] {
+		t.Error("expected EdgeTypeImplements from FileHandler to Readable")
+	}
+	if !implementsTargets[writable.ID] {
+		t.Error("expected EdgeTypeImplements from FileHandler to Writable")
+	}
+	if !implementsTargets[readWrite.ID] {
+		t.Error("expected EdgeTypeImplements from FileHandler to ReadWrite (composed Protocol)")
+	}
+}

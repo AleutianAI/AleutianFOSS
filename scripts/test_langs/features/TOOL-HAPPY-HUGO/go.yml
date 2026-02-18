@@ -54,11 +54,13 @@ tests:
     description: >
       find_implementations tool against Hugo. Target: page.Page interface.
     query: |
-      What types implement the Page interface in the resources/page package?
+      What types implement the Page interface?
     expected_state: COMPLETE
     reference_answer: |
       The Page interface in resources/page/page.go has implementations including
-      pageState in hugolib/page.go and other page-related types.
+      pageState and pageWithOrdinal in hugolib/page.go, PageWithContext in
+      resources/page/page.go, nopPage in resources/page/page_nop.go, and
+      other page-related wrapper types.
     validations:
       - type: graph_tool_used
 

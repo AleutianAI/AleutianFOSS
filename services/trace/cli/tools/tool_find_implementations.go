@@ -214,9 +214,13 @@ func (t *findImplementationsTool) Execute(ctx context.Context, params map[string
 
 	var results map[string]*graph.QueryResult
 	var queryErrors int
+	// CR-20-7: Store all index symbols at function scope so formatText can reuse them
+	// instead of performing a redundant index lookup on the "not found" path.
+	var allIndexSymbols []*ast.Symbol
 
 	if t.index != nil {
 		symbols := t.index.GetByName(p.InterfaceName)
+		allIndexSymbols = symbols
 
 		// IT-03 C-3a: Accept interfaces, classes, and structs as valid targets.
 		// Go uses interfaces (SymbolKindInterface), Python/JS/TS use classes
@@ -309,7 +313,8 @@ func (t *findImplementationsTool) Execute(ctx context.Context, params map[string
 	output := t.buildOutput(p.InterfaceName, results)
 
 	// Format text output
-	outputText := t.formatText(p.InterfaceName, results)
+	// CR-20-7: Pass pre-fetched symbols to avoid redundant index lookup on "not found" path.
+	outputText := t.formatText(p.InterfaceName, results, allIndexSymbols)
 
 	span.SetAttributes(
 		attribute.Int("interface_count", len(results)),
@@ -413,7 +418,11 @@ func (t *findImplementationsTool) buildOutput(interfaceName string, results map[
 }
 
 // formatText creates a human-readable text summary.
-func (t *findImplementationsTool) formatText(interfaceName string, results map[string]*graph.QueryResult) string {
+//
+// CR-20-7: Added allIndexSymbols parameter to avoid redundant index lookup. When the
+// index path is used, Execute() already fetched all symbols by name — passing them here
+// eliminates a second O(n) index scan on the "not found" diagnostic path.
+func (t *findImplementationsTool) formatText(interfaceName string, results map[string]*graph.QueryResult, allIndexSymbols []*ast.Symbol) string {
 	var sb strings.Builder
 
 	totalImpls := 0
@@ -426,7 +435,26 @@ func (t *findImplementationsTool) formatText(interfaceName string, results map[s
 	if totalImpls == 0 {
 		if len(results) == 0 {
 			sb.WriteString(fmt.Sprintf("## GRAPH RESULT: Symbol '%s' not found\n\n", interfaceName))
-			sb.WriteString(fmt.Sprintf("No interface or class named '%s' exists in this codebase.\n", interfaceName))
+
+			// Phase 19: Check if the name exists as a non-type symbol (function, variable,
+			// export alias). This provides a more informative message for prototype-based
+			// JS codebases where patterns like `var app = module.exports = {}` create
+			// export aliases, not class/interface declarations.
+			// CR-20-7: Uses pre-fetched allIndexSymbols instead of redundant index lookup.
+			if len(allIndexSymbols) > 0 {
+				sb.WriteString(fmt.Sprintf("No interface, class, or struct named '%s' exists, but the name was found as:\n", interfaceName))
+				for _, sym := range allIndexSymbols {
+					if sym == nil {
+						continue
+					}
+					sb.WriteString(fmt.Sprintf("  • %s (%s) in %s:%d\n", sym.Name, sym.Kind, sym.FilePath, sym.StartLine))
+				}
+				sb.WriteString(fmt.Sprintf("\n'%s' is not a class or interface, so no inheritance hierarchy exists for it.\n", interfaceName))
+				sb.WriteString("This is common in JavaScript codebases that use prototype/module.exports patterns.\n\n")
+			} else {
+				sb.WriteString(fmt.Sprintf("No interface or class named '%s' exists in this codebase.\n", interfaceName))
+			}
+
 			sb.WriteString("The graph has been fully indexed - this is the definitive answer.\n\n")
 			sb.WriteString("**Do NOT use Grep to search further** - the graph already analyzed all source files.\n")
 		} else {

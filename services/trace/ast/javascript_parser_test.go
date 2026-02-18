@@ -2178,3 +2178,422 @@ function setup() {
 		t.Errorf("expected FunctionArgs to include 'express.static', got %v", useCall.FunctionArgs)
 	}
 }
+
+// =============================================================================
+// IT-03a Phase 12: Metadata.Methods population tests
+// =============================================================================
+
+func TestJavaScriptParser_ClassMethodSignatures(t *testing.T) {
+	source := `class UserService {
+    constructor(db) {
+        this.db = db;
+    }
+
+    getUser(id) {
+        return this.db.find(id);
+    }
+
+    saveUser(user) {
+        return this.db.save(user);
+    }
+
+    deleteUser(id) {
+        return this.db.delete(id);
+    }
+}
+`
+	parser := NewJavaScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var cls *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindClass && sym.Name == "UserService" {
+			cls = sym
+			break
+		}
+	}
+
+	if cls == nil {
+		t.Fatal("expected class 'UserService'")
+	}
+
+	if cls.Metadata == nil {
+		t.Fatal("expected Metadata to be non-nil")
+	}
+
+	// 3 methods (getUser, saveUser, deleteUser), constructor excluded
+	if len(cls.Metadata.Methods) != 3 {
+		t.Fatalf("expected 3 methods in Metadata.Methods, got %d", len(cls.Metadata.Methods))
+	}
+
+	expectedNames := map[string]bool{
+		"getUser":    false,
+		"saveUser":   false,
+		"deleteUser": false,
+	}
+	for _, m := range cls.Metadata.Methods {
+		if _, ok := expectedNames[m.Name]; ok {
+			expectedNames[m.Name] = true
+		} else {
+			t.Errorf("unexpected method in Metadata.Methods: %s", m.Name)
+		}
+	}
+	for name, found := range expectedNames {
+		if !found {
+			t.Errorf("expected method %q in Metadata.Methods", name)
+		}
+	}
+}
+
+func TestJavaScriptParser_ClassMethodSignatures_SkipConstructor(t *testing.T) {
+	source := `class Handler {
+    constructor(name) {
+        this.name = name;
+    }
+
+    handle(req) {
+        return null;
+    }
+}
+`
+	parser := NewJavaScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var cls *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindClass && sym.Name == "Handler" {
+			cls = sym
+			break
+		}
+	}
+
+	if cls == nil {
+		t.Fatal("expected class 'Handler'")
+	}
+
+	if cls.Metadata == nil {
+		t.Fatal("expected Metadata to be non-nil")
+	}
+
+	// Only 'handle', constructor should be excluded
+	if len(cls.Metadata.Methods) != 1 {
+		t.Fatalf("expected 1 method (excluding constructor), got %d", len(cls.Metadata.Methods))
+	}
+
+	if cls.Metadata.Methods[0].Name != "handle" {
+		t.Errorf("expected method 'handle', got %q", cls.Metadata.Methods[0].Name)
+	}
+
+	for _, m := range cls.Metadata.Methods {
+		if m.Name == "constructor" {
+			t.Error("constructor should NOT be in Metadata.Methods")
+		}
+	}
+}
+
+// IT-03a Phase 13 J-1: Arrow function call site extraction tests
+
+func TestJavaScriptParser_ArrowFunction_CallSites(t *testing.T) {
+	parser := NewJavaScriptParser()
+
+	src := []byte(`
+const fetchData = async (url) => {
+  const response = await fetch(url);
+  const data = response.json();
+  processData(data);
+  return data;
+};
+
+const transform = (items) => {
+  return items.map(item => item.name).filter(name => validate(name));
+};
+`)
+
+	result, err := parser.Parse(context.Background(), src, "arrow_calls.js")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	// Find fetchData
+	var fetchData *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "fetchData" {
+			fetchData = sym
+			break
+		}
+	}
+	if fetchData == nil {
+		t.Fatal("expected symbol 'fetchData'")
+	}
+	if fetchData.Kind != SymbolKindFunction {
+		t.Errorf("expected fetchData kind Function, got %v", fetchData.Kind)
+	}
+
+	// fetchData should have call sites: fetch, processData, and json (method)
+	if len(fetchData.Calls) == 0 {
+		t.Fatal("expected fetchData to have call sites, got 0")
+	}
+
+	callNames := make(map[string]bool)
+	for _, call := range fetchData.Calls {
+		callNames[call.Target] = true
+	}
+	if !callNames["fetch"] {
+		t.Error("expected call site 'fetch' in fetchData")
+	}
+	if !callNames["processData"] {
+		t.Error("expected call site 'processData' in fetchData")
+	}
+
+	// Find transform
+	var transform *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "transform" {
+			transform = sym
+			break
+		}
+	}
+	if transform == nil {
+		t.Fatal("expected symbol 'transform'")
+	}
+	if len(transform.Calls) == 0 {
+		t.Fatal("expected transform to have call sites, got 0")
+	}
+
+	transformCalls := make(map[string]bool)
+	for _, call := range transform.Calls {
+		transformCalls[call.Target] = true
+	}
+	if !transformCalls["map"] {
+		t.Error("expected call site 'map' in transform")
+	}
+	if !transformCalls["filter"] {
+		t.Error("expected call site 'filter' in transform")
+	}
+}
+
+func TestJavaScriptParser_ArrowFunction_ExpressionBody_CallSites(t *testing.T) {
+	parser := NewJavaScriptParser()
+
+	src := []byte(`
+const greet = (name) => console.log("Hello " + name);
+const double = (x) => multiply(x, 2);
+`)
+
+	result, err := parser.Parse(context.Background(), src, "arrow_expr.js")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	// Find double — expression body arrow with call_expression
+	var doubleSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "double" {
+			doubleSym = sym
+			break
+		}
+	}
+	if doubleSym == nil {
+		t.Fatal("expected symbol 'double'")
+	}
+	if doubleSym.Kind != SymbolKindFunction {
+		t.Errorf("expected kind Function, got %v", doubleSym.Kind)
+	}
+
+	// double should have call site: multiply
+	callNames := make(map[string]bool)
+	for _, call := range doubleSym.Calls {
+		callNames[call.Target] = true
+	}
+	if !callNames["multiply"] {
+		t.Error("expected call site 'multiply' in double")
+	}
+}
+
+// IT-03a Phase 16 J-2: Prototype methods without module.exports
+
+func TestJavaScriptParser_PrototypeMethod_NoExportAlias(t *testing.T) {
+	parser := NewJavaScriptParser()
+
+	src := []byte(`
+function Router() {
+  this.stack = [];
+}
+
+Router.prototype.handle = function handle(req, res) {
+  this.stack.forEach(function(layer) {
+    layer.handle(req, res);
+  });
+};
+
+Router.prototype.route = function route(path) {
+  return new Route(path);
+};
+`)
+
+	result, err := parser.Parse(context.Background(), src, "router.js")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	// Should find prototype methods even without module.exports aliases
+	methodNames := make(map[string]bool)
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindMethod {
+			methodNames[sym.Name] = true
+		}
+	}
+
+	if !methodNames["handle"] {
+		t.Error("expected prototype method 'handle' to be extracted")
+	}
+	if !methodNames["route"] {
+		t.Error("expected prototype method 'route' to be extracted")
+	}
+}
+
+// IT-03a Phase 16 J-3: Destructured require
+
+func TestJavaScriptParser_DestructuredRequire(t *testing.T) {
+	parser := NewJavaScriptParser()
+
+	src := []byte(`
+const { Router, Request } = require('express');
+const { readFile, writeFile } = require('fs');
+const path = require('path');
+`)
+
+	result, err := parser.Parse(context.Background(), src, "destructured.js")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	// Collect import aliases
+	importAliases := make(map[string]string)
+	for _, imp := range result.Imports {
+		importAliases[imp.Alias] = imp.Path
+	}
+
+	/// Destructured: { Router, Request } from 'express'
+	if importAliases["Router"] != "express" {
+		t.Errorf("expected Router alias from 'express', got %q", importAliases["Router"])
+	}
+	if importAliases["Request"] != "express" {
+		t.Errorf("expected Request alias from 'express', got %q", importAliases["Request"])
+	}
+
+	/// Destructured: { readFile, writeFile } from 'fs'
+	if importAliases["readFile"] != "fs" {
+		t.Errorf("expected readFile alias from 'fs', got %q", importAliases["readFile"])
+	}
+	if importAliases["writeFile"] != "fs" {
+		t.Errorf("expected writeFile alias from 'fs', got %q", importAliases["writeFile"])
+	}
+
+	/// Simple: path from 'path'
+	if importAliases["path"] != "path" {
+		t.Errorf("expected path alias from 'path', got %q", importAliases["path"])
+	}
+}
+
+// TestJavaScriptParser_DestructuredRequire_Aliased verifies that aliased destructured
+// require extracts only the local binding name (right side), not the remote export name.
+// Phase 17 COVERAGE-1: Regression test for pair_pattern bug fix.
+func TestJavaScriptParser_DestructuredRequire_Aliased(t *testing.T) {
+	parser := NewJavaScriptParser()
+
+	src := []byte(`
+const { Router: MyRouter, Request: Req } = require('express');
+const { createServer: makeServer } = require('http');
+`)
+
+	result, err := parser.Parse(context.Background(), src, "aliased.js")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	// Collect import aliases
+	importAliases := make(map[string]string)
+	for _, imp := range result.Imports {
+		if imp.Alias != "" {
+			importAliases[imp.Alias] = imp.Path
+		}
+	}
+
+	// Aliased: { Router: MyRouter } → only "MyRouter" should appear, NOT "Router"
+	if importAliases["MyRouter"] != "express" {
+		t.Errorf("expected MyRouter alias from 'express', got %q", importAliases["MyRouter"])
+	}
+	if importAliases["Req"] != "express" {
+		t.Errorf("expected Req alias from 'express', got %q", importAliases["Req"])
+	}
+	if importAliases["makeServer"] != "http" {
+		t.Errorf("expected makeServer alias from 'http', got %q", importAliases["makeServer"])
+	}
+
+	// The original export names should NOT appear as aliases
+	if _, exists := importAliases["Router"]; exists {
+		t.Errorf("original name 'Router' should not be in import aliases — only local binding 'MyRouter'")
+	}
+	if _, exists := importAliases["Request"]; exists {
+		t.Errorf("original name 'Request' should not be in import aliases — only local binding 'Req'")
+	}
+	if _, exists := importAliases["createServer"]; exists {
+		t.Errorf("original name 'createServer' should not be in import aliases — only local binding 'makeServer'")
+	}
+}
+
+// TestJavaScriptParser_ArrowFunction_ExpressionBody_Object verifies that
+// arrow functions returning object literals via parenthesized expressions
+// have their call sites extracted.
+// Phase 17 COVERAGE-3: Tests parenthesized_expression body arrow functions.
+func TestJavaScriptParser_ArrowFunction_ExpressionBody_Object(t *testing.T) {
+	parser := NewJavaScriptParser()
+
+	src := []byte(`
+const makeConfig = (name) => ({
+	key: generateKey(name),
+	value: transform(name)
+});
+`)
+
+	result, err := parser.Parse(context.Background(), src, "arrow_object.js")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	var makeConfig *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "makeConfig" {
+			makeConfig = sym
+			break
+		}
+	}
+
+	if makeConfig == nil {
+		t.Fatal("expected makeConfig symbol")
+	}
+
+	if makeConfig.Kind != SymbolKindFunction {
+		t.Errorf("expected SymbolKindFunction, got %v", makeConfig.Kind)
+	}
+
+	// Should have call sites extracted from the expression body
+	callTargets := make(map[string]bool)
+	for _, call := range makeConfig.Calls {
+		callTargets[call.Target] = true
+	}
+
+	if !callTargets["generateKey"] {
+		t.Errorf("expected call site 'generateKey', got calls: %v", callTargets)
+	}
+	if !callTargets["transform"] {
+		t.Errorf("expected call site 'transform', got calls: %v", callTargets)
+	}
+}
