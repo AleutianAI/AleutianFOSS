@@ -116,8 +116,22 @@ tools:
       - find function
       - find type
       - find variable
-    use_when: "User wants to find where a symbol is defined"
-    avoid_when: "User wants to find usages (use find_references)"
+      - find class
+      - find struct
+      - find interface
+      - where is
+      - what is
+      - locate
+      - symbol lookup
+      - definition location
+    use_when: >
+      User wants to find where a symbol (function, class, struct, interface, type, variable)
+      is defined. Examples: "Where is Router defined?", "Find the DataFrame class",
+      "What is Context?", "Locate the NestFactory class". Works across Go, Python, JS, TS.
+    avoid_when: >
+      User wants to find usages/references of a symbol (use find_references instead).
+      User wants to find who calls a function (use find_callers).
+      User wants to find what a function calls (use find_callees).
     requires:
       - graph_initialized
 

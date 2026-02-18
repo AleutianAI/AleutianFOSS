@@ -2597,3 +2597,89 @@ const makeConfig = (name) => ({
 		t.Errorf("expected call site 'transform', got calls: %v", callTargets)
 	}
 }
+
+// TestJavaScriptParser_ModuleExportsMarksFunctionExported verifies that when a file uses
+// module.exports = View and defines function View() with constructor pattern (this.x = ...),
+// the View symbol is marked as Exported=true and Kind=SymbolKindClass.
+// IT-04 Phase 2: Ensures the post-pass correctly marks CommonJS-exported symbols.
+func TestJavaScriptParser_ModuleExportsMarksFunctionExported(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `
+var debug = require('debug')('express:view');
+
+module.exports = View;
+
+function View(name, options) {
+  this.defaultEngine = options.defaultEngine;
+  this.ext = options.ext;
+  this.name = name;
+  this.root = options.root;
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "lib/view.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var viewSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "View" {
+			viewSym = sym
+			break
+		}
+	}
+
+	if viewSym == nil {
+		t.Fatal("expected to find symbol 'View'")
+	}
+
+	// IT-04: module.exports = View should mark View as exported
+	if !viewSym.Exported {
+		t.Error("expected View to be marked as Exported (module.exports = View)")
+	}
+
+	// Constructor function pattern (PascalCase + this.x = ...) should upgrade to class
+	if viewSym.Kind != SymbolKindClass {
+		t.Errorf("expected View kind to be %q (constructor function), got %q", SymbolKindClass, viewSym.Kind)
+	}
+}
+
+// TestJavaScriptParser_ModuleExportsMarksLayerExported verifies the same module.exports
+// pattern for Layer (router/layer.js).
+func TestJavaScriptParser_ModuleExportsMarksLayerExported(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `
+module.exports = Layer;
+
+function Layer(path, options, fn) {
+  this.handle = fn;
+  this.name = fn.name || '<anonymous>';
+  this.params = undefined;
+  this.path = undefined;
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "lib/router/layer.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var layerSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Layer" {
+			layerSym = sym
+			break
+		}
+	}
+
+	if layerSym == nil {
+		t.Fatal("expected to find symbol 'Layer'")
+	}
+
+	if !layerSym.Exported {
+		t.Error("expected Layer to be marked as Exported (module.exports = Layer)")
+	}
+
+	if layerSym.Kind != SymbolKindClass {
+		t.Errorf("expected Layer kind to be %q (constructor function), got %q", SymbolKindClass, layerSym.Kind)
+	}
+}

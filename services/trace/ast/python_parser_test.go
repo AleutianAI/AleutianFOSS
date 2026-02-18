@@ -866,6 +866,150 @@ func TestPythonParser_Parse_Validation(t *testing.T) {
 	}
 }
 
+// TestPythonParser_DecoratedClassWithManyMethods tests that a decorated class
+// with many methods (like Pandas MultiIndex) is correctly parsed and passes Validate().
+// IT-04: Diagnostic test for the find_symbol integration failure on MultiIndex.
+func TestPythonParser_DecoratedClassWithManyMethods(t *testing.T) {
+	source := `
+from pandas.compat import set_module
+
+@set_module("pandas")
+class MultiIndex(Index):
+    """A multi-level index object."""
+
+    _hidden_attrs = frozenset()
+    _cache = {}
+
+    def __new__(cls, levels=None, codes=None, sortorder=None, names=None,
+                dtype=None, copy=False, name=None, verify_integrity=True):
+        result = object.__new__(cls)
+        return result
+
+    def __init__(self, levels=None, codes=None, sortorder=None, names=None):
+        self._levels = levels
+        self._codes = codes
+
+    @classmethod
+    def from_arrays(cls, arrays, sortorder=None, names=None):
+        """Create a MultiIndex from arrays."""
+        return cls(levels=arrays, names=names)
+
+    @classmethod
+    def from_tuples(cls, tuples, sortorder=None, names=None):
+        """Create from list of tuples."""
+        return cls(levels=tuples, names=names)
+
+    @property
+    def levels(self):
+        return self._levels
+
+    @property
+    def codes(self):
+        return self._codes
+
+    def _get_level_number(self, level):
+        count = self.names.count(level)
+        return count
+
+    def _set_levels(self, levels, level=None, copy=False, validate=True,
+                    verify_integrity=False):
+        new_levels = []
+        for lev in levels:
+            new_levels.append(lev)
+        self._levels = new_levels
+
+    def get_loc(self, key, method=None):
+        """Get location for a label."""
+        return self._engine.get_loc(key)
+
+    def get_locs(self, seq):
+        """Get locations for a sequence."""
+        return [self.get_loc(x) for x in seq]
+
+    def _reindex_non_unique(self, target):
+        new_target = self._shallow_copy(target)
+        return new_target
+
+    def set_levels(self, levels, level=None, inplace=None, verify_integrity=True):
+        self._set_levels(levels, level=level, validate=True,
+                         verify_integrity=verify_integrity)
+
+    def set_codes(self, codes, level=None, inplace=None, verify_integrity=True):
+        self._codes = codes
+`
+	parser := NewPythonParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "pandas/core/indexes/multi.py")
+	if err != nil {
+		t.Fatalf("Parse() returned error: %v", err)
+	}
+
+	// Check ParseResult.Validate()
+	if err := result.Validate(); err != nil {
+		t.Fatalf("result.Validate() failed — WOULD CAUSE FILE DROP: %v", err)
+	}
+
+	// Find MultiIndex class
+	var mi *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "MultiIndex" {
+			mi = sym
+			break
+		}
+	}
+	if mi == nil {
+		t.Fatal("MultiIndex not found in parsed symbols")
+	}
+
+	// Verify Symbol.Validate() passes (including recursive children)
+	if err := mi.Validate(); err != nil {
+		t.Fatalf("MultiIndex.Validate() failed: %v", err)
+	}
+
+	t.Logf("MultiIndex found: Kind=%s, StartLine=%d, EndLine=%d, Exported=%v, Children=%d",
+		mi.Kind, mi.StartLine, mi.EndLine, mi.Exported, len(mi.Children))
+
+	// Log all children for diagnosis
+	for i, child := range mi.Children {
+		t.Logf("  Child[%d]: Name=%q Kind=%s StartLine=%d EndLine=%d Exported=%v",
+			i, child.Name, child.Kind, child.StartLine, child.EndLine, child.Exported)
+	}
+
+	// Verify expectations
+	if mi.Kind != SymbolKindClass {
+		t.Errorf("expected SymbolKindClass, got %s", mi.Kind)
+	}
+	if mi.Metadata == nil || mi.Metadata.Extends != "Index" {
+		t.Errorf("expected Extends=Index, got %v", mi.Metadata)
+	}
+	if !mi.Exported {
+		t.Error("expected MultiIndex to be exported")
+	}
+
+	// Verify decorator is captured
+	if mi.Metadata == nil || len(mi.Metadata.Decorators) == 0 {
+		t.Error("expected set_module decorator to be captured")
+	} else {
+		t.Logf("  Decorators: %v", mi.Metadata.Decorators)
+	}
+
+	// Check children include various kinds
+	methodCount := 0
+	propertyCount := 0
+	for _, child := range mi.Children {
+		switch child.Kind {
+		case SymbolKindMethod:
+			methodCount++
+		case SymbolKindProperty:
+			propertyCount++
+		}
+	}
+	t.Logf("  Methods: %d, Properties: %d", methodCount, propertyCount)
+
+	if methodCount == 0 {
+		t.Error("expected at least one method child")
+	}
+}
+
 func TestPythonParser_Parse_Hash(t *testing.T) {
 	parser := NewPythonParser()
 	content := []byte("def foo(): pass")

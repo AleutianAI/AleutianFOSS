@@ -332,7 +332,7 @@ func extractFunctionNameFromQuery(query string) string {
 			// Look for pattern: <Symbol> function/method
 			for i := 0; i < len(words)-1; i++ {
 				nextWordLower := strings.ToLower(words[i+1])
-				if nextWordLower == "function" || nextWordLower == "method" || nextWordLower == "symbol" {
+				if isSymbolKindKeyword(nextWordLower) {
 					candidate := strings.Trim(words[i], "?,.()")
 					if isValidFunctionName(candidate) && isFunctionLikeName(candidate) {
 						return candidate
@@ -342,12 +342,13 @@ func extractFunctionNameFromQuery(query string) string {
 		}
 	}
 
-	// P0 Fix (Feb 14, 2026): Pattern 6: "X function/method" anywhere in query
+	// P0 Fix (Feb 14, 2026): Pattern 6: "X function/method/class/struct" anywhere in query
 	// Handles: "What dominates Process function", "Find Process method"
+	// IT-04 Fix: Also handles "Where is the TransformNode class defined?"
 	words := strings.Fields(query)
 	for i := 0; i < len(words)-1; i++ {
 		nextWordLower := strings.ToLower(words[i+1])
-		if nextWordLower == "function" || nextWordLower == "method" || nextWordLower == "symbol" {
+		if isSymbolKindKeyword(nextWordLower) {
 			candidate := strings.Trim(words[i], "?,.()")
 			if isValidFunctionName(candidate) && isFunctionLikeName(candidate) {
 				return candidate
@@ -380,18 +381,40 @@ func isValidFunctionName(s string) bool {
 	// P0 Fix (Feb 14, 2026): Added "control", "dependencies", "dependency", "common"
 	// to prevent extracting query keywords instead of symbol names
 	lower := strings.ToLower(s)
+	// IT-04 Audit: Comprehensive skipWords aligned with genericWords (tool_helpers.go).
+	// Every word in genericWords should also be here, plus query-specific verbs/adverbs.
+	// Gap analysis identified 13 missing words; this list is now exhaustive.
 	skipWords := []string{
-		"the", "a", "an", "this", "that", "what", "who", "how", "which",
+		// English articles, pronouns, prepositions (aligned with genericWords)
+		"the", "a", "an", "this", "that", "what", "who", "how", "which", "where", "when",
+		"it", "them", "some", "every", "each", "into", "given",
+		// Query verbs and adjectives
 		"function", "method", "all", "any", "find", "show", "list", "get",
 		"path", "from", "to", "between", "and", "or", "with", "for", "in",
 		"most", "important", "top", "are", "is", "does", "do", "has", "have",
+		"defined", "codebase", "located", "location", "used", "called",
+		// Graph/tool relationship nouns
 		"these", "those", "connection", "connected", "calls", "callers", "callees",
 		"control", "dependencies", "dependency", "common", "dominators", "dominator",
-		"references", "reference", "implementations", "implementation", "symbol",
+		"references", "reference", "implementations", "implementation", "symbol", "symbols",
 		"hotspots", "hotspot", "cycles", "cycle", "communities", "community",
 		"extends", "extend", "implements", "implement", "subclass", "subclasses",
+		"superclass", "superclasses", "derivative", "derivatives",
+		"parent", "parents", "child", "children",
+		// Programming construct nouns (aligned with genericWords)
 		"classes", "class", "interface", "interfaces", "structs", "struct",
 		"base", "abstract", "derive", "derives", "inherit", "inherits",
+		"type", "types", "enum", "enums",
+		"prototype", "prototypes", "constructor", "constructors",
+		"object", "objects", "property", "properties", "field", "fields",
+		"variable", "variables", "constant", "constants",
+		"parameter", "parameters", "argument", "arguments",
+		"module", "modules", "package", "packages",
+		"decorator", "component",
+		// File/code nouns (aligned with genericWords)
+		"code", "file", "files", "name", "names",
+		"extension", "extensions",
+		"caller", "callee",
 	}
 	for _, skip := range skipWords {
 		if lower == skip {
@@ -524,6 +547,36 @@ func isFileExtension(s string) bool {
 		"cs", "cpp", "cc", "c", "h", "hpp", "swift", "m", "mm",
 		"css", "html", "htm", "xml", "json", "yaml", "yml", "toml",
 		"md", "txt", "sh", "bash", "zsh", "sql", "proto", "wasm":
+		return true
+	}
+	return false
+}
+
+// isSymbolKindKeyword returns true if the word is a programming construct keyword
+// that typically follows a symbol name in queries (e.g., "TransformNode class",
+// "Process function", "Engine struct").
+//
+// IT-04 Fix: Previously only "function"/"method"/"symbol" were recognized, causing
+// Pattern 6 to miss "X class defined?" queries.
+//
+// IT-04 Audit: Comprehensive coverage across Go, Python, TypeScript, JavaScript:
+//   - Go: struct, interface, type, func, method
+//   - Python: class, decorator, module, function, method
+//   - TypeScript/JavaScript: class, interface, enum, type, function, method,
+//     prototype, constructor, component, property
+//   - Cross-language: variable, constant, field, parameter, symbol
+func isSymbolKindKeyword(word string) bool {
+	switch word {
+	// Core symbol kinds (all languages)
+	case "function", "func", "method", "symbol",
+		"class", "struct", "interface", "type", "enum",
+		// JS/TS specific
+		"prototype", "constructor", "object", "component",
+		// Member-level
+		"variable", "var", "constant", "const",
+		"property", "field", "parameter",
+		// Python specific
+		"decorator", "module":
 		return true
 	}
 	return false
@@ -921,19 +974,59 @@ func extractTopNFromQuery(query string, defaultVal int) int {
 //   - Query is valid UTF-8 string.
 //   - "methods" maps to "function" kind for graph queries.
 //   - "struct" and "interface" map to "type" kind for graph queries.
+//
+// extractKindFromQuery extracts a symbol kind filter from the user's query.
+//
+// IT-04 Audit: Added class, enum, variable, constant, decorator, method mappings.
+// Previously only "function" and "type" were recognized, causing incorrect kind
+// filters for Python/JS/TS class queries and Go enum queries.
 func extractKindFromQuery(query string) string {
 	lowerQuery := strings.ToLower(query)
 
 	// Check for function-related keywords
 	if strings.Contains(lowerQuery, "function") || strings.Contains(lowerQuery, "func ") ||
-		strings.Contains(lowerQuery, "functions") || strings.Contains(lowerQuery, "methods") {
+		strings.Contains(lowerQuery, "functions") {
 		return "function"
 	}
 
-	// Check for type-related keywords
-	if strings.Contains(lowerQuery, " type") || strings.Contains(lowerQuery, "types") ||
-		strings.Contains(lowerQuery, "struct") || strings.Contains(lowerQuery, "interface") {
+	// Check for method-related keywords (separate from function for precision)
+	if strings.Contains(lowerQuery, " method") || strings.Contains(lowerQuery, "methods") {
+		return "method"
+	}
+
+	// Check for class-related keywords (Python, JS, TS)
+	if strings.Contains(lowerQuery, " class") || strings.Contains(lowerQuery, "classes") {
+		return "class"
+	}
+
+	// Check for struct-related keywords (Go)
+	if strings.Contains(lowerQuery, "struct") || strings.Contains(lowerQuery, "structs") {
+		return "struct"
+	}
+
+	// Check for interface-related keywords
+	if strings.Contains(lowerQuery, "interface") || strings.Contains(lowerQuery, "interfaces") {
+		return "interface"
+	}
+
+	// Check for enum-related keywords (TS, Python)
+	if strings.Contains(lowerQuery, " enum") || strings.Contains(lowerQuery, "enums") {
+		return "enum"
+	}
+
+	// Check for type-related keywords (generic)
+	if strings.Contains(lowerQuery, " type") || strings.Contains(lowerQuery, "types") {
 		return "type"
+	}
+
+	// Check for variable/constant keywords
+	if strings.Contains(lowerQuery, "variable") || strings.Contains(lowerQuery, "variables") ||
+		strings.Contains(lowerQuery, " var ") {
+		return "variable"
+	}
+	if strings.Contains(lowerQuery, "constant") || strings.Contains(lowerQuery, "constants") ||
+		strings.Contains(lowerQuery, " const ") {
+		return "constant"
 	}
 
 	return "all"

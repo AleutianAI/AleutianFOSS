@@ -87,7 +87,9 @@ func TestResolveSymbol_NameMatch_Single(t *testing.T) {
 
 // TestResolveSymbol_NameMatch_SingleNonFunction tests fallback when only non-function exists.
 // CB-31d: When searching for "Handler" and only Handler (struct) exists, we skip it
-// hoping to find a function, but if we don't find anything better, we return it via fallback.
+// IT-04 Fix: Single non-function match should now return with high confidence.
+// Previously it was skipped in favor of substring/fuzzy search, which was wrong —
+// an exact name match is authoritative regardless of symbol kind.
 func TestResolveSymbol_NameMatch_SingleNonFunction(t *testing.T) {
 	idx := index.NewSymbolIndex()
 	symbol := testSymbol("pkg/handler.go:Handler", "Handler", ast.SymbolKindStruct, 10)
@@ -99,21 +101,20 @@ func TestResolveSymbol_NameMatch_SingleNonFunction(t *testing.T) {
 
 	resolvedID, confidence, strategy, err := resolveSymbol(deps, "Handler")
 	if err != nil {
-		t.Fatalf("Expected fallback, got error: %v", err)
+		t.Fatalf("Expected match, got error: %v", err)
 	}
 
 	if resolvedID != "pkg/handler.go:Handler" {
 		t.Errorf("Expected ID 'pkg/handler.go:Handler', got '%s'", resolvedID)
 	}
 
-	// Should return via fallback or fuzzy with low confidence
-	if confidence > 0.6 {
-		t.Errorf("Expected low confidence fallback (<= 0.6), got %f", confidence)
+	// IT-04: Single exact name match returns 0.95 regardless of kind
+	if confidence != 0.95 {
+		t.Errorf("Expected confidence 0.95, got %f", confidence)
 	}
 
-	// Strategy should indicate it's not an ideal match
-	if strategy == "name" {
-		t.Errorf("Expected fallback/fuzzy strategy, got '%s'", strategy)
+	if strategy != "name" {
+		t.Errorf("Expected strategy 'name', got '%s'", strategy)
 	}
 }
 
@@ -420,7 +421,9 @@ func TestResolveSymbolCached_NilSession(t *testing.T) {
 }
 
 // TestResolveSymbol_SubstringMatch tests Strategy 2.5: substring matching.
-// CB-31d Test 94 fix: "Handler" should match "NewHandler"
+// IT-04 Update: When there's an exact name match (Handler struct), it should be
+// returned immediately with high confidence. Substring matching only kicks in
+// when there's NO exact name match.
 func TestResolveSymbol_SubstringMatch(t *testing.T) {
 	idx := index.NewSymbolIndex()
 
@@ -441,25 +444,23 @@ func TestResolveSymbol_SubstringMatch(t *testing.T) {
 
 	deps := &Dependencies{SymbolIndex: idx}
 
-	// Test: "Handler" should match "NewHandler" via substring, not Handler struct
+	// IT-04: "Handler" exact match returns the Handler struct directly
 	resolvedID, confidence, strategy, err := resolveSymbol(deps, "Handler")
 	if err != nil {
-		t.Fatalf("Expected substring match, got error: %v", err)
+		t.Fatalf("Expected match, got error: %v", err)
 	}
 
-	// Should prefer NewHandler (function) over Handler (struct)
-	if resolvedID != "pkg/handlers/beacon_upload_handler.go:22:NewHandler" {
-		t.Errorf("Expected NewHandler (function), got '%s'", resolvedID)
+	// Exact name match returns Handler struct with high confidence
+	if resolvedID != "pkg/handlers/beacon_upload_handler.go:12:Handler" {
+		t.Errorf("Expected exact match Handler struct, got '%s'", resolvedID)
 	}
 
-	// Confidence should be 0.75 (substring, not prefix) + 0.05 (function bonus) = 0.8
-	// Note: "Handler" is IN "NewHandler" but not a prefix
-	if confidence < 0.75 || confidence > 0.85 {
-		t.Errorf("Expected confidence 0.75-0.85, got %f", confidence)
+	if confidence != 0.95 {
+		t.Errorf("Expected confidence 0.95, got %f", confidence)
 	}
 
-	if strategy != "substring" {
-		t.Errorf("Expected strategy 'substring', got '%s'", strategy)
+	if strategy != "name" {
+		t.Errorf("Expected strategy 'name', got '%s'", strategy)
 	}
 }
 

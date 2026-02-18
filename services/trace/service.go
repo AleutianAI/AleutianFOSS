@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -271,11 +272,23 @@ func (s *Service) Init(ctx context.Context, projectRoot string, languages, exclu
 	g := buildResult.Graph
 
 	// I-1: Add symbols to index recursively (including child symbols)
+	// IT-04: Observable pipeline — log all index add failures for diagnostics.
+	var totalAdded, totalDropped, totalRetried int
 	for _, pr := range parseResults {
 		if pr == nil {
 			continue
 		}
-		addSymbolsToIndexRecursive(idx, pr.Symbols)
+		added, dropped, retried := addSymbolsToIndexRecursive(idx, pr.Symbols, slog.Default())
+		totalAdded += added
+		totalDropped += dropped
+		totalRetried += retried
+	}
+	if totalDropped > 0 || totalRetried > 0 {
+		slog.Default().Warn("index population completed with issues",
+			slog.Int("added", totalAdded),
+			slog.Int("dropped", totalDropped),
+			slog.Int("retried", totalRetried),
+		)
 	}
 
 	result.SymbolsExtracted = idx.Stats().TotalSymbols
@@ -556,24 +569,124 @@ func (s *Service) isLanguageFile(ext string, languages []string) bool {
 //	child symbols (e.g., nested functions, struct fields) would be in the
 //	graph but not findable via the index.
 //
+//	IT-04 Fix: Logs all index add failures for diagnostics instead of silently
+//	discarding errors. On ErrInvalidSymbol with children, strips children and
+//	retries the parent alone, then adds children independently. This prevents
+//	invalid children from poisoning parent symbol indexing.
+//
 // Inputs:
 //   - idx: The symbol index to add to. Must not be nil.
 //   - symbols: Slice of symbols to add. Nil entries are skipped.
+//   - logger: Logger for diagnostic output. Must not be nil.
+//
+// Outputs:
+//   - added: Number of symbols successfully added to the index.
+//   - dropped: Number of symbols that could not be added (logged).
+//   - retried: Number of symbols that required child-stripping retry.
 //
 // Thread Safety: Depends on index.SymbolIndex thread safety.
-func addSymbolsToIndexRecursive(idx *index.SymbolIndex, symbols []*ast.Symbol) {
-	for _, sym := range symbols {
+func addSymbolsToIndexRecursive(idx *index.SymbolIndex, symbols []*ast.Symbol, logger *slog.Logger) (added, dropped, retried int) {
+	for i, sym := range symbols {
 		if sym == nil {
 			continue
 		}
-		// Add symbol to index, ignoring duplicates
-		_ = idx.Add(sym)
 
-		// Recursively add children
-		if len(sym.Children) > 0 {
-			addSymbolsToIndexRecursive(idx, sym.Children)
+		err := idx.Add(sym)
+		if err == nil {
+			added++
+			// Recursively add children
+			if len(sym.Children) > 0 {
+				ca, cd, cr := addSymbolsToIndexRecursive(idx, sym.Children, logger)
+				added += ca
+				dropped += cd
+				retried += cr
+			}
+			continue
+		}
+
+		switch {
+		case errors.Is(err, index.ErrDuplicateSymbol):
+			// Expected for some patterns (re-exports, aliases). Log at debug level.
+			logger.Debug("index: duplicate symbol skipped",
+				slog.String("name", sym.Name),
+				slog.String("kind", sym.Kind.String()),
+				slog.String("id", sym.ID),
+				slog.String("file", sym.FilePath),
+			)
+			dropped++
+			// Still recurse children — they may have unique IDs
+			if len(sym.Children) > 0 {
+				ca, cd, cr := addSymbolsToIndexRecursive(idx, sym.Children, logger)
+				added += ca
+				dropped += cd
+				retried += cr
+			}
+
+		case errors.Is(err, index.ErrInvalidSymbol) && len(sym.Children) > 0:
+			// Children may be poisoning parent validation. Strip children, retry parent,
+			// then add children independently.
+			logger.Warn("index: invalid symbol with children, retrying without children",
+				slog.String("name", sym.Name),
+				slog.String("kind", sym.Kind.String()),
+				slog.String("file", sym.FilePath),
+				slog.Int("children", len(sym.Children)),
+				slog.String("error", err.Error()),
+			)
+			retried++
+			// Clone parent before stripping children to avoid mutating the original.
+			// addSymbolLocked stores the pointer, so mutating the original would leave
+			// an invalid-child parent in the index, violating the Validate() invariant.
+			parentCopy := *sym
+			parentCopy.Children = nil
+			retryErr := idx.Add(&parentCopy)
+			if retryErr == nil {
+				added++
+			} else {
+				logger.Error("index: symbol still invalid after stripping children",
+					slog.String("name", sym.Name),
+					slog.String("kind", sym.Kind.String()),
+					slog.String("file", sym.FilePath),
+					slog.String("error", retryErr.Error()),
+				)
+				dropped++
+			}
+			// Add children independently regardless of parent outcome
+			ca, cd, cr := addSymbolsToIndexRecursive(idx, sym.Children, logger)
+			added += ca
+			dropped += cd
+			retried += cr
+
+		case errors.Is(err, index.ErrInvalidSymbol):
+			logger.Error("index: invalid symbol dropped",
+				slog.String("name", sym.Name),
+				slog.String("kind", sym.Kind.String()),
+				slog.String("file", sym.FilePath),
+				slog.String("error", err.Error()),
+			)
+			dropped++
+
+		case errors.Is(err, index.ErrMaxSymbolsExceeded):
+			// Count remaining symbols (including current) as dropped.
+			remaining := len(symbols) - i
+			logger.Warn("index: max symbols exceeded, stopping",
+				slog.String("name", sym.Name),
+				slog.String("file", sym.FilePath),
+				slog.Int("remaining_unprocessed", remaining),
+			)
+			dropped += remaining
+			return added, dropped, retried
+
+		default:
+			logger.Error("index: unexpected error adding symbol",
+				slog.String("name", sym.Name),
+				slog.String("kind", sym.Kind.String()),
+				slog.String("file", sym.FilePath),
+				slog.String("error", err.Error()),
+			)
+			dropped++
 		}
 	}
+	return added, dropped, retried
 }
 
 // GetContext assembles context for a query.

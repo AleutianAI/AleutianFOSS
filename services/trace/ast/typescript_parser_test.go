@@ -800,6 +800,113 @@ func TestTypeScriptParser_Parse_Validation(t *testing.T) {
 	}
 }
 
+// TestTypeScriptParser_DecoratedFieldClass tests that a class with decorated fields
+// (like BabylonJS TransformNode) is correctly parsed and passes Validate().
+// IT-04: This is a diagnostic test for the find_symbol integration failure on TransformNode.
+func TestTypeScriptParser_DecoratedFieldClass(t *testing.T) {
+	source := `
+import { serialize, serializeAsVector3 } from "./decorators";
+
+export class TransformNode extends Node {
+    @serializeAsVector3("position")
+    private _position: Vector3 = Vector3.Zero();
+
+    @serializeAsVector3("rotation")
+    private _rotation: Vector3 = Vector3.Zero();
+
+    @serialize()
+    private _scaling: Vector3 = Vector3.One();
+
+    @serialize("billboardMode")
+    public billboardMode: number = 0;
+
+    constructor(name: string, scene?: Scene) {
+        super(name, scene);
+    }
+
+    public getAbsolutePosition(): Vector3 {
+        return this._position;
+    }
+
+    public setPositionWithLocalVector(newPosition: Vector3): TransformNode {
+        this._position = newPosition;
+        return this;
+    }
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test/transformNode.ts")
+	if err != nil {
+		t.Fatalf("Parse() returned error: %v", err)
+	}
+
+	// Check ParseResult.Validate()
+	if err := result.Validate(); err != nil {
+		t.Fatalf("result.Validate() failed: %v", err)
+	}
+
+	// Find TransformNode class
+	var tn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "TransformNode" {
+			tn = sym
+			break
+		}
+	}
+	if tn == nil {
+		t.Fatal("TransformNode not found in parsed symbols")
+	}
+
+	// Verify Symbol.Validate() passes (including recursive children validation)
+	if err := tn.Validate(); err != nil {
+		t.Fatalf("TransformNode.Validate() failed: %v", err)
+	}
+
+	t.Logf("TransformNode found: Kind=%s, StartLine=%d, EndLine=%d, Children=%d",
+		tn.Kind, tn.StartLine, tn.EndLine, len(tn.Children))
+
+	// Log all children for diagnosis
+	for i, child := range tn.Children {
+		t.Logf("  Child[%d]: Name=%q Kind=%s StartLine=%d EndLine=%d",
+			i, child.Name, child.Kind, child.StartLine, child.EndLine)
+	}
+
+	// Verify key expectations
+	if tn.Kind != SymbolKindClass {
+		t.Errorf("expected SymbolKindClass, got %s", tn.Kind)
+	}
+	if !tn.Exported {
+		t.Error("expected TransformNode to be exported")
+	}
+	if tn.Metadata == nil || tn.Metadata.Extends != "Node" {
+		t.Errorf("expected Extends=Node, got %v", tn.Metadata)
+	}
+
+	// Check that children include methods AND fields
+	hasMethod := false
+	hasField := false
+	for _, child := range tn.Children {
+		if child.Kind == SymbolKindMethod {
+			hasMethod = true
+		}
+		if child.Kind == SymbolKindField {
+			hasField = true
+		}
+	}
+	if !hasMethod {
+		t.Error("expected at least one method child")
+	}
+	if !hasField {
+		t.Error("expected at least one field child (decorated fields)")
+	}
+
+	// Verify Validate() passes — this is the exact check that service.go's
+	// parseFileToResult uses. If this fails, the ENTIRE file is dropped.
+	if err := result.Validate(); err != nil {
+		t.Fatalf("ParseResult.Validate() WOULD CAUSE FILE DROP: %v", err)
+	}
+}
+
 func TestTypeScriptParser_Parse_Hash(t *testing.T) {
 	parser := NewTypeScriptParser()
 	content := []byte("const x = 1;")
@@ -2861,5 +2968,49 @@ export class Validator {
 	}
 	if noNarrowings.Metadata != nil && len(noNarrowings.Metadata.TypeNarrowings) > 0 {
 		t.Errorf("expected no TypeNarrowings, got %v", noNarrowings.Metadata.TypeNarrowings)
+	}
+}
+
+// TestTypeScriptParser_ExportConstNewInstance verifies that `export const X = new Y()`
+// produces a symbol with Kind=SymbolKindConstant and Exported=true.
+// IT-04 Phase 3: Ensures NestFactory-style patterns are correctly parsed.
+func TestTypeScriptParser_ExportConstNewInstance(t *testing.T) {
+	parser := NewTypeScriptParser()
+	content := `
+export class NestFactoryStatic {
+  async create(module: any): Promise<any> {
+    return {};
+  }
+}
+
+export const NestFactory = new NestFactoryStatic();
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "packages/core/nest-factory.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var nestFactory *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "NestFactory" {
+			nestFactory = sym
+			break
+		}
+	}
+
+	if nestFactory == nil {
+		t.Fatal("expected to find symbol 'NestFactory'")
+	}
+
+	if !nestFactory.Exported {
+		t.Error("expected NestFactory to be marked as Exported")
+	}
+
+	if nestFactory.Kind != SymbolKindConstant {
+		t.Errorf("expected NestFactory kind to be %q, got %q", SymbolKindConstant, nestFactory.Kind)
+	}
+
+	if nestFactory.Language != "typescript" {
+		t.Errorf("expected language 'typescript', got %q", nestFactory.Language)
 	}
 }

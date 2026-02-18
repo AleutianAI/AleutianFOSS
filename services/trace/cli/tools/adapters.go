@@ -1480,6 +1480,34 @@ func StaticToolDefinitions() []ToolDefinition {
 			SideEffects: false,
 			Timeout:     15 * time.Second,
 		},
+		// IT-04: Add find_symbol to static definitions so the LLM classifier
+		// can route "where is X defined?" and "find X" queries correctly.
+		{
+			Name: "find_symbol",
+			Description: "Look up a symbol (function, type, class, interface, variable) by name. " +
+				"Returns the symbol's definition location (file and line), kind, package, and signature. " +
+				"Use for 'where is X defined?', 'find X', 'locate X', 'what is X?'. " +
+				"Works across all languages: Go structs/interfaces, Python classes, JS/TS classes and functions.",
+			Parameters: map[string]ParamDef{
+				"name": {
+					Type:        ParamTypeString,
+					Description: "Name of the symbol to find (e.g., 'Router', 'DataFrame', 'Context', 'NestFactory')",
+					Required:    true,
+				},
+				"kind": {
+					Type:        ParamTypeString,
+					Description: "Filter by symbol kind: function, method, class, struct, interface, type, variable, constant, enum, or all",
+					Required:    false,
+					Default:     "all",
+					Enum:        []any{"function", "method", "class", "struct", "interface", "type", "variable", "constant", "enum", "all"},
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    92,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     5 * time.Second,
+		},
 		{
 			Name: "find_callers",
 			Description: "Find all functions that CALL a given function (upstream dependencies). " +

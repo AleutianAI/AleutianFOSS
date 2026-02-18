@@ -205,6 +205,21 @@ func (p *JavaScriptParser) Parse(ctx context.Context, content []byte, filePath s
 
 	p.extractSymbols(ctx, rootNode, content, filePath, result, false, exportAliases)
 
+	// IT-04 Phase 2: Post-pass — mark symbols as Exported when they appear in
+	// module.exports assignments. buildModuleExportAliases detects patterns like
+	// `module.exports = View` but the export alias is discovered before the function
+	// symbol is created (top-to-bottom AST traversal). This post-pass retroactively
+	// applies the export status.
+	if len(exportAliases) > 0 {
+		for _, sym := range result.Symbols {
+			if !sym.Exported {
+				if _, isExported := exportAliases[sym.Name]; isExported {
+					sym.Exported = true
+				}
+			}
+		}
+	}
+
 	// Validate result
 	if err := result.Validate(); err != nil {
 		result.Errors = append(result.Errors, fmt.Sprintf("validation error: %v", err))

@@ -153,10 +153,10 @@ func (t *findSymbolTool) Definition() ToolDefinition {
 			},
 			"kind": {
 				Type:        ParamTypeString,
-				Description: "Filter by symbol kind: function, method, class, struct, interface, type, variable, constant, enum, or all",
+				Description: "Filter by symbol kind: function, method, class, struct, interface, type, variable, constant, enum, decorator, property, field, component, or all",
 				Required:    false,
 				Default:     "all",
-				Enum:        []any{"function", "method", "class", "struct", "interface", "type", "variable", "constant", "enum", "all"},
+				Enum:        []any{"function", "method", "class", "struct", "interface", "type", "variable", "constant", "enum", "decorator", "property", "field", "component", "all"},
 			},
 			"package": {
 				Type:        ParamTypeString,
@@ -381,11 +381,12 @@ func (t *findSymbolTool) formatText(searchName string, symbols []*ast.Symbol) st
 
 // matchesSymbolKind checks if a symbol kind matches a filter string.
 //
-// IT-03 C-2: Extended to support class, struct, and enum kinds.
-// "type" matches both SymbolKindType and SymbolKindStruct for backward compatibility.
-// "class" matches SymbolKindClass (Python/JS/TS class definitions).
-// "struct" matches SymbolKindStruct (Go struct definitions).
-// "all" or any unrecognized value matches everything.
+// IT-04 Audit: Comprehensive kind matching across Go, Python, TypeScript, JavaScript.
+//   - "type" now matches Type, Struct, Class, AND Interface (all are type-level constructs)
+//   - "class" matches Class (Python/JS/TS class definitions)
+//   - "struct" matches Struct (Go struct definitions)
+//   - Added "decorator", "property", "field", "component" filters
+//   - "all" or any unrecognized value matches everything
 func matchesSymbolKind(kind ast.SymbolKind, filter string) bool {
 	switch filter {
 	case "function":
@@ -393,11 +394,18 @@ func matchesSymbolKind(kind ast.SymbolKind, filter string) bool {
 	case "method":
 		return kind == ast.SymbolKindMethod
 	case "class":
-		return kind == ast.SymbolKindClass
+		// IT-04: "class" matches both Class and Struct. The router may send "class"
+		// for Go codebases where the actual kind is Struct, or vice versa.
+		return kind == ast.SymbolKindClass || kind == ast.SymbolKindStruct
 	case "struct":
-		return kind == ast.SymbolKindStruct
+		// IT-04: "struct" matches both Struct and Class. JS/Python/TS don't have structs;
+		// the router (trained on Go) sends "struct" for constructor functions that the
+		// JS parser classifies as SymbolKindClass.
+		return kind == ast.SymbolKindStruct || kind == ast.SymbolKindClass
 	case "type":
-		return kind == ast.SymbolKindType || kind == ast.SymbolKindStruct
+		// "type" is the broadest type-level filter: matches all type-defining constructs
+		return kind == ast.SymbolKindType || kind == ast.SymbolKindStruct ||
+			kind == ast.SymbolKindClass || kind == ast.SymbolKindInterface
 	case "interface":
 		return kind == ast.SymbolKindInterface
 	case "variable":
@@ -406,6 +414,14 @@ func matchesSymbolKind(kind ast.SymbolKind, filter string) bool {
 		return kind == ast.SymbolKindConstant
 	case "enum":
 		return kind == ast.SymbolKindEnum
+	case "decorator":
+		return kind == ast.SymbolKindDecorator
+	case "property":
+		return kind == ast.SymbolKindProperty
+	case "field":
+		return kind == ast.SymbolKindField
+	case "component":
+		return kind == ast.SymbolKindComponent
 	case "all":
 		return true
 	default:

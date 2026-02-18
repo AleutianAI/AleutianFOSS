@@ -814,17 +814,17 @@ func TestExtractKindFromQuery(t *testing.T) {
 		{
 			name:  "method_keyword",
 			query: "List all methods with high connectivity",
-			want:  "function", // methods map to function
+			want:  "method", // IT-04 Audit: methods now map precisely to "method"
 		},
 		{
 			name:  "struct_keyword",
 			query: "Find hotspot structs",
-			want:  "type", // struct maps to type
+			want:  "struct", // IT-04 Audit: structs now map precisely to "struct"
 		},
 		{
 			name:  "interface_keyword",
 			query: "Show interface hotspots",
-			want:  "type", // interface maps to type
+			want:  "interface", // IT-04 Audit: interfaces now map precisely to "interface"
 		},
 		{
 			name:  "no_kind_specified",

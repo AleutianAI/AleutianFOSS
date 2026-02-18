@@ -71,8 +71,11 @@ tests:
       Where is the Application prototype defined in this codebase?
     expected_state: COMPLETE
     reference_answer: |
-      The Application prototype (app) is defined in lib/application.js. It is the
-      core object that provides routing, middleware registration, and server lifecycle.
+      No exact match for 'Application'. Partial/fuzzy matches include
+      createApplication (function) at lib/express.js:37 and ./application (import)
+      at lib/express.js:18. The Application prototype object is defined as
+      var app = exports = module.exports = {} in lib/application.js, which has
+      no discrete symbol named 'Application'.
     validations:
       - type: graph_tool_used
 
@@ -678,8 +681,8 @@ tests:
       Where is the View constructor defined in this codebase?
     expected_state: COMPLETE
     reference_answer: |
-      The View constructor is defined in lib/view.js. It handles template file
-      resolution and rendering engine delegation for app.render calls.
+      Found 1 symbol matching 'View': View (class) at lib/view.js:52,
+      signature function View(name, options), exported.
     validations:
       - type: graph_tool_used
 
@@ -692,8 +695,8 @@ tests:
       Where is the Layer constructor defined?
     expected_state: COMPLETE
     reference_answer: |
-      The Layer constructor is defined in lib/router/layer.js. It wraps individual
-      middleware functions and route handlers with path matching and error handling.
+      Found 1 symbol matching 'Layer': Layer (class) at lib/router/layer.js:33,
+      signature function Layer(path, options, fn), exported.
     validations:
       - type: graph_tool_used
 
@@ -2030,8 +2033,9 @@ tests:
       Where is the Layer constructor defined in Express?
     expected_state: COMPLETE
     reference_answer: |
-      find_symbol tool was used and produced a CRS TraceStep with
-      match_count, used_fuzzy, and kind_filter metadata.
+      Found 1 symbol matching 'Layer': Layer (class) at lib/router/layer.js:33,
+      signature function Layer(path, options, fn), exported.
+      CRS TraceStep produced with match_count, used_fuzzy, and kind_filter metadata.
     validations:
       - type: graph_tool_used
       - type: crs_trace_step_present

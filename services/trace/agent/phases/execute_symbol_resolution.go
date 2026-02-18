@@ -146,27 +146,22 @@ func resolveSymbol(
 
 	// Strategy 2: Fuzzy match by name (O(1) with secondary index)
 	matches := deps.SymbolIndex.GetByName(name)
-	var skippedNonFunction *ast.Symbol // Track non-function match to exclude from substring search
 
 	if len(matches) == 1 {
-		// Single match - but only return if it's a function/method or if no better matches exist
+		// IT-04 Fix: Single exact name match — return it with high confidence regardless of kind.
+		// Previously, non-function matches (classes, structs, interfaces) were skipped in favor of
+		// substring/fuzzy search, which meant "TransformNode" (a class) would be deprioritized
+		// even when it was the only exact match. An exact name match is always authoritative.
 		match := matches[0]
+		matchType := "name_single"
 		if match.Kind == ast.SymbolKindFunction || match.Kind == ast.SymbolKindMethod {
-			// Perfect: single function match
-			span.SetAttributes(
-				attribute.String("match_type", "name_single_function"),
-				attribute.Int("match_count", 1),
-			)
-			return match.ID, 0.95, "name", nil
+			matchType = "name_single_function"
 		}
-		// Single non-function match (struct/interface) - continue to substring/fuzzy search
-		// to see if there's a better function match (e.g., "Handler" struct vs "NewHandler" function)
-		skippedNonFunction = match
 		span.SetAttributes(
-			attribute.String("match_type", "name_single_non_function"),
-			attribute.Int("skipped_kind", int(match.Kind)),
+			attribute.String("match_type", matchType),
+			attribute.Int("match_count", 1),
 		)
-		// Don't return yet - fall through to substring matching
+		return match.ID, 0.95, "name", nil
 	} else if len(matches) > 1 {
 		span.SetAttributes(
 			attribute.String("match_type", "name_multiple"),
@@ -198,11 +193,6 @@ func resolveSymbol(
 	substringMatches := []substringMatch{}
 
 	for _, result := range substringResults {
-		// Skip the non-function match we found in Strategy 2 (avoid returning same symbol)
-		if skippedNonFunction != nil && result.ID == skippedNonFunction.ID {
-			continue
-		}
-
 		nameLower := strings.ToLower(result.Name)
 		searchLower := strings.ToLower(name)
 
@@ -274,16 +264,6 @@ func resolveSymbol(
 			}
 			suggestions = append(suggestions, result.Name+kindStr)
 		}
-	}
-
-	// Last resort: If we skipped a non-function match earlier and found nothing better,
-	// return it with low confidence rather than failing completely
-	if skippedNonFunction != nil {
-		span.SetAttributes(
-			attribute.String("match_type", "name_fallback"),
-			attribute.String("fallback_reason", "no_function_match_found"),
-		)
-		return skippedNonFunction.ID, 0.5, "name_fallback", nil
 	}
 
 	span.SetAttributes(

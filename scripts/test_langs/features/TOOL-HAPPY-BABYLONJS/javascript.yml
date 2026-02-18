@@ -545,7 +545,7 @@ tests:
       TODO: Tool not yet registered as standalone.
     validations: []
 
-  - id: 7138
+  - id: 7238
     name: babylonjs_find_duplication
     category: TOOL_HAPPY_PATH_TODO
     description: >

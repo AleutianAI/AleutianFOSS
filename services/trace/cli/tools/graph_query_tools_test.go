@@ -446,7 +446,9 @@ func TestFindSymbolTool_KindClassAndStruct(t *testing.T) {
 
 	tool := NewFindSymbolTool(g, idx)
 
-	t.Run("kind=class returns only class symbols", func(t *testing.T) {
+	t.Run("kind=class returns class and struct symbols", func(t *testing.T) {
+		// IT-04: "class" cross-matches Struct because the router may send "class"
+		// for Go structs, or "struct" for JS/Python classes.
 		result, err := tool.Execute(ctx, map[string]any{
 			"name": "UserModel",
 			"kind": "class",
@@ -458,15 +460,14 @@ func TestFindSymbolTool_KindClassAndStruct(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 		output := result.Output.(FindSymbolOutput)
-		if output.MatchCount != 1 {
-			t.Errorf("kind=class: got %d matches, want 1 (class only)", output.MatchCount)
-		}
-		if len(output.Symbols) > 0 && output.Symbols[0].Kind != "class" {
-			t.Errorf("kind=class: got kind=%s, want class", output.Symbols[0].Kind)
+		if output.MatchCount != 2 {
+			t.Errorf("kind=class: got %d matches, want 2 (class + struct)", output.MatchCount)
 		}
 	})
 
-	t.Run("kind=struct returns only struct symbols", func(t *testing.T) {
+	t.Run("kind=struct returns struct and class symbols", func(t *testing.T) {
+		// IT-04: "struct" cross-matches Class because JS/Python/TS don't have structs;
+		// their classes are the equivalent construct.
 		result, err := tool.Execute(ctx, map[string]any{
 			"name": "UserModel",
 			"kind": "struct",
@@ -478,8 +479,8 @@ func TestFindSymbolTool_KindClassAndStruct(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 		output := result.Output.(FindSymbolOutput)
-		if output.MatchCount != 1 {
-			t.Errorf("kind=struct: got %d matches, want 1 (struct only)", output.MatchCount)
+		if output.MatchCount != 2 {
+			t.Errorf("kind=struct: got %d matches, want 2 (struct + class)", output.MatchCount)
 		}
 	})
 
@@ -1421,6 +1422,24 @@ func TestFindCalleesTool_FormatTextOutput(t *testing.T) {
 			t.Error("OutputText should contain 'External/Stdlib Callees' section")
 		}
 	})
+}
+
+// TestFindSymbolTool_StaticDefinitions verifies find_symbol is in StaticToolDefinitions (IT-04).
+func TestFindSymbolTool_StaticDefinitions(t *testing.T) {
+	defs := StaticToolDefinitions()
+	found := false
+	for _, def := range defs {
+		if def.Name == "find_symbol" {
+			found = true
+			if def.Parameters["name"].Required != true {
+				t.Error("find_symbol 'name' parameter should be required")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("find_symbol not found in StaticToolDefinitions()")
+	}
 }
 
 // TestFindCalleesTool_StaticDefinitions verifies find_callees is in StaticToolDefinitions.

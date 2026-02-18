@@ -828,3 +828,60 @@ func TestIsFileExtension(t *testing.T) {
 		}
 	}
 }
+
+// TestExtractFunctionNameFromQuery_IT04_FindSymbolQueries tests the IT-04 fix for
+// find_symbol queries using "Where is the X class/struct defined?" pattern.
+// Previously, Pattern 6 only recognized "function"/"method"/"symbol" as kind keywords,
+// causing "Where" to be extracted instead of the actual symbol name.
+func TestExtractFunctionNameFromQuery_IT04_FindSymbolQueries(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		// === All 29 find_symbol test queries from integration testing ===
+		// JavaScript/TypeScript - class keyword
+		{name: "BabylonJS: Scene class", query: "Where is the Scene class defined in this codebase?", want: "Scene"},
+		{name: "BabylonJS: Engine class", query: "Where is the Engine class defined in this codebase?", want: "Engine"},
+		{name: "BabylonJS: TransformNode class", query: "Where is the TransformNode class defined?", want: "TransformNode"},
+		{name: "Express: Application prototype", query: "Where is the Application prototype defined in this codebase?", want: "Application"},
+		{name: "Express: View constructor", query: "Where is the View constructor defined in this codebase?", want: "View"},
+		{name: "Express: Layer constructor", query: "Where is the Layer constructor defined?", want: "Layer"},
+		{name: "NestJS: NestFactory class", query: "Where is the NestFactory class defined?", want: "NestFactory"},
+		{name: "NestJS: Injector class", query: "Where is the Injector class defined?", want: "Injector"},
+		{name: "NestJS: RoutesResolver class", query: "Where is the RoutesResolver class defined?", want: "RoutesResolver"},
+		{name: "Plottable: Plot class", query: "Where is the Plot class defined?", want: "Plot"},
+		{name: "Plottable: Table class", query: "Where is the Table class defined?", want: "Table"},
+		{name: "Plottable: Dispatcher class", query: "Where is the Dispatcher class defined?", want: "Dispatcher"},
+		// Python - class keyword
+		{name: "Pandas: DataFrame class", query: "Where is the DataFrame class defined?", want: "DataFrame"},
+		{name: "Pandas: Series class", query: "Where is the Series class defined?", want: "Series"},
+		{name: "Pandas: MultiIndex class", query: "Where is the MultiIndex class defined?", want: "MultiIndex"},
+		{name: "Flask: Flask class", query: "Where is the Flask class defined?", want: "Flask"},
+		{name: "Flask: Blueprint class", query: "Where is the Blueprint class defined?", want: "Blueprint"},
+		{name: "Flask: Config class", query: "Where is the Config class defined?", want: "Config"},
+		// Go - struct keyword
+		{name: "Gin: Context struct", query: "Where is the Context struct defined?", want: "Context"},
+		{name: "Gin: Engine struct", query: "Where is the Engine struct defined?", want: "Engine"},
+		{name: "Gin: RouterGroup struct", query: "Where is the RouterGroup struct defined?", want: "RouterGroup"},
+		{name: "Badger: DB struct", query: "Where is the DB struct defined?", want: "DB"},
+		{name: "Badger: Txn struct", query: "Where is the Txn struct defined in this codebase?", want: "Txn"},
+		{name: "Badger: levelsController struct", query: "Where is the levelsController struct defined?", want: "levelsController"},
+		// Go - no kind keyword
+		{name: "Hugo: HugoSites", query: "Where is HugoSites defined in this codebase?", want: "HugoSites"},
+		{name: "Hugo: pageState struct", query: "Where is the pageState struct defined in this codebase?", want: "pageState"},
+		{name: "Hugo: ContentSpec", query: "Where is ContentSpec defined in this codebase?", want: "ContentSpec"},
+		// Edge cases
+		{name: "bare symbol name", query: "TransformNode", want: "TransformNode"},
+		{name: "just asking where", query: "Where is handleRequest defined?", want: "handleRequest"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractFunctionNameFromQuery(tt.query)
+			if got != tt.want {
+				t.Errorf("extractFunctionNameFromQuery(%q) = %q, want %q", tt.query, got, tt.want)
+			}
+		})
+	}
+}

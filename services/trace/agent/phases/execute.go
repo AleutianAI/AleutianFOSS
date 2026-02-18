@@ -1977,13 +1977,38 @@ func (p *ExecutePhase) buildEmptyResponseFallback(deps *Dependencies) string {
 
 // graphToolsWithSubstantiveResults are the graph tools that, when they return
 // results, indicate we have enough information to synthesize an answer.
+// IT-04 Audit: ALL graph tools must be in this map. Every graph tool analyzes the
+// complete code graph (every source file) and returns authoritative, exhaustive results.
+// The LLM should NEVER be allowed to spiral into Grep/Glob to "verify" graph results.
+//
+// Previously only 7 of 23 graph tools were listed, causing the LLM to spiral after
+// the other 16. Now all 23 are listed.
 var graphToolsWithSubstantiveResults = map[string]bool{
+	// Core graph traversal
 	"find_callers":         true,
 	"find_callees":         true,
 	"find_implementations": true,
 	"find_references":      true,
+	"find_symbol":          true,
 	"find_path":            true,
 	"get_call_chain":       true,
+	// Graph analytics
+	"find_hotspots":             true,
+	"find_important":            true,
+	"find_weighted_criticality": true,
+	"find_dead_code":            true,
+	"find_cycles":               true,
+	"find_loops":                true,
+	"find_communities":          true,
+	"find_articulation_points":  true,
+	"find_merge_points":         true,
+	"find_dominators":           true,
+	"find_control_dependencies": true,
+	"find_critical_path":        true,
+	"find_common_dependency":    true,
+	"find_extractable_regions":  true,
+	"find_module_api":           true,
+	"check_reducibility":        true,
 }
 
 // shouldForceSynthesisAfterGraphTools determines if we should force synthesis
