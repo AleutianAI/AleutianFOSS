@@ -276,6 +276,9 @@ func (p *JavaScriptParser) extractSymbols(ctx context.Context, node *sitter.Node
 			}
 		}
 
+		// IT-03a B-2: Detect prototype chain inheritance patterns
+		p.extractPrototypeInheritance(node, content, filePath, result)
+
 	default:
 		// No special handling needed for other node types
 	}
@@ -469,6 +472,26 @@ func (p *JavaScriptParser) extractExport(ctx context.Context, node *sitter.Node,
 		case jsNodeExportClause:
 			// export { foo, bar }
 			p.extractExportClause(child, content, filePath, result)
+
+		case "string", "template_string":
+			// IT-03a B-3: This is the source module in a re-export:
+			// export { Foo } from './bar'
+			// export * from './baz'
+			// Create an import to track the module dependency
+			source := p.extractStringContent(child, content)
+			if source != "" {
+				result.Imports = append(result.Imports, Import{
+					Path:       source,
+					IsRelative: strings.HasPrefix(source, "."),
+					Location: Location{
+						FilePath:  filePath,
+						StartLine: int(node.StartPoint().Row) + 1,
+						EndLine:   int(node.EndPoint().Row) + 1,
+						StartCol:  int(node.StartPoint().Column),
+						EndCol:    int(node.EndPoint().Column),
+					},
+				})
+			}
 		}
 	}
 }
@@ -566,10 +589,18 @@ func (p *JavaScriptParser) extractFunction(ctx context.Context, node *sitter.Nod
 		ParsedAtMilli: time.Now().UnixMilli(),
 	}
 
-	if isAsync || isGenerator {
+	// IT-03a B-1: Detect constructor function pattern (PascalCase + this.x = ...)
+	isConstructor := false
+	if bodyNode != nil && p.isConstructorFunction(name, bodyNode, content) {
+		isConstructor = true
+		sym.Kind = SymbolKindClass
+	}
+
+	if isAsync || isGenerator || isConstructor {
 		sym.Metadata = &SymbolMetadata{
-			IsAsync:     isAsync,
-			IsGenerator: isGenerator,
+			IsAsync:       isAsync,
+			IsGenerator:   isGenerator,
+			IsConstructor: isConstructor,
 		}
 	}
 
@@ -1238,7 +1269,48 @@ func (p *JavaScriptParser) extractSingleCallSite(node *sitter.Node, content []by
 		return nil
 	}
 
+	// IT-03a C-1: Extract identifier arguments (callback/HOF references)
+	argsNode := node.ChildByFieldName("arguments")
+	if argsNode != nil {
+		call.FunctionArgs = p.extractCallbackArgIdentifiers(argsNode, content)
+	}
+
 	return call
+}
+
+// extractCallbackArgIdentifiers extracts identifier arguments from a call's arguments node.
+//
+// Description:
+//
+//	Walks the arguments node and extracts top-level identifiers that likely reference
+//	functions (PascalCase or known patterns). This enables callback/HOF tracking.
+//	Only extracts identifiers, not string literals, numbers, or inline functions.
+//
+// IT-03a C-1: Enables EdgeTypeReferences from caller to callback arguments.
+func (p *JavaScriptParser) extractCallbackArgIdentifiers(argsNode *sitter.Node, content []byte) []string {
+	identifiers := make([]string, 0, argsNode.ChildCount())
+	for i := 0; i < int(argsNode.ChildCount()); i++ {
+		child := argsNode.Child(i)
+		if child == nil {
+			continue
+		}
+		switch child.Type() {
+		case jsNodeIdentifier:
+			name := string(content[child.StartByte():child.EndByte()])
+			// Skip common non-function identifiers
+			if name != "true" && name != "false" && name != "null" && name != "undefined" &&
+				name != "this" && name != "console" && name != "window" && name != "document" {
+				identifiers = append(identifiers, name)
+			}
+		case jsNodeMemberExpression:
+			// Extract member expression as potential callback: obj.method
+			text := string(content[child.StartByte():child.EndByte()])
+			if len(text) <= 50 && !strings.Contains(text, "(") {
+				identifiers = append(identifiers, text)
+			}
+		}
+	}
+	return identifiers
 }
 
 // =============================================================================
@@ -1479,6 +1551,496 @@ func (p *JavaScriptParser) findModuleExportsAssignment(node *sitter.Node, conten
 //
 //	[]*Symbol - Extracted method symbols. May be empty if the statement doesn't match.
 //
+// isConstructorFunction detects the JavaScript constructor function pattern.
+//
+// Description:
+//
+//	A constructor function is identified by two criteria:
+//	1. The function name starts with an uppercase letter (PascalCase convention)
+//	2. The function body contains at least one "this.x = ..." assignment
+//
+//	Example: function Router() { this.stack = []; this.params = {}; }
+//
+// IT-03a B-1: Constructor functions are reclassified as SymbolKindClass.
+func (p *JavaScriptParser) isConstructorFunction(name string, bodyNode *sitter.Node, content []byte) bool {
+	if name == "" || bodyNode == nil {
+		return false
+	}
+
+	// Check PascalCase: first character must be uppercase
+	firstRune, _ := utf8.DecodeRuneInString(name)
+	if !unicode.IsUpper(firstRune) {
+		return false
+	}
+
+	// Check for this.x = ... assignments in the body
+	return p.bodyHasThisAssignment(bodyNode, content, 0)
+}
+
+// bodyHasThisAssignment checks if a node tree contains "this.x = ..." assignments.
+//
+// Description:
+//
+//	Recursively walks the AST looking for assignment_expression nodes whose
+//	left-hand side is a member_expression starting with "this.". Skips nested
+//	function declarations to avoid false positives from inner constructors.
+//
+// Inputs:
+//   - node: The AST node to search. May be nil.
+//   - content: Raw source bytes for extracting node text.
+//   - depth: Current recursion depth. Stops at maxThisAssignmentDepth.
+//
+// Outputs:
+//   - bool: True if a "this.x = ..." pattern was found.
+//
+// Limitations:
+//   - Does not distinguish between constructor and non-constructor this usage.
+//   - Only recurses into expression_statement and statement_block nodes.
+//
+// Assumptions:
+//   - content is valid UTF-8 and matches the AST node byte ranges.
+func (p *JavaScriptParser) bodyHasThisAssignment(node *sitter.Node, content []byte, depth int) bool {
+	if node == nil || depth > maxThisAssignmentDepth {
+		return false
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child == nil {
+			continue
+		}
+
+		// Look for assignment_expression with this.x on left side
+		if child.Type() == jsNodeAssignmentExpression {
+			for j := 0; j < int(child.ChildCount()); j++ {
+				gc := child.Child(j)
+				if gc != nil && gc.Type() == jsNodeMemberExpression {
+					if int(gc.EndByte()) > len(content) {
+						continue
+					}
+					text := string(content[gc.StartByte():gc.EndByte()])
+					if strings.HasPrefix(text, "this.") {
+						return true
+					}
+				}
+			}
+		}
+
+		// Recurse into expression_statements and blocks (but not nested functions)
+		if child.Type() == jsNodeExpressionStatement || child.Type() == jsNodeStatementBlock {
+			if p.bodyHasThisAssignment(child, content, depth+1) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// extractPrototypeInheritance detects JavaScript prototype-based inheritance patterns
+// and records them as metadata on existing symbols in the parse result.
+//
+// Description:
+//
+//	Detects two common patterns:
+//	1. util.inherits(Child, Parent) — Node.js style
+//	2. Child.prototype = Object.create(Parent.prototype) — ES5 style
+//
+//	When detected, finds the Child symbol in the result and sets its
+//	Metadata.Extends to the Parent name, enabling EdgeTypeEmbeds creation.
+//
+// IT-03a B-2: Enables prototype chain inheritance edges in the graph.
+func (p *JavaScriptParser) extractPrototypeInheritance(node *sitter.Node, content []byte, filePath string, result *ParseResult) {
+	if node == nil || node.Type() != jsNodeExpressionStatement {
+		return
+	}
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child == nil {
+			continue
+		}
+
+		switch child.Type() {
+		case "call_expression":
+			// Pattern: util.inherits(Child, Parent) or inherits(Child, Parent)
+			p.detectUtilInherits(child, content, result)
+			// Pattern: Object.assign(Target.prototype, Source.prototype, ...)
+			p.detectObjectAssignMixin(child, content, result)
+			// Pattern: mixin(target, Source.prototype, ...)
+			p.detectMixinCall(child, content, result)
+		case jsNodeAssignmentExpression:
+			// Pattern: Child.prototype = Object.create(Parent.prototype)
+			p.detectObjectCreateInheritance(child, content, result)
+		}
+	}
+}
+
+// detectUtilInherits detects util.inherits(Child, Parent) or inherits(Child, Parent).
+//
+// Description:
+//
+//	Checks if a call_expression node calls a function named "inherits" or ending with
+//	".inherits" (e.g., util.inherits). If so, extracts the first two identifier
+//	arguments as child and parent, and sets Extends on the child symbol.
+//
+// Inputs:
+//   - callNode: A call_expression AST node. Must not be nil.
+//   - content: Raw source bytes of the file.
+//   - result: The ParseResult to update with extends relationships.
+//
+// Outputs:
+//
+//	None. Modifies result in-place via setExtendsOnSymbol.
+//
+// Limitations:
+//   - Only matches calls with exactly "inherits" as the function name or suffix.
+//   - Only extracts bare identifier arguments, not member expressions.
+//
+// Assumptions:
+//   - callNode is a "call_expression" node.
+//
+// IT-03a B-2: Enables Node.js-style prototype chain inheritance detection.
+func (p *JavaScriptParser) detectUtilInherits(callNode *sitter.Node, content []byte, result *ParseResult) {
+	funcNode := callNode.ChildByFieldName("function")
+	argsNode := callNode.ChildByFieldName("arguments")
+	if funcNode == nil || argsNode == nil {
+		return
+	}
+
+	// Check if the function is "inherits" or "*.inherits"
+	funcText := string(content[funcNode.StartByte():funcNode.EndByte()])
+	if funcText != "inherits" && !strings.HasSuffix(funcText, ".inherits") {
+		return
+	}
+
+	// Extract the two arguments: Child, Parent
+	var args []string
+	for i := 0; i < int(argsNode.ChildCount()); i++ {
+		arg := argsNode.Child(i)
+		if arg != nil && arg.Type() == jsNodeIdentifier {
+			args = append(args, string(content[arg.StartByte():arg.EndByte()]))
+		}
+	}
+	if len(args) < 2 {
+		return
+	}
+
+	childName := args[0]
+	parentName := args[1]
+
+	// Find the child symbol and set its Extends
+	p.setExtendsOnSymbol(result, childName, parentName)
+}
+
+// detectObjectCreateInheritance detects Child.prototype = Object.create(Parent.prototype).
+//
+// Description:
+//
+//	Checks if an assignment_expression has a left-hand side of the form X.prototype
+//	and a right-hand side that is Object.create(Y.prototype). If so, extracts X as
+//	the child and Y as the parent, and sets Extends on the child symbol.
+//
+// Inputs:
+//   - assignNode: An assignment_expression AST node. Must not be nil.
+//   - content: Raw source bytes of the file.
+//   - result: The ParseResult to update with extends relationships.
+//
+// Outputs:
+//
+//	None. Modifies result in-place via setExtendsOnSymbol.
+//
+// Limitations:
+//   - Only matches the exact Object.create pattern, not variations like Object['create'].
+//
+// Assumptions:
+//   - assignNode is an "assignment_expression" node.
+//
+// IT-03a B-2: Enables ES5-style prototype chain inheritance detection.
+func (p *JavaScriptParser) detectObjectCreateInheritance(assignNode *sitter.Node, content []byte, result *ParseResult) {
+	leftNode := assignNode.ChildByFieldName("left")
+	rightNode := assignNode.ChildByFieldName("right")
+	if leftNode == nil || rightNode == nil {
+		return
+	}
+
+	// LHS must be *.prototype
+	if leftNode.Type() != jsNodeMemberExpression {
+		return
+	}
+	lObj := leftNode.ChildByFieldName("object")
+	lProp := leftNode.ChildByFieldName("property")
+	if lObj == nil || lProp == nil || lObj.Type() != jsNodeIdentifier {
+		return
+	}
+	propText := string(content[lProp.StartByte():lProp.EndByte()])
+	if propText != "prototype" {
+		return
+	}
+	childName := string(content[lObj.StartByte():lObj.EndByte()])
+
+	// RHS must be Object.create(Parent.prototype)
+	if rightNode.Type() != "call_expression" {
+		return
+	}
+	funcNode := rightNode.ChildByFieldName("function")
+	argsNode := rightNode.ChildByFieldName("arguments")
+	if funcNode == nil || argsNode == nil {
+		return
+	}
+	funcText := string(content[funcNode.StartByte():funcNode.EndByte()])
+	if funcText != "Object.create" {
+		return
+	}
+
+	// First argument should be Parent.prototype
+	for i := 0; i < int(argsNode.ChildCount()); i++ {
+		arg := argsNode.Child(i)
+		if arg == nil {
+			continue
+		}
+		if arg.Type() == jsNodeMemberExpression {
+			argObj := arg.ChildByFieldName("object")
+			argProp := arg.ChildByFieldName("property")
+			if argObj != nil && argProp != nil && argObj.Type() == jsNodeIdentifier {
+				argPropText := string(content[argProp.StartByte():argProp.EndByte()])
+				if argPropText == "prototype" {
+					parentName := string(content[argObj.StartByte():argObj.EndByte()])
+					p.setExtendsOnSymbol(result, childName, parentName)
+					return
+				}
+			}
+		}
+	}
+}
+
+// setExtendsOnSymbol finds a symbol by name in the result and sets its Metadata.Extends.
+//
+// Description:
+//
+//	Scans all symbols in the ParseResult for one matching childName and sets
+//	its Metadata.Extends field to parentName. Creates Metadata if nil. Stops
+//	after the first matching symbol.
+//
+// Inputs:
+//   - result: The ParseResult containing symbols to search. Must not be nil.
+//   - childName: The name of the child symbol to find.
+//   - parentName: The parent name to set as Extends.
+//
+// Outputs:
+//
+//	None. Modifies the matching symbol's Metadata in-place.
+//
+// Limitations:
+//   - Only updates the first symbol with a matching name.
+//   - Overwrites any existing Extends value.
+//
+// Assumptions:
+//   - result and result.Symbols are non-nil.
+func (p *JavaScriptParser) setExtendsOnSymbol(result *ParseResult, childName, parentName string) {
+	for _, sym := range result.Symbols {
+		if sym != nil && sym.Name == childName {
+			if sym.Metadata == nil {
+				sym.Metadata = &SymbolMetadata{}
+			}
+			sym.Metadata.Extends = parentName
+			return
+		}
+	}
+}
+
+// detectObjectAssignMixin detects Object.assign(Target.prototype, Source.prototype, ...) mixin patterns.
+//
+// Description:
+//
+//	Detects calls to Object.assign where the first argument is X.prototype (the target)
+//	and subsequent arguments are source prototypes or objects. For each source, sets
+//	Extends on the target symbol via setExtendsOnSymbol.
+//
+// Inputs:
+//   - callNode: A call_expression AST node. Must not be nil.
+//   - content: Raw source bytes of the file.
+//   - result: The ParseResult to update with extends relationships.
+//
+// Outputs:
+//
+//	None. Modifies result in-place via setExtendsOnSymbol.
+//
+// Limitations:
+//   - Only detects Object.assign where the first argument ends with .prototype.
+//   - Sets Extends to the last source found (overwrites previous sources).
+//
+// Assumptions:
+//   - callNode is a "call_expression" node.
+//
+// IT-03a B-2: Extends prototype inheritance to cover Object.assign mixin patterns.
+func (p *JavaScriptParser) detectObjectAssignMixin(callNode *sitter.Node, content []byte, result *ParseResult) {
+	funcNode := callNode.ChildByFieldName("function")
+	argsNode := callNode.ChildByFieldName("arguments")
+	if funcNode == nil || argsNode == nil {
+		return
+	}
+
+	// Check function text is "Object.assign"
+	if int(funcNode.EndByte()) > len(content) || int(funcNode.StartByte()) > len(content) {
+		return
+	}
+	funcText := string(content[funcNode.StartByte():funcNode.EndByte()])
+	if funcText != "Object.assign" {
+		return
+	}
+
+	// Collect non-punctuation arguments
+	var args []*sitter.Node
+	for i := 0; i < int(argsNode.ChildCount()); i++ {
+		arg := argsNode.Child(i)
+		if arg == nil {
+			continue
+		}
+		// Skip punctuation nodes (parentheses, commas)
+		if arg.Type() == "(" || arg.Type() == ")" || arg.Type() == "," {
+			continue
+		}
+		args = append(args, arg)
+	}
+	if len(args) < 2 {
+		return
+	}
+
+	// First argument must be X.prototype (the target)
+	firstArg := args[0]
+	if firstArg.Type() != jsNodeMemberExpression {
+		return
+	}
+	targetObj := firstArg.ChildByFieldName("object")
+	targetProp := firstArg.ChildByFieldName("property")
+	if targetObj == nil || targetProp == nil || targetObj.Type() != jsNodeIdentifier {
+		return
+	}
+	if string(content[targetProp.StartByte():targetProp.EndByte()]) != "prototype" {
+		return
+	}
+	targetName := string(content[targetObj.StartByte():targetObj.EndByte()])
+
+	// Remaining arguments are sources
+	for _, arg := range args[1:] {
+		var sourceName string
+		switch arg.Type() {
+		case jsNodeMemberExpression:
+			// Source.prototype → extract "Source"
+			srcObj := arg.ChildByFieldName("object")
+			srcProp := arg.ChildByFieldName("property")
+			if srcObj != nil && srcProp != nil && srcObj.Type() == jsNodeIdentifier {
+				if string(content[srcProp.StartByte():srcProp.EndByte()]) == "prototype" {
+					sourceName = string(content[srcObj.StartByte():srcObj.EndByte()])
+				}
+			}
+		case jsNodeIdentifier:
+			// Bare identifier as source
+			sourceName = string(content[arg.StartByte():arg.EndByte()])
+		}
+		if sourceName != "" {
+			p.setExtendsOnSymbol(result, targetName, sourceName)
+		}
+	}
+}
+
+// detectMixinCall detects mixin(target, Source.prototype, ...) patterns.
+//
+// Description:
+//
+//	Detects calls to functions whose name ends with "mixin" (handles bare mixin,
+//	_.mixin, utils.mixin, etc.). The first argument is the target identifier,
+//	and the second argument is the source (may be X.prototype or a bare identifier).
+//
+// Inputs:
+//   - callNode: A call_expression AST node. Must not be nil.
+//   - content: Raw source bytes of the file.
+//   - result: The ParseResult to update with extends relationships.
+//
+// Outputs:
+//
+//	None. Modifies result in-place via setExtendsOnSymbol.
+//
+// Limitations:
+//   - Only matches functions ending with "mixin" — does not detect arbitrary mixing functions.
+//   - Ignores arguments beyond the second (e.g., boolean flags).
+//
+// Assumptions:
+//   - callNode is a "call_expression" node.
+//
+// IT-03a B-2: Extends prototype inheritance to cover mixin call patterns.
+func (p *JavaScriptParser) detectMixinCall(callNode *sitter.Node, content []byte, result *ParseResult) {
+	funcNode := callNode.ChildByFieldName("function")
+	argsNode := callNode.ChildByFieldName("arguments")
+	if funcNode == nil || argsNode == nil {
+		return
+	}
+
+	// Check function name ends with "mixin"
+	if int(funcNode.EndByte()) > len(content) || int(funcNode.StartByte()) > len(content) {
+		return
+	}
+	funcText := string(content[funcNode.StartByte():funcNode.EndByte()])
+	if !strings.HasSuffix(funcText, "mixin") {
+		return
+	}
+
+	// Collect non-punctuation arguments
+	var args []*sitter.Node
+	for i := 0; i < int(argsNode.ChildCount()); i++ {
+		arg := argsNode.Child(i)
+		if arg == nil {
+			continue
+		}
+		if arg.Type() == "(" || arg.Type() == ")" || arg.Type() == "," {
+			continue
+		}
+		args = append(args, arg)
+	}
+	if len(args) < 2 {
+		return
+	}
+
+	// First argument is the target identifier
+	firstArg := args[0]
+	var targetName string
+	switch firstArg.Type() {
+	case jsNodeIdentifier:
+		targetName = string(content[firstArg.StartByte():firstArg.EndByte()])
+	case jsNodeMemberExpression:
+		// Handle target.prototype as well
+		targetObj := firstArg.ChildByFieldName("object")
+		if targetObj != nil && targetObj.Type() == jsNodeIdentifier {
+			targetName = string(content[targetObj.StartByte():targetObj.EndByte()])
+		}
+	}
+	if targetName == "" {
+		return
+	}
+
+	// Second argument is the source
+	secondArg := args[1]
+	var sourceName string
+	switch secondArg.Type() {
+	case jsNodeMemberExpression:
+		srcObj := secondArg.ChildByFieldName("object")
+		srcProp := secondArg.ChildByFieldName("property")
+		if srcObj != nil && srcProp != nil && srcObj.Type() == jsNodeIdentifier {
+			if string(content[srcProp.StartByte():srcProp.EndByte()]) == "prototype" {
+				sourceName = string(content[srcObj.StartByte():srcObj.EndByte()])
+			} else {
+				// member expression but not .prototype — use full text
+				sourceName = string(content[secondArg.StartByte():secondArg.EndByte()])
+			}
+		}
+	case jsNodeIdentifier:
+		sourceName = string(content[secondArg.StartByte():secondArg.EndByte()])
+	}
+	if sourceName != "" {
+		p.setExtendsOnSymbol(result, targetName, sourceName)
+	}
+}
+
 // Thread Safety: Safe for concurrent use.
 func (p *JavaScriptParser) extractPrototypeMethodAssignment(ctx context.Context, node *sitter.Node, content []byte, filePath string, exportAliases map[string]string) []*Symbol {
 	if node == nil || node.Type() != jsNodeExpressionStatement {

@@ -1591,3 +1591,75 @@ func TestGlobTool_Execute_RelativePath(t *testing.T) {
 		t.Errorf("expected 2 files, got %d", globResult.Count)
 	}
 }
+
+// =============================================================================
+// GR-59 Group D: Grep Parameter Resilience Tests
+// =============================================================================
+
+func TestGrepParams_ClampLimit(t *testing.T) {
+	t.Run("negative limit clamped to default", func(t *testing.T) {
+		p := &GrepParams{
+			Pattern: "test",
+			Limit:   -5,
+		}
+		err := p.Validate()
+		if err != nil {
+			t.Fatalf("expected no error after clamping, got: %v", err)
+		}
+		if p.Limit != DefaultGrepLimit {
+			t.Errorf("expected limit clamped to %d, got %d", DefaultGrepLimit, p.Limit)
+		}
+	})
+
+	t.Run("over-max limit clamped to max", func(t *testing.T) {
+		p := &GrepParams{
+			Pattern: "test",
+			Limit:   10000,
+		}
+		err := p.Validate()
+		if err != nil {
+			t.Fatalf("expected no error after clamping, got: %v", err)
+		}
+		if p.Limit != MaxGrepLimit {
+			t.Errorf("expected limit clamped to %d, got %d", MaxGrepLimit, p.Limit)
+		}
+	})
+
+	t.Run("valid limit unchanged", func(t *testing.T) {
+		p := &GrepParams{
+			Pattern: "test",
+			Limit:   50,
+		}
+		err := p.Validate()
+		if err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+		if p.Limit != 50 {
+			t.Errorf("expected limit 50, got %d", p.Limit)
+		}
+	})
+}
+
+func TestFixCommonRegexErrors(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"no fix needed", "func (.*) Next", "func (.*) Next"},
+		{"balanced parens", "func (.*) Next()", "func (.*) Next()"},
+		{"unclosed trailing paren", "func (.*) Next(", "func (.*) Next\\("},
+		{"escaped paren ignored", "func \\(test\\)", "func \\(test\\)"},
+		{"no parens", "simple pattern", "simple pattern"},
+		{"empty", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := fixCommonRegexErrors(tt.input)
+			if result != tt.expected {
+				t.Errorf("fixCommonRegexErrors(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}

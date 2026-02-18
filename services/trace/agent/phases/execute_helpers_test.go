@@ -662,3 +662,169 @@ func TestExtractTypeDotMethodFromQuery_PunctuationStripping(t *testing.T) {
 		})
 	}
 }
+
+// =============================================================================
+// GR-59 Group F: Surrender Detection Tests
+// =============================================================================
+
+func TestIsSurrenderResponse(t *testing.T) {
+	tests := []struct {
+		name     string
+		response string
+		expected bool
+	}{
+		{"simple surrender", "I don't know", true},
+		{"surrender with context", "I don't know the answer.", true},
+		{"formal surrender", "I do not know", true},
+		{"unsure", "I'm not sure", true},
+		{"cannot determine", "I cannot determine that", true},
+		{"unable", "I'm unable to answer", true},
+		{"long response not surrender", "I don't know exactly how many functions there are, but based on the graph analysis, the function parseConfig is called by main() and initServer(). Here are the details...", false},
+		{"normal answer", "The function parseConfig is called by main and initServer.", false},
+		{"empty", "", false},
+		{"just spaces", "   ", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isSurrenderResponse(tt.response)
+			if result != tt.expected {
+				t.Errorf("isSurrenderResponse(%q) = %v, want %v", tt.response, result, tt.expected)
+			}
+		})
+	}
+}
+
+// =============================================================================
+// IT-03a: File Extension Rejection + Interface Name Extraction Tests
+// =============================================================================
+
+func TestExtractFunctionNameFromQuery_FileExtensionRejection(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{
+			name:  "Babylon.js should not match as Type.Method",
+			query: "What classes extend the AbstractMesh class in Babylon.js?",
+			// Without file extension fix, this would return "Babylon.js"
+			// With fix, it falls through to Pattern 7 (CamelCase fallback) → "AbstractMesh"
+			want: "AbstractMesh",
+		},
+		{
+			name:  "Express.js should not match as Type.Method",
+			query: "Find implementations of Router in Express.js",
+			want:  "Router",
+		},
+		{
+			name:  "Flask.py should not match as Type.Method",
+			query: "What extends Blueprint in Flask.py?",
+			// "extends" is in skipWords, "Blueprint" is CamelCase → Pattern 7
+			want: "Blueprint",
+		},
+		{
+			name:  "real dot-notation still works",
+			query: "Who calls Router.handle?",
+			want:  "Router.handle",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractFunctionNameFromQuery(tt.query)
+			if got != tt.want {
+				t.Errorf("extractFunctionNameFromQuery(%q) = %q, want %q",
+					tt.query, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractInterfaceNameFromQuery(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		// "extend" patterns
+		{
+			name:  "what classes extend X",
+			query: "What classes extend the AbstractMesh class?",
+			want:  "AbstractMesh",
+		},
+		{
+			name:  "what extends X in project",
+			query: "What classes extend the Light base class in Babylon.js?",
+			want:  "Light",
+		},
+		{
+			name:  "classes that extend X",
+			query: "Show classes that extend EventEmitter",
+			want:  "EventEmitter",
+		},
+
+		// "implement" patterns
+		{
+			name:  "what implements X",
+			query: "What implements the Reader interface?",
+			want:  "Reader",
+		},
+		{
+			name:  "classes implementing X",
+			query: "Find all types that implement SessionInterface",
+			want:  "SessionInterface",
+		},
+
+		// "subclass" patterns
+		{
+			name:  "subclasses of X",
+			query: "What are the subclasses of AbstractMesh?",
+			want:  "AbstractMesh",
+		},
+
+		// "X class/interface" pattern
+		{
+			name:  "X class pattern",
+			query: "Find implementations of the AbstractMesh class",
+			want:  "AbstractMesh",
+		},
+		{
+			name:  "X interface pattern",
+			query: "Show all implementations of the Handler interface",
+			want:  "Handler",
+		},
+
+		// No match — should return empty
+		{
+			name:  "no inheritance keywords",
+			query: "How does the parser work?",
+			want:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractInterfaceNameFromQuery(tt.query)
+			if got != tt.want {
+				t.Errorf("extractInterfaceNameFromQuery(%q) = %q, want %q",
+					tt.query, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsFileExtension(t *testing.T) {
+	// File extensions should be rejected
+	for _, ext := range []string{"js", "ts", "py", "go", "rs", "java", "css", "html", "json"} {
+		if !isFileExtension(ext) {
+			t.Errorf("isFileExtension(%q) = false, want true", ext)
+		}
+	}
+	// Non-extensions should pass
+	for _, notExt := range []string{"Get", "handle", "render", "JSON", "Open", "Init"} {
+		if isFileExtension(notExt) {
+			t.Errorf("isFileExtension(%q) = true, want false", notExt)
+		}
+	}
+}

@@ -1434,3 +1434,747 @@ Route.prototype._handles_method = function _handles_method(method) {
 		t.Errorf("expected Receiver=%q, got %q", "Route", handlesMethodSym.Receiver)
 	}
 }
+
+// =============================================================================
+// IT-03a B-1: Constructor Function Detection Tests
+// =============================================================================
+
+func TestJavaScriptParser_ConstructorFunction_Detected(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `
+function Router(options) {
+    this.stack = [];
+    this.params = {};
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "test.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var routerSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Router" {
+			routerSym = sym
+			break
+		}
+	}
+
+	if routerSym == nil {
+		t.Fatal("expected to find symbol 'Router'")
+	}
+	if routerSym.Kind != SymbolKindClass {
+		t.Errorf("expected Kind=SymbolKindClass, got %v", routerSym.Kind)
+	}
+	if routerSym.Metadata == nil {
+		t.Fatal("expected Metadata to be non-nil")
+	}
+	if !routerSym.Metadata.IsConstructor {
+		t.Error("expected IsConstructor=true for PascalCase function with this.x assignments")
+	}
+}
+
+func TestJavaScriptParser_ConstructorFunction_NotDetected_LowerCase(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `
+function createRouter(options) {
+    this.stack = [];
+    this.params = {};
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "test.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var fnSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "createRouter" {
+			fnSym = sym
+			break
+		}
+	}
+
+	if fnSym == nil {
+		t.Fatal("expected to find symbol 'createRouter'")
+	}
+	if fnSym.Kind != SymbolKindFunction {
+		t.Errorf("expected Kind=SymbolKindFunction for lowercase function, got %v", fnSym.Kind)
+	}
+}
+
+func TestJavaScriptParser_ConstructorFunction_NotDetected_NoThis(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `
+function Router(options) {
+    var stack = [];
+    var params = {};
+    return { stack: stack, params: params };
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "test.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var routerSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Router" {
+			routerSym = sym
+			break
+		}
+	}
+
+	if routerSym == nil {
+		t.Fatal("expected to find symbol 'Router'")
+	}
+	if routerSym.Kind != SymbolKindFunction {
+		t.Errorf("expected Kind=SymbolKindFunction for PascalCase function without this.x, got %v", routerSym.Kind)
+	}
+}
+
+func TestJavaScriptParser_ConstructorFunction_MultipleThisAssignments(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `
+function EventEmitter() {
+    this._events = {};
+    this._maxListeners = 10;
+    this._wildcard = false;
+    this._conf = {};
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "test.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var emitterSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "EventEmitter" {
+			emitterSym = sym
+			break
+		}
+	}
+
+	if emitterSym == nil {
+		t.Fatal("expected to find symbol 'EventEmitter'")
+	}
+	if emitterSym.Kind != SymbolKindClass {
+		t.Errorf("expected Kind=SymbolKindClass, got %v", emitterSym.Kind)
+	}
+	if emitterSym.Metadata == nil || !emitterSym.Metadata.IsConstructor {
+		t.Error("expected IsConstructor=true for constructor with multiple this.x assignments")
+	}
+}
+
+func TestJavaScriptParser_ConstructorFunction_NestedFunction(t *testing.T) {
+	// A this.x assignment inside a nested function should NOT make the outer
+	// function a constructor. The bodyHasThisAssignment method recurses into
+	// expression_statements and statement_blocks but not into nested function
+	// declarations. However, the current implementation may or may not catch this
+	// depending on nesting depth. This test verifies the intended behavior:
+	// only direct this.x in the function body counts.
+	parser := NewJavaScriptParser()
+	content := `
+function Outer() {
+    function inner() {
+        this.value = 42;
+    }
+    var x = 1;
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "test.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var outerSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Outer" {
+			outerSym = sym
+			break
+		}
+	}
+
+	if outerSym == nil {
+		t.Fatal("expected to find symbol 'Outer'")
+	}
+	// The outer function does not have this.x in its own body (only in nested function),
+	// so it should remain SymbolKindFunction.
+	if outerSym.Kind != SymbolKindFunction {
+		t.Errorf("expected Kind=SymbolKindFunction for function with this.x only in nested function, got %v", outerSym.Kind)
+	}
+}
+
+// =============================================================================
+// IT-03a B-2: Prototype Chain Inheritance Tests
+// =============================================================================
+
+func TestJavaScriptParser_PrototypeInheritance_UtilInherits(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `
+function Router() {
+    this.stack = [];
+}
+
+function EventEmitter() {
+    this.events = {};
+}
+
+util.inherits(Router, EventEmitter);
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "test.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var routerSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Router" {
+			routerSym = sym
+			break
+		}
+	}
+
+	if routerSym == nil {
+		t.Fatal("expected to find symbol 'Router'")
+	}
+	if routerSym.Metadata == nil {
+		t.Fatal("expected Metadata to be non-nil on Router after util.inherits")
+	}
+	if routerSym.Metadata.Extends != "EventEmitter" {
+		t.Errorf("expected Extends=%q, got %q", "EventEmitter", routerSym.Metadata.Extends)
+	}
+}
+
+func TestJavaScriptParser_PrototypeInheritance_ObjectCreate(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `
+function Router() {
+    this.stack = [];
+}
+
+function EventEmitter() {
+    this.events = {};
+}
+
+Router.prototype = Object.create(EventEmitter.prototype);
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "test.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var routerSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Router" {
+			routerSym = sym
+			break
+		}
+	}
+
+	if routerSym == nil {
+		t.Fatal("expected to find symbol 'Router'")
+	}
+	if routerSym.Metadata == nil {
+		t.Fatal("expected Metadata to be non-nil on Router after Object.create inheritance")
+	}
+	if routerSym.Metadata.Extends != "EventEmitter" {
+		t.Errorf("expected Extends=%q, got %q", "EventEmitter", routerSym.Metadata.Extends)
+	}
+}
+
+func TestJavaScriptParser_PrototypeInheritance_BareInherits(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `
+function Child() {
+    this.name = "child";
+}
+
+function Parent() {
+    this.name = "parent";
+}
+
+inherits(Child, Parent);
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "test.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var childSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Child" {
+			childSym = sym
+			break
+		}
+	}
+
+	if childSym == nil {
+		t.Fatal("expected to find symbol 'Child'")
+	}
+	if childSym.Metadata == nil {
+		t.Fatal("expected Metadata to be non-nil on Child after bare inherits()")
+	}
+	if childSym.Metadata.Extends != "Parent" {
+		t.Errorf("expected Extends=%q, got %q", "Parent", childSym.Metadata.Extends)
+	}
+}
+
+func TestJavaScriptParser_PrototypeInheritance_NoMatch(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `
+function Router() {
+    this.stack = [];
+}
+
+console.log("no inheritance here");
+someFunc(Router, EventEmitter);
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "test.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var routerSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Router" {
+			routerSym = sym
+			break
+		}
+	}
+
+	if routerSym == nil {
+		t.Fatal("expected to find symbol 'Router'")
+	}
+	// Metadata might be set (for IsConstructor) but Extends should be empty
+	if routerSym.Metadata != nil && routerSym.Metadata.Extends != "" {
+		t.Errorf("expected Extends to be empty for unrelated expressions, got %q", routerSym.Metadata.Extends)
+	}
+}
+
+// =============================================================================
+// IT-03a B-2 (extended): Object.assign / Mixin Inheritance Tests
+// =============================================================================
+
+func TestJavaScriptParser_PrototypeInheritance_ObjectAssign(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `
+function Router() {
+    this.stack = [];
+}
+
+function EventEmitter() {
+    this.events = {};
+}
+
+Object.assign(Router.prototype, EventEmitter.prototype);
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "test.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var routerSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Router" {
+			routerSym = sym
+			break
+		}
+	}
+
+	if routerSym == nil {
+		t.Fatal("expected to find symbol 'Router'")
+	}
+	if routerSym.Metadata == nil {
+		t.Fatal("expected Metadata to be non-nil on Router after Object.assign")
+	}
+	if routerSym.Metadata.Extends != "EventEmitter" {
+		t.Errorf("expected Extends=%q, got %q", "EventEmitter", routerSym.Metadata.Extends)
+	}
+}
+
+func TestJavaScriptParser_PrototypeInheritance_ObjectAssignMultiple(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `
+function App() {
+    this.settings = {};
+}
+
+function Emitter() {
+    this.events = {};
+}
+
+function Logger() {
+    this.logs = [];
+}
+
+Object.assign(App.prototype, Emitter.prototype, Logger.prototype);
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "test.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var appSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "App" {
+			appSym = sym
+			break
+		}
+	}
+
+	if appSym == nil {
+		t.Fatal("expected to find symbol 'App'")
+	}
+	if appSym.Metadata == nil {
+		t.Fatal("expected Metadata to be non-nil on App after Object.assign with multiple sources")
+	}
+	// setExtendsOnSymbol overwrites, so the last source wins
+	if appSym.Metadata.Extends != "Logger" {
+		t.Errorf("expected Extends=%q (last source), got %q", "Logger", appSym.Metadata.Extends)
+	}
+}
+
+func TestJavaScriptParser_PrototypeInheritance_MixinCall(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `
+function App() {
+    this.settings = {};
+}
+
+function EventEmitter() {
+    this.events = {};
+}
+
+mixin(App, EventEmitter.prototype, false);
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "test.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var appSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "App" {
+			appSym = sym
+			break
+		}
+	}
+
+	if appSym == nil {
+		t.Fatal("expected to find symbol 'App'")
+	}
+	if appSym.Metadata == nil {
+		t.Fatal("expected Metadata to be non-nil on App after mixin()")
+	}
+	if appSym.Metadata.Extends != "EventEmitter" {
+		t.Errorf("expected Extends=%q, got %q", "EventEmitter", appSym.Metadata.Extends)
+	}
+}
+
+func TestJavaScriptParser_PrototypeInheritance_MixinNoMatch(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `
+function App() {
+    this.settings = {};
+}
+
+mixin(App);
+merge(App, EventEmitter);
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "test.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var appSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "App" {
+			appSym = sym
+			break
+		}
+	}
+
+	if appSym == nil {
+		t.Fatal("expected to find symbol 'App'")
+	}
+	// mixin(App) has < 2 args → no match
+	// merge(App, EventEmitter) does not end with "mixin" → no match
+	if appSym.Metadata != nil && appSym.Metadata.Extends != "" {
+		t.Errorf("expected Extends to be empty, got %q", appSym.Metadata.Extends)
+	}
+}
+
+// =============================================================================
+// IT-03a B-3: Re-export Module Resolution Tests
+// =============================================================================
+
+func TestJavaScriptParser_ReExport_NamedFromModule(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `export { Foo } from './bar';`
+
+	result, err := parser.Parse(context.Background(), []byte(content), "test.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should create an import for the re-exported module
+	var found bool
+	for _, imp := range result.Imports {
+		if imp.Path == "./bar" {
+			found = true
+			if !imp.IsRelative {
+				t.Error("expected IsRelative=true for './bar'")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("expected an import with Path='./bar' from re-export")
+	}
+}
+
+func TestJavaScriptParser_ReExport_StarFromModule(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `export * from './baz';`
+
+	result, err := parser.Parse(context.Background(), []byte(content), "test.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var found bool
+	for _, imp := range result.Imports {
+		if imp.Path == "./baz" {
+			found = true
+			if !imp.IsRelative {
+				t.Error("expected IsRelative=true for './baz'")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("expected an import with Path='./baz' from star re-export")
+	}
+}
+
+func TestJavaScriptParser_ReExport_AbsoluteModule(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `export { X } from 'module-name';`
+
+	result, err := parser.Parse(context.Background(), []byte(content), "test.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var found bool
+	for _, imp := range result.Imports {
+		if imp.Path == "module-name" {
+			found = true
+			if imp.IsRelative {
+				t.Error("expected IsRelative=false for 'module-name'")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("expected an import with Path='module-name' from re-export")
+	}
+}
+
+// =============================================================================
+// IT-03a C-1: Callback Argument Tracking Tests
+// =============================================================================
+
+func TestJavaScriptParser_CallbackArgs_SimpleIdentifier(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `
+function setup() {
+    app.use(middleware);
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "test.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var setupSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "setup" && sym.Kind == SymbolKindFunction {
+			setupSym = sym
+			break
+		}
+	}
+
+	if setupSym == nil {
+		t.Fatal("expected to find function 'setup'")
+	}
+
+	// Find the app.use call
+	var useCall *CallSite
+	for i := range setupSym.Calls {
+		if setupSym.Calls[i].Target == "use" {
+			useCall = &setupSym.Calls[i]
+			break
+		}
+	}
+
+	if useCall == nil {
+		t.Fatal("expected to find call to 'use'")
+	}
+
+	if len(useCall.FunctionArgs) == 0 {
+		t.Fatal("expected FunctionArgs to contain 'middleware'")
+	}
+
+	found := false
+	for _, arg := range useCall.FunctionArgs {
+		if arg == "middleware" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected FunctionArgs to include 'middleware', got %v", useCall.FunctionArgs)
+	}
+}
+
+func TestJavaScriptParser_CallbackArgs_MultipleArgs(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `
+function setup() {
+    router.use(auth, logger);
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "test.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var setupSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "setup" && sym.Kind == SymbolKindFunction {
+			setupSym = sym
+			break
+		}
+	}
+
+	if setupSym == nil {
+		t.Fatal("expected to find function 'setup'")
+	}
+
+	var useCall *CallSite
+	for i := range setupSym.Calls {
+		if setupSym.Calls[i].Target == "use" {
+			useCall = &setupSym.Calls[i]
+			break
+		}
+	}
+
+	if useCall == nil {
+		t.Fatal("expected to find call to 'use'")
+	}
+
+	argSet := make(map[string]bool)
+	for _, arg := range useCall.FunctionArgs {
+		argSet[arg] = true
+	}
+
+	if !argSet["auth"] {
+		t.Errorf("expected FunctionArgs to include 'auth', got %v", useCall.FunctionArgs)
+	}
+	if !argSet["logger"] {
+		t.Errorf("expected FunctionArgs to include 'logger', got %v", useCall.FunctionArgs)
+	}
+}
+
+func TestJavaScriptParser_CallbackArgs_SkipsLiterals(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `
+function setup() {
+    foo("string", 42, true);
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "test.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var setupSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "setup" && sym.Kind == SymbolKindFunction {
+			setupSym = sym
+			break
+		}
+	}
+
+	if setupSym == nil {
+		t.Fatal("expected to find function 'setup'")
+	}
+
+	var fooCall *CallSite
+	for i := range setupSym.Calls {
+		if setupSym.Calls[i].Target == "foo" {
+			fooCall = &setupSym.Calls[i]
+			break
+		}
+	}
+
+	if fooCall == nil {
+		t.Fatal("expected to find call to 'foo'")
+	}
+
+	// String literals, numbers, and booleans should NOT appear in FunctionArgs
+	if len(fooCall.FunctionArgs) != 0 {
+		t.Errorf("expected FunctionArgs to be empty for literal-only arguments, got %v", fooCall.FunctionArgs)
+	}
+}
+
+func TestJavaScriptParser_CallbackArgs_MemberExpression(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `
+function setup() {
+    app.use(express.static);
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "test.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var setupSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "setup" && sym.Kind == SymbolKindFunction {
+			setupSym = sym
+			break
+		}
+	}
+
+	if setupSym == nil {
+		t.Fatal("expected to find function 'setup'")
+	}
+
+	var useCall *CallSite
+	for i := range setupSym.Calls {
+		if setupSym.Calls[i].Target == "use" {
+			useCall = &setupSym.Calls[i]
+			break
+		}
+	}
+
+	if useCall == nil {
+		t.Fatal("expected to find call to 'use'")
+	}
+
+	found := false
+	for _, arg := range useCall.FunctionArgs {
+		if arg == "express.static" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected FunctionArgs to include 'express.static', got %v", useCall.FunctionArgs)
+	}
+}

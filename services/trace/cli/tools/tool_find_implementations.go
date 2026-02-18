@@ -21,6 +21,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
@@ -91,14 +92,16 @@ type ImplementationInfo struct {
 //
 // Description:
 //
-//	Finds all types that implement a given interface by name. Essential for
-//	understanding polymorphism and interface usage.
+//	Finds all types that implement a given interface, extend a given class,
+//	or embed a given struct. Works across languages: Go interfaces (structural
+//	typing), Python class inheritance and ABCs, JS/TS class extends and
+//	implements. Essential for understanding polymorphism and type hierarchies.
 //
 // GR-01 Optimization:
 //
 //	Uses O(1) SymbolIndex lookup before falling back to O(V) graph scan.
-//	Only symbols with Kind=SymbolKindInterface are queried; other matching
-//	names are filtered out with debug logging.
+//	Only symbols with Kind in {Interface, Class, Struct} are queried; other
+//	matching names (functions, variables, etc.) are filtered out with debug logging.
 //
 // Thread Safety: Safe for concurrent use. All operations are read-only.
 type findImplementationsTool struct {
@@ -111,8 +114,9 @@ type findImplementationsTool struct {
 //
 // Description:
 //
-//	Creates a tool that finds all types implementing a given interface.
-//	Filters to only interface symbols before querying.
+//	Creates a tool that finds all types implementing a given interface,
+//	extending a given class, or embedding a given struct. Accepts
+//	SymbolKindInterface, SymbolKindClass, and SymbolKindStruct as targets.
 //
 // Inputs:
 //
@@ -125,13 +129,13 @@ type findImplementationsTool struct {
 //
 // Limitations:
 //
-//   - Only searches for interface symbols (non-interfaces filtered)
+//   - Only searches for type symbols (functions, variables filtered out)
 //   - Maximum 1000 implementations per query
 //
 // Assumptions:
 //
 //   - Graph is frozen before tool creation
-//   - Interface→Implements edges are properly indexed
+//   - Implements and Embeds edges are properly indexed
 func NewFindImplementationsTool(g *graph.Graph, idx *index.SymbolIndex) Tool {
 	return &findImplementationsTool{
 		graph:  g,
@@ -151,13 +155,14 @@ func (t *findImplementationsTool) Category() ToolCategory {
 func (t *findImplementationsTool) Definition() ToolDefinition {
 	return ToolDefinition{
 		Name: "find_implementations",
-		Description: "Find all types that implement a given interface. " +
-			"Essential for understanding polymorphism and interface usage. " +
-			"Use this to find concrete implementations of an interface.",
+		Description: "Find all types that implement a given interface or extend a given class. " +
+			"Works across languages: Go interfaces (structural typing), Python class inheritance and ABCs, " +
+			"JS/TS class extends and implements. " +
+			"Use for 'what implements X?', 'what extends X?', 'what subclasses X?', 'what types derive from X?'.",
 		Parameters: map[string]ParamDef{
 			"interface_name": {
 				Type:        ParamTypeString,
-				Description: "Name of the interface to find implementations for (e.g., 'Reader', 'Handler')",
+				Description: "Name of the interface or base class to find implementations/subclasses for (e.g., 'Reader', 'AbstractMesh', 'Index', 'SessionInterface')",
 				Required:    true,
 			},
 			"limit": {
@@ -182,9 +187,17 @@ func (t *findImplementationsTool) Execute(ctx context.Context, params map[string
 	// Parse and validate parameters
 	p, err := t.parseParams(params)
 	if err != nil {
+		errStep := crs.NewTraceStepBuilder().
+			WithAction("tool_find_implementations").
+			WithTool("find_implementations").
+			WithDuration(time.Since(start)).
+			WithError(err.Error()).
+			Build()
 		return &Result{
-			Success: false,
-			Error:   err.Error(),
+			Success:   false,
+			Error:     err.Error(),
+			TraceStep: &errStep,
+			Duration:  time.Since(start),
 		}, nil
 	}
 
@@ -205,34 +218,37 @@ func (t *findImplementationsTool) Execute(ctx context.Context, params map[string
 	if t.index != nil {
 		symbols := t.index.GetByName(p.InterfaceName)
 
-		// Filter to only interface symbols
+		// IT-03 C-3a: Accept interfaces, classes, and structs as valid targets.
+		// Go uses interfaces (SymbolKindInterface), Python/JS/TS use classes
+		// (SymbolKindClass), and Go structs (SymbolKindStruct) can be embedding targets.
 		var interfaces []*ast.Symbol
-		var nonInterfaces int
+		var filtered int
 		for _, sym := range symbols {
 			if sym == nil {
 				continue
 			}
-			if sym.Kind == ast.SymbolKindInterface {
+			switch sym.Kind {
+			case ast.SymbolKindInterface, ast.SymbolKindClass, ast.SymbolKindStruct:
 				interfaces = append(interfaces, sym)
-			} else {
-				nonInterfaces++
+			default:
+				filtered++
 			}
 		}
 
-		if nonInterfaces > 0 {
-			t.logger.Debug("filtered non-interface symbols",
+		if filtered > 0 {
+			t.logger.Debug("filtered non-type symbols",
 				slog.String("tool", "find_implementations"),
 				slog.String("interface_name", p.InterfaceName),
-				slog.Int("filtered_count", nonInterfaces),
-				slog.Int("interfaces_found", len(interfaces)),
+				slog.Int("filtered_count", filtered),
+				slog.Int("types_found", len(interfaces)),
 			)
 		}
 
 		span.SetAttributes(
 			attribute.Bool("index_used", true),
 			attribute.Int("index_matches", len(symbols)),
-			attribute.Int("interfaces_found", len(interfaces)),
-			attribute.Int("non_interfaces_filtered", nonInterfaces),
+			attribute.Int("types_found", len(interfaces)),
+			attribute.Int("non_types_filtered", filtered),
 		)
 
 		if len(interfaces) > 0 {
@@ -273,9 +289,18 @@ func (t *findImplementationsTool) Execute(ctx context.Context, params map[string
 		results, gErr = t.graph.FindImplementationsByName(ctx, p.InterfaceName, graph.WithLimit(p.Limit))
 		if gErr != nil {
 			span.RecordError(gErr)
+			errStep := crs.NewTraceStepBuilder().
+				WithAction("tool_find_implementations").
+				WithTarget(p.InterfaceName).
+				WithTool("find_implementations").
+				WithDuration(time.Since(start)).
+				WithError(fmt.Sprintf("find implementations for '%s': %v", p.InterfaceName, gErr)).
+				Build()
 			return &Result{
-				Success: false,
-				Error:   fmt.Sprintf("find implementations for '%s': %v", p.InterfaceName, gErr),
+				Success:   false,
+				Error:     fmt.Sprintf("find implementations for '%s': %v", p.InterfaceName, gErr),
+				TraceStep: &errStep,
+				Duration:  time.Since(start),
 			}, nil
 		}
 	}
@@ -291,12 +316,26 @@ func (t *findImplementationsTool) Execute(ctx context.Context, params map[string
 		attribute.Int("total_implementations", output.TotalImplementations),
 	)
 
+	duration := time.Since(start)
+
+	// Build CRS TraceStep for reasoning trace continuity
+	toolStep := crs.NewTraceStepBuilder().
+		WithAction("tool_find_implementations").
+		WithTarget(p.InterfaceName).
+		WithTool("find_implementations").
+		WithDuration(duration).
+		WithMetadata("match_count", fmt.Sprintf("%d", output.MatchCount)).
+		WithMetadata("total_implementations", fmt.Sprintf("%d", output.TotalImplementations)).
+		WithMetadata("index_used", fmt.Sprintf("%v", t.index != nil)).
+		Build()
+
 	return &Result{
 		Success:    true,
 		Output:     output,
 		OutputText: outputText,
 		TokensUsed: estimateTokens(outputText),
-		Duration:   time.Since(start),
+		TraceStep:  &toolStep,
+		Duration:   duration,
 	}, nil
 }
 
@@ -312,8 +351,8 @@ func (t *findImplementationsTool) parseParams(params map[string]any) (FindImplem
 			p.InterfaceName = name
 		}
 	}
-	if p.InterfaceName == "" {
-		return p, fmt.Errorf("interface_name is required")
+	if err := ValidateSymbolName(p.InterfaceName, "interface_name", "'Scale', 'Iterator', 'Router'"); err != nil {
+		return p, err
 	}
 
 	// Extract limit (optional)
@@ -385,27 +424,38 @@ func (t *findImplementationsTool) formatText(interfaceName string, results map[s
 	}
 
 	if totalImpls == 0 {
-		sb.WriteString(fmt.Sprintf("## GRAPH RESULT: No implementations of '%s'\n\n", interfaceName))
 		if len(results) == 0 {
-			sb.WriteString(fmt.Sprintf("No interface named '%s' exists in this codebase.\n", interfaceName))
+			sb.WriteString(fmt.Sprintf("## GRAPH RESULT: Symbol '%s' not found\n\n", interfaceName))
+			sb.WriteString(fmt.Sprintf("No interface or class named '%s' exists in this codebase.\n", interfaceName))
 			sb.WriteString("The graph has been fully indexed - this is the definitive answer.\n\n")
 			sb.WriteString("**Do NOT use Grep to search further** - the graph already analyzed all source files.\n")
 		} else {
-			sb.WriteString(fmt.Sprintf("The interface '%s' exists but has no implementing types.\n", interfaceName))
+			sb.WriteString(fmt.Sprintf("## GRAPH RESULT: Implementations of '%s' not found\n\n", interfaceName))
+			sb.WriteString(fmt.Sprintf("The type '%s' exists but has no implementing or extending types.\n", interfaceName))
 			sb.WriteString("The graph has been fully indexed - this is the definitive answer.\n\n")
 			sb.WriteString("**Do NOT use Grep to search further** - the graph already analyzed all source files.\n")
 		}
 		return sb.String()
 	}
 
-	sb.WriteString(fmt.Sprintf("Found %d implementations of interface '%s':\n\n", totalImpls, interfaceName))
+	sb.WriteString(fmt.Sprintf("Found %d implementations/subclasses of '%s':\n\n", totalImpls, interfaceName))
 
-	for interfaceID, result := range results {
+	for targetID, result := range results {
 		if result == nil || len(result.Symbols) == 0 {
 			continue
 		}
 
-		sb.WriteString(fmt.Sprintf("Interface: %s\n", interfaceID))
+		// IT-03: Use language-appropriate label based on target symbol kind
+		label := "Interface"
+		if targetNode, exists := t.graph.GetNode(targetID); exists && targetNode.Symbol != nil {
+			switch targetNode.Symbol.Kind {
+			case ast.SymbolKindClass:
+				label = "Base class"
+			case ast.SymbolKindStruct:
+				label = "Struct"
+			}
+		}
+		sb.WriteString(fmt.Sprintf("%s: %s\n", label, targetID))
 		for _, sym := range result.Symbols {
 			if sym == nil {
 				continue
@@ -414,6 +464,13 @@ func (t *findImplementationsTool) formatText(interfaceName string, results map[s
 		}
 		sb.WriteString("\n")
 	}
+
+	// GR-59 Group A: Signal definitiveness on success path.
+	// The graph already analyzed every source file — these results are exhaustive.
+	// Without this footer, the LLM tries to verify via Grep/Read, triggering CB fires.
+	sb.WriteString("---\n")
+	sb.WriteString("The graph has been fully indexed — these results are exhaustive.\n")
+	sb.WriteString("**Do NOT use Grep or Read to verify** — the graph already analyzed all source files.\n")
 
 	return sb.String()
 }

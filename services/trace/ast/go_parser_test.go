@@ -329,6 +329,144 @@ func TestGoParser_Parse_Struct(t *testing.T) {
 	}
 }
 
+// TestGoParser_Parse_StructEmbedding verifies that the Go parser detects embedded
+// (anonymous) fields and sets Metadata.Extends on the parent struct symbol.
+// IT-03 H-3: Promoted method resolution depends on this.
+func TestGoParser_Parse_StructEmbedding(t *testing.T) {
+	parser := NewGoParser()
+	ctx := context.Background()
+
+	t.Run("single embedded type", func(t *testing.T) {
+		content := `package main
+
+type RouterGroup struct {
+	basePath string
+}
+
+type Engine struct {
+	RouterGroup
+	pool int
+}
+`
+		result, err := parser.Parse(ctx, []byte(content), "engine.go")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		var engine *Symbol
+		for _, sym := range result.Symbols {
+			if sym.Name == "Engine" && sym.Kind == SymbolKindStruct {
+				engine = sym
+				break
+			}
+		}
+		if engine == nil {
+			t.Fatal("expected to find Engine struct")
+		}
+		if engine.Metadata == nil {
+			t.Fatal("expected Engine to have Metadata")
+		}
+		if engine.Metadata.Extends != "RouterGroup" {
+			t.Errorf("expected Extends='RouterGroup', got %q", engine.Metadata.Extends)
+		}
+	})
+
+	t.Run("pointer embedded type", func(t *testing.T) {
+		content := `package main
+
+type Base struct{}
+
+type Child struct {
+	*Base
+	Name string
+}
+`
+		result, err := parser.Parse(ctx, []byte(content), "child.go")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		var child *Symbol
+		for _, sym := range result.Symbols {
+			if sym.Name == "Child" && sym.Kind == SymbolKindStruct {
+				child = sym
+				break
+			}
+		}
+		if child == nil {
+			t.Fatal("expected to find Child struct")
+		}
+		if child.Metadata == nil {
+			t.Fatal("expected Child to have Metadata")
+		}
+		if child.Metadata.Extends != "Base" {
+			t.Errorf("expected Extends='Base', got %q", child.Metadata.Extends)
+		}
+	})
+
+	t.Run("qualified embedded type", func(t *testing.T) {
+		content := `package main
+
+import "sync"
+
+type SafeMap struct {
+	sync.Mutex
+	data map[string]string
+}
+`
+		result, err := parser.Parse(ctx, []byte(content), "safemap.go")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		var safeMap *Symbol
+		for _, sym := range result.Symbols {
+			if sym.Name == "SafeMap" && sym.Kind == SymbolKindStruct {
+				safeMap = sym
+				break
+			}
+		}
+		if safeMap == nil {
+			t.Fatal("expected to find SafeMap struct")
+		}
+		if safeMap.Metadata == nil {
+			t.Fatal("expected SafeMap to have Metadata")
+		}
+		if safeMap.Metadata.Extends != "Mutex" {
+			t.Errorf("expected Extends='Mutex', got %q", safeMap.Metadata.Extends)
+		}
+	})
+
+	t.Run("no embedded type", func(t *testing.T) {
+		content := `package main
+
+type Plain struct {
+	Name string
+	Age  int
+}
+`
+		result, err := parser.Parse(ctx, []byte(content), "plain.go")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		var plain *Symbol
+		for _, sym := range result.Symbols {
+			if sym.Name == "Plain" && sym.Kind == SymbolKindStruct {
+				plain = sym
+				break
+			}
+		}
+		if plain == nil {
+			t.Fatal("expected to find Plain struct")
+		}
+		// Plain struct has no embeds — Metadata should be nil or Extends should be empty
+		if plain.Metadata != nil && plain.Metadata.Extends != "" {
+			t.Errorf("expected no Extends for Plain, got %q", plain.Metadata.Extends)
+		}
+	})
+}
+
 func TestGoParser_Parse_Imports(t *testing.T) {
 	parser := NewGoParser()
 	ctx := context.Background()

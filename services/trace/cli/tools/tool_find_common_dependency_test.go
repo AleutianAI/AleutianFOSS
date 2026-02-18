@@ -240,11 +240,13 @@ func TestFindCommonDependencyTool_NonExistentTarget(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Execute() returned error: %v", err)
 		}
-		if result.Success {
-			t.Fatal("Expected failure with non-existent target")
+		// Phase 11A: Tool returns Success=true with informational text when targets
+		// are definitively verified as non-existent (graph is fully indexed).
+		if !result.Success {
+			t.Fatal("Expected success (informational result for verified non-existence)")
 		}
-		if !strings.Contains(result.Error, "not found") && !strings.Contains(result.Error, "NonExistent") {
-			t.Errorf("Expected error about non-existent target, got: %s", result.Error)
+		if !strings.Contains(result.OutputText, "Not found") && !strings.Contains(result.OutputText, "NonExistent") {
+			t.Errorf("Expected informational text about non-existent target, got: %s", result.OutputText)
 		}
 	})
 }

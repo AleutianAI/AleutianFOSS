@@ -364,6 +364,27 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 		return agent.StateError, buildErr
 	}
 
+	// GR-59 Rev 4d: Pre-LLM synthesis check — MUST be before hardForcing block.
+	// If a forced graph tool already completed (flag set by executeToolDirectlyWithFallback),
+	// skip ALL further tool execution and force synthesis directly. This prevents the
+	// router from forcing Grep/Glob/Read after the graph already answered authoritatively.
+	// Previous placement (Rev 4c) was AFTER the hardForcing block, so it was bypassed
+	// when the router selected a non-graph tool (e.g., Grep) on subsequent steps.
+	if stepNumber >= 1 && deps.Session != nil && deps.Session.GraphToolHadSubstantiveResults() {
+		slog.Info("GR-59 Rev 4d: Pre-tool synthesis — forced graph tool already completed, skipping router-forced tool",
+			slog.String("session_id", deps.Session.ID),
+			slog.Int("step_number", stepNumber),
+			slog.String("router_suggested", func() string {
+				if hardForcing != nil {
+					return hardForcing.Tool
+				}
+				return "none"
+			}()),
+		)
+		deps.Session.SetCircuitBreakerActive(true)
+		return p.forceLLMSynthesis(ctx, deps, request, stepStart, stepNumber)
+	}
+
 	// O1.3 Fix: Capture semantic info for trace step metadata
 	var lastSemanticInfo *SemanticInfo
 
@@ -579,12 +600,21 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 			slog.Int("tool_results", len(toolResults)),
 		)
 
-		// Build a synthesis from the graph tool results
+		// First try to synthesize from the current batch's tool results.
 		synthResult := p.synthesizeFromGraphToolResults(deps, toolResults, "graph_tool_completion")
 		if synthResult != "" {
 			response.Content = synthResult
 			return p.handleCompletion(ctx, deps, response, request, stepStart, stepNumber)
 		}
+
+		// GR-59 Rev 2: If current batch has no graph results (e.g., only CB errors),
+		// force the LLM to produce an answer from conversation history which already
+		// contains the graph tool results from prior steps.
+		slog.Info("GR-59 Rev 2: Current batch has no graph results, forcing LLM synthesis from history",
+			slog.String("session_id", deps.Session.ID),
+		)
+		deps.Session.SetCircuitBreakerActive(true)
+		return p.forceLLMSynthesis(ctx, deps, request, stepStart, stepNumber)
 	}
 
 	// Check if reflection is needed
@@ -1491,6 +1521,25 @@ func (p *ExecutePhase) handleCompletion(ctx context.Context, deps *Dependencies,
 		}
 	}
 
+	// GR-59 Group F: Detect LLM "surrender" responses ("I don't know") when tool results exist.
+	// If the LLM gives up despite having graph tool results, retry once with a synthesis directive.
+	if isSurrenderResponse(response.Content) && deps.Context != nil && len(deps.Context.ToolResults) > 0 {
+		surrenderRetries := deps.Session.GetMetric(agent.MetricSurrenderRetries)
+		if surrenderRetries < 1 {
+			slog.Info("GR-59: Surrender detected with tool results available, retrying synthesis",
+				slog.String("session_id", deps.Session.ID),
+				slog.String("response_preview", truncateForLog(response.Content, 50)),
+				slog.Int("tool_results", len(deps.Context.ToolResults)),
+			)
+			deps.Session.IncrementMetric(agent.MetricSurrenderRetries, 1)
+
+			synthesized := p.synthesizeFromToolResults(deps)
+			if synthesized != "" {
+				response.Content = synthesized
+			}
+		}
+	}
+
 	// Validate response for prohibited patterns (hybrid stack layer 4)
 	if p.responseValidator != nil {
 		// GR-Phase1 Fix: Use the actual tool_choice from the request instead of
@@ -1915,11 +1964,12 @@ func (p *ExecutePhase) buildEmptyResponseFallback(deps *Dependencies) string {
 // graphToolsWithSubstantiveResults are the graph tools that, when they return
 // results, indicate we have enough information to synthesize an answer.
 var graphToolsWithSubstantiveResults = map[string]bool{
-	"find_callers":    true,
-	"find_callees":    true,
-	"find_references": true,
-	"find_path":       true,
-	"get_call_chain":  true,
+	"find_callers":         true,
+	"find_callees":         true,
+	"find_implementations": true,
+	"find_references":      true,
+	"find_path":            true,
+	"get_call_chain":       true,
 }
 
 // shouldForceSynthesisAfterGraphTools determines if we should force synthesis
@@ -1952,7 +2002,18 @@ func (p *ExecutePhase) shouldForceSynthesisAfterGraphTools(deps *Dependencies, t
 		return false
 	}
 
-	// Check if any of the executed tools were graph tools with results
+	// GR-59 Rev 4: Direct session flag from forced tool execution.
+	// Set by executeToolDirectlyWithFallback when a graph tool returns
+	// substantive results. No metadata round-trip — most reliable signal.
+	if deps.Session != nil && deps.Session.GraphToolHadSubstantiveResults() {
+		slog.Info("GR-59 Rev 4: Forcing synthesis — forced graph tool had substantive results",
+			slog.String("session_id", deps.Session.ID),
+			slog.Int("step_number", stepNumber),
+		)
+		return true
+	}
+
+	// Check if any of the executed tools in the CURRENT batch were graph tools with results
 	for _, result := range toolResults {
 		if result == nil || result.Error != "" {
 			continue
@@ -1965,7 +2026,7 @@ func (p *ExecutePhase) shouldForceSynthesisAfterGraphTools(deps *Dependencies, t
 		if graphToolsWithSubstantiveResults[toolName] {
 			// Check if the result contains actual data (not "No X found" messages)
 			if hasSubstantiveGraphResult(result.OutputText) {
-				slog.Debug("GR-41b: Graph tool returned substantive results",
+				slog.Debug("GR-41b: Graph tool returned substantive results (current batch)",
 					slog.String("tool", toolName),
 					slog.Int("content_len", len(result.OutputText)),
 				)
@@ -1974,6 +2035,68 @@ func (p *ExecutePhase) shouldForceSynthesisAfterGraphTools(deps *Dependencies, t
 		}
 	}
 
+	// GR-59 Rev 2: Check session history for PREVIOUS graph tool results.
+	// The current batch may contain only Grep/Read (non-graph tools) while
+	// a graph tool returned substantive results in a prior step. Without this
+	// check, the LLM keeps calling Grep after find_implementations already answered.
+	if deps.Session != nil && p.sessionHasPriorGraphToolResults(deps) {
+		slog.Info("GR-59 Rev 2: Forcing synthesis — prior graph tool had substantive results",
+			slog.String("session_id", deps.Session.ID),
+			slog.Int("step_number", stepNumber),
+		)
+		return true
+	}
+
+	return false
+}
+
+// sessionHasPriorGraphToolResults checks session trace step history for any
+// previous graph tool execution that returned substantive results.
+//
+// Description:
+//
+//	This addresses the blind spot where shouldForceSynthesisAfterGraphTools only
+//	checked the current batch's tool results. When a graph tool (e.g., find_implementations)
+//	returned results at step 0 but the LLM called Grep at step 1, the current batch
+//	contained only Grep results — missing the graph tool's substantive output entirely.
+//
+// Inputs:
+//
+//	deps - Phase dependencies with session access.
+//
+// Outputs:
+//
+//	bool - True if any prior graph tool returned non-zero results.
+//
+// Thread Safety: Safe for concurrent use (read-only).
+func (p *ExecutePhase) sessionHasPriorGraphToolResults(deps *Dependencies) bool {
+	traceSteps := deps.Session.GetTraceSteps()
+	// Result count metadata keys used by graph tools to indicate substantive output.
+	resultCountKeys := []string{
+		"match_count",           // find_callers, find_implementations
+		"total_callers",         // find_callers
+		"total_implementations", // find_implementations
+		"resolved_count",        // find_callees
+		"total_count",           // find_callees
+		"reference_count",       // find_references
+		"chain_length",          // get_call_chain
+	}
+
+	for _, step := range traceSteps {
+		if !graphToolsWithSubstantiveResults[step.Tool] || step.Error != "" {
+			continue
+		}
+		for _, key := range resultCountKeys {
+			if val, ok := step.Metadata[key]; ok && val != "0" && val != "" {
+				slog.Debug("GR-59 Rev 2: Found prior graph tool with substantive results",
+					slog.String("tool", step.Tool),
+					slog.String("key", key),
+					slog.String("value", val),
+				)
+				return true
+			}
+		}
+	}
 	return false
 }
 
@@ -2002,6 +2125,9 @@ func getToolNameFromResult(result *tools.Result) string {
 	if strings.Contains(outputLower, "references found") || strings.Contains(outputLower, "referenced by") {
 		return "find_references"
 	}
+	if strings.Contains(outputLower, "implementations found") || strings.Contains(outputLower, "implements") || strings.Contains(outputLower, "classes that implement") || strings.Contains(outputLower, "classes extend") {
+		return "find_implementations"
+	}
 	if strings.Contains(outputLower, "call chain") {
 		return "get_call_chain"
 	}
@@ -2017,13 +2143,13 @@ func hasSubstantiveGraphResult(content string) bool {
 	}
 
 	// Check for common "no results" patterns
+	// GR-59 Rev 4 root cause fix: All graph tools now include "not found" in their
+	// zero-result headers (e.g., "Symbol 'X' not found", "Callers of 'X' not found",
+	// "Callees of 'X' not found", "Implementations of 'X' not found"). The universal
+	// "not found" pattern catches all of them without tool-specific workarounds.
 	noResultPatterns := []string{
-		"No callers found",
-		"No callees found",
-		"No references found",
-		"No path found",
-		"No call chain found",
 		"not found",
+		"No references found",
 		"No results",
 	}
 
@@ -2093,6 +2219,11 @@ func (p *ExecutePhase) synthesizeFromGraphToolResults(deps *Dependencies, toolRe
 			sb.WriteString(content)
 			sb.WriteString("\n\n")
 
+		case "find_implementations":
+			sb.WriteString("**Implementations found:**\n")
+			sb.WriteString(content)
+			sb.WriteString("\n\n")
+
 		case "get_call_chain":
 			sb.WriteString("**Call chain:**\n")
 			sb.WriteString(content)
@@ -2155,4 +2286,82 @@ func (p *ExecutePhase) synthesizeFromGraphToolResults(deps *Dependencies, toolRe
 	}
 
 	return ""
+}
+
+// forceLLMSynthesis forces the LLM to produce a final answer from conversation history.
+//
+// Description:
+//
+//	GR-59 Rev 2: When a graph tool returned substantive results in a prior step
+//	but the current batch contains only CB errors or non-graph tool results,
+//	force the LLM to synthesize an answer. The conversation history already
+//	contains the graph tool output, so the LLM has everything it needs.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation.
+//	deps - Phase dependencies.
+//	request - The original LLM request (used for signature compatibility).
+//	stepStart - When this step began (for duration tracking).
+//	stepNumber - Current step number.
+//
+// Outputs:
+//
+//	agent.AgentState - The next state.
+//	error - Non-nil on failure.
+//
+// Thread Safety: Safe for concurrent use.
+func (p *ExecutePhase) forceLLMSynthesis(
+	ctx context.Context,
+	deps *Dependencies,
+	request *llm.Request,
+	stepStart time.Time,
+	stepNumber int,
+) (agent.AgentState, error) {
+	slog.Info("GR-59 Rev 2: Forcing LLM synthesis from conversation history",
+		slog.String("session_id", deps.Session.ID),
+		slog.Int("step_number", stepNumber),
+	)
+
+	// Build request without tools — force text-only response.
+	synthRequest := llm.BuildRequest(deps.Context, nil, p.maxTokens)
+
+	synthesisPrompt := `You have gathered information from tools. Now provide a complete answer.
+
+MANDATORY: YOU MUST RESPOND WITH A COMPLETE ANSWER based on the tool results in the conversation above.
+Graph tools have already provided exhaustive results — do NOT request more tool calls.
+Summarize the findings clearly and completely.`
+
+	// Append synthesis instruction as the last user message.
+	synthRequest.Messages = append(synthRequest.Messages, llm.Message{
+		Role:    "user",
+		Content: synthesisPrompt,
+	})
+	synthRequest.ToolChoice = llm.ToolChoiceNone()
+	synthRequest.Tools = nil
+
+	response, err := p.callLLM(ctx, deps, synthRequest)
+	if err != nil {
+		slog.Error("GR-59 Rev 2: Synthesis LLM call failed",
+			slog.String("session_id", deps.Session.ID),
+			slog.String("error", err.Error()),
+		)
+		return p.handleLLMError(deps, err)
+	}
+
+	// Record trace step
+	if deps.Session != nil {
+		deps.Session.RecordTraceStep(crs.TraceStep{
+			Timestamp: time.Now().UnixMilli(),
+			Action:    "forced_synthesis",
+			Target:    "gr59_rev2_session_history",
+			Metadata: map[string]string{
+				"reason":        "prior_graph_tool_results",
+				"step_number":   fmt.Sprintf("%d", stepNumber),
+				"output_tokens": fmt.Sprintf("%d", response.OutputTokens),
+			},
+		})
+	}
+
+	return p.handleCompletion(ctx, deps, response, synthRequest, stepStart, stepNumber)
 }

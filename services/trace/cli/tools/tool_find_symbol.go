@@ -21,6 +21,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
@@ -152,10 +153,10 @@ func (t *findSymbolTool) Definition() ToolDefinition {
 			},
 			"kind": {
 				Type:        ParamTypeString,
-				Description: "Filter by symbol kind: function, type, interface, variable, constant, method, or all",
+				Description: "Filter by symbol kind: function, method, class, struct, interface, type, variable, constant, enum, or all",
 				Required:    false,
 				Default:     "all",
-				Enum:        []any{"function", "type", "interface", "variable", "constant", "method", "all"},
+				Enum:        []any{"function", "method", "class", "struct", "interface", "type", "variable", "constant", "enum", "all"},
 			},
 			"package": {
 				Type:        ParamTypeString,
@@ -178,9 +179,17 @@ func (t *findSymbolTool) Execute(ctx context.Context, params map[string]any) (*R
 	// Parse and validate parameters
 	p, err := t.parseParams(params)
 	if err != nil {
+		errStep := crs.NewTraceStepBuilder().
+			WithAction("tool_find_symbol").
+			WithTool("find_symbol").
+			WithDuration(time.Since(start)).
+			WithError(err.Error()).
+			Build()
 		return &Result{
-			Success: false,
-			Error:   err.Error(),
+			Success:   false,
+			Error:     err.Error(),
+			TraceStep: &errStep,
+			Duration:  time.Since(start),
 		}, nil
 	}
 
@@ -256,12 +265,26 @@ func (t *findSymbolTool) Execute(ctx context.Context, params map[string]any) (*R
 		attribute.Bool("used_fuzzy", usedFuzzy),
 	)
 
+	duration := time.Since(start)
+
+	// Build CRS TraceStep for reasoning trace continuity
+	toolStep := crs.NewTraceStepBuilder().
+		WithAction("tool_find_symbol").
+		WithTarget(p.Name).
+		WithTool("find_symbol").
+		WithDuration(duration).
+		WithMetadata("match_count", fmt.Sprintf("%d", len(filtered))).
+		WithMetadata("used_fuzzy", fmt.Sprintf("%v", usedFuzzy)).
+		WithMetadata("kind_filter", p.Kind).
+		Build()
+
 	return &Result{
 		Success:    true,
 		Output:     output,
 		OutputText: outputText,
 		TokensUsed: estimateTokens(outputText),
-		Duration:   time.Since(start),
+		TraceStep:  &toolStep,
+		Duration:   duration,
 	}, nil
 }
 
@@ -277,8 +300,8 @@ func (t *findSymbolTool) parseParams(params map[string]any) (FindSymbolParams, e
 			p.Name = name
 		}
 	}
-	if p.Name == "" {
-		return p, fmt.Errorf("name is required")
+	if err := ValidateSymbolName(p.Name, "name", "'Router', 'handleRequest', 'Config'"); err != nil {
+		return p, err
 	}
 
 	// Extract kind (optional)
@@ -357,12 +380,22 @@ func (t *findSymbolTool) formatText(searchName string, symbols []*ast.Symbol) st
 }
 
 // matchesSymbolKind checks if a symbol kind matches a filter string.
+//
+// IT-03 C-2: Extended to support class, struct, and enum kinds.
+// "type" matches both SymbolKindType and SymbolKindStruct for backward compatibility.
+// "class" matches SymbolKindClass (Python/JS/TS class definitions).
+// "struct" matches SymbolKindStruct (Go struct definitions).
+// "all" or any unrecognized value matches everything.
 func matchesSymbolKind(kind ast.SymbolKind, filter string) bool {
 	switch filter {
 	case "function":
 		return kind == ast.SymbolKindFunction
 	case "method":
 		return kind == ast.SymbolKindMethod
+	case "class":
+		return kind == ast.SymbolKindClass
+	case "struct":
+		return kind == ast.SymbolKindStruct
 	case "type":
 		return kind == ast.SymbolKindType || kind == ast.SymbolKindStruct
 	case "interface":
@@ -371,6 +404,10 @@ func matchesSymbolKind(kind ast.SymbolKind, filter string) bool {
 		return kind == ast.SymbolKindVariable
 	case "constant":
 		return kind == ast.SymbolKindConstant
+	case "enum":
+		return kind == ast.SymbolKindEnum
+	case "all":
+		return true
 	default:
 		return true
 	}

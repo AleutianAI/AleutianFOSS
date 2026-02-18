@@ -21,6 +21,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
@@ -161,9 +162,17 @@ func (t *findReferencesTool) Execute(ctx context.Context, params map[string]any)
 	// Parse and validate parameters
 	p, err := t.parseParams(params)
 	if err != nil {
+		errStep := crs.NewTraceStepBuilder().
+			WithAction("tool_find_references").
+			WithTool("find_references").
+			WithDuration(time.Since(start)).
+			WithError(err.Error()).
+			Build()
 		return &Result{
-			Success: false,
-			Error:   err.Error(),
+			Success:   false,
+			Error:     err.Error(),
+			TraceStep: &errStep,
+			Duration:  time.Since(start),
 		}, nil
 	}
 
@@ -179,8 +188,10 @@ func (t *findReferencesTool) Execute(ctx context.Context, params map[string]any)
 
 	// Find symbol IDs and their references
 	var allReferences []ReferenceInfo
+	var symbolMatches int
 	if t.index != nil {
 		matches := t.index.GetByName(p.SymbolName)
+		symbolMatches = len(matches)
 		for _, sym := range matches {
 			if sym == nil {
 				continue
@@ -223,12 +234,25 @@ func (t *findReferencesTool) Execute(ctx context.Context, params map[string]any)
 
 	span.SetAttributes(attribute.Int("reference_count", len(allReferences)))
 
+	duration := time.Since(start)
+
+	// Build CRS TraceStep for reasoning trace continuity
+	toolStep := crs.NewTraceStepBuilder().
+		WithAction("tool_find_references").
+		WithTarget(p.SymbolName).
+		WithTool("find_references").
+		WithDuration(duration).
+		WithMetadata("reference_count", fmt.Sprintf("%d", len(allReferences))).
+		WithMetadata("symbol_matches", fmt.Sprintf("%d", symbolMatches)).
+		Build()
+
 	return &Result{
 		Success:    true,
 		Output:     output,
 		OutputText: outputText,
 		TokensUsed: estimateTokens(outputText),
-		Duration:   time.Since(start),
+		TraceStep:  &toolStep,
+		Duration:   duration,
 	}, nil
 }
 
@@ -244,8 +268,8 @@ func (t *findReferencesTool) parseParams(params map[string]any) (FindReferencesP
 			p.SymbolName = name
 		}
 	}
-	if p.SymbolName == "" {
-		return p, fmt.Errorf("symbol_name is required")
+	if err := ValidateSymbolName(p.SymbolName, "symbol_name", "'Session', 'app', 'Logger'"); err != nil {
+		return p, err
 	}
 
 	// Extract limit (optional)

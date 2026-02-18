@@ -1117,6 +1117,32 @@ run_crs_test() {
 
     echo ""
     if [ "$state" = "$expected_state" ]; then
+        # IT-03 C-1: Detect surrender/empty responses that technically reach COMPLETE state
+        # but don't actually answer the query. These should be flagged as FAILED.
+        local surrender_detected=false
+        local agent_response_lower=$(echo "$agent_response" | tr '[:upper:]' '[:lower:]')
+        local response_length=${#agent_response}
+
+        # Check for empty or near-empty responses (< 20 chars after trimming)
+        local trimmed_response=$(echo "$agent_response" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        if [ ${#trimmed_response} -lt 20 ]; then
+            surrender_detected=true
+            echo -e "  ${RED}════ FAILED (SURRENDER) ════${NC} Response too short (${#trimmed_response} chars)"
+        fi
+
+        # Check for explicit "I don't know" / surrender patterns
+        if [ "$surrender_detected" = false ]; then
+            if echo "$agent_response_lower" | grep -qE "(i don.t know|i cannot|i.m unable to|i am unable to|unable to determine|cannot determine|no information available|i have no|i lack|not enough information|insufficient information|i couldn.t find|i could not find|no results|no data available)"; then
+                surrender_detected=true
+                echo -e "  ${RED}════ FAILED (SURRENDER) ════${NC} Agent surrendered instead of answering"
+                echo "$agent_response" | head -3 | sed 's/^/    /'
+            fi
+        fi
+
+        if [ "$surrender_detected" = true ]; then
+            return 1
+        fi
+
         echo -e "  ${GREEN}════ PASSED ════${NC} State: $state (${duration}ms)"
 
         # Run extra checks if specified (M-3: guard against undefined function)
@@ -1195,7 +1221,91 @@ resolve_tool_indices() {
             continue
         fi
         if [ "$part" = "find_callees_all" ]; then
-            indices+=(1 42 43)
+            indices+=(1 44 45)
+            continue
+        fi
+        if [ "$part" = "find_implementations_all" ]; then
+            indices+=(2 42 43)
+            continue
+        fi
+        if [ "$part" = "find_symbol_all" ]; then
+            indices+=(3 46 47)
+            continue
+        fi
+        if [ "$part" = "find_references_all" ]; then
+            indices+=(4 48 49)
+            continue
+        fi
+        if [ "$part" = "get_call_chain_all" ]; then
+            indices+=(5 50 51)
+            continue
+        fi
+        if [ "$part" = "find_path_all" ]; then
+            indices+=(6 52 53)
+            continue
+        fi
+        if [ "$part" = "find_hotspots_all" ]; then
+            indices+=(7 54 55)
+            continue
+        fi
+        if [ "$part" = "find_dead_code_all" ]; then
+            indices+=(8 56 57)
+            continue
+        fi
+        if [ "$part" = "find_cycles_all" ]; then
+            indices+=(9 58 59)
+            continue
+        fi
+        if [ "$part" = "find_important_all" ]; then
+            indices+=(10 60 61)
+            continue
+        fi
+        if [ "$part" = "find_communities_all" ]; then
+            indices+=(11 62 63)
+            continue
+        fi
+        if [ "$part" = "find_articulation_points_all" ]; then
+            indices+=(12 64 65)
+            continue
+        fi
+        if [ "$part" = "find_dominators_all" ]; then
+            indices+=(13 66 67)
+            continue
+        fi
+        if [ "$part" = "find_loops_all" ]; then
+            indices+=(14 68 69)
+            continue
+        fi
+        if [ "$part" = "find_merge_points_all" ]; then
+            indices+=(15 70 71)
+            continue
+        fi
+        if [ "$part" = "find_common_dependency_all" ]; then
+            indices+=(16 72 73)
+            continue
+        fi
+        if [ "$part" = "find_control_dependencies_all" ]; then
+            indices+=(17 74 75)
+            continue
+        fi
+        if [ "$part" = "find_extractable_regions_all" ]; then
+            indices+=(18 76 77)
+            continue
+        fi
+        if [ "$part" = "check_reducibility_all" ]; then
+            indices+=(19 78 79)
+            continue
+        fi
+        if [ "$part" = "find_critical_path_all" ]; then
+            indices+=(20 80 81)
+            continue
+        fi
+        if [ "$part" = "find_module_api_all" ]; then
+            indices+=(21 82 83)
+            continue
+        fi
+        if [ "$part" = "find_weighted_criticality_all" ]; then
+            indices+=(22 84 85)
             continue
         fi
 
@@ -1214,7 +1324,8 @@ resolve_tool_indices() {
                 for i in "${!TOOL_NAMES[@]}"; do
                     printf "  %02d  %s\n" "$i" "${TOOL_NAMES[$i]}" >&2
                 done
-                echo -e "${YELLOW}Aliases: find_callers_all (= 0,40,41), find_callees_all (= 1,42,43)${NC}" >&2
+                echo -e "${YELLOW}Aliases: <tool_name>_all runs 3 tests per project for that tool.${NC}" >&2
+                echo -e "${YELLOW}  e.g., find_callers_all, find_symbol_all, find_hotspots_all, etc.${NC}" >&2
                 return 1
             fi
         fi
@@ -1481,6 +1592,65 @@ load_tool_across_projects() {
             local tool_display
             tool_display=$(tool_index_to_name "$tool_idx")
             echo -e "  ${GREEN}✓${NC} ${file_project_name} (${file_language}): test $test_id — $tool_display"
+        done
+
+        # Second pass: scan for TOOL_CRS_VERIFICATION entries matching the tool name.
+        # CRS entries live at the end of YAML files (not at positional indices 0-22),
+        # so we must search by name pattern (e.g., "*_crs_find_callers*").
+        for tool_idx in "${indices_arr[@]}"; do
+            local tool_name
+            tool_name=$(tool_index_to_name "$tool_idx")
+
+            # Use yq to find all CRS verification tests whose name contains "crs_<tool_name>"
+            local crs_indices
+            crs_indices=$(yq eval "[.tests | to_entries[] | select(.value.category == \"TOOL_CRS_VERIFICATION\" and (.value.name | test(\"crs_${tool_name}\"))) | .key] | .[]" "$yaml_file" 2>/dev/null)
+
+            for crs_idx in $crs_indices; do
+                local crs_test_id=$(yq eval ".tests[$crs_idx].id" "$yaml_file")
+
+                # Skip if already loaded (avoid duplicates with _all aliases)
+                local already_loaded=false
+                for existing_id in "${CRS_TEST_IDS[@]}"; do
+                    if [ "$existing_id" = "$crs_test_id" ]; then
+                        already_loaded=true
+                        break
+                    fi
+                done
+                if $already_loaded; then
+                    continue
+                fi
+
+                local crs_category=$(yq eval ".tests[$crs_idx].category" "$yaml_file")
+                local crs_name=$(yq eval ".tests[$crs_idx].name" "$yaml_file")
+                local crs_query=$(yq eval ".tests[$crs_idx].query" "$yaml_file")
+                local crs_expected=$(yq eval ".tests[$crs_idx].expected_state" "$yaml_file")
+
+                local crs_validations=""
+                local crs_num_val=$(yq eval ".tests[$crs_idx].validations | length" "$yaml_file")
+                if [ "$crs_num_val" != "null" ] && [ "$crs_num_val" -gt 0 ] 2>/dev/null; then
+                    for ((v=0; v<crs_num_val; v++)); do
+                        local val_type=$(yq eval ".tests[$crs_idx].validations[$v].type" "$yaml_file")
+                        if [ -n "$crs_validations" ]; then
+                            crs_validations="${crs_validations}|${val_type}"
+                        else
+                            crs_validations="$val_type"
+                        fi
+                    done
+                fi
+
+                local crs_test_string="$crs_category|$crs_name|$crs_query|$crs_expected"
+                if [ -n "$crs_validations" ]; then
+                    crs_test_string="${crs_test_string}|${crs_validations}"
+                fi
+
+                CRS_TESTS+=("$crs_test_string")
+                CRS_TEST_IDS+=("$crs_test_id")
+                CRS_TEST_PROJECT_ROOTS+=("$file_project_root")
+                CRS_TEST_PROJECT_NAMES+=("$file_project_name")
+                ((test_count++))
+
+                echo -e "  ${GREEN}✓${NC} ${file_project_name} (${file_language}): test $crs_test_id — ${tool_name} [CRS]"
+            done
         done
     done
 

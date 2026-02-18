@@ -257,6 +257,10 @@ func extractFunctionNameFromQuery(query string) string {
 		if strings.Contains(candidate, ".") {
 			parts := strings.SplitN(candidate, ".", 2)
 			if len(parts) == 2 && isValidTypeName(parts[0]) && len(parts[1]) > 0 {
+				// Reject file extensions — "Babylon.js", "Express.ts", "Flask.py" are not Type.Method
+				if isFileExtension(parts[1]) {
+					continue
+				}
 				// Validate the method part starts with a letter (reject "Foo.123")
 				methodFirstRune := rune(parts[1][0])
 				if unicode.IsLetter(methodFirstRune) || parts[1][0] == '_' {
@@ -385,6 +389,9 @@ func isValidFunctionName(s string) bool {
 		"control", "dependencies", "dependency", "common", "dominators", "dominator",
 		"references", "reference", "implementations", "implementation", "symbol",
 		"hotspots", "hotspot", "cycles", "cycle", "communities", "community",
+		"extends", "extend", "implements", "implement", "subclass", "subclasses",
+		"classes", "class", "interface", "interfaces", "structs", "struct",
+		"base", "abstract", "derive", "derives", "inherit", "inherits",
 	}
 	for _, skip := range skipWords {
 		if lower == skip {
@@ -392,6 +399,134 @@ func isValidFunctionName(s string) bool {
 		}
 	}
 	return true
+}
+
+// extractInterfaceNameFromQuery extracts an interface or base class name from an
+// implementation-related query using inheritance-specific patterns.
+//
+// Description:
+//
+//	Recognizes patterns specific to find_implementations queries:
+//	  "What classes extend AbstractMesh?" → "AbstractMesh"
+//	  "What implements the Reader interface?" → "Reader"
+//	  "What subclasses Light in Babylon.js?" → "Light"
+//	  "Find implementations of SessionInterface" → "SessionInterface"
+//
+//	Returns "" if no inheritance-specific pattern is found.
+//	The caller should fall back to extractFunctionNameFromQuery.
+func extractInterfaceNameFromQuery(query string) string {
+	lowerQuery := strings.ToLower(query)
+	words := strings.Fields(query)
+
+	// Pattern 1: "extend(s) X" — X is the base class/interface
+	for _, keyword := range []string{"extends ", "extend "} {
+		if idx := strings.Index(lowerQuery, keyword); idx >= 0 {
+			after := query[idx+len(keyword):]
+			afterWords := strings.Fields(after)
+			// Skip articles: "the"
+			for _, w := range afterWords {
+				candidate := strings.Trim(w, "?,.()")
+				candidateLower := strings.ToLower(candidate)
+				if candidateLower == "the" || candidateLower == "a" || candidateLower == "an" {
+					continue
+				}
+				if isValidFunctionName(candidate) && !isQueryKeyword(candidateLower) {
+					return candidate
+				}
+				break
+			}
+		}
+	}
+
+	// Pattern 2: "implement(s) X" — X is the interface
+	for _, keyword := range []string{"implements ", "implement "} {
+		if idx := strings.Index(lowerQuery, keyword); idx >= 0 {
+			after := query[idx+len(keyword):]
+			afterWords := strings.Fields(after)
+			for _, w := range afterWords {
+				candidate := strings.Trim(w, "?,.()")
+				candidateLower := strings.ToLower(candidate)
+				if candidateLower == "the" || candidateLower == "a" || candidateLower == "an" {
+					continue
+				}
+				if isValidFunctionName(candidate) && !isQueryKeyword(candidateLower) {
+					return candidate
+				}
+				break
+			}
+		}
+	}
+
+	// Pattern 3: "subclass(es) of X" or "implementations of X"
+	for _, keyword := range []string{"subclasses of ", "subclass of ", "implementations of ", "implementation of "} {
+		if idx := strings.Index(lowerQuery, keyword); idx >= 0 {
+			after := query[idx+len(keyword):]
+			afterWords := strings.Fields(after)
+			for _, w := range afterWords {
+				candidate := strings.Trim(w, "?,.()")
+				candidateLower := strings.ToLower(candidate)
+				if candidateLower == "the" || candidateLower == "a" || candidateLower == "an" {
+					continue
+				}
+				if isValidFunctionName(candidate) && !isQueryKeyword(candidateLower) {
+					return candidate
+				}
+				break
+			}
+		}
+	}
+
+	// Pattern 4: "X class" or "X interface" or "X base class" — the word before "class"/"interface"
+	for i := 0; i < len(words)-1; i++ {
+		nextLower := strings.ToLower(words[i+1])
+		if nextLower == "class" || nextLower == "interface" || nextLower == "struct" || nextLower == "type" {
+			candidate := strings.Trim(words[i], "?,.()")
+			candidateLower := strings.ToLower(candidate)
+			if candidateLower == "the" || candidateLower == "a" || candidateLower == "an" ||
+				candidateLower == "base" || candidateLower == "abstract" || candidateLower == "parent" {
+				continue
+			}
+			if isValidFunctionName(candidate) && !isQueryKeyword(candidateLower) {
+				return candidate
+			}
+		}
+	}
+
+	return ""
+}
+
+// isQueryKeyword returns true if the word is a common query keyword that should
+// not be extracted as a symbol name.
+func isQueryKeyword(lower string) bool {
+	switch lower {
+	case "what", "which", "who", "how", "where", "when", "why",
+		"classes", "class", "types", "type", "functions", "function",
+		"methods", "method", "interfaces", "interface", "structs", "struct",
+		"all", "any", "find", "show", "list", "get", "are", "is",
+		"does", "do", "has", "have", "the", "a", "an", "in", "on",
+		"from", "to", "with", "for", "base", "abstract", "parent",
+		"this", "that", "these", "those":
+		return true
+	}
+	return false
+}
+
+// isFileExtension returns true if the string is a common programming language file extension.
+// Used to reject "Babylon.js", "Express.ts", etc. as Type.Method patterns.
+func isFileExtension(s string) bool {
+	// Only match if the extension is already lowercase — "js", "ts", "py", etc.
+	// Uppercase like "JSON", "HTML" are valid method names (e.g., Context.JSON).
+	if s != strings.ToLower(s) {
+		return false
+	}
+	switch s {
+	case "js", "ts", "jsx", "tsx", "py", "go", "rs", "rb", "java", "kt",
+		"cs", "cpp", "cc", "c", "h", "hpp", "swift", "m", "mm",
+		"css", "html", "htm", "xml", "json", "yaml", "yml", "toml",
+		"md", "txt", "sh", "bash", "zsh", "sql", "proto", "wasm":
+		return true
+	}
+	return false
 }
 
 // isFunctionLikeName checks if a name looks like a function (CamelCase or contains underscore).

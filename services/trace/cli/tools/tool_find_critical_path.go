@@ -386,15 +386,13 @@ func (t *findCriticalPathTool) parseParams(params map[string]any) (FindCriticalP
 	// Extract target (required)
 	if targetRaw, ok := params["target"]; ok {
 		if target, ok := parseStringParam(targetRaw); ok {
-			if target == "" {
-				return p, fmt.Errorf("target parameter cannot be empty")
-			}
 			p.Target = target
 		} else {
 			return p, fmt.Errorf("target parameter must be a string")
 		}
-	} else {
-		return p, fmt.Errorf("target parameter is required")
+	}
+	if err := ValidateSymbolName(p.Target, "target", "'handleRequest', 'Serve', 'main'"); err != nil {
+		return p, err
 	}
 
 	// Extract entry (optional)

@@ -1415,9 +1415,71 @@ func StaticToolDefinitions() []ToolDefinition {
 			SideEffects: false,
 			Timeout:     30 * time.Second,
 		},
+		// IT-03 C-3: Add find_implementations to static definitions with cross-language
+		// description so the LLM classifier routes "extends" and "subclass" queries correctly.
+		{
+			Name: "find_implementations",
+			Description: "Find all types that implement a given interface or extend a given class. " +
+				"Works across languages: Go interfaces (structural typing), Python class inheritance and ABCs, " +
+				"JS/TS class extends and implements. " +
+				"Use for 'what implements X?', 'what extends X?', 'what subclasses X?', 'what derives from X?'.",
+			Parameters: map[string]ParamDef{
+				"interface_name": {
+					Type:        ParamTypeString,
+					Description: "Name of the interface or base class to find implementations/subclasses for (e.g., 'Reader', 'AbstractMesh', 'Index', 'SessionInterface')",
+					Required:    true,
+				},
+				"limit": {
+					Type:        ParamTypeInt,
+					Description: "Maximum number of implementations to return",
+					Required:    false,
+					Default:     50,
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    93,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     5 * time.Second,
+		},
 		// IT-02 H-1: Add find_callers and find_callees — the two most fundamental
 		// graph query tools were missing from static definitions, causing the LLM
 		// classifier to lack awareness for tool routing.
+		// IT-02 R6-FIX: Add get_call_chain to static definitions so the LLM
+		// classifier is aware of it and can distinguish it from find_callees.
+		{
+			Name: "get_call_chain",
+			Description: "Get the TRANSITIVE call chain for a function — traces ALL calls recursively up to depth 10. " +
+				"Can trace 'downstream' (what does X call, and what do those call, recursively) or 'upstream' (what calls X, recursively). " +
+				"ONLY use when the user explicitly asks for the FULL call hierarchy, transitive calls, impact analysis, or call chains. " +
+				"DO NOT use for simple 'what does X call' questions — those need find_callees for DIRECT callees only. " +
+				"Results from this tool are TRANSITIVE (indirect) calls, NOT direct callees.",
+			Parameters: map[string]ParamDef{
+				"function_name": {
+					Type:        ParamTypeString,
+					Description: "Name of the function to trace",
+					Required:    true,
+				},
+				"direction": {
+					Type:        ParamTypeString,
+					Description: "Traversal direction: 'downstream' (callees) or 'upstream' (callers)",
+					Required:    false,
+					Default:     "downstream",
+					Enum:        []any{"downstream", "upstream"},
+				},
+				"max_depth": {
+					Type:        ParamTypeInt,
+					Description: "Maximum traversal depth (1-10)",
+					Required:    false,
+					Default:     10,
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    80, // Lower than find_callees (94) to prefer direct queries
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     15 * time.Second,
+		},
 		{
 			Name: "find_callers",
 			Description: "Find all functions that CALL a given function (upstream dependencies). " +

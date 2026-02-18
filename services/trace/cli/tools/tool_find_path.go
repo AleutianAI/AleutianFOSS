@@ -322,8 +322,8 @@ func (t *findPathTool) parseParams(params map[string]any) (FindPathParams, error
 			p.From = from
 		}
 	}
-	if p.From == "" {
-		return p, fmt.Errorf("from is required")
+	if err := ValidateSymbolName(p.From, "from", "'main', 'handleRequest', 'Initialize'"); err != nil {
+		return p, err
 	}
 
 	// Extract to (required)
@@ -332,8 +332,8 @@ func (t *findPathTool) parseParams(params map[string]any) (FindPathParams, error
 			p.To = to
 		}
 	}
-	if p.To == "" {
-		return p, fmt.Errorf("to is required")
+	if err := ValidateSymbolName(p.To, "to", "'Serve', 'Execute', 'render'"); err != nil {
+		return p, err
 	}
 
 	return p, nil

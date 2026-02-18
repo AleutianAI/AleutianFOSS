@@ -9,9 +9,43 @@ package classifier
 
 import (
 	"fmt"
+	"log/slog"
+	"regexp"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
 )
+
+// GR-59 Group C: Pre-compiled regexes for stripping special tokens from LLM-generated tool names.
+// Allocated once at package init. Handles cases like:
+//   - "find_callees<|channel|>analysis" → "find_callees"
+//   - "Grep]" → "Grep"
+var (
+	specialTokenRe = regexp.MustCompile(`<\|[^|]*\|>`)
+	trailingJunkRe = regexp.MustCompile(`[^a-zA-Z0-9_]+$`)
+)
+
+// stripSpecialTokens removes LLM special tokens and trailing non-tool characters from a tool name.
+//
+// Description:
+//
+//	LLMs sometimes leak special tokens (e.g., <|channel|>) or stray characters
+//	(e.g., trailing brackets) into tool names. This function strips them before
+//	exact/fuzzy matching to prevent false negatives.
+//
+// Inputs:
+//
+//   - name: The raw tool name from LLM output.
+//
+// Outputs:
+//
+//   - string: Cleaned tool name with special tokens and trailing junk removed.
+//
+// Thread Safety: This function is safe for concurrent use.
+func stripSpecialTokens(name string) string {
+	name = specialTokenRe.ReplaceAllString(name, "")
+	name = trailingJunkRe.ReplaceAllString(name, "")
+	return name
+}
 
 // ToolValidationResult contains the outcome of tool name validation.
 type ToolValidationResult struct {
@@ -70,6 +104,23 @@ func ValidateToolName(suggested string, available []string) ToolValidationResult
 		return ToolValidationResult{
 			Valid: false,
 			Error: fmt.Errorf("no available tools"),
+		}
+	}
+
+	// GR-59 Group C: Strip special tokens that LLMs sometimes leak into tool names.
+	sanitized := stripSpecialTokens(suggested)
+	if sanitized != suggested {
+		slog.Warn("GR-59: special token detected in tool name",
+			slog.String("original", suggested),
+			slog.String("sanitized", sanitized),
+		)
+		suggested = sanitized
+		// After sanitization, re-check for empty
+		if suggested == "" {
+			return ToolValidationResult{
+				Valid: false,
+				Error: fmt.Errorf("tool name empty after sanitization"),
+			}
 		}
 	}
 

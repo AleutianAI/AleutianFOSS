@@ -21,6 +21,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
@@ -200,9 +201,17 @@ func (t *findCalleesTool) Execute(ctx context.Context, params map[string]any) (*
 	// Parse and validate parameters
 	p, err := t.parseParams(params)
 	if err != nil {
+		errStep := crs.NewTraceStepBuilder().
+			WithAction("tool_find_callees").
+			WithTool("find_callees").
+			WithDuration(time.Since(start)).
+			WithError(err.Error()).
+			Build()
 		return &Result{
-			Success: false,
-			Error:   err.Error(),
+			Success:   false,
+			Error:     err.Error(),
+			TraceStep: &errStep,
+			Duration:  time.Since(start),
 		}, nil
 	}
 
@@ -333,9 +342,18 @@ func (t *findCalleesTool) Execute(ctx context.Context, params map[string]any) (*
 		results, gErr = t.graph.FindCalleesByName(ctx, p.FunctionName, graph.WithLimit(p.Limit))
 		if gErr != nil {
 			span.RecordError(gErr)
+			errStep := crs.NewTraceStepBuilder().
+				WithAction("tool_find_callees").
+				WithTarget(p.FunctionName).
+				WithTool("find_callees").
+				WithDuration(time.Since(start)).
+				WithError(fmt.Sprintf("find callees for '%s': %v", p.FunctionName, gErr)).
+				Build()
 			return &Result{
-				Success: false,
-				Error:   fmt.Sprintf("find callees for '%s': %v", p.FunctionName, gErr),
+				Success:   false,
+				Error:     fmt.Sprintf("find callees for '%s': %v", p.FunctionName, gErr),
+				TraceStep: &errStep,
+				Duration:  time.Since(start),
 			}, nil
 		}
 	}
@@ -352,12 +370,26 @@ func (t *findCalleesTool) Execute(ctx context.Context, params map[string]any) (*
 		attribute.Int("total_count", output.TotalCount),
 	)
 
+	duration := time.Since(start)
+
+	// Build CRS TraceStep for reasoning trace continuity
+	toolStep := crs.NewTraceStepBuilder().
+		WithAction("tool_find_callees").
+		WithTarget(p.FunctionName).
+		WithTool("find_callees").
+		WithDuration(duration).
+		WithMetadata("resolved_count", fmt.Sprintf("%d", output.ResolvedCount)).
+		WithMetadata("external_count", fmt.Sprintf("%d", output.ExternalCount)).
+		WithMetadata("total_count", fmt.Sprintf("%d", output.TotalCount)).
+		Build()
+
 	return &Result{
 		Success:    true,
 		Output:     output,
 		OutputText: outputText,
 		TokensUsed: estimateTokens(outputText),
-		Duration:   time.Since(start),
+		TraceStep:  &toolStep,
+		Duration:   duration,
 	}, nil
 }
 
@@ -373,8 +405,8 @@ func (t *findCalleesTool) parseParams(params map[string]any) (FindCalleesParams,
 			p.FunctionName = name
 		}
 	}
-	if p.FunctionName == "" {
-		return p, fmt.Errorf("function_name is required")
+	if err := ValidateSymbolName(p.FunctionName, "function_name", "'render', 'Initialize', 'Execute'"); err != nil {
+		return p, err
 	}
 
 	// Extract limit (optional)
@@ -469,7 +501,7 @@ func (t *findCalleesTool) formatText(functionName string, output FindCalleesOutp
 	var sb strings.Builder
 
 	if output.TotalCount == 0 {
-		sb.WriteString(fmt.Sprintf("## GRAPH RESULT: No callees of '%s'\n\n", functionName))
+		sb.WriteString(fmt.Sprintf("## GRAPH RESULT: Callees of '%s' not found\n\n", functionName))
 		sb.WriteString(fmt.Sprintf("The function '%s' does not call any other functions.\n", functionName))
 		sb.WriteString("The graph has been fully indexed - this is the definitive answer.\n\n")
 		sb.WriteString("**Do NOT use Grep to search further** - the graph already analyzed all source files.\n")
@@ -506,6 +538,11 @@ func (t *findCalleesTool) formatText(functionName string, output FindCalleesOutp
 			sb.WriteString(fmt.Sprintf("  ... and %d more external calls\n", len(output.ExternalCallees)-10))
 		}
 	}
+
+	// GR-59 Group A: Signal definitiveness on success path.
+	sb.WriteString("\n---\n")
+	sb.WriteString("The graph has been fully indexed — these results are exhaustive.\n")
+	sb.WriteString("**Do NOT use Grep or Read to verify** — the graph already analyzed all source files.\n")
 
 	return sb.String()
 }

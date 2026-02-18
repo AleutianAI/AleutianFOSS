@@ -21,6 +21,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
@@ -204,9 +205,17 @@ func (t *findCallersTool) Execute(ctx context.Context, params map[string]any) (*
 	// Parse and validate parameters
 	p, err := t.parseParams(params)
 	if err != nil {
+		errStep := crs.NewTraceStepBuilder().
+			WithAction("tool_find_callers").
+			WithTool("find_callers").
+			WithDuration(time.Since(start)).
+			WithError(err.Error()).
+			Build()
 		return &Result{
-			Success: false,
-			Error:   err.Error(),
+			Success:   false,
+			Error:     err.Error(),
+			TraceStep: &errStep,
+			Duration:  time.Since(start),
 		}, nil
 	}
 
@@ -321,9 +330,18 @@ func (t *findCallersTool) Execute(ctx context.Context, params map[string]any) (*
 		legacyResults, gErr = t.graph.FindCallersByName(ctx, p.FunctionName, graph.WithLimit(p.Limit))
 		if gErr != nil {
 			span.RecordError(gErr)
+			errStep := crs.NewTraceStepBuilder().
+				WithAction("tool_find_callers").
+				WithTarget(p.FunctionName).
+				WithTool("find_callers").
+				WithDuration(time.Since(start)).
+				WithError(fmt.Sprintf("find callers for '%s': %v", p.FunctionName, gErr)).
+				Build()
 			return &Result{
-				Success: false,
-				Error:   fmt.Sprintf("find callers for '%s': %v", p.FunctionName, gErr),
+				Success:   false,
+				Error:     fmt.Sprintf("find callers for '%s': %v", p.FunctionName, gErr),
+				TraceStep: &errStep,
+				Duration:  time.Since(start),
 			}, nil
 		}
 	}
@@ -345,12 +363,26 @@ func (t *findCallersTool) Execute(ctx context.Context, params map[string]any) (*
 		attribute.Int("total_callers", output.TotalCallers),
 	)
 
+	duration := time.Since(start)
+
+	// Build CRS TraceStep for reasoning trace continuity
+	toolStep := crs.NewTraceStepBuilder().
+		WithAction("tool_find_callers").
+		WithTarget(p.FunctionName).
+		WithTool("find_callers").
+		WithDuration(duration).
+		WithMetadata("match_count", fmt.Sprintf("%d", output.MatchCount)).
+		WithMetadata("total_callers", fmt.Sprintf("%d", output.TotalCallers)).
+		WithMetadata("used_inheritance_path", fmt.Sprintf("%v", usedInheritancePath)).
+		Build()
+
 	return &Result{
 		Success:    true,
 		Output:     output,
 		OutputText: outputText,
 		TokensUsed: estimateTokens(outputText),
-		Duration:   time.Since(start),
+		TraceStep:  &toolStep,
+		Duration:   duration,
 	}, nil
 }
 
@@ -366,8 +398,8 @@ func (t *findCallersTool) parseParams(params map[string]any) (FindCallersParams,
 			p.FunctionName = name
 		}
 	}
-	if p.FunctionName == "" {
-		return p, fmt.Errorf("function_name is required")
+	if err := ValidateSymbolName(p.FunctionName, "function_name", "'handleRequest', 'Serve', 'Parse'"); err != nil {
+		return p, err
 	}
 
 	// Extract limit (optional)
@@ -559,10 +591,11 @@ func (t *findCallersTool) formatText(functionName string, results map[string]*gr
 	}
 
 	if totalCallers == 0 {
-		sb.WriteString(fmt.Sprintf("## GRAPH RESULT: No callers of '%s'\n\n", functionName))
 		if len(results) == 0 {
+			sb.WriteString(fmt.Sprintf("## GRAPH RESULT: Symbol '%s' not found\n\n", functionName))
 			sb.WriteString(fmt.Sprintf("No function named '%s' exists in this codebase.\n", functionName))
 		} else {
+			sb.WriteString(fmt.Sprintf("## GRAPH RESULT: Callers of '%s' not found\n\n", functionName))
 			sb.WriteString(fmt.Sprintf("The function '%s' is not called anywhere (dead code or entry point).\n", functionName))
 		}
 		sb.WriteString("The graph has been fully indexed - this is the definitive answer.\n\n")
@@ -589,6 +622,11 @@ func (t *findCallersTool) formatText(functionName string, results map[string]*gr
 		}
 		sb.WriteString("\n")
 	}
+
+	// GR-59 Group A: Signal definitiveness on success path.
+	sb.WriteString("---\n")
+	sb.WriteString("The graph has been fully indexed — these results are exhaustive.\n")
+	sb.WriteString("**Do NOT use Grep or Read to verify** — the graph already analyzed all source files.\n")
 
 	return sb.String()
 }
@@ -669,10 +707,11 @@ func (t *findCallersTool) formatTextWithInheritance(functionName string, results
 	}
 
 	if totalCallers == 0 {
-		sb.WriteString(fmt.Sprintf("## GRAPH RESULT: No callers of '%s'\n\n", functionName))
 		if len(results) == 0 {
+			sb.WriteString(fmt.Sprintf("## GRAPH RESULT: Symbol '%s' not found\n\n", functionName))
 			sb.WriteString(fmt.Sprintf("No function named '%s' exists in this codebase.\n", functionName))
 		} else {
+			sb.WriteString(fmt.Sprintf("## GRAPH RESULT: Callers of '%s' not found\n\n", functionName))
 			sb.WriteString(fmt.Sprintf("The function '%s' is not called anywhere (dead code or entry point).\n", functionName))
 		}
 		sb.WriteString("The graph has been fully indexed - this is the definitive answer.\n\n")
@@ -726,6 +765,11 @@ func (t *findCallersTool) formatTextWithInheritance(functionName string, results
 			}
 		}
 	}
+
+	// GR-59 Group A: Signal definitiveness on success path.
+	sb.WriteString("---\n")
+	sb.WriteString("The graph has been fully indexed — these results are exhaustive.\n")
+	sb.WriteString("**Do NOT use Grep or Read to verify** — the graph already analyzed all source files.\n")
 
 	return sb.String()
 }

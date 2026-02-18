@@ -971,6 +971,44 @@ func isNotFoundError(errMsg string) bool {
 	return false
 }
 
+// isSurrenderResponse detects when the LLM gives up instead of answering.
+//
+// Description:
+//
+//	Checks short LLM responses (< 50 chars) for "I don't know" style phrases.
+//	This catches the edge case where the LLM surrenders despite having valid
+//	tool results in the session that it could summarize.
+//
+// Inputs:
+//
+//   - response: The LLM response text.
+//
+// Outputs:
+//
+//   - bool: True if the response is a surrender.
+//
+// Thread Safety: This function is safe for concurrent use.
+func isSurrenderResponse(response string) bool {
+	lower := strings.ToLower(strings.TrimSpace(response))
+	if len(lower) > 50 {
+		return false // Only check short responses
+	}
+	surrenderPhrases := []string{
+		"i don't know",
+		"i do not know",
+		"i'm not sure",
+		"i cannot determine",
+		"i'm unable to",
+		"i am unable to",
+	}
+	for _, phrase := range surrenderPhrases {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
 // categorizeToolError maps error messages to ErrorCategory for CDCL learning.
 //
 // Description:

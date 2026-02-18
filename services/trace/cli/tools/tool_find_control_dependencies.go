@@ -369,8 +369,8 @@ func (t *findControlDependenciesTool) parseParams(params map[string]any) (FindCo
 			p.Target = target
 		}
 	}
-	if p.Target == "" {
-		return p, fmt.Errorf("target is required")
+	if err := ValidateSymbolName(p.Target, "target", "'handleRequest', 'Serve', 'Execute'"); err != nil {
+		return p, err
 	}
 
 	// Extract depth (optional)

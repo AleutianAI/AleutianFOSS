@@ -51,6 +51,9 @@ const (
 
 	// MetricToolForcingRetries is the tool forcing retry count.
 	MetricToolForcingRetries MetricField = "tool_forcing_retries"
+
+	// MetricSurrenderRetries is the count of surrender detection retries (GR-59 Group F).
+	MetricSurrenderRetries MetricField = "surrender_retries"
 )
 
 // ValidContextEvictionPolicies contains valid eviction policy values.
@@ -362,6 +365,15 @@ type Session struct {
 	// require tool usage and should accept text responses as final answers.
 	// GR-44: Fixes death spiral where CB fires but execute phase still demands tools.
 	circuitBreakerActive bool
+
+	// graphToolHadSubstantiveResults indicates that a forced graph tool call
+	// (e.g., find_implementations, find_callers) returned substantive results.
+	// When true, shouldForceSynthesisAfterGraphTools forces synthesis to prevent
+	// the LLM from spiraling into Grep/Glob loops after already receiving
+	// authoritative graph results.
+	// GR-59 Rev 4: Direct flag eliminates fragile metadata round-trip through
+	// session trace steps which proved unreliable across Revs 2-3.
+	graphToolHadSubstantiveResults bool
 }
 
 // SafetyViolation represents a safety-blocked operation for CDCL learning.
@@ -1334,6 +1346,49 @@ func (s *Session) SetCircuitBreakerActive(active bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.circuitBreakerActive = active
+}
+
+// GraphToolHadSubstantiveResults returns true if a forced graph tool call
+// returned substantive results during this session.
+//
+// Description:
+//
+//	GR-59 Rev 4: Used by shouldForceSynthesisAfterGraphTools to detect when
+//	a forced graph tool (find_implementations, find_callers, etc.) already
+//	returned authoritative results. Prevents the LLM from spiraling into
+//	Grep/Glob loops after receiving exhaustive graph data.
+//
+// Outputs:
+//
+//	bool - True if a forced graph tool returned substantive results.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) GraphToolHadSubstantiveResults() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.graphToolHadSubstantiveResults
+}
+
+// SetGraphToolHadSubstantiveResults marks that a forced graph tool returned
+// substantive results.
+//
+// Description:
+//
+//	Called by executeToolDirectlyWithFallback when a graph tool like
+//	find_implementations returns non-zero results. Once set, all subsequent
+//	execution steps will force synthesis instead of allowing further search.
+//
+// Inputs:
+//
+//	v - True when graph tool returned results, false to reset.
+//
+// GR-59 Rev 4: Direct flag eliminates fragile metadata round-trip.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) SetGraphToolHadSubstantiveResults(v bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.graphToolHadSubstantiveResults = v
 }
 
 // GetRecentToolErrors returns recent tool failures for router feedback.

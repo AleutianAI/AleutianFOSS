@@ -1995,3 +1995,396 @@ func TestPythonParser_ExtractCallSites_OverloadAndDelegation(t *testing.T) {
 		}
 	})
 }
+
+// === IT-03a A-3: Decorator Arguments Tests ===
+
+func TestPythonParser_DecoratorArgs_SimpleFunction(t *testing.T) {
+	source := `@app.route("/users")
+def get_users():
+    pass
+`
+	parser := NewPythonParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var fn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindFunction && sym.Name == "get_users" {
+			fn = sym
+			break
+		}
+	}
+
+	if fn == nil {
+		t.Fatal("expected function 'get_users'")
+	}
+
+	if fn.Metadata == nil {
+		t.Fatal("expected metadata on decorated function")
+	}
+
+	// Verify the decorator name is captured
+	foundDecorator := false
+	for _, dec := range fn.Metadata.Decorators {
+		if dec == "app.route" {
+			foundDecorator = true
+			break
+		}
+	}
+	if !foundDecorator {
+		t.Errorf("expected decorator 'app.route', got decorators: %v", fn.Metadata.Decorators)
+	}
+
+	// @app.route("/users") has only a string arg, no identifier args
+	// DecoratorArgs should be nil or not contain "app.route"
+	if fn.Metadata.DecoratorArgs != nil {
+		if args, ok := fn.Metadata.DecoratorArgs["app.route"]; ok && len(args) > 0 {
+			t.Errorf("expected no decorator args for app.route (string arg only), got %v", args)
+		}
+	}
+}
+
+func TestPythonParser_DecoratorArgs_ClassWithIdentifier(t *testing.T) {
+	source := `@use_interceptors(LoggingInterceptor)
+def handler():
+    pass
+`
+	parser := NewPythonParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var fn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindFunction && sym.Name == "handler" {
+			fn = sym
+			break
+		}
+	}
+
+	if fn == nil {
+		t.Fatal("expected function 'handler'")
+	}
+
+	if fn.Metadata == nil {
+		t.Fatal("expected metadata on decorated function")
+	}
+
+	if fn.Metadata.DecoratorArgs == nil {
+		t.Fatal("expected DecoratorArgs to be non-nil")
+	}
+
+	args, ok := fn.Metadata.DecoratorArgs["use_interceptors"]
+	if !ok {
+		t.Fatalf("expected DecoratorArgs to contain 'use_interceptors', got %v", fn.Metadata.DecoratorArgs)
+	}
+
+	if len(args) != 1 || args[0] != "LoggingInterceptor" {
+		t.Errorf("expected DecoratorArgs['use_interceptors'] = ['LoggingInterceptor'], got %v", args)
+	}
+}
+
+func TestPythonParser_DecoratorArgs_KeywordArgument(t *testing.T) {
+	source := `@register(cls=MyService)
+def handler():
+    pass
+`
+	parser := NewPythonParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var fn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindFunction && sym.Name == "handler" {
+			fn = sym
+			break
+		}
+	}
+
+	if fn == nil {
+		t.Fatal("expected function 'handler'")
+	}
+
+	if fn.Metadata == nil || fn.Metadata.DecoratorArgs == nil {
+		t.Fatal("expected DecoratorArgs to be non-nil")
+	}
+
+	args, ok := fn.Metadata.DecoratorArgs["register"]
+	if !ok {
+		t.Fatalf("expected DecoratorArgs to contain 'register', got %v", fn.Metadata.DecoratorArgs)
+	}
+
+	found := false
+	for _, arg := range args {
+		if arg == "MyService" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected DecoratorArgs['register'] to include 'MyService', got %v", args)
+	}
+}
+
+func TestPythonParser_DecoratorArgs_ListArgument(t *testing.T) {
+	source := `@register([Service1, Service2])
+def handler():
+    pass
+`
+	parser := NewPythonParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var fn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindFunction && sym.Name == "handler" {
+			fn = sym
+			break
+		}
+	}
+
+	if fn == nil {
+		t.Fatal("expected function 'handler'")
+	}
+
+	if fn.Metadata == nil || fn.Metadata.DecoratorArgs == nil {
+		t.Fatal("expected DecoratorArgs to be non-nil")
+	}
+
+	args, ok := fn.Metadata.DecoratorArgs["register"]
+	if !ok {
+		t.Fatalf("expected DecoratorArgs to contain 'register', got %v", fn.Metadata.DecoratorArgs)
+	}
+
+	argSet := make(map[string]bool)
+	for _, a := range args {
+		argSet[a] = true
+	}
+
+	if !argSet["Service1"] {
+		t.Errorf("expected DecoratorArgs['register'] to include 'Service1', got %v", args)
+	}
+	if !argSet["Service2"] {
+		t.Errorf("expected DecoratorArgs['register'] to include 'Service2', got %v", args)
+	}
+}
+
+func TestPythonParser_DecoratorArgs_NoArgs(t *testing.T) {
+	source := `@staticmethod
+def foo():
+    pass
+`
+	parser := NewPythonParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var fn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindFunction && sym.Name == "foo" {
+			fn = sym
+			break
+		}
+	}
+
+	if fn == nil {
+		t.Fatal("expected function 'foo'")
+	}
+
+	// @staticmethod has no parentheses, so no DecoratorArgs
+	if fn.Metadata != nil && fn.Metadata.DecoratorArgs != nil {
+		t.Errorf("expected no DecoratorArgs for bare decorator, got %v", fn.Metadata.DecoratorArgs)
+	}
+}
+
+func TestPythonParser_DecoratorArgs_EmptyCall(t *testing.T) {
+	source := `@injectable()
+def foo():
+    pass
+`
+	parser := NewPythonParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var fn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindFunction && sym.Name == "foo" {
+			fn = sym
+			break
+		}
+	}
+
+	if fn == nil {
+		t.Fatal("expected function 'foo'")
+	}
+
+	// @injectable() has empty args — no identifier arguments
+	if fn.Metadata != nil && fn.Metadata.DecoratorArgs != nil {
+		if args, ok := fn.Metadata.DecoratorArgs["injectable"]; ok && len(args) > 0 {
+			t.Errorf("expected no DecoratorArgs for empty call, got %v", args)
+		}
+	}
+}
+
+func TestPythonParser_DecoratorArgs_ClassDecorated(t *testing.T) {
+	source := `@register(MyPlugin)
+class PluginHandler:
+    def handle(self):
+        pass
+`
+	parser := NewPythonParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var class *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindClass && sym.Name == "PluginHandler" {
+			class = sym
+			break
+		}
+	}
+
+	if class == nil {
+		t.Fatal("expected class 'PluginHandler'")
+	}
+
+	if class.Metadata == nil {
+		t.Fatal("expected metadata on decorated class")
+	}
+
+	// Verify decorator is present
+	foundDecorator := false
+	for _, dec := range class.Metadata.Decorators {
+		if dec == "register" {
+			foundDecorator = true
+			break
+		}
+	}
+	if !foundDecorator {
+		t.Errorf("expected decorator 'register', got decorators: %v", class.Metadata.Decorators)
+	}
+
+	// Verify DecoratorArgs
+	if class.Metadata.DecoratorArgs == nil {
+		t.Fatal("expected DecoratorArgs to be non-nil for decorated class")
+	}
+
+	args, ok := class.Metadata.DecoratorArgs["register"]
+	if !ok {
+		t.Fatalf("expected DecoratorArgs to contain 'register', got %v", class.Metadata.DecoratorArgs)
+	}
+
+	if len(args) != 1 || args[0] != "MyPlugin" {
+		t.Errorf("expected DecoratorArgs['register'] = ['MyPlugin'], got %v", args)
+	}
+}
+
+func TestPythonParser_DecoratorArgs_DecoratedMethod(t *testing.T) {
+	source := `class MyController:
+    @use_guards(AuthGuard)
+    def protected_route(self):
+        pass
+`
+	parser := NewPythonParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var class *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindClass && sym.Name == "MyController" {
+			class = sym
+			break
+		}
+	}
+
+	if class == nil {
+		t.Fatal("expected class 'MyController'")
+	}
+
+	var method *Symbol
+	for _, child := range class.Children {
+		if child.Name == "protected_route" {
+			method = child
+			break
+		}
+	}
+
+	if method == nil {
+		t.Fatal("expected method 'protected_route'")
+	}
+
+	if method.Metadata == nil {
+		t.Fatal("expected metadata on decorated method")
+	}
+
+	// Verify decorator is present
+	foundDecorator := false
+	for _, dec := range method.Metadata.Decorators {
+		if dec == "use_guards" {
+			foundDecorator = true
+			break
+		}
+	}
+	if !foundDecorator {
+		t.Errorf("expected decorator 'use_guards', got decorators: %v", method.Metadata.Decorators)
+	}
+
+	// Verify DecoratorArgs
+	if method.Metadata.DecoratorArgs == nil {
+		t.Fatal("expected DecoratorArgs to be non-nil for decorated method")
+	}
+
+	args, ok := method.Metadata.DecoratorArgs["use_guards"]
+	if !ok {
+		t.Fatalf("expected DecoratorArgs to contain 'use_guards', got %v", method.Metadata.DecoratorArgs)
+	}
+
+	if len(args) != 1 || args[0] != "AuthGuard" {
+		t.Errorf("expected DecoratorArgs['use_guards'] = ['AuthGuard'], got %v", args)
+	}
+}
+
+func TestPythonParser_DecoratorArgs_SkipsBooleans(t *testing.T) {
+	source := `@foo(True, False, None)
+def bar():
+    pass
+`
+	parser := NewPythonParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var fn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindFunction && sym.Name == "bar" {
+			fn = sym
+			break
+		}
+	}
+
+	if fn == nil {
+		t.Fatal("expected function 'bar'")
+	}
+
+	// True, False, None are not identifiers for our purposes — should be skipped
+	if fn.Metadata != nil && fn.Metadata.DecoratorArgs != nil {
+		if args, ok := fn.Metadata.DecoratorArgs["foo"]; ok && len(args) > 0 {
+			t.Errorf("expected no DecoratorArgs for @foo(True, False, None), got %v", args)
+		}
+	}
+}

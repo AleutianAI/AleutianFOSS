@@ -703,12 +703,20 @@ func (p *PythonParser) processMethod(ctx context.Context, node *sitter.Node, con
 
 // processDecoratedMethod extracts a decorated method.
 func (p *PythonParser) processDecoratedMethod(ctx context.Context, node *sitter.Node, content []byte, filePath string, className string) *Symbol {
-	decorators := p.extractDecorators(node, content)
+	decorators, decoratorArgs := p.extractDecoratorsWithArgs(node, content)
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
 		if child.Type() == "function_definition" {
-			return p.processMethod(ctx, child, content, filePath, decorators, className)
+			sym := p.processMethod(ctx, child, content, filePath, decorators, className)
+			// IT-03a A-3: Attach decorator arguments
+			if sym != nil && len(decoratorArgs) > 0 {
+				if sym.Metadata == nil {
+					sym.Metadata = &SymbolMetadata{}
+				}
+				sym.Metadata.DecoratorArgs = decoratorArgs
+			}
+			return sym
 		}
 	}
 
@@ -731,8 +739,15 @@ func (p *PythonParser) extractFunctions(ctx context.Context, root *sitter.Node, 
 			for j := 0; j < int(child.ChildCount()); j++ {
 				grandchild := child.Child(j)
 				if grandchild.Type() == "function_definition" {
-					decorators := p.extractDecorators(child, content)
+					decorators, decoratorArgs := p.extractDecoratorsWithArgs(child, content)
 					if fn := p.processFunction(ctx, grandchild, content, filePath, decorators, ""); fn != nil {
+						// IT-03a A-3: Attach decorator arguments
+						if len(decoratorArgs) > 0 {
+							if fn.Metadata == nil {
+								fn.Metadata = &SymbolMetadata{}
+							}
+							fn.Metadata.DecoratorArgs = decoratorArgs
+						}
 						// Extract nested functions
 						p.extractNestedFunctions(ctx, grandchild, content, filePath, fn)
 						result.Symbols = append(result.Symbols, fn)
@@ -876,13 +891,21 @@ func (p *PythonParser) processFunction(ctx context.Context, node *sitter.Node, c
 
 // processDecoratedDefinition handles decorated classes and functions at module level.
 func (p *PythonParser) processDecoratedDefinition(ctx context.Context, node *sitter.Node, content []byte, filePath string, result *ParseResult, parent *Symbol) {
-	decorators := p.extractDecorators(node, content)
+	decorators, decoratorArgs := p.extractDecoratorsWithArgs(node, content)
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
 		switch child.Type() {
 		case "class_definition":
-			p.processClass(ctx, child, content, filePath, result, decorators)
+			if sym := p.processClass(ctx, child, content, filePath, result, decorators); sym != nil {
+				// IT-03a A-3: Attach decorator arguments
+				if len(decoratorArgs) > 0 {
+					if sym.Metadata == nil {
+						sym.Metadata = &SymbolMetadata{}
+					}
+					sym.Metadata.DecoratorArgs = decoratorArgs
+				}
+			}
 		case "function_definition":
 			// Handled in extractFunctions
 		}
@@ -919,6 +942,132 @@ func (p *PythonParser) extractDecorators(node *sitter.Node, content []byte) []st
 	}
 
 	return decorators
+}
+
+// extractDecoratorsWithArgs extracts decorator names and their argument identifiers.
+//
+// Description:
+//
+//	Similar to extractDecorators but also captures identifier arguments from decorator calls.
+//	For @app.route("/users"), returns names=["app.route"], args={}.
+//	For @UseInterceptors(LoggingInterceptor), returns names=["UseInterceptors"],
+//	args={"UseInterceptors": ["LoggingInterceptor"]}.
+//
+// IT-03a A-3: Enables EdgeTypeReferences from decorated symbol to decorator arguments.
+func (p *PythonParser) extractDecoratorsWithArgs(node *sitter.Node, content []byte) ([]string, map[string][]string) {
+	decorators := make([]string, 0)
+	var decoratorArgs map[string][]string
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() != "decorator" {
+			continue
+		}
+		for j := 0; j < int(child.ChildCount()); j++ {
+			grandchild := child.Child(j)
+			switch grandchild.Type() {
+			case "identifier":
+				decorators = append(decorators, string(content[grandchild.StartByte():grandchild.EndByte()]))
+			case "attribute":
+				decorators = append(decorators, string(content[grandchild.StartByte():grandchild.EndByte()]))
+			case "call":
+				var name string
+				var args []string
+				for k := 0; k < int(grandchild.ChildCount()); k++ {
+					ggchild := grandchild.Child(k)
+					switch ggchild.Type() {
+					case "identifier":
+						if name == "" {
+							name = string(content[ggchild.StartByte():ggchild.EndByte()])
+						}
+					case "attribute":
+						if name == "" {
+							name = string(content[ggchild.StartByte():ggchild.EndByte()])
+						}
+					case "argument_list":
+						args = p.extractDecoratorArgIdentifiers(ggchild, content)
+					}
+				}
+				if name != "" {
+					decorators = append(decorators, name)
+					if len(args) > 0 {
+						if decoratorArgs == nil {
+							decoratorArgs = make(map[string][]string)
+						}
+						decoratorArgs[name] = args
+					}
+				}
+			}
+		}
+	}
+
+	return decorators, decoratorArgs
+}
+
+// extractDecoratorArgIdentifiers extracts identifier arguments from a Python decorator's argument list.
+//
+// Description:
+//
+//	Walks the argument_list node and extracts top-level identifiers.
+//	Skips string literals, numbers, keyword arguments (unless value is an identifier),
+//	and other non-identifier arguments. Also recurses into list arguments to find
+//	nested identifiers.
+//
+// Inputs:
+//   - argsNode: The argument_list AST node. May be nil (returns nil).
+//   - content: Raw source bytes for extracting identifier text.
+//
+// Outputs:
+//   - []string: Extracted identifier names. May be empty but not nil if argsNode is non-nil.
+//
+// Limitations:
+//   - Only extracts identifiers from keyword_argument values and list children.
+//   - Does not recurse into nested calls or complex expressions.
+//   - Skips Python boolean/None constants (True, False, None).
+//
+// Assumptions:
+//   - content is valid UTF-8 and matches the AST node byte ranges.
+func (p *PythonParser) extractDecoratorArgIdentifiers(argsNode *sitter.Node, content []byte) []string {
+	if argsNode == nil {
+		return nil
+	}
+	identifiers := make([]string, 0, argsNode.ChildCount())
+	for i := 0; i < int(argsNode.ChildCount()); i++ {
+		child := argsNode.Child(i)
+		if child == nil {
+			continue
+		}
+		switch child.Type() {
+		case "identifier":
+			name := string(content[child.StartByte():child.EndByte()])
+			if name != "True" && name != "False" && name != "None" {
+				identifiers = append(identifiers, name)
+			}
+		case "keyword_argument":
+			// Extract value if it's an identifier: key=SomeClass
+			for j := 0; j < int(child.ChildCount()); j++ {
+				gc := child.Child(j)
+				if gc == nil {
+					continue
+				}
+				if gc.Type() == "identifier" && j > 0 {
+					identifiers = append(identifiers, string(content[gc.StartByte():gc.EndByte()]))
+				}
+			}
+		case "list":
+			// Recurse into list arguments: [Class1, Class2]
+			for j := 0; j < int(child.ChildCount()); j++ {
+				gc := child.Child(j)
+				if gc == nil {
+					continue
+				}
+				if gc.Type() == "identifier" {
+					identifiers = append(identifiers, string(content[gc.StartByte():gc.EndByte()]))
+				}
+			}
+		}
+	}
+	return identifiers
 }
 
 // extractModuleVariables extracts top-level variable assignments.

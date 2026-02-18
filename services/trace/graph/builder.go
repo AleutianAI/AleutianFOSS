@@ -693,6 +693,15 @@ func (b *Builder) extractSymbolEdges(ctx context.Context, state *buildState, sym
 		// Interfaces define contracts - no outgoing edges typically
 		break
 	}
+
+	// IT-03a A-3: Extract decorator argument edges for any symbol kind
+	b.extractDecoratorArgEdges(state, sym)
+
+	// IT-03a C-2: Extract type argument reference edges
+	b.extractTypeArgEdges(state, sym)
+
+	// IT-03a C-3: Extract type narrowing reference edges
+	b.extractTypeNarrowingEdges(state, sym)
 }
 
 // extractReceiverEdge creates a RECEIVES edge from method to receiver type.
@@ -846,6 +855,118 @@ func (b *Builder) extractEmbedsEdges(state *buildState, sym *ast.Symbol) {
 	}
 }
 
+// extractDecoratorArgEdges creates REFERENCES edges from a decorated symbol to its decorator arguments.
+//
+// Description:
+//
+//	When a decorator has arguments that are identifiers (references to other symbols),
+//	this creates EdgeTypeReferences edges from the decorated symbol to those arguments.
+//	Example: @UseInterceptors(LoggingInterceptor) creates a REFERENCES edge from
+//	the decorated class to LoggingInterceptor.
+//
+// IT-03a A-3: Enables graph-based discovery of decorator argument relationships.
+func (b *Builder) extractDecoratorArgEdges(state *buildState, sym *ast.Symbol) {
+	if sym.Metadata == nil || len(sym.Metadata.DecoratorArgs) == 0 {
+		return
+	}
+
+	for _, argNames := range sym.Metadata.DecoratorArgs {
+		for _, argName := range argNames {
+			targets := b.resolveSymbolByName(state, argName, sym.FilePath)
+			if len(targets) == 0 {
+				// Only create placeholder for reasonable identifier names
+				if len(argName) > 0 && argName[0] >= 'A' && argName[0] <= 'Z' {
+					targetID := b.getOrCreatePlaceholder(state, "", argName)
+					targets = []string{targetID}
+				} else {
+					continue
+				}
+			}
+
+			for _, targetID := range targets {
+				err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeReferences, sym.Location())
+				if err != nil {
+					state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+						FromID:   sym.ID,
+						ToID:     targetID,
+						EdgeType: EdgeTypeReferences,
+						Err:      err,
+					})
+					continue
+				}
+				state.result.Stats.EdgesCreated++
+			}
+
+			if len(targets) > 1 {
+				state.result.Stats.AmbiguousResolves++
+			}
+		}
+	}
+}
+
+// extractTypeArgEdges creates REFERENCES edges from a symbol to its type argument types.
+//
+// Description:
+//
+//	When a symbol has TypeArguments in its metadata (e.g., Promise<User> → User),
+//	this creates EdgeTypeReferences edges from the symbol to the referenced types.
+//
+// IT-03a C-2: Enables graph-based discovery of generic type relationships.
+func (b *Builder) extractTypeArgEdges(state *buildState, sym *ast.Symbol) {
+	if sym.Metadata == nil || len(sym.Metadata.TypeArguments) == 0 {
+		return
+	}
+
+	for _, typeArg := range sym.Metadata.TypeArguments {
+		targets := b.resolveSymbolByName(state, typeArg, sym.FilePath)
+		if len(targets) == 0 {
+			continue // Don't create placeholders for type args
+		}
+		for _, targetID := range targets {
+			err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeReferences, sym.Location())
+			if err != nil && !strings.Contains(err.Error(), "already exists") {
+				state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+					FromID:   sym.ID,
+					ToID:     targetID,
+					EdgeType: EdgeTypeReferences,
+					Err:      err,
+				})
+			} else if err == nil {
+				state.result.Stats.EdgesCreated++
+			}
+		}
+	}
+}
+
+// extractTypeNarrowingEdges creates REFERENCES edges from a symbol to types used in instanceof checks.
+//
+// IT-03a C-3: Enables graph-based discovery of type narrowing relationships.
+func (b *Builder) extractTypeNarrowingEdges(state *buildState, sym *ast.Symbol) {
+	if sym.Metadata == nil || len(sym.Metadata.TypeNarrowings) == 0 {
+		return
+	}
+
+	for _, typeName := range sym.Metadata.TypeNarrowings {
+		targets := b.resolveSymbolByName(state, typeName, sym.FilePath)
+		if len(targets) == 0 {
+			continue
+		}
+		for _, targetID := range targets {
+			err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeReferences, sym.Location())
+			if err != nil && !strings.Contains(err.Error(), "already exists") {
+				state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+					FromID:   sym.ID,
+					ToID:     targetID,
+					EdgeType: EdgeTypeReferences,
+					Err:      err,
+				})
+			} else if err == nil {
+				state.result.Stats.EdgesCreated++
+			}
+		}
+	}
+}
+
 // extractCallEdges creates CALLS edges from a function/method to its callees.
 //
 // Description:
@@ -931,6 +1052,32 @@ func (b *Builder) extractCallEdges(ctx context.Context, state *buildState, sym *
 			continue
 		}
 		state.result.Stats.EdgesCreated++
+	}
+
+	// IT-03a C-1: Create REFERENCES edges for callback/HOF arguments
+	for _, call := range sym.Calls {
+		for _, argName := range call.FunctionArgs {
+			targets := b.resolveSymbolByName(state, argName, sym.FilePath)
+			if len(targets) == 0 {
+				continue // Don't create placeholders for callback args
+			}
+			for _, targetID := range targets {
+				if targetID == sym.ID {
+					continue
+				}
+				err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeReferences, call.Location)
+				if err != nil && !strings.Contains(err.Error(), "already exists") {
+					state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+						FromID:   sym.ID,
+						ToID:     targetID,
+						EdgeType: EdgeTypeReferences,
+						Err:      err,
+					})
+				} else if err == nil {
+					state.result.Stats.EdgesCreated++
+				}
+			}
+		}
 	}
 
 	// Track call edge stats for observability
@@ -1976,8 +2123,8 @@ func (b *Builder) computeInterfaceImplementations(ctx context.Context, state *bu
 		if sym.Kind != ast.SymbolKindInterface {
 			continue
 		}
-		// GR-40: Go, GR-40a: Python
-		if sym.Language != "go" && sym.Language != "python" {
+		// GR-40: Go, GR-40a: Python, IT-03a A-1: TypeScript
+		if sym.Language != "go" && sym.Language != "python" && sym.Language != "typescript" {
 			continue
 		}
 		if sym.Metadata == nil || len(sym.Metadata.Methods) == 0 {
@@ -1998,10 +2145,12 @@ func (b *Builder) computeInterfaceImplementations(ctx context.Context, state *bu
 	// Count interfaces for span attributes
 	goInterfaceCount := len(interfacesByLang["go"])
 	pythonProtocolCount := len(interfacesByLang["python"])
+	tsInterfaceCount := len(interfacesByLang["typescript"])
 
 	span.SetAttributes(
 		attribute.Int("interface.go_count", goInterfaceCount),
 		attribute.Int("interface.python_count", pythonProtocolCount),
+		attribute.Int("interface.typescript_count", tsInterfaceCount),
 	)
 
 	if len(interfacesByLang) == 0 {
@@ -2022,12 +2171,17 @@ func (b *Builder) computeInterfaceImplementations(ctx context.Context, state *bu
 		if sym.Kind != ast.SymbolKindStruct && sym.Kind != ast.SymbolKindType && sym.Kind != ast.SymbolKindClass {
 			continue
 		}
-		// GR-40: Go, GR-40a: Python
-		if sym.Language != "go" && sym.Language != "python" {
+		// GR-40: Go, GR-40a: Python, IT-03a A-1: TypeScript
+		if sym.Language != "go" && sym.Language != "python" && sym.Language != "typescript" {
 			continue
 		}
-		if sym.Metadata == nil || len(sym.Metadata.Methods) == 0 {
-			continue // No methods
+		// IT-03 H-3: Include types that have embeds even if they have no direct methods,
+		// because promoted methods from embedded types may satisfy interfaces.
+		if sym.Metadata == nil {
+			continue
+		}
+		if len(sym.Metadata.Methods) == 0 && sym.Metadata.Extends == "" {
+			continue // No methods and no embeds
 		}
 
 		if typesByLang[sym.Language] == nil {
@@ -2041,13 +2195,30 @@ func (b *Builder) computeInterfaceImplementations(ctx context.Context, state *bu
 		typesByLang[sym.Language][sym.ID] = methodSet
 	}
 
+	// IT-03 H-3: Resolve promoted methods from EMBEDS edges.
+	// In Go, when struct A embeds struct B, A inherits B's methods (promoted methods).
+	// Walk EMBEDS edges recursively and merge embedded type methods into each type's method set.
+	promotedCount := 0
+	for _, types := range typesByLang {
+		for typeID, methodSet := range types {
+			added := b.resolvePromotedMethods(state, typeID, methodSet, make(map[string]bool))
+			promotedCount += added
+		}
+	}
+
+	if promotedCount > 0 {
+		span.SetAttributes(attribute.Int("promoted_methods_added", promotedCount))
+	}
+
 	// Count types for span attributes
 	goTypeCount := len(typesByLang["go"])
 	pythonClassCount := len(typesByLang["python"])
+	tsClassCount := len(typesByLang["typescript"])
 
 	span.SetAttributes(
 		attribute.Int("type.go_count", goTypeCount),
 		attribute.Int("type.python_count", pythonClassCount),
+		attribute.Int("type.typescript_count", tsClassCount),
 	)
 
 	if len(typesByLang) == 0 {
@@ -2166,4 +2337,67 @@ func isMethodSuperset(superset, subset map[string]bool) bool {
 		}
 	}
 	return true
+}
+
+// resolvePromotedMethods follows outgoing EMBEDS edges from a type and merges
+// the embedded type's methods into the given method set.
+//
+// Description:
+//
+//	In Go, when struct A embeds struct B, all of B's methods are promoted to A.
+//	This function walks the EMBEDS edge chain recursively (A embeds B, B embeds C)
+//	and merges all discovered methods into the provided methodSet.
+//
+// Inputs:
+//   - state: Build state containing symbolsByID for method lookups.
+//   - typeID: The symbol ID of the type to resolve promoted methods for.
+//   - methodSet: The type's method set to merge promoted methods into. Modified in place.
+//   - visited: Set of already-visited type IDs to prevent infinite cycles.
+//
+// Outputs:
+//   - int: Number of promoted methods added to the method set.
+//
+// Limitations:
+//   - Only follows EMBEDS edges (not IMPLEMENTS or CALLS).
+//   - Only merges method names, not full signatures (consistent with isMethodSuperset).
+//
+// Thread Safety: Not safe for concurrent use on the same methodSet.
+func (b *Builder) resolvePromotedMethods(state *buildState, typeID string, methodSet map[string]bool, visited map[string]bool) int {
+	if visited[typeID] {
+		return 0
+	}
+	visited[typeID] = true
+
+	added := 0
+
+	// Look up the node in the graph to find outgoing EMBEDS edges
+	node, exists := state.graph.GetNode(typeID)
+	if !exists || node == nil {
+		return 0
+	}
+
+	for _, edge := range node.Outgoing {
+		if edge.Type != EdgeTypeEmbeds {
+			continue
+		}
+
+		// Get the embedded type's symbol to access its methods
+		embeddedSym := state.symbolsByID[edge.ToID]
+		if embeddedSym == nil || embeddedSym.Metadata == nil {
+			continue
+		}
+
+		// Merge the embedded type's methods into our method set
+		for _, m := range embeddedSym.Metadata.Methods {
+			if !methodSet[m.Name] {
+				methodSet[m.Name] = true
+				added++
+			}
+		}
+
+		// Recurse: the embedded type may itself embed other types
+		added += b.resolvePromotedMethods(state, edge.ToID, methodSet, visited)
+	}
+
+	return added
 }

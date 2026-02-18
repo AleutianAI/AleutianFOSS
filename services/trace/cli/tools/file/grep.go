@@ -214,6 +214,10 @@ func (t *GrepTool) Execute(ctx context.Context, params map[string]any) (*tools.R
 	} else {
 		// Standard regex mode
 		regexPattern := p.Pattern
+
+		// GR-59 Group D: Auto-fix common regex errors before compiling.
+		regexPattern = fixCommonRegexErrors(regexPattern)
+
 		if p.CaseInsensitive {
 			regexPattern = "(?i)" + regexPattern
 		}
@@ -688,4 +692,35 @@ func levenshteinDistance(s1, s2 string) int {
 	}
 
 	return prev[m]
+}
+
+// fixCommonRegexErrors attempts to fix the most common LLM regex mistake: unclosed parentheses.
+//
+// Description:
+//
+//	LLMs frequently generate regex patterns with unbalanced parentheses, e.g.,
+//	"func (.*) Next(" where the trailing "(" is intended as a literal but is
+//	unescaped. This function escapes the last unmatched open paren to produce
+//	a compilable pattern.
+//
+// Inputs:
+//
+//   - pattern: The regex pattern string (max 1024 chars per MaxGrepPattern).
+//
+// Outputs:
+//
+//   - string: The fixed pattern. Unchanged if no fix was needed.
+//
+// Thread Safety: This function is safe for concurrent use.
+func fixCommonRegexErrors(pattern string) string {
+	openParens := strings.Count(pattern, "(") - strings.Count(pattern, "\\(")
+	closeParens := strings.Count(pattern, ")") - strings.Count(pattern, "\\)")
+	if openParens > closeParens {
+		// Escape the last unmatched open paren.
+		lastOpen := strings.LastIndex(pattern, "(")
+		if lastOpen >= 0 && (lastOpen == 0 || pattern[lastOpen-1] != '\\') {
+			pattern = pattern[:lastOpen] + "\\(" + pattern[lastOpen+1:]
+		}
+	}
+	return pattern
 }

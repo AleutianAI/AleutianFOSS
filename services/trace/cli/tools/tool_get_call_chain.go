@@ -21,6 +21,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
@@ -187,9 +188,17 @@ func (t *getCallChainTool) Execute(ctx context.Context, params map[string]any) (
 	// Parse and validate parameters
 	p, err := t.parseParams(params)
 	if err != nil {
+		errStep := crs.NewTraceStepBuilder().
+			WithAction("tool_get_call_chain").
+			WithTool("get_call_chain").
+			WithDuration(time.Since(start)).
+			WithError(err.Error()).
+			Build()
 		return &Result{
-			Success: false,
-			Error:   err.Error(),
+			Success:   false,
+			Error:     err.Error(),
+			TraceStep: &errStep,
+			Duration:  time.Since(start),
 		}, nil
 	}
 
@@ -222,11 +231,21 @@ func (t *getCallChainTool) Execute(ctx context.Context, params map[string]any) (
 			Direction:    p.Direction,
 			Message:      fmt.Sprintf("No function named '%s' found", p.FunctionName),
 		}
+		notFoundStep := crs.NewTraceStepBuilder().
+			WithAction("tool_get_call_chain").
+			WithTarget(p.FunctionName).
+			WithTool("get_call_chain").
+			WithDuration(time.Since(start)).
+			WithMetadata("direction", p.Direction).
+			WithMetadata("chain_length", "0").
+			WithMetadata("depth", "0").
+			Build()
 		return &Result{
 			Success:    true,
 			Output:     output,
 			OutputText: fmt.Sprintf("No function named '%s' found in the codebase.", p.FunctionName),
 			TokensUsed: 10,
+			TraceStep:  &notFoundStep,
 			Duration:   time.Since(start),
 		}, nil
 	}
@@ -243,9 +262,19 @@ func (t *getCallChainTool) Execute(ctx context.Context, params map[string]any) (
 
 	if gErr != nil {
 		span.RecordError(gErr)
+		errStep := crs.NewTraceStepBuilder().
+			WithAction("tool_get_call_chain").
+			WithTarget(p.FunctionName).
+			WithTool("get_call_chain").
+			WithDuration(time.Since(start)).
+			WithMetadata("direction", p.Direction).
+			WithError(fmt.Sprintf("traversal failed: %v", gErr)).
+			Build()
 		return &Result{
-			Success: false,
-			Error:   fmt.Sprintf("traversal failed: %v", gErr),
+			Success:   false,
+			Error:     fmt.Sprintf("traversal failed: %v", gErr),
+			TraceStep: &errStep,
+			Duration:  time.Since(start),
 		}, nil
 	}
 
@@ -261,12 +290,27 @@ func (t *getCallChainTool) Execute(ctx context.Context, params map[string]any) (
 		attribute.Bool("truncated", traversal.Truncated),
 	)
 
+	duration := time.Since(start)
+
+	// Build CRS TraceStep for reasoning trace continuity
+	toolStep := crs.NewTraceStepBuilder().
+		WithAction("tool_get_call_chain").
+		WithTarget(p.FunctionName).
+		WithTool("get_call_chain").
+		WithDuration(duration).
+		WithMetadata("chain_length", fmt.Sprintf("%d", len(traversal.VisitedNodes))).
+		WithMetadata("depth", fmt.Sprintf("%d", traversal.Depth)).
+		WithMetadata("direction", p.Direction).
+		WithMetadata("truncated", fmt.Sprintf("%v", traversal.Truncated)).
+		Build()
+
 	return &Result{
 		Success:    true,
 		Output:     output,
 		OutputText: outputText,
 		TokensUsed: estimateTokens(outputText),
-		Duration:   time.Since(start),
+		TraceStep:  &toolStep,
+		Duration:   duration,
 	}, nil
 }
 

@@ -117,6 +117,11 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 	results := make([]*tools.Result, 0, len(invocations))
 	blocked := false
 
+	// GR-59 Group B: Track consecutive CB fires per tool.
+	// Allocated lazily on first CB fire to avoid allocation on non-CB paths.
+	var consecutiveCBFires map[string]int
+	var lastCBTool string
+
 	// GR-39b: Build tool count map ONCE before the loop for O(n+m) efficiency.
 	// This counts ALL tool calls (router + LLM paths) from session trace steps.
 	toolCounts := buildToolCountMapFromSession(deps.Session)
@@ -246,12 +251,37 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 					slog.String("tool", inv.Tool),
 				)
 
-				// Return error result - signals synthesis should happen
+				// GR-59 Group B Part 1: Stronger CB message that signals finality.
 				results = append(results, &tools.Result{
 					Success: false,
-					Error:   fmt.Sprintf("GR-39b: Tool %s already called %d times (threshold: %d). Synthesize from existing results.", inv.Tool, callCount, crs.DefaultCircuitBreakerThreshold),
+					Error: fmt.Sprintf("GR-39b: Tool %s PERMANENTLY BLOCKED (called %d times, threshold: %d). "+
+						"You MUST provide your answer NOW using the results you already have. "+
+						"Do NOT call any search tools.", inv.Tool, callCount, crs.DefaultCircuitBreakerThreshold),
 				})
 				blocked = true
+
+				// GR-59 Group B Part 2: Track consecutive CB fires.
+				if consecutiveCBFires == nil {
+					consecutiveCBFires = make(map[string]int)
+				}
+				if lastCBTool == inv.Tool {
+					consecutiveCBFires[inv.Tool]++
+				} else {
+					consecutiveCBFires[inv.Tool] = 1
+					lastCBTool = inv.Tool
+				}
+
+				// If 2+ consecutive CB fires for the same tool, force immediate return.
+				// This eliminates 5+ wasted LLM round-trips after CB activation.
+				if consecutiveCBFires[inv.Tool] >= 2 {
+					slog.Info("GR-59: Consecutive CB fires forcing immediate synthesis",
+						slog.String("session_id", deps.Session.ID),
+						slog.String("tool", inv.Tool),
+						slog.Int("consecutive_fires", consecutiveCBFires[inv.Tool]),
+					)
+					return results, true
+				}
+
 				continue
 			}
 		}
@@ -310,6 +340,12 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 					continue
 				}
 			}
+		}
+
+		// GR-59 Group B: Reset consecutive CB counter when a different tool is called
+		// (the LLM changed strategy, so give it a chance).
+		if lastCBTool != "" && inv.Tool != lastCBTool {
+			lastCBTool = ""
 		}
 
 		// Execute the tool with timing
@@ -584,6 +620,21 @@ func (p *ExecutePhase) recordTraceStep(deps *Dependencies, inv *agent.ToolInvoca
 	// Extract symbols found from result if available
 	if result != nil && result.Success {
 		step.SymbolsFound = extractSymbolsFromResult(result)
+	}
+
+	// GR-59 Rev 3: Merge tool's own TraceStep metadata into the session step.
+	// Tools like find_implementations, find_callers, find_callees record domain-specific
+	// metadata (match_count, total_implementations, total_callers, etc.) in result.TraceStep.
+	// Without merging, sessionHasPriorGraphToolResults() cannot detect prior graph tool
+	// results, causing forced synthesis to miss and allowing unnecessary Grep/Glob loops.
+	if result != nil && result.TraceStep != nil && result.TraceStep.Metadata != nil {
+		for k, v := range result.TraceStep.Metadata {
+			step.Metadata[k] = v
+		}
+		// Preserve the tool's action if it's more specific (e.g., "tool_find_implementations")
+		if result.TraceStep.Action != "" {
+			step.Action = result.TraceStep.Action
+		}
 	}
 
 	deps.Session.RecordTraceStep(step)
@@ -1280,9 +1331,12 @@ func (p *ExecutePhase) extractToolParameters(
 		}, nil
 
 	case "find_implementations":
-		// Extract interface name from query
-		// Similar patterns to function name but looking for interface
-		interfaceName := extractFunctionNameFromQuery(query) // Reuse same logic
+		// Extract interface/class name from query using implementation-specific patterns first,
+		// then fall back to generic function name extraction.
+		interfaceName := extractInterfaceNameFromQuery(query)
+		if interfaceName == "" {
+			interfaceName = extractFunctionNameFromQuery(query)
+		}
 		if interfaceName == "" && ctx != nil {
 			interfaceName = extractFunctionNameFromContext(ctx)
 		}
@@ -2083,7 +2137,33 @@ func (p *ExecutePhase) executeToolDirectlyWithFallback(
 		stepBuilder = stepBuilder.WithMetadata("result_preview", outputStr)
 	}
 
+	// GR-59 Rev 3: Merge tool's own TraceStep metadata into the forced call step.
+	// This ensures sessionHasPriorGraphToolResults() can detect that graph tools
+	// returned substantive results (match_count, total_implementations, etc.)
+	// even when executed via the forced tool call path.
+	if result != nil && result.TraceStep != nil && result.TraceStep.Metadata != nil {
+		for k, v := range result.TraceStep.Metadata {
+			stepBuilder = stepBuilder.WithMetadata(k, v)
+		}
+	}
+
 	deps.Session.RecordTraceStep(stepBuilder.Build())
+
+	// GR-59 Rev 4: Set session flag when forced graph tool completes successfully.
+	// Graph results are authoritative whether positive ("Found 3 implementations")
+	// or zero ("Symbol 'X' not found"). Both are definitive answers — the graph
+	// analyzed every source file. The LLM must synthesize from these results,
+	// not spiral into Grep/Glob loops trying to verify or search independently.
+	if graphToolsWithSubstantiveResults[toolName] &&
+		result != nil && result.Success {
+		deps.Session.SetGraphToolHadSubstantiveResults(true)
+		slog.Info("GR-59 Rev 4: Forced graph tool completed — will force synthesis",
+			slog.String("session_id", deps.Session.ID),
+			slog.String("tool", toolName),
+			slog.Int("output_len", len(result.OutputText)),
+			slog.Bool("has_positive_results", hasSubstantiveGraphResult(result.OutputText)),
+		)
+	}
 
 	// CB-30c: Estimate and track tokens for tool output
 	// This ensures token metrics are non-zero even when using hard-forced tools

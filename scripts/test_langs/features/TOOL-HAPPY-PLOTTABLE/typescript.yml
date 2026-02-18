@@ -348,88 +348,108 @@ tests:
 
   - id: 8123
     name: plottable_find_entry_points
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: find_entry_points tool (not yet registered as standalone tool).
+      find_entry_points tool against Plottable. Find execution entry points.
     query: |
       What are the entry points into this codebase?
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone. Entry points include
-      the Plottable namespace exports and Component.renderTo calls.
-    validations: []
+      Entry points include plot constructors (new LinePlot, BarPlot),
+      Component.renderTo for DOM attachment, and the Plottable
+      namespace exports used by consumers.
+    validations:
+      - type: graph_tool_used
 
   - id: 8124
     name: plottable_trace_data_flow
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: trace_data_flow tool (not yet registered as standalone tool).
+      trace_data_flow tool against Plottable. Trace dataset rendering flow.
     query: |
       Trace how dataset values flow through the rendering pipeline
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      Dataset values flow through Scale.scale() for coordinate mapping,
+      then to Drawer classes that generate SVG elements positioned
+      according to the computed layout and plot dimensions.
+    validations:
+      - type: graph_tool_used
 
   - id: 8125
     name: plottable_trace_error_flow
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: trace_error_flow tool (not yet registered as standalone tool).
+      trace_error_flow tool against Plottable. Trace scale errors.
     query: |
       Trace how errors propagate through the scale domain computation
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      Scale errors propagate from invalid domain values through
+      Scale.domainMin/domainMax validation, affecting the plot
+      rendering which may produce NaN positions or empty visuals.
+    validations:
+      - type: graph_tool_used
 
   - id: 8126
     name: plottable_find_config_usage
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: find_config_usage tool (not yet registered as standalone tool).
+      find_config_usage tool against Plottable. Find plot config usage.
     query: |
       How is the plot configuration used across Plottable?
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      Plot configuration controls animator settings, auto-resize
+      behavior, dataset ordering, and rendering options that affect
+      how Components compute layout and render SVG elements.
+    validations:
+      - type: graph_tool_used
 
   - id: 8127
     name: plottable_find_similar_code
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: find_similar_code tool (not yet registered as standalone tool).
+      find_similar_code tool against Plottable. Similar to LinePlot.
     query: |
       Find code similar to the LinePlot rendering logic
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      Code similar to LinePlot rendering exists in AreaPlot,
+      ScatterPlot, and BarPlot — all extending XYPlot with the
+      same pattern of dataset iteration, scale application, and drawing.
+    validations:
+      - type: graph_tool_used
 
   - id: 8128
     name: plottable_build_minimal_context
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: build_minimal_context tool (not yet registered as standalone tool).
+      build_minimal_context tool against Plottable. Context for Plot.render.
     query: |
       Build minimal context needed to understand the Plot.render method
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      Minimal context includes Component base class, XYPlot, Scale
+      binding, Dataset, Drawer, and the computeLayout/render lifecycle
+      that positions and draws chart elements.
+    validations:
+      - type: graph_tool_used
 
   - id: 8129
     name: plottable_summarize_file
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: summarize_file tool (not yet registered as standalone tool).
+      summarize_file tool against Plottable. Summarize plot.ts.
     query: |
       Summarize the src/plots/plot.ts file
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      plot.ts defines the base Plot class extending Component.
+      It manages datasets, scales, drawers, animators, and the
+      rendering pipeline that transforms data into SVG visuals.
+    validations:
+      - type: graph_tool_used
 
   - id: 8130
     name: plottable_summarize_package
@@ -587,6 +607,37 @@ tests:
       parent Component.computeLayout for base layout calculations.
     validations:
       - type: graph_tool_used
+  # -- Additional find_implementations tests (44-45) -- expected_state: COMPLETE --
+  - id: 8144
+    name: plottable_find_implementations_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_implementations tool against Plottable (test B). Target: Plot base class.
+    query: |
+      What classes extend the Plot base class to implement specific chart types?
+    expected_state: COMPLETE
+    reference_answer: |
+      Plot in src/plots/plot.ts is extended by XYPlot (abstract intermediary),
+      LinePlot, AreaPlot, BarPlot, ScatterPlot, PiePlot, SegmentPlot,
+      RectanglePlot, and WaterfallPlot for different visualization types.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8145
+    name: plottable_find_implementations_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_implementations tool against Plottable (test C). Target: Axis base class.
+    query: |
+      What classes extend the Axis base class for different axis types?
+    expected_state: COMPLETE
+    reference_answer: |
+      Axis in src/axes/axis.ts is extended by NumericAxis for quantitative scales,
+      TimeAxis for time-based scales with multi-tier tick support, and
+      CategoryAxis for ordinal/band scale rendering.
+    validations:
+      - type: graph_tool_used
+
   # -- Additional find_callees tests (42-43) -- expected_state: COMPLETE --
   - id: 8142
     name: plottable_find_callees_b
@@ -622,3 +673,1541 @@ tests:
       leaks from stale update callbacks.
     validations:
       - type: graph_tool_used
+
+  # -- Additional find_symbol tests (46-47) -- expected_state: COMPLETE --
+
+  - id: 8146
+    name: plottable_find_symbol_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_symbol tool against Plottable (test B). Target: Table class.
+    query: |
+      Where is the Table class defined?
+    expected_state: COMPLETE
+    reference_answer: |
+      Table is defined in src/components/table.ts. It is a layout component
+      that arranges child components in a grid with configurable row and column
+      weights for proportional space allocation.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8147
+    name: plottable_find_symbol_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_symbol tool against Plottable (test C). Target: Dispatcher class.
+    query: |
+      Where is the Dispatcher class defined?
+    expected_state: COMPLETE
+    reference_answer: |
+      Dispatcher is defined in src/dispatchers/dispatcher.ts. It handles
+      user interaction events (mouse, touch) and dispatches them to the
+      appropriate interaction handlers registered on components.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_references tests (48-49) -- expected_state: COMPLETE --
+
+  - id: 8148
+    name: plottable_find_references_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_references tool against Plottable (test B). Target: Drawer class.
+    query: |
+      Where is the Drawer class referenced across the codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      Drawer is referenced in src/plots/plot.ts for rendering datasets,
+      in specific plot subclasses (LinePlot, BarPlot, ScatterPlot) for
+      creating SVG elements, and in the drawers module for factory methods.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8149
+    name: plottable_find_references_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_references tool against Plottable (test C). Target: Dataset class.
+    query: |
+      Where is the Dataset class referenced in the codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      Dataset is referenced in Plot for data binding via addDataset/removeDataset,
+      in XYPlot for accessor-based data extraction, and in individual plot types
+      for computing data extents used in scale domain calculation.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional get_call_chain tests (50-51) -- expected_state: COMPLETE --
+
+  - id: 8150
+    name: plottable_get_call_chain_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      get_call_chain tool against Plottable (test B). Target: scale update propagation.
+    query: |
+      Show the call chain from a Scale domain change to plot re-rendering
+    expected_state: COMPLETE
+    reference_answer: |
+      Scale.domain setter -> _dispatchUpdate -> Plot._onDatasetUpdate or
+      _onScaleUpdate callback -> Component.render -> flush -> renderImmediately
+      to redraw the plot with the new scale mapping.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8151
+    name: plottable_get_call_chain_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      get_call_chain tool against Plottable (test C). Target: interaction event handling.
+    query: |
+      Show the call chain from a mouse click event to an interaction callback
+    expected_state: COMPLETE
+    reference_answer: |
+      Dispatcher._processClick -> registered callback -> Interaction.handleClick ->
+      specific interaction handler (e.g., ClickInteraction._onClick) which
+      invokes the user-registered callback with the translated coordinates.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_path tests (52-53) -- expected_state: COMPLETE --
+
+  - id: 8152
+    name: plottable_find_path_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_path tool against Plottable (test B). Target: Dataset to SVG element.
+    query: |
+      Find the shortest path between Dataset data change and SVG element update
+    expected_state: COMPLETE
+    reference_answer: |
+      Dataset.data setter -> onUpdate callback -> Plot.render -> flush ->
+      renderImmediately -> Drawer.draw -> SVG element creation and update
+      via D3 selections.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8153
+    name: plottable_find_path_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_path tool against Plottable (test C). Target: Legend to Plot connection.
+    query: |
+      Find the shortest path between Legend rendering and Plot dataset access
+    expected_state: COMPLETE
+    reference_answer: |
+      Legend.renderImmediately accesses the registered scales and plots,
+      calling Plot.datasets to retrieve the dataset list, and uses the
+      color scale to render legend entries matching each dataset.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_hotspots tests (54-55) -- expected_state: COMPLETE --
+
+  - id: 8154
+    name: plottable_find_hotspots_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_hotspots tool against Plottable (test B). Target: src/plots/ subsystem.
+    query: |
+      What are the most connected functions in the plots subsystem?
+    expected_state: COMPLETE
+    reference_answer: |
+      Top hotspots in src/plots/ include Plot.renderImmediately,
+      XYPlot._projectorsReady, and Plot.addDataset which connect
+      dataset management, scale binding, and SVG rendering logic.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8155
+    name: plottable_find_hotspots_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_hotspots tool against Plottable (test C). Target: functions with highest fan-in.
+    query: |
+      Which functions have the highest fan-in (are called by the most other functions)?
+    expected_state: COMPLETE
+    reference_answer: |
+      Highest fan-in functions include Component.render (triggered by many
+      property setters), flush (called whenever layout invalidation occurs),
+      and Scale.scale (called by every plot type to map data to pixels).
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_dead_code tests (56-57) -- expected_state: COMPLETE --
+
+  - id: 8156
+    name: plottable_find_dead_code_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dead_code tool against Plottable (test B). Target: src/animators/ subsystem.
+    query: |
+      Find dead code in the animators module
+    expected_state: COMPLETE
+    reference_answer: |
+      Dead code in src/animators/ includes unused easing functions and
+      animation configuration helpers that are defined but never called
+      by any plot or component rendering path.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8157
+    name: plottable_find_dead_code_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dead_code tool against Plottable (test C). Target: utility functions.
+    query: |
+      Find unused utility functions in the src/utils/ directory
+    expected_state: COMPLETE
+    reference_answer: |
+      Dead code in src/utils/ includes helper functions for DOM manipulation,
+      math operations, and array utilities that were written for generality
+      but are never imported by any component or plot module.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_cycles tests (58-59) -- expected_state: COMPLETE --
+
+  - id: 8158
+    name: plottable_find_cycles_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_cycles tool against Plottable (test B). Target: component lifecycle cycles.
+    query: |
+      Find circular dependencies in the component lifecycle methods
+    expected_state: COMPLETE
+    reference_answer: |
+      Cycles exist between Component.render and flush where render schedules
+      a flush via RenderController, and flush calls renderImmediately which
+      may trigger additional render calls on child components.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8159
+    name: plottable_find_cycles_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_cycles tool against Plottable (test C). Target: scale-axis mutual dependencies.
+    query: |
+      Find circular dependencies between Scale and Axis classes
+    expected_state: COMPLETE
+    reference_answer: |
+      Cycles between Scale and Axis arise because Axis registers update
+      callbacks on Scale, and Scale domain changes trigger Axis.render
+      which may adjust the Scale range based on available pixel space.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_important tests (60-61) -- expected_state: COMPLETE --
+
+  - id: 8160
+    name: plottable_find_important_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_important tool against Plottable (test B). Target: src/scales/ subsystem.
+    query: |
+      What are the most important functions by PageRank in the scales subsystem?
+    expected_state: COMPLETE
+    reference_answer: |
+      Within src/scales/, Scale.scale, LinearScale.defaultTicks, and
+      Scale._dispatchUpdate rank highest by PageRank as they are called
+      by all plot types for data-to-pixel transformation.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8161
+    name: plottable_find_important_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_important tool against Plottable (test C). Target: least connected functions.
+    query: |
+      What functions have the lowest PageRank, indicating peripheral importance?
+    expected_state: COMPLETE
+    reference_answer: |
+      Lowest PageRank functions include standalone formatter helpers,
+      isolated color utility functions, and one-off test utilities that
+      have minimal connections to the core rendering pipeline.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_communities tests (62-63) -- expected_state: COMPLETE --
+
+  - id: 8162
+    name: plottable_find_communities_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_communities tool against Plottable (test B). Target: community structure within src/plots/.
+    query: |
+      What are the natural code communities within the plots directory?
+    expected_state: COMPLETE
+    reference_answer: |
+      Within src/plots/, communities form around the XY plot family
+      (LinePlot, AreaPlot, ScatterPlot sharing XYPlot base), the bar plot
+      cluster (BarPlot, StackedBarPlot), and PiePlot as a distinct community
+      with its own rendering and layout logic.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8163
+    name: plottable_find_communities_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_communities tool against Plottable (test C). Target: bridge functions between communities.
+    query: |
+      Which functions serve as bridges between the rendering and interaction communities?
+    expected_state: COMPLETE
+    reference_answer: |
+      Bridge functions include Component.anchor which connects the rendering
+      community to the Dispatcher interaction community, and the Interaction
+      base class methods that translate pixel coordinates using Scale functions
+      from the data transformation community.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_articulation_points tests (64-65) -- expected_state: COMPLETE --
+
+  - id: 8164
+    name: plottable_find_articulation_points_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_articulation_points tool against Plottable (test B). Target: rendering pipeline.
+    query: |
+      Find single points of failure in the rendering pipeline
+    expected_state: COMPLETE
+    reference_answer: |
+      Articulation points in the rendering pipeline include flush (the sole
+      trigger for layout and render), Component.computeLayout (required by
+      all components), and Drawer.draw (the only path to SVG output).
+    validations:
+      - type: graph_tool_used
+
+  - id: 8165
+    name: plottable_find_articulation_points_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_articulation_points tool against Plottable (test C). Target: data binding subsystem.
+    query: |
+      Find articulation points that connect data binding to visual rendering
+    expected_state: COMPLETE
+    reference_answer: |
+      Articulation points bridging data and rendering include Plot.addDataset
+      which is the sole entry for data binding, and the accessor functions
+      (x, y, attr) that serve as the only path from raw data to visual properties.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_dominators tests (66-67) -- expected_state: COMPLETE --
+
+  - id: 8166
+    name: plottable_find_dominators_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dominators tool against Plottable (test B). Target: axis tick rendering.
+    query: |
+      What functions must be called before axis tick marks are rendered?
+    expected_state: COMPLETE
+    reference_answer: |
+      Dominators of tick rendering include Component.anchor, Axis.computeLayout
+      (which calculates available space), Scale.ticks (which generates tick values),
+      and Axis._setupTickMarks before the actual SVG tick elements are drawn.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8167
+    name: plottable_find_dominators_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dominators tool against Plottable (test C). Target: legend entry creation.
+    query: |
+      What functions dominate the path to Legend entry rendering?
+    expected_state: COMPLETE
+    reference_answer: |
+      Dominators of Legend rendering include Component.anchor, Legend.computeLayout
+      for sizing, and the entry creation method that reads registered scales
+      and dataset metadata before rendering color swatches and labels.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_loops tests (68-69) -- expected_state: COMPLETE --
+
+  - id: 8168
+    name: plottable_find_loops_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_loops tool against Plottable (test B). Target: Table grid iteration.
+    query: |
+      Find iterative loop patterns in Table layout computation
+    expected_state: COMPLETE
+    reference_answer: |
+      Table.computeLayout contains nested loops iterating over rows and columns
+      to compute space requests, allocate proportional widths and heights,
+      and recursively call computeLayout on each child component in the grid.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8169
+    name: plottable_find_loops_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_loops tool against Plottable (test C). Target: Group component iteration.
+    query: |
+      Find recursive or iterative patterns in the Group component
+    expected_state: COMPLETE
+    reference_answer: |
+      Group iterates over its child components in computeLayout and
+      renderImmediately, calling each child's corresponding method. When
+      Groups are nested, this creates recursive traversal of the component tree.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_merge_points tests (70-71) -- expected_state: COMPLETE --
+
+  - id: 8170
+    name: plottable_find_merge_points_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_merge_points tool against Plottable (test B). Target: scale domain computation convergence.
+    query: |
+      Where do different scale domain computation paths converge?
+    expected_state: COMPLETE
+    reference_answer: |
+      Scale domain computation paths converge at Scale.autoDomain where
+      extents from multiple datasets, user-set domain bounds, and padding
+      configurations merge into the final domain used for rendering.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8171
+    name: plottable_find_merge_points_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_merge_points tool against Plottable (test C). Target: layout allocation convergence.
+    query: |
+      Where do different layout computation paths converge in the Table component?
+    expected_state: COMPLETE
+    reference_answer: |
+      Layout paths converge in Table._iterateLayout where row height
+      calculations, column width calculations, and child requestedSpace
+      results merge to produce the final layout allocation for all components.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_common_dependency tests (72-73) -- expected_state: COMPLETE --
+
+  - id: 8172
+    name: plottable_find_common_dependency_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_common_dependency tool against Plottable (test B). Target: ScatterPlot and AreaPlot.
+    query: |
+      What shared dependencies do ScatterPlot and AreaPlot have?
+    expected_state: COMPLETE
+    reference_answer: |
+      Both ScatterPlot and AreaPlot share dependencies on XYPlot (common base),
+      Scale for x/y coordinate mapping, Drawer for SVG element rendering,
+      and the accessor pattern (x, y property methods) for data extraction.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8173
+    name: plottable_find_common_dependency_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_common_dependency tool against Plottable (test C). Target: NumericAxis and TimeAxis.
+    query: |
+      What shared dependencies do NumericAxis and TimeAxis have?
+    expected_state: COMPLETE
+    reference_answer: |
+      Both NumericAxis and TimeAxis depend on the Axis base class for tick
+      rendering, Scale for value-to-pixel mapping, the Formatter interface
+      for tick label generation, and Component lifecycle methods for anchoring.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_control_dependencies tests (74-75) -- expected_state: COMPLETE --
+
+  - id: 8174
+    name: plottable_find_control_dependencies_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_control_dependencies tool against Plottable (test B). Target: autorange mode.
+    query: |
+      What conditionals control whether a plot auto-adjusts its scale domain?
+    expected_state: COMPLETE
+    reference_answer: |
+      Auto-ranging is controlled by the autorangeMode property on XYPlot,
+      the autoDomain flag on Scale, and whether includedValues or padding
+      are set, which determine if the domain is expanded beyond data extents.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8175
+    name: plottable_find_control_dependencies_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_control_dependencies tool against Plottable (test C). Target: component visibility.
+    query: |
+      What conditionals control whether a component is rendered or skipped?
+    expected_state: COMPLETE
+    reference_answer: |
+      Component rendering is controlled by the _isAnchored flag, the
+      _isSetup state, the fixedWidth/fixedHeight properties that determine
+      layout participation, and whether the component has been detached.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_extractable_regions tests (76-77) -- expected_state: COMPLETE --
+
+  - id: 8176
+    name: plottable_find_extractable_regions_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_extractable_regions tool against Plottable (test B). Target: XYPlot rendering.
+    query: |
+      Find extractable regions in the XYPlot rendering methods
+    expected_state: COMPLETE
+    reference_answer: |
+      XYPlot.renderImmediately contains extractable regions for dataset
+      iteration, scale application, data-to-pixel projection, and clipping
+      rectangle computation, each with clear single-entry single-exit boundaries.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8177
+    name: plottable_find_extractable_regions_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_extractable_regions tool against Plottable (test C). Target: Table.computeLayout.
+    query: |
+      Find extractable regions in Table.computeLayout
+    expected_state: COMPLETE
+    reference_answer: |
+      Table.computeLayout contains extractable regions for row weight calculation,
+      column weight calculation, child space allocation, and overflow handling,
+      each of which could be separated into focused helper methods.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional check_reducibility tests (78-79) -- expected_state: COMPLETE --
+
+  - id: 8178
+    name: plottable_check_reducibility_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      check_reducibility tool against Plottable (test B). Target: rendering pipeline flow.
+    query: |
+      Check the reducibility of the rendering pipeline control flow
+    expected_state: COMPLETE
+    reference_answer: |
+      The rendering pipeline is highly reducible with well-structured
+      sequential flow through anchor, computeLayout, and renderImmediately.
+      The flush-based deferred rendering introduces minimal back-edges.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8179
+    name: plottable_check_reducibility_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      check_reducibility tool against Plottable (test C). Target: compare plots vs components.
+    query: |
+      Compare the control flow reducibility between the plots and components modules
+    expected_state: COMPLETE
+    reference_answer: |
+      The components module (Table, Group, Label) has simpler, more reducible
+      flow due to straightforward composition, while the plots module has
+      more complex flow from scale callbacks, dataset update handlers,
+      and conditional animation paths.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_critical_path tests (80-81) -- expected_state: COMPLETE --
+
+  - id: 8180
+    name: plottable_find_critical_path_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_critical_path tool against Plottable (test B). Target: data update to visual refresh.
+    query: |
+      What is the critical path from a dataset update to a visual refresh?
+    expected_state: COMPLETE
+    reference_answer: |
+      The critical path runs Dataset.data setter -> onUpdate callback ->
+      Plot.render -> RenderController queue -> flush -> computeLayout ->
+      renderImmediately -> Drawer.draw, the minimum sequence for data changes
+      to appear visually.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8181
+    name: plottable_find_critical_path_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_critical_path tool against Plottable (test C). Target: initial chart setup.
+    query: |
+      What is the mandatory sequence to set up and display a LinePlot?
+    expected_state: COMPLETE
+    reference_answer: |
+      The critical path runs new LinePlot -> addDataset -> x/y accessor setup ->
+      Scale attachment -> renderTo (which triggers anchor -> computeLayout ->
+      renderImmediately), the mandatory steps to display a line chart.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_module_api tests (82-83) -- expected_state: COMPLETE --
+
+  - id: 8182
+    name: plottable_find_module_api_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_module_api tool against Plottable (test B). Target: scales module.
+    query: |
+      What is the public API of the scales module?
+    expected_state: COMPLETE
+    reference_answer: |
+      The scales module exports Scale (base), LinearScale, ModifiedLogScale,
+      TimeScale, ColorScale, InterpolatedColorScale, and CategoryScale,
+      along with their domain/range configuration methods and tick generation.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8183
+    name: plottable_find_module_api_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_module_api tool against Plottable (test C). Target: axes module.
+    query: |
+      What is the public API of the axes module?
+    expected_state: COMPLETE
+    reference_answer: |
+      The axes module exports Axis (base), NumericAxis, TimeAxis, and
+      CategoryAxis, along with configuration methods for tick formatting,
+      label rotation, tick interval, and orientation (top/bottom/left/right).
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_weighted_criticality tests (84-85) -- expected_state: COMPLETE --
+
+  - id: 8184
+    name: plottable_find_weighted_criticality_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_weighted_criticality tool against Plottable (test B). Target: Component hierarchy.
+    query: |
+      What are the most critical functions by weighted importance in the Component hierarchy?
+    expected_state: COMPLETE
+    reference_answer: |
+      In the Component hierarchy, Component.render, Component.computeLayout,
+      and Component.anchor rank highest by weighted criticality as they combine
+      high degree centrality (many callers/callees), high betweenness (bridge
+      layout to rendering), and high PageRank (called by all subclasses).
+    validations:
+      - type: graph_tool_used
+
+  - id: 8185
+    name: plottable_find_weighted_criticality_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_weighted_criticality tool against Plottable (test C). Target: comparison across subsystems.
+    query: |
+      Compare the weighted criticality of functions in scales versus plots
+    expected_state: COMPLETE
+    reference_answer: |
+      Scale functions like Scale.scale and Scale._dispatchUpdate have high
+      weighted criticality due to being called by every plot type, while
+      plot-specific functions like PiePlot._sliceAngles have lower criticality
+      as they serve only one visualization type.
+    validations:
+      - type: graph_tool_used
+
+
+  # ── IT-24 through IT-42: New tool tests ──
+
+  - id: 8186
+    name: plottable_graph_overview
+    category: TOOL_HAPPY_PATH
+    description: >
+      graph_overview tool against Plottable charting library. Get overall graph statistics.
+    query: |
+      Give me an overview of this codebase's call graph
+    expected_state: COMPLETE
+    reference_answer: |
+      The Plottable charting library call graph contains D3-based charting
+      spanning packages like Plot, Component, Scale, Axis, Dataset.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8187
+    name: plottable_graph_overview_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      graph_overview tool against Plottable charting library (test B). Focus on graph density.
+    query: |
+      How dense is the call graph and what is the average connectivity?
+    expected_state: COMPLETE
+    reference_answer: |
+      The graph has moderate density with most functions having 2-5 callees.
+      Hotspot functions have significantly higher degree reflecting the
+      core architecture of Plottable charting library.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8188
+    name: plottable_graph_overview_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      graph_overview tool against Plottable charting library (test C). Focus on package distribution.
+    query: |
+      How are functions distributed across packages in the call graph?
+    expected_state: COMPLETE
+    reference_answer: |
+      Functions are distributed across Plot, Component, Scale, Axis, Dataset,
+      with the core package containing the most edges due to
+      orchestration responsibilities.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8189
+    name: plottable_explore_package
+    category: TOOL_HAPPY_PATH
+    description: >
+      explore_package tool against Plottable charting library. Explore plots.
+    query: |
+      Explore the plots and show its key types and functions
+    expected_state: COMPLETE
+    reference_answer: |
+      The plots contains Plot, LinePlot, BarPlot, ScatterPlot, StackedBar.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8190
+    name: plottable_explore_package_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      explore_package tool against Plottable charting library (test B). Explore scales.
+    query: |
+      Explore the scales and show its key types and functions
+    expected_state: COMPLETE
+    reference_answer: |
+      The scales contains Scale, QuantitativeScale, CategoryScale, TimeScale.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8191
+    name: plottable_explore_package_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      explore_package tool against Plottable charting library (test C). Explore components.
+    query: |
+      Explore the components and show its key types and functions
+    expected_state: COMPLETE
+    reference_answer: |
+      The components contains Component, Axis, Legend, Label, Gridlines.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8192
+    name: plottable_list_packages
+    category: TOOL_HAPPY_PATH
+    description: >
+      list_packages tool against Plottable charting library. List all packages.
+    query: |
+      List all packages in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Packages include plots, scales, components, axes, animators, dispatchers, drawers, interactions, utils.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8193
+    name: plottable_list_packages_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      list_packages tool against Plottable charting library (test B). Focus on count.
+    query: |
+      How many packages does this codebase have?
+    expected_state: COMPLETE
+    reference_answer: |
+      The codebase has multiple packages organized by concern,
+      including plots, scales, components, axes, animators, dispatchers, drawers, interactions, utils.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8194
+    name: plottable_list_packages_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      list_packages tool against Plottable charting library (test C). Focus on hierarchy.
+    query: |
+      Show the package hierarchy and how packages are organized
+    expected_state: COMPLETE
+    reference_answer: |
+      Packages are organized by concern with plots, scales, components, axes, animators, dispatchers, drawers, interactions, utils
+      as the main functional groupings.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8195
+    name: plottable_read
+    category: TOOL_HAPPY_PATH
+    description: >
+      Read tool against Plottable charting library.
+    query: |
+      Show me the contents of plots/plot.ts
+    expected_state: COMPLETE
+    reference_answer: |
+      base Plot class
+    validations:
+      - type: graph_tool_used
+
+  - id: 8196
+    name: plottable_read_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Read tool against Plottable charting library (test B).
+    query: |
+      Read the scales/scale.ts file
+    expected_state: COMPLETE
+    reference_answer: |
+      Scale interface
+    validations:
+      - type: graph_tool_used
+
+  - id: 8197
+    name: plottable_read_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Read tool against Plottable charting library (test C).
+    query: |
+      Show me the components/component.ts file
+    expected_state: COMPLETE
+    reference_answer: |
+      Component base class
+    validations:
+      - type: graph_tool_used
+
+  - id: 8198
+    name: plottable_write
+    category: TOOL_HAPPY_PATH
+    description: >
+      Write tool against Plottable charting library.
+    query: |
+      Create a new test chart setup
+    expected_state: COMPLETE
+    reference_answer: |
+      The Write tool processes test chart setup for
+      the Plottable charting library codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8199
+    name: plottable_write_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Write tool against Plottable charting library (test B).
+    query: |
+      Write a custom scale
+    expected_state: COMPLETE
+    reference_answer: |
+      The Write tool processes custom scale for
+      the Plottable charting library codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8200
+    name: plottable_write_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Write tool against Plottable charting library (test C).
+    query: |
+      Create a plot helper
+    expected_state: COMPLETE
+    reference_answer: |
+      The Write tool processes plot helper for
+      the Plottable charting library codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8201
+    name: plottable_edit
+    category: TOOL_HAPPY_PATH
+    description: >
+      Edit tool against Plottable charting library.
+    query: |
+      Modify the Plot.renderImmediately
+    expected_state: COMPLETE
+    reference_answer: |
+      The Edit tool processes Plot.renderImmediately for
+      the Plottable charting library codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8202
+    name: plottable_edit_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Edit tool against Plottable charting library (test B).
+    query: |
+      Update the Scale.domain setter
+    expected_state: COMPLETE
+    reference_answer: |
+      The Edit tool processes Scale.domain setter for
+      the Plottable charting library codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8203
+    name: plottable_edit_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Edit tool against Plottable charting library (test C).
+    query: |
+      Fix the Component.anchor
+    expected_state: COMPLETE
+    reference_answer: |
+      The Edit tool processes Component.anchor for
+      the Plottable charting library codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8204
+    name: plottable_glob
+    category: TOOL_HAPPY_PATH
+    description: >
+      Glob tool against Plottable charting library.
+    query: |
+      Find all files matching src/plots/*.ts
+    expected_state: COMPLETE
+    reference_answer: |
+      The Glob tool processes src/plots/*.ts for
+      the Plottable charting library codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8205
+    name: plottable_glob_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Glob tool against Plottable charting library (test B).
+    query: |
+      Find files matching src/scales/*.ts
+    expected_state: COMPLETE
+    reference_answer: |
+      The Glob tool processes src/scales/*.ts for
+      the Plottable charting library codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8206
+    name: plottable_glob_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Glob tool against Plottable charting library (test C).
+    query: |
+      Search for src/components/*.ts files
+    expected_state: COMPLETE
+    reference_answer: |
+      The Glob tool processes src/components/*.ts for
+      the Plottable charting library codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8207
+    name: plottable_grep
+    category: TOOL_HAPPY_PATH
+    description: >
+      Grep tool against Plottable charting library.
+    query: |
+      Search for renderImmediately calls in the codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      The Grep tool processes renderImmediately calls for
+      the Plottable charting library codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8208
+    name: plottable_grep_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Grep tool against Plottable charting library (test B).
+    query: |
+      Find all addDataset usage
+    expected_state: COMPLETE
+    reference_answer: |
+      The Grep tool processes addDataset usage for
+      the Plottable charting library codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8209
+    name: plottable_grep_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Grep tool against Plottable charting library (test C).
+    query: |
+      Search for D3 selection patterns
+    expected_state: COMPLETE
+    reference_answer: |
+      The Grep tool processes D3 selection patterns for
+      the Plottable charting library codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8210
+    name: plottable_diff
+    category: TOOL_HAPPY_PATH
+    description: >
+      Diff tool against Plottable charting library.
+    query: |
+      Compare LinePlot vs BarPlot
+    expected_state: COMPLETE
+    reference_answer: |
+      The Diff tool processes LinePlot vs BarPlot for
+      the Plottable charting library codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8211
+    name: plottable_diff_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Diff tool against Plottable charting library (test B).
+    query: |
+      Show differences between QuantitativeScale vs CategoryScale
+    expected_state: COMPLETE
+    reference_answer: |
+      The Diff tool processes QuantitativeScale vs CategoryScale for
+      the Plottable charting library codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8212
+    name: plottable_diff_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Diff tool against Plottable charting library (test C).
+    query: |
+      Compare XYPlot vs PiePlot
+    expected_state: COMPLETE
+    reference_answer: |
+      The Diff tool processes XYPlot vs PiePlot for
+      the Plottable charting library codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8213
+    name: plottable_tree
+    category: TOOL_HAPPY_PATH
+    description: >
+      Tree tool against Plottable charting library.
+    query: |
+      Show the src directory
+    expected_state: COMPLETE
+    reference_answer: |
+      The Tree tool processes src directory for
+      the Plottable charting library codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8214
+    name: plottable_tree_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Tree tool against Plottable charting library (test B).
+    query: |
+      Show the src/plots structure
+    expected_state: COMPLETE
+    reference_answer: |
+      The Tree tool processes src/plots for
+      the Plottable charting library codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8215
+    name: plottable_tree_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Tree tool against Plottable charting library (test C).
+    query: |
+      Display the src/components layout
+    expected_state: COMPLETE
+    reference_answer: |
+      The Tree tool processes src/components for
+      the Plottable charting library codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8216
+    name: plottable_json
+    category: TOOL_HAPPY_PATH
+    description: >
+      JSON tool against Plottable charting library.
+    query: |
+      Parse the package.json
+    expected_state: COMPLETE
+    reference_answer: |
+      The JSON tool processes package.json for
+      the Plottable charting library codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8217
+    name: plottable_json_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      JSON tool against Plottable charting library (test B).
+    query: |
+      Extract info from tsconfig.json
+    expected_state: COMPLETE
+    reference_answer: |
+      The JSON tool processes tsconfig.json for
+      the Plottable charting library codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8218
+    name: plottable_json_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      JSON tool against Plottable charting library (test C).
+    query: |
+      Read the test config
+    expected_state: COMPLETE
+    reference_answer: |
+      The JSON tool processes test config for
+      the Plottable charting library codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8219
+    name: plottable_validate_syntax
+    category: TOOL_HAPPY_PATH
+    description: >
+      validate_syntax tool against Plottable charting library.
+    query: |
+      Validate the syntax of plots/plot.ts
+    expected_state: COMPLETE
+    reference_answer: |
+      The validate_syntax tool processes plots/plot.ts for
+      the Plottable charting library codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8220
+    name: plottable_validate_syntax_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      validate_syntax tool against Plottable charting library (test B).
+    query: |
+      Check the syntax of scales/scale.ts
+    expected_state: COMPLETE
+    reference_answer: |
+      The validate_syntax tool processes scales/scale.ts for
+      the Plottable charting library codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8221
+    name: plottable_validate_syntax_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      validate_syntax tool against Plottable charting library (test C).
+    query: |
+      Verify the syntax of components/component.ts
+    expected_state: COMPLETE
+    reference_answer: |
+      The validate_syntax tool processes components/component.ts for
+      the Plottable charting library codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 8222
+    name: plottable_find_entry_points_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_entry_points tool against Plottable charting library (test B). Focus on plot creation.
+    query: |
+      plot creation in Plottable charting library?
+    expected_state: COMPLETE
+    reference_answer: |
+      new LinePlot, new BarPlot, new ScatterPlot
+    validations:
+      - type: graph_tool_used
+
+  - id: 8223
+    name: plottable_find_entry_points_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_entry_points tool against Plottable charting library (test C). Focus on rendering entry.
+    query: |
+      rendering entry in Plottable charting library?
+    expected_state: COMPLETE
+    reference_answer: |
+      renderTo, anchor, computeLayout, renderImmediately
+    validations:
+      - type: graph_tool_used
+
+  - id: 8224
+    name: plottable_trace_data_flow_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      trace_data_flow tool against Plottable charting library (test B). Focus on data to visual.
+    query: |
+      data to visual in Plottable charting library?
+    expected_state: COMPLETE
+    reference_answer: |
+      Dataset, Scale.scale(), Drawer, SVG elements
+    validations:
+      - type: graph_tool_used
+
+  - id: 8225
+    name: plottable_trace_data_flow_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      trace_data_flow tool against Plottable charting library (test C). Focus on layout pipeline.
+    query: |
+      layout pipeline in Plottable charting library?
+    expected_state: COMPLETE
+    reference_answer: |
+      requestedSpace, computeLayout, origin, render
+    validations:
+      - type: graph_tool_used
+
+  - id: 8226
+    name: plottable_trace_error_flow_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      trace_error_flow tool against Plottable charting library (test B). Focus on scale errors.
+    query: |
+      scale errors in Plottable charting library?
+    expected_state: COMPLETE
+    reference_answer: |
+      domain mismatch, invalid range, NaN handling
+    validations:
+      - type: graph_tool_used
+
+  - id: 8227
+    name: plottable_trace_error_flow_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      trace_error_flow tool against Plottable charting library (test C). Focus on render errors.
+    query: |
+      render errors in Plottable charting library?
+    expected_state: COMPLETE
+    reference_answer: |
+      missing anchor, null dataset, SVG append failures
+    validations:
+      - type: graph_tool_used
+
+  - id: 8228
+    name: plottable_build_minimal_context_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      build_minimal_context tool against Plottable charting library (test B). Focus on XYPlot rendering.
+    query: |
+      XYPlot rendering
+    expected_state: COMPLETE
+    reference_answer: |
+      XYPlot, scales, datasets, drawers, rendering
+    validations:
+      - type: graph_tool_used
+
+  - id: 8229
+    name: plottable_build_minimal_context_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      build_minimal_context tool against Plottable charting library (test C). Focus on interaction handling.
+    query: |
+      interaction handling in Plottable charting library?
+    expected_state: COMPLETE
+    reference_answer: |
+      Interaction, Dispatcher, click/drag/hover events
+    validations:
+      - type: graph_tool_used
+
+  - id: 8230
+    name: plottable_find_similar_code_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_similar_code tool against Plottable charting library (test B). Focus on plot types.
+    query: |
+      plot types in Plottable charting library?
+    expected_state: COMPLETE
+    reference_answer: |
+      Line/Bar/Scatter all extend XYPlot with similar render
+    validations:
+      - type: graph_tool_used
+
+  - id: 8231
+    name: plottable_find_similar_code_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_similar_code tool against Plottable charting library (test C). Focus on axis types.
+    query: |
+      axis types in Plottable charting library?
+    expected_state: COMPLETE
+    reference_answer: |
+      NumericAxis/CategoryAxis/TimeAxis similar label generation
+    validations:
+      - type: graph_tool_used
+
+  - id: 8232
+    name: plottable_find_config_usage_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_config_usage tool against Plottable charting library (test B). Focus on plot config.
+    query: |
+      plot config in Plottable charting library?
+    expected_state: COMPLETE
+    reference_answer: |
+      animator, autoResize, dataset order, rendering options
+    validations:
+      - type: graph_tool_used
+
+  - id: 8233
+    name: plottable_find_config_usage_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_config_usage tool against Plottable charting library (test C). Focus on axis config.
+    query: |
+      axis config in Plottable charting library?
+    expected_state: COMPLETE
+    reference_answer: |
+      orientation, formatter, tickGenerator, label angle
+    validations:
+      - type: graph_tool_used
+
+  - id: 8234
+    name: plottable_summarize_file_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      summarize_file tool against Plottable charting library (test B). Focus on plots/xyPlot.ts.
+    query: |
+      plots/xyPlot.ts in Plottable charting library?
+    expected_state: COMPLETE
+    reference_answer: |
+      XYPlot base class, scale binding, dataset management
+    validations:
+      - type: graph_tool_used
+
+  - id: 8235
+    name: plottable_summarize_file_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      summarize_file tool against Plottable charting library (test C). Focus on components/component.ts.
+    query: |
+      components/component.ts in Plottable charting library?
+    expected_state: COMPLETE
+    reference_answer: |
+      Component lifecycle, anchor, render, destroy
+    validations:
+      - type: graph_tool_used
+
+  # -- GR-58: CRS TraceStep Verification Tests --
+
+  - id: 8236
+    name: plottable_crs_find_callers
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58: Verify find_callers produces CRS TraceStep. Target: Plot.renderImmediately.
+    query: |
+      Who calls the Plot.renderImmediately method?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_callers tool was used and produced a CRS TraceStep recording the query
+      for Plot.renderImmediately with match_count, total_callers, and used_inheritance_path metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 8237
+    name: plottable_crs_find_callees
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58: Verify find_callees produces CRS TraceStep. Target: Component.anchor.
+    query: |
+      What functions does Component.anchor call?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_callees tool was used and produced a CRS TraceStep recording the query
+      for Component.anchor with resolved_count, external_count, and total_count metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  # -- GR-58: CRS TraceStep Verification (IT-03 to IT-42) --
+
+  - id: 8238
+    name: plottable_crs_find_hotspots
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-07: Verify find_hotspots produces CRS TraceStep against Plottable.
+    query: |
+      Find hotspot functions in Plottable's rendering code.
+    expected_state: COMPLETE
+    reference_answer: |
+      find_hotspots tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 8239
+    name: plottable_crs_find_communities
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-11: Verify find_communities produces CRS TraceStep against Plottable.
+    query: |
+      Find communities or clusters in Plottable's component graph.
+    expected_state: COMPLETE
+    reference_answer: |
+      find_communities tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 8240
+    name: plottable_crs_find_common_dependency
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-16: Verify find_common_dependency produces CRS TraceStep against Plottable.
+    query: |
+      Find common dependencies between the Plot and Axis classes in Plottable.
+    expected_state: COMPLETE
+    reference_answer: |
+      find_common_dependency tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 8241
+    name: plottable_crs_find_critical_path
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-20: Verify find_critical_path produces CRS TraceStep against Plottable.
+    query: |
+      Find the critical path in Plottable's render pipeline.
+    expected_state: COMPLETE
+    reference_answer: |
+      find_critical_path tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 8242
+    name: plottable_crs_explore_package
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-25: Verify explore_package produces CRS TraceStep against Plottable.
+    query: |
+      Explore the plots package in Plottable.
+    expected_state: COMPLETE
+    reference_answer: |
+      explore_package tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 8243
+    name: plottable_crs_trace_data_flow
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-29: Verify trace_data_flow produces CRS TraceStep against Plottable.
+    query: |
+      Trace data flow through the Dataset class in Plottable.
+    expected_state: COMPLETE
+    reference_answer: |
+      trace_data_flow tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 8244
+    name: plottable_crs_read
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-34: Verify read tool produces CRS TraceStep against Plottable.
+    query: |
+      Read the contents of src/plots/plot.ts in Plottable.
+    expected_state: COMPLETE
+    reference_answer: |
+      read tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 8245
+    name: plottable_crs_grep
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-38: Verify grep tool produces CRS TraceStep against Plottable.
+    query: |
+      Search for 'renderImmediately' across the Plottable codebase.
+    expected_state: COMPLETE
+    reference_answer: |
+      grep tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  # -- IT-01/IT-02/IT-03: Second CRS TraceStep Verification --
+
+  - id: 8246
+    name: plottable_crs_find_callers_b
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      IT-01: Second CRS verification for find_callers against Plottable. Target: Component.anchor.
+    query: |
+      Who calls the Component.anchor method in Plottable?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_callers tool was used and produced a CRS TraceStep with
+      match_count, total_callers, and used_inheritance_path metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 8247
+    name: plottable_crs_find_callees_b
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      IT-02: Second CRS verification for find_callees against Plottable. Target: Plot.renderImmediately.
+    query: |
+      What functions does Plot.renderImmediately call in Plottable?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_callees tool was used and produced a CRS TraceStep with
+      resolved_count, external_count, and total_count metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 8248
+    name: plottable_crs_find_implementations_a
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      IT-03: First CRS verification for find_implementations against Plottable. Target: Scale.
+    query: |
+      What classes extend the Scale base class in Plottable?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_implementations tool was used and produced a CRS TraceStep with
+      match_count, total_implementations, and index_used metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 8249
+    name: plottable_crs_find_implementations_b
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      IT-03: Second CRS verification for find_implementations against Plottable. Target: Drawer.
+    query: |
+      What classes extend the Drawer base class in Plottable?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_implementations tool was used and produced a CRS TraceStep with
+      match_count, total_implementations, and index_used metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present

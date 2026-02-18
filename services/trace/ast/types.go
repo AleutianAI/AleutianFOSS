@@ -532,6 +532,15 @@ type CallSite struct {
 	//   - "s" for s.Initialize()
 	//   - "ctx" for ctx.Done()
 	Receiver string `json:"receiver,omitempty"`
+
+	// FunctionArgs lists identifiers passed as callback/HOF arguments.
+	// Only populated when a call passes identifiers that may reference other functions.
+	// IT-03a C-1: Enables EdgeTypeReferences from caller to callback arguments.
+	//
+	// Examples:
+	//   - ["middleware"] for app.use(middleware)
+	//   - ["LoggingInterceptor"] for UseInterceptors(LoggingInterceptor)
+	FunctionArgs []string `json:"function_args,omitempty"`
 }
 
 // Validate checks if the CallSite has valid field values.
@@ -568,9 +577,20 @@ type SymbolMetadata struct {
 	// Example: ["staticmethod", "cache"] for Python.
 	Decorators []string `json:"decorators,omitempty"`
 
+	// DecoratorArgs maps decorator names to their argument identifiers.
+	// Only populated when a decorator has arguments that reference symbols.
+	// Example: {"UseInterceptors": ["LoggingInterceptor"], "Module": ["UserService"]}
+	// IT-03a A-3: Enables EdgeTypeReferences from decorated symbol to decorator arguments.
+	DecoratorArgs map[string][]string `json:"decorator_args,omitempty"`
+
 	// TypeParameters lists generic type parameter names.
 	// Example: ["T", "U"] for TypeScript generic function.
 	TypeParameters []string `json:"type_parameters,omitempty"`
+
+	// TypeArguments lists type identifiers used as generic arguments in the symbol's type annotations.
+	// IT-03a C-2: Tracks type arguments like User in Promise<User>, Handler in Map<string, Handler>.
+	// Only populated for non-primitive type names (skips string, number, boolean, etc.).
+	TypeArguments []string `json:"type_arguments,omitempty"`
 
 	// ReturnType is the declared return type (if available).
 	// Example: "Promise<User>" for TypeScript async function.
@@ -606,6 +626,19 @@ type SymbolMetadata struct {
 	// For structs/types: lists methods with receivers matching this type.
 	// Used for Go interface implementation detection via method-set matching (GR-40).
 	Methods []MethodSignature `json:"methods,omitempty"`
+
+	// IsConstructor indicates a JavaScript constructor function (uses this.x = ...).
+	// IT-03a B-1: Constructor functions are reclassified as SymbolKindClass for graph visibility.
+	IsConstructor bool `json:"is_constructor,omitempty"`
+
+	// TypeNarrowings lists type identifiers used in type narrowing expressions.
+	// IT-03a C-3: Tracks types referenced via instanceof, typeof, and type predicates.
+	// Example: ["Router", "Response"] for code containing `x instanceof Router`.
+	TypeNarrowings []string `json:"type_narrowings,omitempty"`
+
+	// PrototypeOf indicates this symbol was assigned via Foo.prototype.method = ...
+	// IT-03a B-2: Links prototype method assignments to their constructor function.
+	PrototypeOf string `json:"prototype_of,omitempty"`
 
 	// CSSSelector is the full CSS selector for CSS symbols.
 	CSSSelector string `json:"css_selector,omitempty"`

@@ -357,6 +357,66 @@ func TestValidateParamType(t *testing.T) {
 	})
 }
 
+// GR-59 Group C: Tests for special token stripping in tool name validation.
+
+func TestStripSpecialTokens(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"no tokens", "find_callers", "find_callers"},
+		{"channel token", "find_callees<|channel|>analysis", "find_calleesanalysis"},
+		{"trailing bracket", "Grep]", "Grep"},
+		{"trailing parens", "find_path()", "find_path"},
+		{"multiple tokens", "tool<|a|>name<|b|>", "toolname"},
+		{"only token", "<|token|>", ""},
+		{"empty", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := stripSpecialTokens(tt.input)
+			if result != tt.expected {
+				t.Errorf("stripSpecialTokens(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestValidateToolName_SpecialTokens(t *testing.T) {
+	available := []string{"find_callees", "find_callers", "Grep"}
+
+	t.Run("special token stripped then exact match", func(t *testing.T) {
+		result := ValidateToolName("Grep]", available)
+		if !result.Valid {
+			t.Error("expected valid after stripping trailing bracket")
+		}
+		if result.ToolName != "Grep" {
+			t.Errorf("expected Grep, got %s", result.ToolName)
+		}
+	})
+
+	t.Run("channel token stripped then fuzzy match", func(t *testing.T) {
+		// "find_calleesanalysis" after stripping → fuzzy match to "find_callees" (distance 8, won't match)
+		// But "find_callees<|channel|>" → "find_callees" → exact match
+		result := ValidateToolName("find_callees<|channel|>", available)
+		if !result.Valid {
+			t.Error("expected valid after stripping channel token")
+		}
+		if result.ToolName != "find_callees" {
+			t.Errorf("expected find_callees, got %s", result.ToolName)
+		}
+	})
+
+	t.Run("empty after sanitization", func(t *testing.T) {
+		result := ValidateToolName("<|token|>", available)
+		if result.Valid {
+			t.Error("expected invalid for name that becomes empty after sanitization")
+		}
+	})
+}
+
 func TestContainsValue(t *testing.T) {
 	t.Run("string in slice", func(t *testing.T) {
 		if !containsValue([]any{"a", "b", "c"}, "b") {

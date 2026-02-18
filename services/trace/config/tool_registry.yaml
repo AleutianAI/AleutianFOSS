@@ -76,8 +76,18 @@ tools:
       - interface implementations
       - types that implement
       - structs implementing
-    use_when: "User asks what types implement an interface"
-    avoid_when: "User asks about callers or callees"
+      - extends
+      - subclass
+      - subclasses
+      - inherits
+      - derives from
+      - child class
+      - base class
+      - class hierarchy
+      - what extends
+      - what implements
+    use_when: "User asks what types implement an interface OR what classes extend a base class. Works for all languages: Go interfaces, Python class inheritance/ABCs, JS/TS class extends. Use for 'what implements X?', 'what extends X?', 'what subclasses X?', 'what derives from X?'."
+    avoid_when: "User asks about callers or callees. Use find_callers or find_callees instead."
     requires:
       - graph_initialized
 
@@ -122,8 +132,8 @@ tools:
       - trace calls
       - full call hierarchy
       - recursive callers
-    use_when: "User wants to see the full call hierarchy, not just immediate callers/callees"
-    avoid_when: "User only wants immediate callers or callees"
+    use_when: "User explicitly asks for the FULL call hierarchy, transitive calls, call chains, impact analysis, or 'all the way down/up'. Must contain words like 'chain', 'transitive', 'recursive', 'hierarchy', 'impact', or 'all calls'."
+    avoid_when: "User asks 'what does X call' or 'what functions does X call' or 'what methods does X invoke' — those are find_callees queries for DIRECT callees only. DO NOT use get_call_chain unless the user explicitly wants transitive/recursive traversal."
     requires:
       - graph_initialized
 

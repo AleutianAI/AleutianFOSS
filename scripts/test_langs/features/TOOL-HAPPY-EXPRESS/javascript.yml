@@ -51,13 +51,14 @@ tests:
     name: express_find_implementations
     category: TOOL_HAPPY_PATH
     description: >
-      find_implementations tool against Express. Target: Router prototype.
+      find_implementations tool against Express. Target: Application prototype.
     query: |
-      What prototypes extend the Router prototype?
+      What prototypes extend the Application prototype?
     expected_state: COMPLETE
     reference_answer: |
-      The Router prototype in lib/router/index.js is extended with route matching,
-      param handling, and middleware dispatch methods.
+      The Application prototype in lib/application.js is extended with
+      EventEmitter.prototype and the internal proto module for routing,
+      middleware registration, and server lifecycle.
     validations:
       - type: graph_tool_used
 
@@ -345,88 +346,108 @@ tests:
 
   - id: 7023
     name: express_find_entry_points
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: find_entry_points tool (not yet registered as standalone tool).
+      find_entry_points tool against Express. Find execution entry points.
     query: |
       What are the entry points into this codebase?
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone. Entry points include
-      createApplication in lib/express.js and the exported app factory.
-    validations: []
+      Entry points include createApplication (express()), the app
+      factory function in lib/express.js, and built-in middleware
+      exports like express.json and express.static.
+    validations:
+      - type: graph_tool_used
 
   - id: 7024
     name: express_trace_data_flow
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: trace_data_flow tool (not yet registered as standalone tool).
+      trace_data_flow tool against Express. Trace request data flow.
     query: |
       Trace how request data flows through the middleware pipeline
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      Request data flows from app.handle through Router.handle,
+      Layer.handle_request for each middleware, with req/res objects
+      passed through the next() chain to the final route handler.
+    validations:
+      - type: graph_tool_used
 
   - id: 7025
     name: express_trace_error_flow
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: trace_error_flow tool (not yet registered as standalone tool).
+      trace_error_flow tool against Express. Trace error propagation.
     query: |
       Trace how errors propagate through the middleware error handling system
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      Errors passed to next(err) skip normal middleware and invoke
+      error-handling middleware (4-arg functions). Unhandled errors
+      reach finalhandler which sends the default error response.
+    validations:
+      - type: graph_tool_used
 
   - id: 7026
     name: express_find_config_usage
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: find_config_usage tool (not yet registered as standalone tool).
+      find_config_usage tool against Express. Find settings usage.
     query: |
       How is the app.settings configuration used across Express?
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      App settings control view engine, views directory, env mode,
+      trust proxy, ETag generation, JSON formatting, and JSONP
+      callback name across the application and response modules.
+    validations:
+      - type: graph_tool_used
 
   - id: 7027
     name: express_find_similar_code
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: find_similar_code tool (not yet registered as standalone tool).
+      find_similar_code tool against Express. Similar to dispatch.
     query: |
       Find code similar to the middleware dispatch logic
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      Code similar to middleware dispatch exists in Router.route
+      handling, param processing callbacks, and error middleware
+      chains — all using the Layer/next() iteration pattern.
+    validations:
+      - type: graph_tool_used
 
   - id: 7028
     name: express_build_minimal_context
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: build_minimal_context tool (not yet registered as standalone tool).
+      build_minimal_context tool against Express. Context for Router.handle.
     query: |
       Build minimal context needed to understand the Router.handle function
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      Minimal context includes Router proto, Layer, Route,
+      path-to-regexp matching, the middleware stack, and the
+      next() callback that drives sequential middleware execution.
+    validations:
+      - type: graph_tool_used
 
   - id: 7029
     name: express_summarize_file
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: summarize_file tool (not yet registered as standalone tool).
+      summarize_file tool against Express. Summarize application.js.
     query: |
       Summarize the lib/application.js file
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      application.js defines the app object with route registration
+      (get/post/put/delete), middleware mounting (use), settings
+      management (set/get), and the core handle/listen methods.
+    validations:
+      - type: graph_tool_used
 
   - id: 7030
     name: express_summarize_package
@@ -581,6 +602,37 @@ tests:
       indirectly through the layer dispatch mechanism.
     validations:
       - type: graph_tool_used
+  # -- Additional find_implementations tests (44-45) -- expected_state: COMPLETE --
+  - id: 7044
+    name: express_find_implementations_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_implementations tool against Express (test B). Target: Layer class in router/layer.js.
+    query: |
+      What classes or prototypes extend or subclass the Layer constructor in Express?
+    expected_state: COMPLETE
+    reference_answer: |
+      Layer in lib/router/layer.js is the internal wrapper for route handlers
+      and middleware. It is instantiated by Router and Route but not subclassed
+      directly. The tool should find Layer and explain its usage pattern.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7045
+    name: express_find_implementations_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_implementations tool against Express (test C). Target: Route class in router/route.js.
+    query: |
+      What classes or prototypes extend the Route constructor in Express?
+    expected_state: COMPLETE
+    reference_answer: |
+      Route in lib/router/route.js represents a single route with per-method
+      handler stacks. HTTP methods (get, post, put, delete, etc.) are added
+      to Route.prototype dynamically. Route is not subclassed but used by Router.
+    validations:
+      - type: graph_tool_used
+
   # -- Additional find_callees tests (42-43) -- expected_state: COMPLETE --
   - id: 7042
     name: express_find_callees_b
@@ -614,3 +666,1546 @@ tests:
       for sub-app mounting.
     validations:
       - type: graph_tool_used
+
+  # -- Additional find_symbol tests (46-47) -- expected_state: COMPLETE --
+
+  - id: 7046
+    name: express_find_symbol_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_symbol tool against Express (test B). Target: View constructor in lib/view.js.
+    query: |
+      Where is the View constructor defined in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      The View constructor is defined in lib/view.js. It handles template file
+      resolution and rendering engine delegation for app.render calls.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7047
+    name: express_find_symbol_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_symbol tool against Express (test C). Target: Layer constructor in lib/router/layer.js.
+    query: |
+      Where is the Layer constructor defined?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Layer constructor is defined in lib/router/layer.js. It wraps individual
+      middleware functions and route handlers with path matching and error handling.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_references tests (48-49) -- expected_state: COMPLETE --
+
+  - id: 7048
+    name: express_find_references_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_references tool against Express (test B). Target: Response object in lib/response.js.
+    query: |
+      Where is the Response object referenced across the codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Response object from lib/response.js is referenced in lib/express.js
+      where it is assigned as the response prototype, and throughout middleware
+      that calls res.send, res.json, res.redirect, and res.render.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7049
+    name: express_find_references_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_references tool against Express (test C). Target: Route constructor in lib/router/route.js.
+    query: |
+      Where is the Route constructor referenced in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Route constructor from lib/router/route.js is referenced in
+      lib/router/index.js where Router.route creates new Route instances
+      for each registered path, and in lib/router/layer.js indirectly.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional get_call_chain tests (50-51) -- expected_state: COMPLETE --
+
+  - id: 7050
+    name: express_get_call_chain_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      get_call_chain tool against Express (test B). Target: from app.use to middleware execution.
+    query: |
+      Show the call chain from app.use to the actual middleware function execution
+    expected_state: COMPLETE
+    reference_answer: |
+      app.use -> Router.use -> Layer (wraps fn) -> Router.handle (on request) ->
+      Layer.handle_request -> middleware fn(req, res, next).
+    validations:
+      - type: graph_tool_used
+
+  - id: 7051
+    name: express_get_call_chain_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      get_call_chain tool against Express (test C). Target: from app.render to template output.
+    query: |
+      Show the call chain from app.render to template rendering output
+    expected_state: COMPLETE
+    reference_answer: |
+      app.render -> new View(name) -> View.resolve (finds template file) ->
+      View.render -> engine(filePath, options, callback) -> callback with HTML.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_path tests (52-53) -- expected_state: COMPLETE --
+
+  - id: 7052
+    name: express_find_path_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_path tool against Express (test B). Target: between app.param and route handler.
+    query: |
+      Find the shortest path between app.param and a route handler execution
+    expected_state: COMPLETE
+    reference_answer: |
+      app.param delegates to Router.param which registers a parameter callback.
+      When a route matches, Router.handle calls process_params before dispatching
+      to Route.dispatch and the route handler.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7053
+    name: express_find_path_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_path tool against Express (test C). Target: between res.render and View.render.
+    query: |
+      Find the shortest path between res.render and View.render
+    expected_state: COMPLETE
+    reference_answer: |
+      res.render calls app.render which constructs a new View instance,
+      resolves the template path, and calls View.render to execute the
+      template engine callback.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_hotspots tests (54-55) -- expected_state: COMPLETE --
+
+  - id: 7054
+    name: express_find_hotspots_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_hotspots tool against Express (test B). Target: router subsystem specifically.
+    query: |
+      What are the hotspot functions within the lib/router directory?
+    expected_state: COMPLETE
+    reference_answer: |
+      Within lib/router, the top hotspots are Router.handle (highest fan-in/out),
+      Route.dispatch (called for every matched route), and Layer.handle_request
+      (invoked for each middleware and route handler in the stack).
+    validations:
+      - type: graph_tool_used
+
+  - id: 7055
+    name: express_find_hotspots_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_hotspots tool against Express (test C). Target: response subsystem.
+    query: |
+      What are the most connected functions in lib/response.js?
+    expected_state: COMPLETE
+    reference_answer: |
+      In lib/response.js, res.send is the primary hotspot due to high fan-in
+      from res.json, res.jsonp, and res.sendFile, plus internal calls to
+      setHeader, getHeader, and Buffer handling utilities.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_dead_code tests (56-57) -- expected_state: COMPLETE --
+
+  - id: 7056
+    name: express_find_dead_code_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dead_code tool against Express (test B). Target: utility functions.
+    query: |
+      Are there any dead code functions in lib/utils.js?
+    expected_state: COMPLETE
+    reference_answer: |
+      Dead code analysis of lib/utils.js checks for exported helper functions
+      that have zero callers within the Express codebase, such as utility
+      functions that may only be used by downstream consumers.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7057
+    name: express_find_dead_code_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dead_code tool against Express (test C). Target: deprecated methods.
+    query: |
+      Find any deprecated or unreachable methods in the application module
+    expected_state: COMPLETE
+    reference_answer: |
+      Dead code analysis of lib/application.js identifies methods with zero
+      incoming call edges that are not part of the public API surface,
+      potentially including internal helpers superseded by newer patterns.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_cycles tests (58-59) -- expected_state: COMPLETE --
+
+  - id: 7058
+    name: express_find_cycles_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_cycles tool against Express (test B). Target: router module specifically.
+    query: |
+      Find circular dependencies within the lib/router directory
+    expected_state: COMPLETE
+    reference_answer: |
+      The router module has circular patterns between Router.handle and the
+      next() callback mechanism, where next() re-enters Router.handle's
+      layer iteration logic to process the next middleware in the stack.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7059
+    name: express_find_cycles_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_cycles tool against Express (test C). Target: request/response cycle.
+    query: |
+      Are there circular call dependencies between request and response modules?
+    expected_state: COMPLETE
+    reference_answer: |
+      Cycle analysis between lib/request.js and lib/response.js checks for
+      mutual dependencies where request processing references response
+      methods and vice versa through the shared app context.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_important tests (60-61) -- expected_state: COMPLETE --
+
+  - id: 7060
+    name: express_find_important_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_important tool against Express (test B). Target: middleware subsystem.
+    query: |
+      What are the most important functions by PageRank in the middleware dispatch system?
+    expected_state: COMPLETE
+    reference_answer: |
+      In the middleware subsystem, Router.handle ranks highest due to its central
+      role dispatching all requests. Layer.handle_request and Route.dispatch
+      also rank highly as they sit on every middleware execution path.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7061
+    name: express_find_important_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_important tool against Express (test C). Target: application configuration.
+    query: |
+      Which application setup functions have the highest structural importance?
+    expected_state: COMPLETE
+    reference_answer: |
+      PageRank identifies app.set, app.use, and app.lazyrouter as structurally
+      important configuration functions since they are called during setup
+      and influence the behavior of the entire request handling pipeline.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_communities tests (62-63) -- expected_state: COMPLETE --
+
+  - id: 7062
+    name: express_find_communities_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_communities tool against Express (test B). Target: identifying request vs response clusters.
+    query: |
+      Do request handling and response sending form distinct code communities?
+    expected_state: COMPLETE
+    reference_answer: |
+      Community detection separates request-side functions (req.param, req.get,
+      req.accepts) from response-side functions (res.send, res.json, res.redirect),
+      with the router module forming a bridging community between them.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7063
+    name: express_find_communities_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_communities tool against Express (test C). Target: identifying the view/template community.
+    query: |
+      What code community does the template rendering system belong to?
+    expected_state: COMPLETE
+    reference_answer: |
+      Community detection groups lib/view.js with app.render and res.render
+      into a template rendering community, distinct from the routing and
+      middleware dispatch communities.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_articulation_points tests (64-65) -- expected_state: COMPLETE --
+
+  - id: 7064
+    name: express_find_articulation_points_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_articulation_points tool against Express (test B). Target: router dispatch chain.
+    query: |
+      What are the single points of failure in the router dispatch chain?
+    expected_state: COMPLETE
+    reference_answer: |
+      In the router dispatch chain, Router.handle and Route.dispatch are
+      articulation points. Removing either would disconnect route registration
+      from handler execution, breaking all request processing.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7065
+    name: express_find_articulation_points_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_articulation_points tool against Express (test C). Target: response pipeline.
+    query: |
+      Are there articulation points in the response sending pipeline?
+    expected_state: COMPLETE
+    reference_answer: |
+      In the response pipeline, res.send is an articulation point since
+      res.json, res.jsonp, and res.sendFile all route through it to
+      produce the final HTTP response output.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_dominators tests (66-67) -- expected_state: COMPLETE --
+
+  - id: 7066
+    name: express_find_dominators_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dominators tool against Express (test B). Target: res.send execution.
+    query: |
+      What functions must be called before res.send executes?
+    expected_state: COMPLETE
+    reference_answer: |
+      Dominators of res.send include app.handle and Router.handle which must
+      process the incoming request through the middleware stack before any
+      route handler can invoke res.send to produce a response.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7067
+    name: express_find_dominators_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dominators tool against Express (test C). Target: View.render execution.
+    query: |
+      What functions dominate the path to View.render?
+    expected_state: COMPLETE
+    reference_answer: |
+      Dominators of View.render include app.render which must construct the
+      View instance and resolve the template path before View.render can
+      execute the template engine callback.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_loops tests (68-69) -- expected_state: COMPLETE --
+
+  - id: 7068
+    name: express_find_loops_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_loops tool against Express (test B). Target: parameter processing.
+    query: |
+      Find loops or recursive patterns in the parameter processing system
+    expected_state: COMPLETE
+    reference_answer: |
+      The process_params function in lib/router/index.js uses a recursive
+      pattern to iterate through registered param callbacks, calling paramCallback
+      which may recursively invoke the next param handler via the done callback.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7069
+    name: express_find_loops_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_loops tool against Express (test C). Target: error handling middleware.
+    query: |
+      Are there recursive patterns in the error handling middleware chain?
+    expected_state: COMPLETE
+    reference_answer: |
+      Error handling uses the same next() iteration pattern as regular middleware,
+      where Layer.handle_error checks arity to distinguish error handlers (4 args)
+      and the next() callback re-enters the Router.handle iteration loop.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_merge_points tests (70-71) -- expected_state: COMPLETE --
+
+  - id: 7070
+    name: express_find_merge_points_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_merge_points tool against Express (test B). Target: HTTP method handlers.
+    query: |
+      Where do the different HTTP method handlers (GET, POST, PUT) converge?
+    expected_state: COMPLETE
+    reference_answer: |
+      All HTTP method handlers (app.get, app.post, app.put, app.delete) converge
+      at Router.route which creates a Route instance, and then at Route.dispatch
+      which dispatches to the method-specific handler stack.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7071
+    name: express_find_merge_points_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_merge_points tool against Express (test C). Target: error paths.
+    query: |
+      Where do different error handling paths converge in Express?
+    expected_state: COMPLETE
+    reference_answer: |
+      Error paths from route handlers, middleware, and param callbacks all
+      converge at the error-handling branch in Router.handle, which looks for
+      layers with arity 4 (err, req, res, next) to process errors.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_common_dependency tests (72-73) -- expected_state: COMPLETE --
+
+  - id: 7072
+    name: express_find_common_dependency_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_common_dependency tool against Express (test B). Target: res.json and res.send.
+    query: |
+      What shared dependency do res.json and res.send have?
+    expected_state: COMPLETE
+    reference_answer: |
+      res.json calls res.send internally, so they share the underlying
+      setHeader, getHeader, and Buffer/content-length handling logic.
+      res.send is the common dependency that produces the final HTTP output.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7073
+    name: express_find_common_dependency_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_common_dependency tool against Express (test C). Target: Router.use and Router.route.
+    query: |
+      What shared dependency do Router.use and Router.route have?
+    expected_state: COMPLETE
+    reference_answer: |
+      Both Router.use and Router.route share the Layer constructor as a
+      common dependency, since both create Layer instances to wrap their
+      respective middleware functions or route handlers.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_control_dependencies tests (74-75) -- expected_state: COMPLETE --
+
+  - id: 7074
+    name: express_find_control_dependencies_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_control_dependencies tool against Express (test B). Target: route matching logic.
+    query: |
+      What conditionals control whether a route matches an incoming request path?
+    expected_state: COMPLETE
+    reference_answer: |
+      Route matching is controlled by Layer.match which uses path-to-regexp
+      to test the request path, the method check in Route._handles_method,
+      and the fast_slash optimization for root-mounted middleware.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7075
+    name: express_find_control_dependencies_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_control_dependencies tool against Express (test C). Target: content negotiation.
+    query: |
+      What conditionals control content type negotiation in the response?
+    expected_state: COMPLETE
+    reference_answer: |
+      Content negotiation in res.send is controlled by checks on the Content-Type
+      header, req.accepts for format selection, and typeof checks on the body
+      argument to decide between Buffer, string, and JSON serialization.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_extractable_regions tests (76-77) -- expected_state: COMPLETE --
+
+  - id: 7076
+    name: express_find_extractable_regions_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_extractable_regions tool against Express (test B). Target: response module.
+    query: |
+      Find extractable regions in lib/response.js
+    expected_state: COMPLETE
+    reference_answer: |
+      In lib/response.js, res.send contains extractable regions for content-type
+      detection, ETag generation, and head-request handling that could each be
+      isolated into separate single-responsibility functions.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7077
+    name: express_find_extractable_regions_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_extractable_regions tool against Express (test C). Target: router index.
+    query: |
+      Find extractable code regions in lib/router/index.js
+    expected_state: COMPLETE
+    reference_answer: |
+      In lib/router/index.js, Router.handle contains extractable regions for
+      layer matching, path trimming for sub-routers, and the process_params
+      callback chain, each with clear entry and exit boundaries.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional check_reducibility tests (78-79) -- expected_state: COMPLETE --
+
+  - id: 7078
+    name: express_check_reducibility_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      check_reducibility tool against Express (test B). Target: router subsystem.
+    query: |
+      Check the control flow reducibility of the router dispatch subsystem
+    expected_state: COMPLETE
+    reference_answer: |
+      Reducibility analysis of the router subsystem evaluates whether the
+      middleware dispatch loop in Router.handle and the next() callback
+      pattern form a well-structured (reducible) control flow graph.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7079
+    name: express_check_reducibility_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      check_reducibility tool against Express (test C). Target: error handling paths.
+    query: |
+      Is the error handling control flow in Express reducible?
+    expected_state: COMPLETE
+    reference_answer: |
+      Reducibility analysis of the error handling paths checks whether the
+      branching between normal middleware and error handlers (arity-4 functions)
+      in Router.handle forms a reducible control flow structure.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_critical_path tests (80-81) -- expected_state: COMPLETE --
+
+  - id: 7080
+    name: express_find_critical_path_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_critical_path tool against Express (test B). Target: static file serving.
+    query: |
+      What is the critical execution path for serving a static file in Express?
+    expected_state: COMPLETE
+    reference_answer: |
+      The critical path for static files goes through app.handle -> Router.handle ->
+      serve-static middleware -> send module -> fs.createReadStream -> res.end,
+      representing the mandatory sequence for file delivery.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7081
+    name: express_find_critical_path_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_critical_path tool against Express (test C). Target: JSON API response.
+    query: |
+      What is the critical path for returning a JSON API response?
+    expected_state: COMPLETE
+    reference_answer: |
+      The critical path for JSON responses goes through app.handle -> Router.handle ->
+      Route.dispatch -> handler -> res.json -> JSON.stringify -> res.send ->
+      setHeader(Content-Type) -> end(), the mandatory sequence.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_module_api tests (82-83) -- expected_state: COMPLETE --
+
+  - id: 7082
+    name: express_find_module_api_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_module_api tool against Express (test B). Target: lib/response.js module.
+    query: |
+      What is the public API of the response module in Express?
+    expected_state: COMPLETE
+    reference_answer: |
+      lib/response.js exports the Response prototype with methods including
+      res.send, res.json, res.jsonp, res.sendFile, res.download, res.redirect,
+      res.render, res.set, res.get, res.status, and res.type.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7083
+    name: express_find_module_api_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_module_api tool against Express (test C). Target: lib/request.js module.
+    query: |
+      What is the public API of the request module in Express?
+    expected_state: COMPLETE
+    reference_answer: |
+      lib/request.js exports the Request prototype with methods and properties
+      including req.get, req.accepts, req.param, req.is, req.range, and
+      properties like req.protocol, req.hostname, req.ip, and req.path.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_weighted_criticality tests (84-85) -- expected_state: COMPLETE --
+
+  - id: 7084
+    name: express_find_weighted_criticality_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_weighted_criticality tool against Express (test B). Target: router subsystem.
+    query: |
+      What are the most critical functions by weighted importance in the router subsystem?
+    expected_state: COMPLETE
+    reference_answer: |
+      In the router subsystem, Router.handle scores highest in weighted criticality
+      combining PageRank, betweenness (it bridges all middleware), and degree
+      centrality. Route.dispatch and Layer.handle_request follow closely.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7085
+    name: express_find_weighted_criticality_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_weighted_criticality tool against Express (test C). Target: response module.
+    query: |
+      Which response module functions have the highest weighted criticality?
+    expected_state: COMPLETE
+    reference_answer: |
+      In the response module, res.send ranks highest in weighted criticality
+      since it combines high degree (many callers), high betweenness (bridges
+      json/jsonp/sendFile to output), and high PageRank from structural importance.
+    validations:
+      - type: graph_tool_used
+
+
+  # ── IT-24 through IT-42: New tool tests ──
+
+  - id: 7086
+    name: express_graph_overview
+    category: TOOL_HAPPY_PATH
+    description: >
+      graph_overview tool against Express web framework. Get overall graph statistics.
+    query: |
+      Give me an overview of this codebase's call graph
+    expected_state: COMPLETE
+    reference_answer: |
+      The Express web framework call graph contains minimal Node.js framework
+      spanning packages like app, Router, middleware, req/res.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7087
+    name: express_graph_overview_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      graph_overview tool against Express web framework (test B). Focus on graph density.
+    query: |
+      How dense is the call graph and what is the average connectivity?
+    expected_state: COMPLETE
+    reference_answer: |
+      The graph has moderate density with most functions having 2-5 callees.
+      Hotspot functions have significantly higher degree reflecting the
+      core architecture of Express web framework.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7088
+    name: express_graph_overview_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      graph_overview tool against Express web framework (test C). Focus on package distribution.
+    query: |
+      How are functions distributed across packages in the call graph?
+    expected_state: COMPLETE
+    reference_answer: |
+      Functions are distributed across app, Router, middleware, req/res,
+      with the core package containing the most edges due to
+      orchestration responsibilities.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7089
+    name: express_explore_package
+    category: TOOL_HAPPY_PATH
+    description: >
+      explore_package tool against Express web framework. Explore lib/application.js.
+    query: |
+      Explore the lib/application.js and show its key types and functions
+    expected_state: COMPLETE
+    reference_answer: |
+      The lib/application.js contains app object, route registration, settings.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7090
+    name: express_explore_package_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      explore_package tool against Express web framework (test B). Explore lib/router.
+    query: |
+      Explore the lib/router and show its key types and functions
+    expected_state: COMPLETE
+    reference_answer: |
+      The lib/router contains Router, Route, Layer, path matching.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7091
+    name: express_explore_package_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      explore_package tool against Express web framework (test C). Explore lib/response.js.
+    query: |
+      Explore the lib/response.js and show its key types and functions
+    expected_state: COMPLETE
+    reference_answer: |
+      The lib/response.js contains res methods: send, json, render, redirect.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7092
+    name: express_list_packages
+    category: TOOL_HAPPY_PATH
+    description: >
+      list_packages tool against Express web framework. List all packages.
+    query: |
+      List all packages in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Packages include lib (core), lib/router, lib/middleware, examples, test.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7093
+    name: express_list_packages_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      list_packages tool against Express web framework (test B). Focus on count.
+    query: |
+      How many packages does this codebase have?
+    expected_state: COMPLETE
+    reference_answer: |
+      The codebase has multiple packages organized by concern,
+      including lib (core), lib/router, lib/middleware, examples, test.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7094
+    name: express_list_packages_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      list_packages tool against Express web framework (test C). Focus on hierarchy.
+    query: |
+      Show the package hierarchy and how packages are organized
+    expected_state: COMPLETE
+    reference_answer: |
+      Packages are organized by concern with lib (core), lib/router, lib/middleware, examples, test
+      as the main functional groupings.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7095
+    name: express_read
+    category: TOOL_HAPPY_PATH
+    description: >
+      Read tool against Express web framework.
+    query: |
+      Show me the contents of lib/application.js
+    expected_state: COMPLETE
+    reference_answer: |
+      Express app methods
+    validations:
+      - type: graph_tool_used
+
+  - id: 7096
+    name: express_read_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Read tool against Express web framework (test B).
+    query: |
+      Read the lib/router/index.js file
+    expected_state: COMPLETE
+    reference_answer: |
+      Router implementation
+    validations:
+      - type: graph_tool_used
+
+  - id: 7097
+    name: express_read_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Read tool against Express web framework (test C).
+    query: |
+      Show me the lib/response.js file
+    expected_state: COMPLETE
+    reference_answer: |
+      Response methods
+    validations:
+      - type: graph_tool_used
+
+  - id: 7098
+    name: express_write
+    category: TOOL_HAPPY_PATH
+    description: >
+      Write tool against Express web framework.
+    query: |
+      Create a new test middleware
+    expected_state: COMPLETE
+    reference_answer: |
+      The Write tool processes test middleware for
+      the Express web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7099
+    name: express_write_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Write tool against Express web framework (test B).
+    query: |
+      Write a custom error handler
+    expected_state: COMPLETE
+    reference_answer: |
+      The Write tool processes custom error handler for
+      the Express web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7100
+    name: express_write_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Write tool against Express web framework (test C).
+    query: |
+      Create a route helper
+    expected_state: COMPLETE
+    reference_answer: |
+      The Write tool processes route helper for
+      the Express web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7101
+    name: express_edit
+    category: TOOL_HAPPY_PATH
+    description: >
+      Edit tool against Express web framework.
+    query: |
+      Modify the app.handle method
+    expected_state: COMPLETE
+    reference_answer: |
+      The Edit tool processes app.handle method for
+      the Express web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7102
+    name: express_edit_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Edit tool against Express web framework (test B).
+    query: |
+      Update the Router.route
+    expected_state: COMPLETE
+    reference_answer: |
+      The Edit tool processes Router.route for
+      the Express web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7103
+    name: express_edit_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Edit tool against Express web framework (test C).
+    query: |
+      Fix the res.send implementation
+    expected_state: COMPLETE
+    reference_answer: |
+      The Edit tool processes res.send implementation for
+      the Express web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7104
+    name: express_glob
+    category: TOOL_HAPPY_PATH
+    description: >
+      Glob tool against Express web framework.
+    query: |
+      Find all files matching lib/*.js
+    expected_state: COMPLETE
+    reference_answer: |
+      The Glob tool processes lib/*.js for
+      the Express web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7105
+    name: express_glob_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Glob tool against Express web framework (test B).
+    query: |
+      Find files matching lib/router/*.js
+    expected_state: COMPLETE
+    reference_answer: |
+      The Glob tool processes lib/router/*.js for
+      the Express web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7106
+    name: express_glob_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Glob tool against Express web framework (test C).
+    query: |
+      Search for test/*.js files
+    expected_state: COMPLETE
+    reference_answer: |
+      The Glob tool processes test/*.js for
+      the Express web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7107
+    name: express_grep
+    category: TOOL_HAPPY_PATH
+    description: >
+      Grep tool against Express web framework.
+    query: |
+      Search for app.use calls in the codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      The Grep tool processes app.use calls for
+      the Express web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7108
+    name: express_grep_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Grep tool against Express web framework (test B).
+    query: |
+      Find all next() invocations
+    expected_state: COMPLETE
+    reference_answer: |
+      The Grep tool processes next() invocations for
+      the Express web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7109
+    name: express_grep_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Grep tool against Express web framework (test C).
+    query: |
+      Search for module.exports patterns
+    expected_state: COMPLETE
+    reference_answer: |
+      The Grep tool processes module.exports patterns for
+      the Express web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7110
+    name: express_diff
+    category: TOOL_HAPPY_PATH
+    description: >
+      Diff tool against Express web framework.
+    query: |
+      Compare request.js vs response.js
+    expected_state: COMPLETE
+    reference_answer: |
+      The Diff tool processes request.js vs response.js for
+      the Express web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7111
+    name: express_diff_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Diff tool against Express web framework (test B).
+    query: |
+      Show differences between application.js vs router/index.js
+    expected_state: COMPLETE
+    reference_answer: |
+      The Diff tool processes application.js vs router/index.js for
+      the Express web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7112
+    name: express_diff_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Diff tool against Express web framework (test C).
+    query: |
+      Compare json middleware vs urlencoded
+    expected_state: COMPLETE
+    reference_answer: |
+      The Diff tool processes json middleware vs urlencoded for
+      the Express web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7113
+    name: express_tree
+    category: TOOL_HAPPY_PATH
+    description: >
+      Tree tool against Express web framework.
+    query: |
+      Show the lib directory
+    expected_state: COMPLETE
+    reference_answer: |
+      The Tree tool processes lib directory for
+      the Express web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7114
+    name: express_tree_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Tree tool against Express web framework (test B).
+    query: |
+      Show the test directory structure
+    expected_state: COMPLETE
+    reference_answer: |
+      The Tree tool processes test directory for
+      the Express web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7115
+    name: express_tree_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Tree tool against Express web framework (test C).
+    query: |
+      Display the examples directory layout
+    expected_state: COMPLETE
+    reference_answer: |
+      The Tree tool processes examples directory for
+      the Express web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7116
+    name: express_json
+    category: TOOL_HAPPY_PATH
+    description: >
+      JSON tool against Express web framework.
+    query: |
+      Parse the package.json deps
+    expected_state: COMPLETE
+    reference_answer: |
+      The JSON tool processes package.json deps for
+      the Express web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7117
+    name: express_json_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      JSON tool against Express web framework (test B).
+    query: |
+      Extract info from test fixtures
+    expected_state: COMPLETE
+    reference_answer: |
+      The JSON tool processes test fixtures for
+      the Express web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7118
+    name: express_json_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      JSON tool against Express web framework (test C).
+    query: |
+      Read the example app configs
+    expected_state: COMPLETE
+    reference_answer: |
+      The JSON tool processes example app configs for
+      the Express web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7119
+    name: express_validate_syntax
+    category: TOOL_HAPPY_PATH
+    description: >
+      validate_syntax tool against Express web framework.
+    query: |
+      Validate the syntax of lib/application.js
+    expected_state: COMPLETE
+    reference_answer: |
+      The validate_syntax tool processes lib/application.js for
+      the Express web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7120
+    name: express_validate_syntax_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      validate_syntax tool against Express web framework (test B).
+    query: |
+      Check the syntax of lib/router/index.js
+    expected_state: COMPLETE
+    reference_answer: |
+      The validate_syntax tool processes lib/router/index.js for
+      the Express web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7121
+    name: express_validate_syntax_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      validate_syntax tool against Express web framework (test C).
+    query: |
+      Verify the syntax of lib/response.js
+    expected_state: COMPLETE
+    reference_answer: |
+      The validate_syntax tool processes lib/response.js for
+      the Express web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7122
+    name: express_find_entry_points_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_entry_points tool against Express web framework (test B). Focus on createApplication factory.
+    query: |
+      createApplication factory in Express web framework?
+    expected_state: COMPLETE
+    reference_answer: |
+      express(), createApplication, app initialization
+    validations:
+      - type: graph_tool_used
+
+  - id: 7123
+    name: express_find_entry_points_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_entry_points tool against Express web framework (test C). Focus on middleware entry.
+    query: |
+      middleware entry in Express web framework?
+    expected_state: COMPLETE
+    reference_answer: |
+      express.json, express.static, express.urlencoded
+    validations:
+      - type: graph_tool_used
+
+  - id: 7124
+    name: express_trace_data_flow_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      trace_data_flow tool against Express web framework (test B). Focus on request through middleware.
+    query: |
+      request through middleware in Express web framework?
+    expected_state: COMPLETE
+    reference_answer: |
+      app.handle, Router.handle, Layer.handle_request
+    validations:
+      - type: graph_tool_used
+
+  - id: 7125
+    name: express_trace_data_flow_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      trace_data_flow tool against Express web framework (test C). Focus on response pipeline.
+    query: |
+      response pipeline in Express web framework?
+    expected_state: COMPLETE
+    reference_answer: |
+      res.send, res.json, content-type, ETag generation
+    validations:
+      - type: graph_tool_used
+
+  - id: 7126
+    name: express_trace_error_flow_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      trace_error_flow tool against Express web framework (test B). Focus on error middleware.
+    query: |
+      error middleware in Express web framework?
+    expected_state: COMPLETE
+    reference_answer: |
+      4-arg error handler, next(err), default error handler
+    validations:
+      - type: graph_tool_used
+
+  - id: 7127
+    name: express_trace_error_flow_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      trace_error_flow tool against Express web framework (test C). Focus on 404 handling.
+    query: |
+      404 handling in Express web framework?
+    expected_state: COMPLETE
+    reference_answer: |
+      finalhandler, unmatched routes, default 404 response
+    validations:
+      - type: graph_tool_used
+
+  - id: 7128
+    name: express_build_minimal_context_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      build_minimal_context tool against Express web framework (test B). Focus on route matching.
+    query: |
+      route matching in Express web framework?
+    expected_state: COMPLETE
+    reference_answer: |
+      Router, Route, Layer, path-to-regexp, params
+    validations:
+      - type: graph_tool_used
+
+  - id: 7129
+    name: express_build_minimal_context_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      build_minimal_context tool against Express web framework (test C). Focus on middleware chain.
+    query: |
+      middleware chain in Express web framework?
+    expected_state: COMPLETE
+    reference_answer: |
+      Layer stack, next(), route vs app middleware
+    validations:
+      - type: graph_tool_used
+
+  - id: 7130
+    name: express_find_similar_code_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_similar_code tool against Express web framework (test B). Focus on HTTP method handlers.
+    query: |
+      HTTP method handlers
+    expected_state: COMPLETE
+    reference_answer: |
+      get/post/put/delete all follow same pattern
+    validations:
+      - type: graph_tool_used
+
+  - id: 7131
+    name: express_find_similar_code_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_similar_code tool against Express web framework (test C). Focus on built-in middleware.
+    query: |
+      built-in middleware in Express web framework?
+    expected_state: COMPLETE
+    reference_answer: |
+      json/urlencoded/static similar initialization pattern
+    validations:
+      - type: graph_tool_used
+
+  - id: 7132
+    name: express_find_config_usage_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_config_usage tool against Express web framework (test B). Focus on app.settings.
+    query: |
+      app.settings in Express web framework?
+    expected_state: COMPLETE
+    reference_answer: |
+      env, views, view engine, trust proxy
+    validations:
+      - type: graph_tool_used
+
+  - id: 7133
+    name: express_find_config_usage_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_config_usage tool against Express web framework (test C). Focus on response settings.
+    query: |
+      response settings in Express web framework?
+    expected_state: COMPLETE
+    reference_answer: |
+      ETag, json spaces, json replacer, JSONP callback
+    validations:
+      - type: graph_tool_used
+
+  - id: 7134
+    name: express_summarize_file_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      summarize_file tool against Express web framework (test B). Focus on lib/router/index.js.
+    query: |
+      lib/router/index.js in Express web framework?
+    expected_state: COMPLETE
+    reference_answer: |
+      Router proto, route matching, param handling
+    validations:
+      - type: graph_tool_used
+
+  - id: 7135
+    name: express_summarize_file_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      summarize_file tool against Express web framework (test C). Focus on lib/request.js.
+    query: |
+      lib/request.js in Express web framework?
+    expected_state: COMPLETE
+    reference_answer: |
+      req extensions, ip, hostname, accepts, is
+    validations:
+      - type: graph_tool_used
+
+  # -- GR-58: CRS TraceStep Verification Tests --
+
+  - id: 7136
+    name: express_crs_find_callers
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58: Verify find_callers produces CRS TraceStep. Target: Router.handle.
+    query: |
+      Who calls the Router.handle function?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_callers tool was used and produced a CRS TraceStep recording the query
+      for Router.handle with match_count, total_callers, and used_inheritance_path metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 7137
+    name: express_crs_find_callees
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58: Verify find_callees produces CRS TraceStep. Target: app.listen.
+    query: |
+      What functions does app.listen call?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_callees tool was used and produced a CRS TraceStep recording the query
+      for app.listen with resolved_count, external_count, and total_count metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  # -- GR-58: CRS TraceStep Verification (IT-03 to IT-42) --
+
+  - id: 7138
+    name: express_crs_find_symbol
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-04: Verify find_symbol produces CRS TraceStep against Express.
+    query: |
+      Where is the Layer constructor defined in Express?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_symbol tool was used and produced a CRS TraceStep with
+      match_count, used_fuzzy, and kind_filter metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 7139
+    name: express_crs_find_dead_code
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-08: Verify find_dead_code produces CRS TraceStep against Express.
+    query: |
+      Find dead code or unreachable functions in Express.
+    expected_state: COMPLETE
+    reference_answer: |
+      find_dead_code tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 7140
+    name: express_crs_find_dominators
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-13: Verify find_dominators produces CRS TraceStep against Express.
+    query: |
+      Find dominators of the Router.handle function in Express.
+    expected_state: COMPLETE
+    reference_answer: |
+      find_dominators tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 7141
+    name: express_crs_find_control_dependencies
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-17: Verify find_control_dependencies produces CRS TraceStep against Express.
+    query: |
+      Find control dependencies of the app.listen function in Express.
+    expected_state: COMPLETE
+    reference_answer: |
+      find_control_dependencies tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 7142
+    name: express_crs_find_weighted_criticality
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-22: Verify find_weighted_criticality produces CRS TraceStep against Express.
+    query: |
+      Find weighted criticality of functions in Express.
+    expected_state: COMPLETE
+    reference_answer: |
+      find_weighted_criticality tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 7143
+    name: express_crs_list_packages
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-26: Verify list_packages produces CRS TraceStep against Express.
+    query: |
+      List all modules in the Express codebase.
+    expected_state: COMPLETE
+    reference_answer: |
+      list_packages tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 7144
+    name: express_crs_build_minimal_context
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-31: Verify build_minimal_context produces CRS TraceStep against Express.
+    query: |
+      Build minimal context for the Router.handle function in Express.
+    expected_state: COMPLETE
+    reference_answer: |
+      build_minimal_context tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 7145
+    name: express_crs_write
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-35: Verify write tool produces CRS TraceStep against Express.
+    query: |
+      Write a test file for Express middleware.
+    expected_state: COMPLETE
+    reference_answer: |
+      write tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 7146
+    name: express_crs_tree
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-40: Verify tree tool produces CRS TraceStep against Express.
+    query: |
+      Show the directory tree of Express's source code.
+    expected_state: COMPLETE
+    reference_answer: |
+      tree tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  # -- IT-01/IT-02/IT-03: Second CRS TraceStep Verification --
+
+  - id: 7147
+    name: express_crs_find_callers_b
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      IT-01: Second CRS verification for find_callers against Express. Target: Router.handle.
+    query: |
+      Who calls the Router.handle function in Express?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_callers tool was used and produced a CRS TraceStep with
+      match_count, total_callers, and used_inheritance_path metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 7148
+    name: express_crs_find_callees_b
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      IT-02: Second CRS verification for find_callees against Express. Target: Router.route.
+    query: |
+      What functions does Router.route call in Express?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_callees tool was used and produced a CRS TraceStep with
+      resolved_count, external_count, and total_count metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 7149
+    name: express_crs_find_implementations_a
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      IT-03: First CRS verification for find_implementations against Express. Target: Application.
+    query: |
+      What prototypes extend the Application prototype in Express?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_implementations tool was used and produced a CRS TraceStep with
+      match_count, total_implementations, and index_used metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 7150
+    name: express_crs_find_implementations_b
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      IT-03: Second CRS verification for find_implementations against Express. Target: Application.
+    query: |
+      What prototypes extend the Application prototype in Express?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_implementations tool was used and produced a CRS TraceStep with
+      match_count, total_implementations, and index_used metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present

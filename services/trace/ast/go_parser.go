@@ -730,6 +730,18 @@ func (p *GoParser) processTypeSpec(node *sitter.Node, content []byte, filePath s
 				sym.Metadata.Methods = methods
 			}
 		}
+
+		// IT-03 H-3: For structs, detect embedded (anonymous) fields and set Extends.
+		// This enables the builder to create EMBEDS edges for promoted method resolution.
+		if kind == SymbolKindStruct {
+			embeddedTypes := p.extractEmbeddedTypes(typeNode, content)
+			if len(embeddedTypes) > 0 {
+				if sym.Metadata == nil {
+					sym.Metadata = &SymbolMetadata{}
+				}
+				sym.Metadata.Extends = embeddedTypes[0]
+			}
+		}
 	}
 
 	result.Symbols = append(result.Symbols, sym)
@@ -804,6 +816,126 @@ func (p *GoParser) extractField(node *sitter.Node, content []byte, filePath stri
 	}
 
 	return fields
+}
+
+// extractEmbeddedTypes detects anonymous (embedded) fields in a Go struct type node.
+//
+// Description:
+//
+//	Walks the field_declaration_list of a struct_type node looking for
+//	field_declaration nodes that have no field_identifier child. These are
+//	Go embedded (anonymous) fields. Returns the type names of all embedded types.
+//
+// Inputs:
+//   - structNode: A tree-sitter struct_type node. Must not be nil.
+//   - content: Raw source bytes for extracting text.
+//
+// Outputs:
+//   - []string: Names of embedded types (e.g., ["RouterGroup", "Mutex"]).
+//     Empty if no embedded fields found.
+//
+// Limitations:
+//   - Qualified embeds (e.g., sync.Mutex) return only the type name ("Mutex"), not the package.
+//   - Interface embeds within structs are included (they are valid Go embeds).
+//
+// Assumptions:
+//   - structNode is a valid struct_type node from tree-sitter.
+func (p *GoParser) extractEmbeddedTypes(structNode *sitter.Node, content []byte) []string {
+	var embedded []string
+
+	for i := 0; i < int(structNode.ChildCount()); i++ {
+		child := structNode.Child(i)
+		if child.Type() != "field_declaration_list" {
+			continue
+		}
+
+		for j := 0; j < int(child.ChildCount()); j++ {
+			field := child.Child(j)
+			if field.Type() != "field_declaration" {
+				continue
+			}
+
+			// Check if this field_declaration has a field_identifier child.
+			// If it does, it's a named field, not an embedded type.
+			hasFieldIdentifier := false
+			for k := 0; k < int(field.ChildCount()); k++ {
+				if field.Child(k).Type() == "field_identifier" {
+					hasFieldIdentifier = true
+					break
+				}
+			}
+
+			if hasFieldIdentifier {
+				continue
+			}
+
+			// No field_identifier — this is an embedded (anonymous) field.
+			// Extract the type name from type_identifier, pointer_type, or qualified_type.
+			typeName := p.extractEmbeddedTypeName(field, content)
+			if typeName != "" {
+				embedded = append(embedded, typeName)
+			}
+		}
+	}
+
+	return embedded
+}
+
+// extractEmbeddedTypeName extracts the type name from an embedded field declaration.
+//
+// Description:
+//
+//	Handles plain types (RouterGroup), pointer types (*RouterGroup),
+//	and qualified types (sync.Mutex, *sync.Mutex).
+//
+// Inputs:
+//   - fieldNode: A field_declaration node with no field_identifier.
+//   - content: Raw source bytes.
+//
+// Outputs:
+//   - string: The type name (e.g., "RouterGroup", "Mutex"). Empty if not found.
+func (p *GoParser) extractEmbeddedTypeName(fieldNode *sitter.Node, content []byte) string {
+	for i := 0; i < int(fieldNode.ChildCount()); i++ {
+		child := fieldNode.Child(i)
+		switch child.Type() {
+		case "type_identifier":
+			return string(content[child.StartByte():child.EndByte()])
+		case "pointer_type":
+			// *SomeType — unwrap the pointer to get the type name
+			return p.unwrapPointerType(child, content)
+		case "qualified_type":
+			// pkg.Type — extract just the type name (last identifier)
+			return p.extractQualifiedTypeName(child, content)
+		}
+	}
+	return ""
+}
+
+// unwrapPointerType extracts the type name from a pointer_type node (*T or *pkg.T).
+func (p *GoParser) unwrapPointerType(node *sitter.Node, content []byte) string {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "type_identifier":
+			return string(content[child.StartByte():child.EndByte()])
+		case "qualified_type":
+			return p.extractQualifiedTypeName(child, content)
+		}
+	}
+	return ""
+}
+
+// extractQualifiedTypeName extracts the type name from a qualified_type node (pkg.Type).
+func (p *GoParser) extractQualifiedTypeName(node *sitter.Node, content []byte) string {
+	// qualified_type has children: package_identifier "." type_identifier
+	// Return the type_identifier (last part).
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "type_identifier" {
+			return string(content[child.StartByte():child.EndByte()])
+		}
+	}
+	return ""
 }
 
 // extractMethodSpec extracts interface method specifications.
