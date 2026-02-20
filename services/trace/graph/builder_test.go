@@ -5383,3 +5383,257 @@ func TestBuildGraph_PythonComposedProtocolResolution(t *testing.T) {
 		t.Error("expected EdgeTypeImplements from FileHandler to ReadWrite (composed Protocol)")
 	}
 }
+
+// TestInferPackageFromCall tests IT-05a import-map-based package inference
+// across all 4 supported languages.
+func TestInferPackageFromCall(t *testing.T) {
+	tests := []struct {
+		name     string
+		call     ast.CallSite
+		imports  []ast.Import
+		expected string
+	}{
+		// Strategy 1: Alias match
+		{
+			name: "Python alias pd→pandas",
+			call: ast.CallSite{Target: "pd.read_csv"},
+			imports: []ast.Import{
+				{Path: "pandas", Alias: "pd"},
+			},
+			expected: "pandas",
+		},
+		{
+			name: "Python alias np→numpy",
+			call: ast.CallSite{Target: "np.array"},
+			imports: []ast.Import{
+				{Path: "numpy", Alias: "np"},
+			},
+			expected: "numpy",
+		},
+
+		// Strategy 2: Path last segment match
+		{
+			name: "Go os.MkdirAll",
+			call: ast.CallSite{Target: "os.MkdirAll"},
+			imports: []ast.Import{
+				{Path: "os"},
+			},
+			expected: "os",
+		},
+		{
+			name: "Go net/http.ListenAndServe",
+			call: ast.CallSite{Target: "http.ListenAndServe"},
+			imports: []ast.Import{
+				{Path: "net/http"},
+			},
+			expected: "net/http",
+		},
+		{
+			name: "Go fmt.Println",
+			call: ast.CallSite{Target: "fmt.Println"},
+			imports: []ast.Import{
+				{Path: "fmt"},
+				{Path: "os"},
+			},
+			expected: "fmt",
+		},
+		{
+			name: "Python dotted import os.path",
+			call: ast.CallSite{Target: "os.path.join"},
+			imports: []ast.Import{
+				{Path: "os.path"},
+			},
+			expected: "os.path",
+		},
+
+		// Strategy 3: Bare name in import Names (destructured imports)
+		{
+			name: "JS destructured Router from express",
+			call: ast.CallSite{Target: "Router"},
+			imports: []ast.Import{
+				{Path: "express", Names: []string{"Router"}},
+			},
+			expected: "express",
+		},
+		{
+			name: "Python from flask import Flask",
+			call: ast.CallSite{Target: "Flask"},
+			imports: []ast.Import{
+				{Path: "flask", Names: []string{"Flask", "Blueprint"}},
+			},
+			expected: "flask",
+		},
+		{
+			name: "TS aliased import merge as pd_merge",
+			call: ast.CallSite{Target: "pd_merge"},
+			imports: []ast.Import{
+				{Path: "lodash", Names: []string{"merge as pd_merge"}},
+			},
+			expected: "lodash",
+		},
+
+		// No match cases
+		{
+			name:     "no imports returns empty",
+			call:     ast.CallSite{Target: "foo.Bar"},
+			imports:  []ast.Import{},
+			expected: "",
+		},
+		{
+			name: "no matching import returns empty",
+			call: ast.CallSite{Target: "unknown.Function"},
+			imports: []ast.Import{
+				{Path: "os"},
+				{Path: "fmt"},
+			},
+			expected: "",
+		},
+		{
+			name: "bare name not in any Names list returns empty",
+			call: ast.CallSite{Target: "SomeFunc"},
+			imports: []ast.Import{
+				{Path: "express", Names: []string{"Router", "Request"}},
+			},
+			expected: "",
+		},
+
+		// === Additional Strategy 1 tests (alias) ===
+		{
+			name: "Go aliased import mux→gorilla/mux",
+			call: ast.CallSite{Target: "mux.NewRouter"},
+			imports: []ast.Import{
+				{Path: "github.com/gorilla/mux", Alias: "mux"},
+			},
+			expected: "github.com/gorilla/mux",
+		},
+		{
+			name: "Python alias tf→tensorflow",
+			call: ast.CallSite{Target: "tf.constant"},
+			imports: []ast.Import{
+				{Path: "tensorflow", Alias: "tf"},
+			},
+			expected: "tensorflow",
+		},
+		{
+			name: "alias match before path segment scan",
+			call: ast.CallSite{Target: "j.Marshal"},
+			imports: []ast.Import{
+				{Path: "encoding/json"},              // Strategy 2: last seg "json" != "j"
+				{Path: "custom/json/v2", Alias: "j"}, // Strategy 1: alias "j" matches
+			},
+			expected: "custom/json/v2",
+		},
+
+		// === Additional Strategy 2 tests (path segment) ===
+		{
+			name: "Go context package",
+			call: ast.CallSite{Target: "context.Background"},
+			imports: []ast.Import{
+				{Path: "context"},
+			},
+			expected: "context",
+		},
+		{
+			name: "Go deep path github.com/pkg/errors",
+			call: ast.CallSite{Target: "errors.Wrap"},
+			imports: []ast.Import{
+				{Path: "github.com/pkg/errors"},
+			},
+			expected: "github.com/pkg/errors",
+		},
+		{
+			name: "Python werkzeug.serving",
+			call: ast.CallSite{Target: "werkzeug.run_simple"},
+			imports: []ast.Import{
+				{Path: "werkzeug.serving"},
+			},
+			expected: "werkzeug.serving",
+		},
+		{
+			name: "first matching import wins",
+			call: ast.CallSite{Target: "log.Println"},
+			imports: []ast.Import{
+				{Path: "log"},
+				{Path: "custom/log"},
+			},
+			expected: "log",
+		},
+
+		// === Additional Strategy 3 tests (named imports) ===
+		{
+			name: "Python from collections import OrderedDict",
+			call: ast.CallSite{Target: "OrderedDict"},
+			imports: []ast.Import{
+				{Path: "collections", Names: []string{"OrderedDict", "defaultdict"}},
+			},
+			expected: "collections",
+		},
+		{
+			name: "TS named import from react",
+			call: ast.CallSite{Target: "useState"},
+			imports: []ast.Import{
+				{Path: "react", Names: []string{"useState", "useEffect"}},
+			},
+			expected: "react",
+		},
+		{
+			name: "multiple imports first Names match wins",
+			call: ast.CallSite{Target: "merge"},
+			imports: []ast.Import{
+				{Path: "lodash", Names: []string{"merge", "cloneDeep"}},
+				{Path: "rxjs", Names: []string{"merge", "concat"}},
+			},
+			expected: "lodash",
+		},
+		{
+			name: "aliased destructured import Component as Comp",
+			call: ast.CallSite{Target: "Comp"},
+			imports: []ast.Import{
+				{Path: "react", Names: []string{"Component as Comp"}},
+			},
+			expected: "react",
+		},
+
+		// === Edge cases ===
+		{
+			name: "empty target returns empty",
+			call: ast.CallSite{Target: ""},
+			imports: []ast.Import{
+				{Path: "os"},
+			},
+			expected: "",
+		},
+		{
+			name:     "nil imports returns empty",
+			call:     ast.CallSite{Target: "os.Exit"},
+			imports:  nil,
+			expected: "",
+		},
+		{
+			name: "dot-only target",
+			call: ast.CallSite{Target: ".something"},
+			imports: []ast.Import{
+				{Path: "os"},
+			},
+			expected: "",
+		},
+		{
+			name: "target with slash not a dot prefix",
+			call: ast.CallSite{Target: "path/to/func"},
+			imports: []ast.Import{
+				{Path: "path"},
+			},
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := inferPackageFromCall(tt.call, tt.imports)
+			if got != tt.expected {
+				t.Errorf("inferPackageFromCall(%q, imports) = %q, want %q",
+					tt.call.Target, got, tt.expected)
+			}
+		})
+	}
+}

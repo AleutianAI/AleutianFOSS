@@ -463,7 +463,7 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 
 		// TR-1 Fix: Extract tool parameters from query/context
 		// CB-31d: Pass deps for symbol resolution
-		params, paramErr := p.extractToolParameters(deps.Query, hardForcing.Tool, toolDefs, deps.Context, deps)
+		params, paramErr := p.extractToolParameters(ctx, deps.Query, hardForcing.Tool, toolDefs, deps.Context, deps)
 		if paramErr != nil {
 			// TR-7 Fix: Fallback to Main LLM on parameter extraction failure
 			slog.Warn("Parameter extraction failed, falling back to Main LLM (CB-31d)",
@@ -583,7 +583,15 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 	}
 
 	// Parse and execute tool calls
-	invocations := llm.ParseToolCalls(response)
+	// IT-05 R5: Use ParseToolCallsWithReAct which tries native JSON parsing first,
+	// then falls back to ReAct text parsing for models that emit raw text like
+	// "Read src/flask/app.py 1-200" instead of JSON tool calls.
+	invocations, usedReAct := llm.ParseToolCallsWithReAct(response)
+	if usedReAct {
+		slog.Info("IT-05 R5: ReAct fallback parsed tool call from text response",
+			slog.Int("invocations", len(invocations)),
+		)
+	}
 
 	// CRITICAL: Add assistant message with tool calls to conversation history BEFORE execution.
 	// This ensures the LLM sees "I requested tool X" followed by "tool X returned Y".
@@ -1427,25 +1435,8 @@ func (p *ExecutePhase) handleLLMError(deps *Dependencies, err error) (agent.Agen
 			slog.Duration("duration", emptyErr.Duration),
 		)
 
-		// Build a summary response from tool results we already have
-		summary := p.synthesizeFromToolResults(deps)
-		if summary != "" {
-			slog.Info("Graceful recovery: synthesized response from tool results",
-				slog.String("session_id", deps.Session.ID),
-				slog.Int("summary_len", len(summary)),
-			)
-
-			// Add synthesized response to conversation history as assistant message
-			if deps.Context != nil {
-				deps.Context.ConversationHistory = append(deps.Context.ConversationHistory, agent.Message{
-					Role:    "assistant",
-					Content: summary,
-				})
-				deps.Session.SetCurrentContext(deps.Context)
-			}
-
-			p.emitError(deps, fmt.Errorf("recovered from empty response: synthesized from %d tool results", len(deps.Context.ToolResults)), false)
-			return agent.StateComplete, nil
+		if state, recovered := p.tryToolResultRecovery(deps, "empty_response"); recovered {
+			return state, nil
 		}
 
 		// No tool results to synthesize from - fall through to error
@@ -1454,8 +1445,75 @@ func (p *ExecutePhase) handleLLMError(deps *Dependencies, err error) (agent.Agen
 		)
 	}
 
+	// IT-05 R6: Check for Ollama tool-parsing errors.
+	// When the LLM (gpt-oss:20b) emits raw text that looks like a tool call during
+	// synthesis (e.g., find_callers("canActivate")), Ollama's internal parser tries
+	// to parse it as JSON and returns HTTP 500. This is not a real failure — the graph
+	// tool already produced good results. Recover by passing through tool results.
+	if isOllamaToolParsingError(err) {
+		slog.Warn("IT-05 R6: Ollama tool-parsing error detected, attempting graceful recovery",
+			slog.String("session_id", deps.Session.ID),
+			slog.String("error", err.Error()),
+		)
+
+		if state, recovered := p.tryToolResultRecovery(deps, "ollama_tool_parse_error"); recovered {
+			return state, nil
+		}
+	}
+
 	p.emitError(deps, err, false)
 	return agent.StateError, err
+}
+
+// isOllamaToolParsingError detects Ollama HTTP 500 errors caused by the LLM emitting
+// raw text that Ollama's internal parser interprets as a malformed tool call.
+//
+// Example error: "ollama chat failed with status 500: {"error":"error parsing tool call:
+// raw='find_callers(\"canActivate\")', err=invalid character 'i' ..."}"
+//
+// This happens when gpt-oss:20b generates function-call-like text during synthesis
+// despite being told not to request tool calls. Ollama tries to parse the output
+// as JSON tool calls and fails.
+func isOllamaToolParsingError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "error parsing tool call") ||
+		(strings.Contains(errStr, "status 500") && strings.Contains(errStr, "tool call"))
+}
+
+// tryToolResultRecovery attempts to recover from an LLM error by synthesizing
+// a response from previously gathered tool results.
+//
+// Returns (state, true) if recovery succeeded, or (0, false) if no recovery possible.
+func (p *ExecutePhase) tryToolResultRecovery(deps *Dependencies, reason string) (agent.AgentState, bool) {
+	summary := p.synthesizeFromToolResults(deps)
+	if summary == "" {
+		return "", false
+	}
+
+	slog.Info("Graceful recovery: synthesized response from tool results",
+		slog.String("session_id", deps.Session.ID),
+		slog.String("reason", reason),
+		slog.Int("summary_len", len(summary)),
+	)
+
+	// Add synthesized response to conversation history as assistant message
+	if deps.Context != nil {
+		deps.Context.ConversationHistory = append(deps.Context.ConversationHistory, agent.Message{
+			Role:    "assistant",
+			Content: summary,
+		})
+		deps.Session.SetCurrentContext(deps.Context)
+	}
+
+	toolResultCount := 0
+	if deps.Context != nil {
+		toolResultCount = len(deps.Context.ToolResults)
+	}
+	p.emitError(deps, fmt.Errorf("recovered from %s: synthesized from %d tool results", reason, toolResultCount), false)
+	return agent.StateComplete, true
 }
 
 // handleCompletion handles LLM responses with no tool calls.

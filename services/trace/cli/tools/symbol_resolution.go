@@ -21,80 +21,315 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
 )
 
+// KindFilter controls which symbol kinds are accepted during resolution.
+//
+// Description:
+//
+//	Used as an option to ResolveFunctionWithFuzzy to configure which symbol
+//	kinds are accepted on both the exact match and fuzzy search paths.
+//	Default is KindFilterCallable, which preserves the original behavior of
+//	filtering to Function, Method, and Property symbols.
+//
+// Thread Safety: This type is safe for concurrent use (immutable after creation).
+type KindFilter int
+
+const (
+	// KindFilterCallable accepts Function, Method, and Property symbols.
+	// This is the default, preserving the original behavior of ResolveFunctionWithFuzzy.
+	KindFilterCallable KindFilter = iota
+
+	// KindFilterType accepts Interface, Class, Struct, and Type symbols.
+	// Used by find_implementations and similar type-focused tools.
+	KindFilterType
+
+	// KindFilterAny accepts all symbol kinds without filtering.
+	// Used by find_references and tools that operate on any symbol.
+	KindFilterAny
+)
+
+// String returns the string representation of the KindFilter.
+//
+// Outputs:
+//   - string: Human-readable filter name for logging ("callable", "type", "any").
+//
+// Thread Safety: This method is safe for concurrent use.
+func (kf KindFilter) String() string {
+	switch kf {
+	case KindFilterCallable:
+		return "callable"
+	case KindFilterType:
+		return "type"
+	case KindFilterAny:
+		return "any"
+	default:
+		return fmt.Sprintf("unknown(%d)", int(kf))
+	}
+}
+
+// ResolveFuzzyOpt configures optional behavior for ResolveFunctionWithFuzzy.
+//
+// Thread Safety: Option functions are safe for concurrent use.
+type ResolveFuzzyOpt func(*resolveFuzzyConfig)
+
+// resolveFuzzyConfig holds the configuration for ResolveFunctionWithFuzzy options.
+type resolveFuzzyConfig struct {
+	// kindFilter controls which symbol kinds are accepted (default: KindFilterCallable).
+	kindFilter KindFilter
+
+	// bareMethodFallback enables the IT-02 C-1 bare method name fallback.
+	// When dot-notation resolution fails, tries resolving just the method part alone.
+	bareMethodFallback bool
+}
+
+// WithKindFilter sets which symbol kinds to accept during resolution.
+//
+// Description:
+//
+//	Overrides the default KindFilterCallable behavior. Use KindFilterType for
+//	type-focused tools (find_implementations) or KindFilterAny for tools that
+//	operate on any symbol kind (find_references).
+//
+// Inputs:
+//   - kf: The kind filter to apply to both exact match and fuzzy search paths.
+//
+// Example:
+//
+//	sym, _, err := ResolveFunctionWithFuzzy(ctx, idx, "Router", logger,
+//	    WithKindFilter(KindFilterType))
+//
+// Thread Safety: This function is safe for concurrent use.
+func WithKindFilter(kf KindFilter) ResolveFuzzyOpt {
+	return func(c *resolveFuzzyConfig) {
+		c.kindFilter = kf
+	}
+}
+
+// WithBareMethodFallback enables the bare method name fallback for dot-notation queries.
+//
+// Description:
+//
+//	IT-02 C-1: When dot-notation resolution fails (e.g., "DB.Open" where Open is
+//	a package-level function, not a method on DB), the resolver will try resolving
+//	just the method part ("Open") alone via exact match and kind filtering.
+//
+// Example:
+//
+//	sym, _, err := ResolveFunctionWithFuzzy(ctx, idx, "DB.Open", logger,
+//	    WithBareMethodFallback())
+//
+// Thread Safety: This function is safe for concurrent use.
+func WithBareMethodFallback() ResolveFuzzyOpt {
+	return func(c *resolveFuzzyConfig) {
+		c.bareMethodFallback = true
+	}
+}
+
+// matchesKindFilter returns true if the symbol's kind is accepted by the filter.
+//
+// Description:
+//
+//	Evaluates a symbol against the configured KindFilter. Used internally by
+//	ResolveFunctionWithFuzzy to filter both exact match and fuzzy search results.
+//
+// Inputs:
+//   - sym: The symbol to check. Must not be nil.
+//   - kf: The kind filter to evaluate against.
+//
+// Outputs:
+//   - bool: True if the symbol's kind passes the filter.
+//
+// Thread Safety: This function is safe for concurrent use.
+func matchesKindFilter(sym *ast.Symbol, kf KindFilter) bool {
+	switch kf {
+	case KindFilterCallable:
+		return sym.Kind == ast.SymbolKindFunction ||
+			sym.Kind == ast.SymbolKindMethod ||
+			sym.Kind == ast.SymbolKindProperty
+	case KindFilterType:
+		return sym.Kind == ast.SymbolKindInterface ||
+			sym.Kind == ast.SymbolKindClass ||
+			sym.Kind == ast.SymbolKindStruct ||
+			sym.Kind == ast.SymbolKindType
+	case KindFilterAny:
+		return true
+	default:
+		return true
+	}
+}
+
 // ResolveFunctionWithFuzzy attempts to resolve a function name using exact match first,
 // then falls back to fuzzy search if exact match fails.
 //
 // Description:
 //
-//	P1 Fix (Feb 14, 2026): Reusable helper for all graph query tools to enable
-//	partial matching. Prevents "symbol not found" errors when user provides
-//	partial names like "Process" instead of "getDatesToProcess".
+//	Shared resolution helper for all graph query tools. Resolves a user-provided
+//	symbol name to a concrete *ast.Symbol via a multi-strategy pipeline:
+//	  1. Full-ID bypass: if name contains ":", treat as a full symbol ID
+//	  2. Exact match: index.GetByName(name) with kind filtering
+//	  3. Dot-notation: "Type.Method" split via resolveTypeDotMethod (4 strategies)
+//	  4. Bare method fallback: try just method part when dot-notation fails (opt-in)
+//	  5. Fuzzy search: index.Search with kind filtering
+//
+//	IT-00a (Feb 18, 2026): Extended with configurable kind filtering via
+//	ResolveFuzzyOpt options. Default behavior (no options) preserves original
+//	Function/Method/Property filtering for backward compatibility.
 //
 // Inputs:
-//
-//	ctx - Context for timeout control (2 second timeout for fuzzy search).
-//	index - Symbol index to search.
-//	name - Function name to resolve (may be partial).
-//	logger - Logger for debugging and observability.
+//   - ctx: Context for timeout control (2 second timeout for fuzzy search). Must not be nil.
+//   - index: Symbol index to search. Must not be nil.
+//   - name: Symbol name to resolve (may be partial, dot-notation, or full ID).
+//   - logger: Logger for debugging and observability. Must not be nil.
+//   - opts: Optional configuration (WithKindFilter, WithBareMethodFallback).
 //
 // Outputs:
-//
-//	*ast.Symbol - The resolved symbol (never nil if error is nil).
-//	bool - True if fuzzy matching was used, false for exact match.
-//	error - Non-nil if symbol could not be found by any method.
+//   - *ast.Symbol: The resolved symbol. Never nil if error is nil.
+//   - bool: True if fuzzy matching was used, false for exact/dot-notation match.
+//   - error: Non-nil if symbol could not be found by any method.
 //
 // Thread Safety: This function is safe for concurrent use.
 //
 // Example:
 //
+//	// Default (callable symbols):
 //	symbol, fuzzy, err := ResolveFunctionWithFuzzy(ctx, index, "Process", logger)
-//	if err != nil {
-//	    return fmt.Errorf("symbol not found: %w", err)
-//	}
-//	if fuzzy {
-//	    fmt.Printf("⚠️ Using partial match: %s\n", symbol.Name)
-//	}
+//
+//	// Type-only symbols:
+//	symbol, fuzzy, err := ResolveFunctionWithFuzzy(ctx, index, "Router", logger,
+//	    WithKindFilter(KindFilterType))
+//
+//	// Any kind with bare method fallback:
+//	symbol, fuzzy, err := ResolveFunctionWithFuzzy(ctx, index, "DB.Open", logger,
+//	    WithKindFilter(KindFilterAny), WithBareMethodFallback())
 func ResolveFunctionWithFuzzy(
 	ctx context.Context,
 	index *index.SymbolIndex,
 	name string,
 	logger *slog.Logger,
+	opts ...ResolveFuzzyOpt,
 ) (*ast.Symbol, bool, error) {
 	if index == nil {
 		return nil, false, fmt.Errorf("symbol index is nil")
 	}
 
-	// Try exact match first (fast path)
-	exactMatches := index.GetByName(name)
-	if len(exactMatches) > 0 {
-		logger.Info("Symbol resolution: exact match",
-			slog.String("query", name),
-			slog.String("resolved", exactMatches[0].Name),
-			slog.String("kind", exactMatches[0].Kind.String()),
-			slog.String("file", exactMatches[0].FilePath),
-			slog.Int("line", exactMatches[0].StartLine),
-		)
-		return exactMatches[0], false, nil
+	// Apply options with defaults preserving original behavior
+	cfg := resolveFuzzyConfig{
+		kindFilter:         KindFilterCallable,
+		bareMethodFallback: false,
+	}
+	for _, opt := range opts {
+		opt(&cfg)
 	}
 
-	// Try Type.Method dot notation split (e.g., "Plot.render" → type "Plot", method "render")
+	// Step 0: Full-ID bypass — if name looks like a full symbol ID, look up directly
+	if strings.Contains(name, ":") {
+		if sym, ok := index.GetByID(name); ok {
+			logger.Info("Symbol resolution: full-ID bypass",
+				slog.String("query", name),
+				slog.String("resolved", sym.Name),
+				slog.String("kind", sym.Kind.String()),
+			)
+			return sym, false, nil
+		}
+	}
+
+	// Step 1: Try exact match first (fast path) with kind filtering
+	exactMatches := index.GetByName(name)
+	if len(exactMatches) > 0 {
+		if cfg.kindFilter == KindFilterAny {
+			logger.Info("Symbol resolution: exact match",
+				slog.String("query", name),
+				slog.String("resolved", exactMatches[0].Name),
+				slog.String("kind", exactMatches[0].Kind.String()),
+				slog.String("file", exactMatches[0].FilePath),
+				slog.Int("line", exactMatches[0].StartLine),
+			)
+			return exactMatches[0], false, nil
+		}
+		// Apply kind filter — find first match of the right kind
+		for _, sym := range exactMatches {
+			if matchesKindFilter(sym, cfg.kindFilter) {
+				logger.Info("Symbol resolution: exact match",
+					slog.String("query", name),
+					slog.String("resolved", sym.Name),
+					slog.String("kind", sym.Kind.String()),
+					slog.String("file", sym.FilePath),
+					slog.Int("line", sym.StartLine),
+				)
+				return sym, false, nil
+			}
+		}
+		// Exact matches exist but none pass the kind filter — fall through
+		logger.Debug("Symbol resolution: exact matches found but none match kind filter",
+			slog.String("query", name),
+			slog.Int("total_matches", len(exactMatches)),
+			slog.String("kind_filter", cfg.kindFilter.String()),
+		)
+	}
+
+	// Step 2: Try Type.Method dot notation split (e.g., "Plot.render" → type "Plot", method "render")
 	if strings.Contains(name, ".") {
 		parts := strings.SplitN(name, ".", 2)
 		typeName, methodName := parts[0], parts[1]
 		if sym, err := resolveTypeDotMethod(ctx, index, typeName, methodName, logger); err == nil {
-			logger.Info("Symbol resolution: dot notation match",
+			// Apply kind filter to dot-notation result (resolveTypeDotMethod returns
+			// Function/Method/Property; if caller wants types only, this should fall through)
+			if matchesKindFilter(sym, cfg.kindFilter) {
+				logger.Info("Symbol resolution: dot notation match",
+					slog.String("query", name),
+					slog.String("type", typeName),
+					slog.String("method", methodName),
+					slog.String("resolved", sym.Name),
+					slog.String("file", sym.FilePath),
+				)
+				return sym, false, nil
+			}
+			logger.Debug("Symbol resolution: dot notation match rejected by kind filter",
 				slog.String("query", name),
-				slog.String("type", typeName),
-				slog.String("method", methodName),
-				slog.String("resolved", sym.Name),
-				slog.String("file", sym.FilePath),
+				slog.String("resolved_kind", sym.Kind.String()),
+				slog.String("kind_filter", cfg.kindFilter.String()),
 			)
-			return sym, false, nil
+		}
+
+		// Step 3: IT-02 C-1 bare method name fallback (opt-in)
+		// IT-05 R3-1: Collect all kind-filtered bare matches, then disambiguate using
+		// the dot-notation type prefix. Previously, this returned the first match in
+		// parse order (non-deterministic), causing "gin.Default" to resolve to
+		// binding/binding.go:Default instead of gin.go:Default.
+		if cfg.bareMethodFallback {
+			bareMatches := index.GetByName(methodName)
+			var filtered []*ast.Symbol
+			for _, sym := range bareMatches {
+				if matchesKindFilter(sym, cfg.kindFilter) {
+					filtered = append(filtered, sym)
+				}
+			}
+			if len(filtered) == 1 {
+				logger.Info("Symbol resolution: bare method fallback",
+					slog.String("query", name),
+					slog.String("bare_name", methodName),
+					slog.String("resolved", filtered[0].Name),
+					slog.String("kind", filtered[0].Kind.String()),
+					slog.String("file", filtered[0].FilePath),
+				)
+				return filtered[0], false, nil
+			}
+			if len(filtered) > 1 {
+				best := pickBestBareCandidate(filtered, typeName)
+				logger.Info("Symbol resolution: bare method fallback (disambiguated)",
+					slog.String("query", name),
+					slog.String("bare_name", methodName),
+					slog.String("type_prefix", typeName),
+					slog.String("resolved", best.Name),
+					slog.String("file", best.FilePath),
+					slog.Int("candidates", len(filtered)),
+				)
+				return best, false, nil
+			}
 		}
 		// Fall through to fuzzy search if dot notation didn't work
 	}
 
-	// Fallback: Try fuzzy search (slower, requires context timeout)
+	// Step 4: Fuzzy search (slower, requires context timeout)
 	logger.Info("Symbol resolution: exact match failed, trying fuzzy search",
 		slog.String("query", name),
 	)
@@ -118,12 +353,11 @@ func ResolveFunctionWithFuzzy(
 		return nil, false, fmt.Errorf("no match found for '%s'", name)
 	}
 
-	// Filter matches to only functions, methods, and properties (BEFORE selecting best match!)
-	// R3-P1d: Include Property symbols (Python @property, TS get/set accessors).
-	var functionsOnly []*ast.Symbol
+	// Filter fuzzy matches by configured kind filter
+	var kindFiltered []*ast.Symbol
 	for _, match := range fuzzyMatches {
-		if match.Kind == ast.SymbolKindFunction || match.Kind == ast.SymbolKindMethod || match.Kind == ast.SymbolKindProperty {
-			functionsOnly = append(functionsOnly, match)
+		if matchesKindFilter(match, cfg.kindFilter) {
+			kindFiltered = append(kindFiltered, match)
 		}
 	}
 
@@ -131,42 +365,42 @@ func ResolveFunctionWithFuzzy(
 	logger.Info("Symbol resolution: fuzzy search results",
 		slog.String("query", name),
 		slog.Int("total_matches", len(fuzzyMatches)),
-		slog.Int("functions_only", len(functionsOnly)),
+		slog.Int("kind_filtered", len(kindFiltered)),
 	)
 
 	for i, match := range fuzzyMatches {
 		if i < 8 { // Log top 8 matches in detail
-			isFunction := match.Kind == ast.SymbolKindFunction || match.Kind == ast.SymbolKindMethod
 			logger.Info("Symbol resolution: fuzzy match candidate",
 				slog.Int("rank", i+1),
 				slog.String("query", name),
 				slog.String("matched_name", match.Name),
 				slog.String("kind", match.Kind.String()),
-				slog.Bool("is_function", isFunction),
+				slog.Bool("matches_filter", matchesKindFilter(match, cfg.kindFilter)),
 				slog.String("file", match.FilePath),
 				slog.Int("line", match.StartLine),
 			)
 		}
 	}
 
-	// Check if we have any function/method matches
-	if len(functionsOnly) == 0 {
-		logger.Debug("Symbol resolution: fuzzy search found matches but none are functions/methods",
+	// Check if we have any matches after kind filtering
+	if len(kindFiltered) == 0 {
+		logger.Debug("Symbol resolution: fuzzy search found matches but none pass kind filter",
 			slog.String("query", name),
-			slog.Int("total_non_function_matches", len(fuzzyMatches)),
+			slog.Int("total_matches", len(fuzzyMatches)),
+			slog.String("kind_filter", cfg.kindFilter.String()),
 		)
-		return nil, false, fmt.Errorf("no function or method named '%s' found (found %d non-function symbols)", name, len(fuzzyMatches))
+		return nil, false, fmt.Errorf("no symbol named '%s' found matching kind filter (found %d symbols of other kinds)", name, len(fuzzyMatches))
 	}
 
-	// Use first function/method match (best score among functions)
-	selectedMatch := functionsOnly[0]
-	logger.Info("Symbol resolution: selected fuzzy match (function/method only)",
+	// Use first kind-filtered match (best score among matching symbols)
+	selectedMatch := kindFiltered[0]
+	logger.Info("Symbol resolution: selected fuzzy match",
 		slog.String("query", name),
 		slog.String("matched", selectedMatch.Name),
 		slog.String("kind", selectedMatch.Kind.String()),
 		slog.String("file", selectedMatch.FilePath),
 		slog.Int("line", selectedMatch.StartLine),
-		slog.Int("function_candidates", len(functionsOnly)),
+		slog.Int("candidates", len(kindFiltered)),
 	)
 
 	return selectedMatch, true, nil
@@ -177,28 +411,28 @@ func ResolveFunctionWithFuzzy(
 //
 // Description:
 //
-//	P1 Fix (Feb 14, 2026): Batch version of ResolveFunctionWithFuzzy for tools
-//	that accept multiple targets (e.g., find_common_dependency).
+//	Batch version of ResolveFunctionWithFuzzy for tools that accept multiple
+//	targets (e.g., find_common_dependency, find_path). Passes through any
+//	ResolveFuzzyOpt options to each individual resolution call.
 //
 // Inputs:
-//
-//	ctx - Context for timeout control.
-//	index - Symbol index to search.
-//	names - Function names to resolve.
-//	logger - Logger for debugging.
+//   - ctx: Context for timeout control. Must not be nil.
+//   - index: Symbol index to search. Must not be nil.
+//   - names: Function names to resolve. Must not be empty.
+//   - logger: Logger for debugging. Must not be nil.
+//   - opts: Optional configuration passed to each ResolveFunctionWithFuzzy call.
 //
 // Outputs:
-//
-//	[]*ast.Symbol - Resolved symbols (length matches input names).
-//	[]bool - Fuzzy match indicators (parallel to symbols).
-//	error - Non-nil if ANY symbol could not be found.
+//   - []*ast.Symbol: Resolved symbols (length matches input names). Nil on error.
+//   - []bool: Fuzzy match indicators (parallel to symbols). Nil on error.
+//   - error: Non-nil if ANY symbol could not be found.
 //
 // Thread Safety: This function is safe for concurrent use.
 //
 // Example:
 //
 //	symbols, fuzzy, err := ResolveMultipleFunctionsWithFuzzy(ctx, index,
-//	    []string{"Handler", "Middleware"}, logger)
+//	    []string{"Handler", "Middleware"}, logger, WithKindFilter(KindFilterCallable))
 //	if err != nil {
 //	    return fmt.Errorf("failed to resolve targets: %w", err)
 //	}
@@ -207,14 +441,15 @@ func ResolveMultipleFunctionsWithFuzzy(
 	index *index.SymbolIndex,
 	names []string,
 	logger *slog.Logger,
+	opts ...ResolveFuzzyOpt,
 ) ([]*ast.Symbol, []bool, error) {
 	symbols := make([]*ast.Symbol, 0, len(names))
 	fuzzyFlags := make([]bool, 0, len(names))
 
 	for i, name := range names {
-		symbol, fuzzy, err := ResolveFunctionWithFuzzy(ctx, index, name, logger)
+		symbol, fuzzy, err := ResolveFunctionWithFuzzy(ctx, index, name, logger, opts...)
 		if err != nil {
-			logger.Debug("P1: Failed to resolve symbol in batch",
+			logger.Debug("Failed to resolve symbol in batch",
 				slog.Int("index", i),
 				slog.String("name", name),
 				slog.String("error", err.Error()),
@@ -279,6 +514,17 @@ func resolveTypeDotMethod(
 
 		// Strategy 1: Receiver field match (Go, JS set this)
 		if sym.Receiver == typeName {
+			candidates = append(candidates, sym)
+			continue
+		}
+
+		// Strategy 1b (IT-05 R3-2): Receiver prefix match.
+		// Handles cases where the user writes an abbreviated type name, e.g.,
+		// "NestFactory.create" when the actual Receiver is "NestFactoryStatic".
+		// HasPrefix avoids overly broad matching (Contains would match "act"
+		// in "NestFactoryStatic"). The result goes into candidates[] and is
+		// further disambiguated by pickBestCandidate, limiting false-positive risk.
+		if sym.Receiver != "" && strings.HasPrefix(sym.Receiver, typeName) {
 			candidates = append(candidates, sym)
 			continue
 		}
@@ -353,6 +599,8 @@ func resolveTypeDotMethod(
 
 	// Strategy 4: Inheritance chain walk
 	// If the type extends a parent, recursively search for the method on the parent.
+	// IT-05 R5: After finding a parent method, check if the original (child) type
+	// overrides it — if so, prefer the override.
 	for _, typeSym := range typeMatches {
 		if typeSym.Kind != ast.SymbolKindClass && typeSym.Kind != ast.SymbolKindStruct &&
 			typeSym.Kind != ast.SymbolKindInterface && typeSym.Kind != ast.SymbolKindType {
@@ -367,11 +615,105 @@ func resolveTypeDotMethod(
 		)
 		parentSym, err := resolveTypeDotMethod(ctx, idx, typeSym.Metadata.Extends, methodName, logger)
 		if err == nil {
+			// IT-05 R5 Fix: Check if original type overrides the parent method.
+			if override := findChildOverride(idx, typeName, methodName, parentSym); override != nil {
+				logger.Debug("resolveTypeDotMethod: found child override of parent method",
+					slog.String("type", typeName),
+					slog.String("method", methodName),
+					slog.String("parent_method", parentSym.ID),
+					slog.String("override", override.ID),
+				)
+				return override, nil
+			}
 			return parentSym, nil
 		}
 	}
 
 	return nil, fmt.Errorf("no method '%s' found on type '%s'", methodName, typeName)
+}
+
+// findChildOverride checks if a type has a method that overrides a parent method.
+//
+// Description:
+//
+//	IT-05 R5: Used when resolveTypeDotMethod Strategy 4 walks up to a parent class
+//	and finds a method there. Before returning the parent method, we check if the
+//	original (child) type has its own version of the method (an override).
+//
+//	This handles cases like Plot.render where Plot extends Bindable, and
+//	Bindable has render(), but Plot overrides it with its own render().
+//
+// Inputs:
+//   - idx: Symbol index to search. Must not be nil.
+//   - typeName: The original (child) type name (e.g., "Plot").
+//   - methodName: The method name being resolved (e.g., "render").
+//   - parentResult: The parent method that was found via inheritance walk.
+//
+// Outputs:
+//   - *ast.Symbol: The child's override method, or nil if no override exists.
+//
+// Thread Safety: This function is safe for concurrent use.
+func findChildOverride(
+	idx *index.SymbolIndex,
+	typeName string,
+	methodName string,
+	parentResult *ast.Symbol,
+) *ast.Symbol {
+	if idx == nil || parentResult == nil {
+		return nil
+	}
+
+	// Search all methods named methodName
+	methods := idx.GetByName(methodName)
+	for _, m := range methods {
+		if m.Kind != ast.SymbolKindMethod && m.Kind != ast.SymbolKindFunction &&
+			m.Kind != ast.SymbolKindProperty {
+			continue
+		}
+		// Skip the parent result itself
+		if m.ID == parentResult.ID {
+			continue
+		}
+
+		// Strategy 1: Receiver field match (Go, JS set this)
+		if m.Receiver == typeName {
+			return m
+		}
+
+		// Strategy 2: ID contains "typeName.methodName" (JS/TS)
+		if strings.Contains(m.ID, typeName+"."+methodName) {
+			return m
+		}
+
+		// Strategy 3: File base name matches type name (TypeScript/JavaScript).
+		// IT-05 R6: In TS, parsers don't set Receiver on class methods, and the
+		// ID is file-based (e.g., "src/components/plot.ts:293:render"). Check if
+		// the file's base name (without extension) matches the type name exactly.
+		// E.g., typeName="Plot", filePath="src/components/plot.ts" → base="plot" → match.
+		// But typeName="Plot", filePath="src/plot_helper.ts" → base="plot_helper" → no match.
+		if m.FilePath != "" && m.FilePath != parentResult.FilePath {
+			baseName := fileBaseName(m.FilePath)
+			if strings.EqualFold(baseName, typeName) {
+				return m
+			}
+		}
+	}
+	return nil
+}
+
+// fileBaseName returns the base file name without extension.
+// E.g., "src/components/plot.ts" → "plot", "handlers/user.go" → "user".
+func fileBaseName(filePath string) string {
+	// Get the last path component
+	base := filePath
+	if lastSlash := strings.LastIndex(filePath, "/"); lastSlash >= 0 {
+		base = filePath[lastSlash+1:]
+	}
+	// Strip extension (handle .ts, .go, .py, .js, .tsx, .jsx, etc.)
+	if dot := strings.Index(base, "."); dot >= 0 {
+		base = base[:dot]
+	}
+	return base
 }
 
 // isOverloadStub returns true if the symbol is a Python @overload typing stub.
@@ -456,4 +798,55 @@ func pickBestCandidate(candidates []*ast.Symbol) *ast.Symbol {
 	}
 
 	return best
+}
+
+// pickBestBareCandidate selects the best symbol from bare method fallback candidates,
+// using the dot-notation type prefix as a disambiguation signal.
+//
+// Description:
+//
+//	IT-05 R3-1: When BareMethodFallback produces multiple matches (e.g., GetByName("Default")
+//	returns symbols from gin.go and binding/binding.go), this function prefers symbols whose
+//	Receiver, FilePath, or ID contains the original type prefix. This ensures "gin.Default"
+//	resolves to gin.go:Default rather than binding/binding.go:Default.
+//
+//	The algorithm partitions candidates into prefix-matches and non-prefix-matches, then
+//	applies pickBestCandidate on the preferred set. If no prefix-match exists, falls back
+//	to pickBestCandidate on the full set.
+//
+// Inputs:
+//   - candidates: Non-empty, kind-filtered slice of candidate symbols (len >= 2).
+//   - typePrefix: The type/package part from the dot-notation query (e.g., "gin" from "gin.Default").
+//     May be empty, in which case pickBestCandidate is used directly.
+//
+// Outputs:
+//   - *ast.Symbol: The best candidate. Never nil when input is non-empty.
+//
+// Thread Safety: This function is safe for concurrent use (stateless).
+func pickBestBareCandidate(candidates []*ast.Symbol, typePrefix string) *ast.Symbol {
+	if len(candidates) == 0 {
+		return nil
+	}
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+	if typePrefix == "" {
+		return pickBestCandidate(candidates)
+	}
+
+	// Partition: prefer symbols where Receiver, FilePath, or ID contains the type prefix.
+	// Use case-sensitive matching — type names are identifiers with specific casing.
+	var prefixMatches []*ast.Symbol
+	for _, sym := range candidates {
+		if strings.Contains(sym.Receiver, typePrefix) ||
+			strings.Contains(sym.FilePath, strings.ToLower(typePrefix)) ||
+			strings.Contains(sym.ID, typePrefix) {
+			prefixMatches = append(prefixMatches, sym)
+		}
+	}
+
+	if len(prefixMatches) > 0 {
+		return pickBestCandidate(prefixMatches)
+	}
+	return pickBestCandidate(candidates)
 }

@@ -1471,14 +1471,14 @@ func StaticToolDefinitions() []ToolDefinition {
 					Type:        ParamTypeInt,
 					Description: "Maximum traversal depth (1-10)",
 					Required:    false,
-					Default:     10,
+					Default:     5,
 				},
 			},
 			Category:    CategoryExploration,
 			Priority:    80, // Lower than find_callees (94) to prefer direct queries
 			Requires:    []string{"graph_initialized"},
 			SideEffects: false,
-			Timeout:     15 * time.Second,
+			Timeout:     10 * time.Second,
 		},
 		// IT-04: Add find_symbol to static definitions so the LLM classifier
 		// can route "where is X defined?" and "find X" queries correctly.

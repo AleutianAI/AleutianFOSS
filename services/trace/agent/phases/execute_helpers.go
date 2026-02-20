@@ -226,11 +226,8 @@ func extractPackageNameFromQuery(query string) string {
 // Description:
 //
 //	GR-Phase1: Extracts function names for find_callers/find_callees parameter extraction.
-//	Handles patterns like:
-//	  - "What does main call?" → "main"
-//	  - "Who calls parseConfig?" → "parseConfig"
-//	  - "find callers of handleRequest" → "handleRequest"
-//	  - "functions called by BuildRequest" → "BuildRequest"
+//	IT-00a-1 Phase 3: Thin wrapper over extractFunctionNameCandidates that returns
+//	the highest-priority candidate.
 //
 // Inputs:
 //
@@ -240,14 +237,91 @@ func extractPackageNameFromQuery(query string) string {
 //
 //	string - The extracted function name, or empty if not found.
 func extractFunctionNameFromQuery(query string) string {
+	candidates := extractFunctionNameCandidates(query)
+	if len(candidates) > 0 {
+		return candidates[0]
+	}
+	return ""
+}
+
+// extractFunctionNameCandidates extracts ranked function name candidates from a
+// natural language query. Each pattern contributes candidates instead of returning
+// the first match, enabling callers to try multiple candidates against symbol
+// resolution when the first extraction is wrong.
+//
+// Description:
+//
+//	IT-00a-1 Phase 3: Multi-candidate extraction replaces single-shot extraction.
+//	Handles patterns like:
+//	  - "What does main call?" → ["main"]
+//	  - "Who calls parseConfig?" → ["parseConfig"]
+//	  - "find callers of handleRequest" → ["handleRequest"]
+//	  - "Build the call graph from ProcessData" → ["ProcessData"]
+//	  - "Show callers of BuildRequest in the handler" → ["BuildRequest", "handler"]
+//
+//	Patterns are evaluated in priority order (0 → 7). Each pattern appends candidates
+//	to the list; duplicates are suppressed. The first candidate is always the
+//	highest-confidence extraction.
+//
+// Inputs:
+//
+//	query - The user's query string.
+//
+// Outputs:
+//
+//	[]string - Ranked function name candidates (best first). May be empty.
+//
+// Thread Safety: Safe for concurrent use (stateless function).
+func extractFunctionNameCandidates(query string) []string {
+	var candidates []string
+	seen := make(map[string]bool)
+
+	addCandidate := func(name string) {
+		if name != "" && !seen[name] {
+			seen[name] = true
+			candidates = append(candidates, name)
+		}
+	}
+
 	lowerQuery := strings.ToLower(query)
+
+	// IT-05 FN1: Strip compound phrases before word-level extraction.
+	// "Show the call chain from X" contains "call" which Pattern 1/3 would
+	// extract as a function name. Stripping "call chain" first prevents this.
+	// Both query and lowerQuery must be sanitized in sync to preserve index alignment.
+	skipPhrases := []string{
+		"call chain", "call graph", "call hierarchy", "call tree",
+		"call stack", "call flow", "call path",
+	}
+	for _, phrase := range skipPhrases {
+		for {
+			idx := strings.Index(strings.ToLower(query), phrase)
+			if idx < 0 {
+				break
+			}
+			query = query[:idx] + query[idx+len(phrase):]
+		}
+	}
+	lowerQuery = strings.ToLower(query)
+
+	// IT-05 Run 2 Fix: Compute "to" boundary for "from X to Y" queries.
+	// In "Show the call chain from Engine.runRenderLoop to mesh rendering",
+	// words after "to" are destination concepts (mesh, rendering), not source functions.
+	// Patterns 5-7 (positional scans) must not extract words beyond this boundary.
+	// Patterns 0-4 are context-aware (specific keyword triggers) and operate on the full query.
+	fallbackBoundary := len(query) // default: no boundary (use full query)
+	if fromIdx := strings.Index(lowerQuery, " from "); fromIdx >= 0 {
+		if toIdx := strings.Index(lowerQuery[fromIdx:], " to "); toIdx >= 0 {
+			fallbackBoundary = fromIdx + toIdx
+		}
+	}
 
 	// IT-01 Bug 3: Pattern 0 — "X method/function on (the) Y type/class/struct"
 	// Handles: "Who calls the Get method on the Transaction type?" → "Transaction.Get"
 	// Handles: "Who calls the render method on the Scene type?" → "Scene.render"
 	// Must come first because "Get" is in skipWords and would be lost by later patterns.
 	if dotName := extractTypeDotMethodFromQuery(query); dotName != "" {
-		return dotName
+		addCandidate(dotName)
 	}
 
 	// Pattern 0b: Direct dot-notation in query — "Who calls Transaction.Get?"
@@ -264,7 +338,7 @@ func extractFunctionNameFromQuery(query string) string {
 				// Validate the method part starts with a letter (reject "Foo.123")
 				methodFirstRune := rune(parts[1][0])
 				if unicode.IsLetter(methodFirstRune) || parts[1][0] == '_' {
-					return candidate
+					addCandidate(candidate)
 				}
 			}
 		}
@@ -280,7 +354,7 @@ func extractFunctionNameFromQuery(query string) string {
 				if i+1 < len(words) {
 					candidate := strings.Trim(words[i+1], "?,.()")
 					if isValidFunctionName(candidate) {
-						return candidate
+						addCandidate(candidate)
 					}
 				}
 			}
@@ -288,13 +362,16 @@ func extractFunctionNameFromQuery(query string) string {
 	}
 
 	// Pattern 2: "callers of X" or "callees of X"
+	// CR-R2-6: Apply fallbackBoundary — skip " of " matches in the destination zone.
 	if idx := strings.Index(lowerQuery, " of "); idx >= 0 {
-		after := query[idx+4:] // Keep original case
-		words := strings.Fields(after)
-		if len(words) > 0 {
-			candidate := strings.Trim(words[0], "?,.()")
-			if isValidFunctionName(candidate) {
-				return candidate
+		if !(fallbackBoundary < len(query) && idx >= fallbackBoundary) {
+			after := query[idx+4:] // Keep original case
+			words := strings.Fields(after)
+			if len(words) > 0 {
+				candidate := strings.Trim(words[0], "?,.()")
+				if isValidFunctionName(candidate) {
+					addCandidate(candidate)
+				}
 			}
 		}
 	}
@@ -306,7 +383,7 @@ func extractFunctionNameFromQuery(query string) string {
 		if len(words) > 0 {
 			candidate := strings.Trim(words[0], "?,.()")
 			if isValidFunctionName(candidate) {
-				return candidate
+				addCandidate(candidate)
 			}
 		}
 	}
@@ -318,15 +395,21 @@ func extractFunctionNameFromQuery(query string) string {
 		if len(words) > 0 {
 			candidate := strings.Trim(words[0], "?,.()")
 			if isValidFunctionName(candidate) {
-				return candidate
+				addCandidate(candidate)
 			}
 		}
 	}
 
 	// P0 Fix (Feb 14, 2026): Pattern 5: "for X function/method" or "of X function/method"
 	// Handles queries like "control dependencies for Process function"
+	// CR-R2-1: Apply fallbackBoundary — skip matches in the destination zone of "from X to Y".
 	for _, pattern := range []string{" for ", " of "} {
 		if idx := strings.Index(lowerQuery, pattern); idx >= 0 {
+			// CR-R2-1: If this "for"/"of" match starts at or past the "to" boundary,
+			// it's in the destination zone — skip it.
+			if fallbackBoundary < len(query) && idx >= fallbackBoundary {
+				continue
+			}
 			after := query[idx+len(pattern):] // Keep original case
 			words := strings.Fields(after)
 			// Look for pattern: <Symbol> function/method
@@ -335,7 +418,7 @@ func extractFunctionNameFromQuery(query string) string {
 				if isSymbolKindKeyword(nextWordLower) {
 					candidate := strings.Trim(words[i], "?,.()")
 					if isValidFunctionName(candidate) && isFunctionLikeName(candidate) {
-						return candidate
+						addCandidate(candidate)
 					}
 				}
 			}
@@ -345,27 +428,95 @@ func extractFunctionNameFromQuery(query string) string {
 	// P0 Fix (Feb 14, 2026): Pattern 6: "X function/method/class/struct" anywhere in query
 	// Handles: "What dominates Process function", "Find Process method"
 	// IT-04 Fix: Also handles "Where is the TransformNode class defined?"
+	// IT-05 Run 2 Fix: Apply fallbackBoundary to Pattern 6 as well — "view function"
+	// after "to" in "from X to a view function" is a destination, not the source.
+	// CR-R2-2: Use strings.Fields on the truncated query to compute the word limit.
+	// This handles whitespace normalization correctly (compound phrase stripping can
+	// create double spaces that strings.Fields collapses).
 	words := strings.Fields(query)
-	for i := 0; i < len(words)-1; i++ {
+	fallbackWordLimit := len(words) // default: scan all words
+	if fallbackBoundary < len(query) {
+		fallbackWordLimit = len(strings.Fields(query[:fallbackBoundary]))
+	}
+	// CR-R2-5: The -1 is intentional: Pattern 6 peeks at words[i+1] for the kind keyword,
+	// so we need the peeked word to also be before the boundary.
+	for i := 0; i < fallbackWordLimit-1 && i < len(words)-1; i++ {
 		nextWordLower := strings.ToLower(words[i+1])
 		if isSymbolKindKeyword(nextWordLower) {
 			candidate := strings.Trim(words[i], "?,.()")
 			if isValidFunctionName(candidate) && isFunctionLikeName(candidate) {
-				return candidate
+				addCandidate(candidate)
 			}
 		}
 	}
 
 	// Pattern 7 (fallback): Look for CamelCase or snake_case function names
 	// P0 Fix (Feb 14, 2026): This now correctly skips query keywords like "control", "dependencies"
-	for _, word := range words {
-		candidate := strings.Trim(word, "?,.()")
-		if isValidFunctionName(candidate) && isFunctionLikeName(candidate) {
-			return candidate
+	// IT-05 Run 2 Fix: Apply fallbackBoundary with CamelCase exemption (R3-3).
+	// Before boundary: extract all valid function-like names (existing behavior).
+	// After boundary: extract ONLY strictly CamelCase names (e.g., "canActivate", "DataFrame"),
+	// which are strong signals for real symbol names. Single-case words like "rendering",
+	// "handler", "mesh" are blocked — they are destination concept words.
+	if fallbackBoundary < len(query) {
+		// Scan before boundary: all valid function-like names
+		for _, word := range strings.Fields(query[:fallbackBoundary]) {
+			candidate := strings.Trim(word, "?,.()")
+			if isValidFunctionName(candidate) && isFunctionLikeName(candidate) {
+				addCandidate(candidate)
+			}
+		}
+		// Scan after boundary: CamelCase-only (IT-05 R3-3)
+		for _, word := range strings.Fields(query[fallbackBoundary:]) {
+			candidate := strings.Trim(word, "?,.()")
+			if isValidFunctionName(candidate) && isFunctionLikeName(candidate) && isStrictCamelCase(candidate) {
+				addCandidate(candidate)
+			}
+		}
+	} else {
+		// No boundary: scan full query (original behavior)
+		for _, word := range strings.Fields(query) {
+			candidate := strings.Trim(word, "?,.()")
+			if isValidFunctionName(candidate) && isFunctionLikeName(candidate) {
+				addCandidate(candidate)
+			}
 		}
 	}
 
-	return ""
+	return candidates
+}
+
+// extractDestinationCandidates extracts function name candidates from the
+// destination portion of "from X to Y" queries.
+//
+// Description:
+//
+//	IT-05 R5: For get_call_chain dual-endpoint resolution. Extracts candidates
+//	from the text after "to" in "from X to Y" patterns. Returns nil if the
+//	query is not a "from X to Y" pattern.
+//
+// Inputs:
+//
+//	query - The user's query string.
+//
+// Outputs:
+//
+//	[]string - Candidate function names from the destination part, or nil.
+//
+// Thread Safety: Safe for concurrent use (stateless function).
+func extractDestinationCandidates(query string) []string {
+	lowerQuery := strings.ToLower(query)
+	fromIdx := strings.Index(lowerQuery, " from ")
+	if fromIdx < 0 {
+		return nil
+	}
+	// Use LastIndex to find the final " to " — handles multi-hop queries like
+	// "from login to the dashboard to the settings page" by extracting "the settings page".
+	toIdx := strings.LastIndex(lowerQuery[fromIdx:], " to ")
+	if toIdx < 0 {
+		return nil
+	}
+	destPart := query[fromIdx+toIdx+4:] // After the last " to "
+	return extractFunctionNameCandidates(destPart)
 }
 
 // isValidFunctionName checks if a string looks like a valid function name.
@@ -393,6 +544,8 @@ func isValidFunctionName(s string) bool {
 		"path", "from", "to", "between", "and", "or", "with", "for", "in",
 		"most", "important", "top", "are", "is", "does", "do", "has", "have",
 		"defined", "codebase", "located", "location", "used", "called",
+		// IT-05 FN1: Direction/action words for call chain queries
+		"upstream", "downstream", "build", "trace", "analyze", "display",
 		// Graph/tool relationship nouns
 		"these", "those", "connection", "connected", "calls", "callers", "callees",
 		"control", "dependencies", "dependency", "common", "dominators", "dominator",
@@ -415,6 +568,13 @@ func isValidFunctionName(s string) bool {
 		"code", "file", "files", "name", "names",
 		"extension", "extensions",
 		"caller", "callee",
+		// IT-05 Run 2 Fix: Concept/action words from "from X to Y" query destinations.
+		// These are never function names but appear in destination phrases like
+		// "to mesh rendering", "to value retrieval", "to handler execution".
+		"rendering", "creation", "retrieval", "persistence", "execution",
+		"compilation", "initialization", "processing", "assembly",
+		"assigning", "parsing", "dispatch", "handling",
+		"update", "validation", "construction", "aggregation",
 	}
 	for _, skip := range skipWords {
 		if lower == skip {
@@ -597,6 +757,33 @@ func isFunctionLikeName(s string) bool {
 	hasDigit := strings.ContainsAny(s, "0123456789")
 
 	return hasUpperInMiddle || hasUnderscore || hasDigit || len(s) <= 15
+}
+
+// isStrictCamelCase returns true if the name has an uppercase letter after position 0
+// (e.g., "canActivate", "runRenderLoop", "DataFrame"). Single-word all-lowercase names
+// like "route", "handler", "mesh" return false.
+//
+// Description:
+//
+//	IT-05 R3-3: Used by Pattern 7 to distinguish symbol names from concept words in the
+//	destination zone of "from X to Y" queries. CamelCase is a strong signal that a word
+//	is a real symbol name (function, method, class) rather than a natural language concept
+//	like "rendering", "execution", or "initialization".
+//
+// Inputs:
+//   - s: The candidate word to check. Must not be empty.
+//
+// Outputs:
+//   - bool: True if s contains an uppercase letter at position > 0.
+//
+// Thread Safety: This function is safe for concurrent use (stateless).
+func isStrictCamelCase(s string) bool {
+	for i := 1; i < len(s); i++ {
+		if s[i] >= 'A' && s[i] <= 'Z' {
+			return true
+		}
+	}
+	return false
 }
 
 // extractTypeDotMethodFromQuery extracts "Type.Method" from natural language queries
@@ -1181,6 +1368,25 @@ func getAvailableToolNames(toolDefs []tools.ToolDefinition) []string {
 func ValidateToolQuerySemantics(query, selectedTool string) (correctedTool string, wasChanged bool, reason string) {
 	lowerQuery := strings.ToLower(query)
 
+	// IT-05 R1: Detect call chain queries misrouted to find_callers or find_callees.
+	// "Show the call chain from X" should always use get_call_chain.
+	callChainPatterns := []string{
+		"call chain",
+		"call graph",
+		"call hierarchy",
+		"call tree",
+		"transitive call",
+		"recursive call",
+		"full call",
+	}
+	if selectedTool == "find_callers" || selectedTool == "find_callees" {
+		for _, pattern := range callChainPatterns {
+			if strings.Contains(lowerQuery, pattern) {
+				return "get_call_chain", true, "Query contains '" + pattern + "' which indicates get_call_chain, not " + selectedTool
+			}
+		}
+	}
+
 	// Pattern detection for callers vs callees confusion
 	// Callees patterns: "what does X call", "what functions does X call", "what X calls"
 	// Callers patterns: "who calls X", "what calls X", "callers of X"
@@ -1275,12 +1481,13 @@ func hasSemanticCorrectionForQuery(session *agent.Session, query, correctedTool 
 		queryPreview = queryPreview[:100]
 	}
 
-	// Debug: Log the check
 	if semanticCount > 0 || len(steps) > 5 {
-		// Only log when there are semantic corrections or many steps
-		// to avoid noise on first call
-		fmt.Printf("GR-Phase1 DEBUG: hasSemanticCorrectionForQuery called - steps=%d, semantic_corrections=%d, looking_for=%s, query_prefix=%s\n",
-			len(steps), semanticCount, correctedTool, queryPreview[:min(30, len(queryPreview))])
+		slog.Debug("GR-Phase1: hasSemanticCorrectionForQuery called",
+			slog.Int("steps", len(steps)),
+			slog.Int("semantic_corrections", semanticCount),
+			slog.String("looking_for", correctedTool),
+			slog.String("query_prefix", queryPreview[:min(30, len(queryPreview))]),
+		)
 	}
 
 	if len(steps) == 0 {
@@ -1301,7 +1508,9 @@ func hasSemanticCorrectionForQuery(session *agent.Session, query, correctedTool 
 		if !ok {
 			// If no query recorded, consider it a match for safety
 			// (older correction, same tool)
-			fmt.Printf("GR-Phase1 DEBUG: Found match (no query metadata) - target=%s\n", step.Target)
+			slog.Debug("GR-Phase1: found match (no query metadata)",
+				slog.String("target", step.Target),
+			)
 			return true
 		}
 
@@ -1314,19 +1523,24 @@ func hasSemanticCorrectionForQuery(session *agent.Session, query, correctedTool 
 			minLen = len(stepQuery)
 		}
 		if minLen > 0 && queryPreview[:minLen] == stepQuery[:minLen] {
-			fmt.Printf("GR-Phase1 DEBUG: Found match (prefix) - target=%s, step_query=%s\n", step.Target, stepQuery[:min(30, len(stepQuery))])
+			slog.Debug("GR-Phase1: found match (prefix)",
+				slog.String("target", step.Target),
+			)
 			return true
 		}
 
 		// Also match if one is a prefix of the other
 		if strings.HasPrefix(stepQuery, queryPreview) || strings.HasPrefix(queryPreview, stepQuery) {
-			fmt.Printf("GR-Phase1 DEBUG: Found match (hasPrefix) - target=%s\n", step.Target)
+			slog.Debug("GR-Phase1: found match (hasPrefix)",
+				slog.String("target", step.Target),
+			)
 			return true
 		}
 
-		// Debug: Log near miss
-		fmt.Printf("GR-Phase1 DEBUG: Near miss - action=%s, target=%s, step_query=%s, looking_for_query=%s\n",
-			step.Action, step.Target, stepQuery[:min(30, len(stepQuery))], queryPreview[:min(30, len(queryPreview))])
+		slog.Debug("GR-Phase1: near miss in semantic correction check",
+			slog.String("action", step.Action),
+			slog.String("target", step.Target),
+		)
 	}
 
 	return false

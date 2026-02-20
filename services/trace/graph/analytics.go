@@ -276,6 +276,31 @@ func (a *GraphAnalytics) IsGraphReady() bool {
 	return nodeCount > 0 && edgeCount >= 0
 }
 
+// GetNode retrieves a node from the underlying graph by its ID.
+//
+// Description:
+//
+//	Delegates to the underlying Graph.GetNode method to look up a node
+//	by its symbol ID. This is useful for checking node properties such as
+//	outgoing/incoming edge counts without exposing the internal graph.
+//
+// Inputs:
+//
+//	id - The node ID (same as Symbol.ID).
+//
+// Outputs:
+//
+//	*Node - The node if found, nil otherwise.
+//	bool - True if the node was found.
+//
+// Thread Safety: Safe for concurrent use (graph is read-only after freeze).
+func (a *GraphAnalytics) GetNode(id string) (*Node, bool) {
+	if a == nil || a.graph == nil || a.graph.Graph == nil {
+		return nil, false
+	}
+	return a.graph.GetNode(id)
+}
+
 // =============================================================================
 // Hotspot Detection
 // =============================================================================

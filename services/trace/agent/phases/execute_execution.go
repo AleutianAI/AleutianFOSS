@@ -1251,6 +1251,7 @@ func (p *ExecutePhase) getToolNames(deps *Dependencies) []string {
 //
 // Inputs:
 //
+//	goCtx - Context for cancellation propagation to downstream operations.
 //	query - The user's query string.
 //	toolName - The name of the tool to extract parameters for.
 //	toolDefs - Available tool definitions.
@@ -1262,6 +1263,7 @@ func (p *ExecutePhase) getToolNames(deps *Dependencies) []string {
 //	map[string]interface{} - Extracted parameters.
 //	error - Non-nil if parameter extraction fails.
 func (p *ExecutePhase) extractToolParameters(
+	goCtx context.Context,
 	query string,
 	toolName string,
 	toolDefs []tools.ToolDefinition,
@@ -1538,11 +1540,15 @@ func (p *ExecutePhase) extractToolParameters(
 	case "find_dominators":
 		// CB-31d: Extract target function and optional entry point
 		// Patterns: "dominators of X", "what dominates X", "must call before X"
-		target := extractFunctionNameFromQuery(query)
-		if target == "" && ctx != nil {
+		// IT-00a-1 Phase 3: Multi-candidate extraction + candidate-loop resolution
+		candidates := extractFunctionNameCandidates(query)
+		target := ""
+		if len(candidates) == 0 && ctx != nil {
 			target = extractFunctionNameFromContext(ctx)
+		} else if len(candidates) > 0 {
+			target = candidates[0]
 		}
-		if target == "" {
+		if target == "" && len(candidates) == 0 {
 			slog.Debug("CB-31d: find_dominators extraction failed",
 				slog.String("tool", toolName),
 				slog.String("query_preview", truncateForLog(query, 100)),
@@ -1551,24 +1557,33 @@ func (p *ExecutePhase) extractToolParameters(
 		}
 
 		// CB-31d: Resolve target symbol if possible
+		// IT-00a-1: Use candidate-loop resolution when multiple candidates available
 		if deps != nil && deps.SymbolIndex != nil {
 			sessionID := ""
 			if deps.Session != nil {
 				sessionID = deps.Session.ID
 			}
-			resolvedTarget, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, target, deps)
-			if err == nil {
-				slog.Debug("CB-31d: resolved target symbol for find_dominators",
-					slog.String("raw", target),
-					slog.String("resolved", resolvedTarget),
-					slog.Float64("confidence", confidence),
-				)
-				target = resolvedTarget
+			if len(candidates) > 1 {
+				resolvedTarget, rawName, confidence, err := resolveFirstCandidate(goCtx, &p.symbolCache, sessionID, candidates, deps)
+				if err == nil {
+					slog.Debug("CB-31d: resolved target symbol for find_dominators",
+						slog.String("raw", rawName),
+						slog.String("resolved", resolvedTarget),
+						slog.Float64("confidence", confidence),
+						slog.Int("candidates", len(candidates)),
+					)
+					target = resolvedTarget
+				}
 			} else {
-				slog.Debug("CB-31d: symbol resolution failed, using raw name",
-					slog.String("target", target),
-					slog.String("error", err.Error()),
-				)
+				resolvedTarget, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, target, deps)
+				if err == nil {
+					slog.Debug("CB-31d: resolved target symbol for find_dominators",
+						slog.String("raw", target),
+						slog.String("resolved", resolvedTarget),
+						slog.Float64("confidence", confidence),
+					)
+					target = resolvedTarget
+				}
 			}
 		}
 
@@ -1679,12 +1694,16 @@ func (p *ExecutePhase) extractToolParameters(
 	case "find_critical_path":
 		// CB-31d: Extract target and optional entry point
 		// Patterns: "critical path to X", "mandatory path to X", "from Y to X"
-		target := extractFunctionNameFromQuery(query)
-		if target == "" && ctx != nil {
+		// IT-00a-1 Phase 3: Multi-candidate extraction + candidate-loop resolution
+		candidates := extractFunctionNameCandidates(query)
+		target := ""
+		if len(candidates) == 0 && ctx != nil {
 			target = extractFunctionNameFromContext(ctx)
+		} else if len(candidates) > 0 {
+			target = candidates[0]
 		}
 		// If still no target, try extracting from path symbols (might be "to" symbol)
-		if target == "" {
+		if target == "" && len(candidates) == 0 {
 			_, to, ok := extractPathSymbolsFromQuery(query)
 			if ok && to != "" {
 				target = to
@@ -1699,19 +1718,33 @@ func (p *ExecutePhase) extractToolParameters(
 		}
 
 		// CB-31d: Resolve target symbol if possible
+		// IT-00a-1: Use candidate-loop resolution when multiple candidates available
 		if deps != nil && deps.SymbolIndex != nil {
 			sessionID := ""
 			if deps.Session != nil {
 				sessionID = deps.Session.ID
 			}
-			resolvedTarget, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, target, deps)
-			if err == nil {
-				slog.Debug("CB-31d: resolved target symbol for find_critical_path",
-					slog.String("raw", target),
-					slog.String("resolved", resolvedTarget),
-					slog.Float64("confidence", confidence),
-				)
-				target = resolvedTarget
+			if len(candidates) > 1 {
+				resolvedTarget, rawName, confidence, err := resolveFirstCandidate(goCtx, &p.symbolCache, sessionID, candidates, deps)
+				if err == nil {
+					slog.Debug("CB-31d: resolved target symbol for find_critical_path",
+						slog.String("raw", rawName),
+						slog.String("resolved", resolvedTarget),
+						slog.Float64("confidence", confidence),
+						slog.Int("candidates", len(candidates)),
+					)
+					target = resolvedTarget
+				}
+			} else {
+				resolvedTarget, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, target, deps)
+				if err == nil {
+					slog.Debug("CB-31d: resolved target symbol for find_critical_path",
+						slog.String("raw", target),
+						slog.String("resolved", resolvedTarget),
+						slog.Float64("confidence", confidence),
+					)
+					target = resolvedTarget
+				}
 			}
 		}
 
@@ -1807,11 +1840,17 @@ func (p *ExecutePhase) extractToolParameters(
 	case "find_control_dependencies":
 		// CB-31d: Extract target function
 		// Patterns: "control dependencies of X", "what controls X"
-		target := extractFunctionNameFromQuery(query)
+		// IT-00a-1 Phase 3: Multi-candidate extraction + candidate-loop resolution
+		candidates := extractFunctionNameCandidates(query)
+		target := ""
+		if len(candidates) > 0 {
+			target = candidates[0]
+		}
 		slog.Info("P0 DEBUG: find_control_dependencies parameter extraction",
 			slog.String("tool", toolName),
 			slog.String("query_preview", truncateForLog(query, 100)),
 			slog.String("extracted_from_query", target),
+			slog.Int("candidates", len(candidates)),
 		)
 		if target == "" && ctx != nil {
 			target = extractFunctionNameFromContext(ctx)
@@ -1828,19 +1867,33 @@ func (p *ExecutePhase) extractToolParameters(
 		}
 
 		// CB-31d: Resolve target symbol if possible
+		// IT-00a-1: Use candidate-loop resolution when multiple candidates available
 		if deps != nil && deps.SymbolIndex != nil {
 			sessionID := ""
 			if deps.Session != nil {
 				sessionID = deps.Session.ID
 			}
-			resolvedTarget, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, target, deps)
-			if err == nil {
-				slog.Debug("CB-31d: resolved target symbol for find_control_dependencies",
-					slog.String("raw", target),
-					slog.String("resolved", resolvedTarget),
-					slog.Float64("confidence", confidence),
-				)
-				target = resolvedTarget
+			if len(candidates) > 1 {
+				resolvedTarget, rawName, confidence, err := resolveFirstCandidate(goCtx, &p.symbolCache, sessionID, candidates, deps)
+				if err == nil {
+					slog.Debug("CB-31d: resolved target symbol for find_control_dependencies",
+						slog.String("raw", rawName),
+						slog.String("resolved", resolvedTarget),
+						slog.Float64("confidence", confidence),
+						slog.Int("candidates", len(candidates)),
+					)
+					target = resolvedTarget
+				}
+			} else {
+				resolvedTarget, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, target, deps)
+				if err == nil {
+					slog.Debug("CB-31d: resolved target symbol for find_control_dependencies",
+						slog.String("raw", target),
+						slog.String("resolved", resolvedTarget),
+						slog.Float64("confidence", confidence),
+					)
+					target = resolvedTarget
+				}
 			}
 		}
 
@@ -1863,23 +1916,42 @@ func (p *ExecutePhase) extractToolParameters(
 	case "find_loops":
 		// CB-31d: Optional entry point, otherwise finds all natural loops
 		// Patterns: "loops in X", "recursive calls in X"
+		// IT-00a-1 Phase 3: Multi-candidate extraction + candidate-loop resolution
 		params := map[string]interface{}{}
-		funcName := extractFunctionNameFromQuery(query)
+		candidates := extractFunctionNameCandidates(query)
+		funcName := ""
+		if len(candidates) > 0 {
+			funcName = candidates[0]
+		}
 		if funcName != "" {
 			// CB-31d: Resolve entry_point symbol if possible
+			// IT-00a-1: Use candidate-loop resolution when multiple candidates available
 			if deps != nil && deps.SymbolIndex != nil {
 				sessionID := ""
 				if deps.Session != nil {
 					sessionID = deps.Session.ID
 				}
-				resolvedFunc, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, funcName, deps)
-				if err == nil {
-					slog.Debug("CB-31d: resolved entry_point symbol for find_loops",
-						slog.String("raw", funcName),
-						slog.String("resolved", resolvedFunc),
-						slog.Float64("confidence", confidence),
-					)
-					funcName = resolvedFunc
+				if len(candidates) > 1 {
+					resolvedFunc, rawName, confidence, err := resolveFirstCandidate(goCtx, &p.symbolCache, sessionID, candidates, deps)
+					if err == nil {
+						slog.Debug("CB-31d: resolved entry_point symbol for find_loops",
+							slog.String("raw", rawName),
+							slog.String("resolved", resolvedFunc),
+							slog.Float64("confidence", confidence),
+							slog.Int("candidates", len(candidates)),
+						)
+						funcName = resolvedFunc
+					}
+				} else {
+					resolvedFunc, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, funcName, deps)
+					if err == nil {
+						slog.Debug("CB-31d: resolved entry_point symbol for find_loops",
+							slog.String("raw", funcName),
+							slog.String("resolved", resolvedFunc),
+							slog.Float64("confidence", confidence),
+						)
+						funcName = resolvedFunc
+					}
 				}
 			}
 			params["entry_point"] = funcName
@@ -1996,7 +2068,12 @@ func (p *ExecutePhase) extractToolParameters(
 		// Optional: direction (default "downstream"), max_depth (default 5, range 1-10)
 
 		// Extract function name (required)
-		funcName := extractFunctionNameFromQuery(query)
+		// IT-00a-1 Phase 3: Multi-candidate extraction + candidate-loop resolution
+		candidates := extractFunctionNameCandidates(query)
+		funcName := ""
+		if len(candidates) > 0 {
+			funcName = candidates[0]
+		}
 		if funcName == "" && ctx != nil {
 			funcName = extractFunctionNameFromContext(ctx)
 		}
@@ -2009,19 +2086,45 @@ func (p *ExecutePhase) extractToolParameters(
 		}
 
 		// CB-31d: Resolve function name if possible
-		if deps != nil && deps.SymbolIndex != nil {
+		// IT-00a-1: Use candidate-loop resolution when multiple candidates available
+		// IT-05 Run 2 Fix: Dot-notation names (Type.Method like "Engine.runRenderLoop")
+		// fail agent-side resolution because the index stores bare method names, not
+		// "Type.Method". The tool's ResolveFunctionWithFuzzy with WithBareMethodFallback()
+		// handles this correctly. Skip pre-resolution for dot-notation and let the tool
+		// resolve it.
+		isDotNotation := strings.Contains(funcName, ".") && !strings.Contains(funcName, "/")
+		if isDotNotation {
+			// CR-R2-4: Log the passthrough decision for observability.
+			slog.Debug("IT-05: skipping agent-side resolution for dot-notation name",
+				slog.String("tool", toolName),
+				slog.String("func_name", funcName),
+			)
+		} else if deps != nil && deps.SymbolIndex != nil {
 			sessionID := ""
 			if deps.Session != nil {
 				sessionID = deps.Session.ID
 			}
-			resolvedFunc, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, funcName, deps)
-			if err == nil {
-				slog.Debug("CB-31d: resolved function symbol for get_call_chain",
-					slog.String("raw", funcName),
-					slog.String("resolved", resolvedFunc),
-					slog.Float64("confidence", confidence),
-				)
-				funcName = resolvedFunc
+			if len(candidates) > 1 {
+				resolvedFunc, rawName, confidence, err := resolveFirstCandidate(goCtx, &p.symbolCache, sessionID, candidates, deps)
+				if err == nil {
+					slog.Debug("CB-31d: resolved function symbol for get_call_chain",
+						slog.String("raw", rawName),
+						slog.String("resolved", resolvedFunc),
+						slog.Float64("confidence", confidence),
+						slog.Int("candidates", len(candidates)),
+					)
+					funcName = resolvedFunc
+				}
+			} else {
+				resolvedFunc, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, funcName, deps)
+				if err == nil {
+					slog.Debug("CB-31d: resolved function symbol for get_call_chain",
+						slog.String("raw", funcName),
+						slog.String("resolved", resolvedFunc),
+						slog.Float64("confidence", confidence),
+					)
+					funcName = resolvedFunc
+				}
 			}
 		}
 
@@ -2059,6 +2162,26 @@ func (p *ExecutePhase) extractToolParameters(
 			"function_name": funcName,
 			"direction":     direction,
 			"max_depth":     maxDepth,
+		}
+
+		// IT-05 R5: Dual-endpoint resolution for "from X to Y" queries.
+		// When query has a destination, resolve it too and pass as optional param.
+		destCandidates := extractDestinationCandidates(query)
+		if len(destCandidates) > 0 && deps != nil && deps.SymbolIndex != nil {
+			sessionID := ""
+			if deps.Session != nil {
+				sessionID = deps.Session.ID
+			}
+			destID, destName, destConf, destErr := resolveFirstCandidate(
+				context.Background(), &p.symbolCache, sessionID, destCandidates, deps)
+			if destErr == nil && destConf > 0 {
+				params["destination_name"] = destID
+				slog.Debug("IT-05 R5: resolved destination for get_call_chain",
+					slog.String("raw", destName),
+					slog.String("resolved", destID),
+					slog.Float64("confidence", destConf),
+				)
+			}
 		}
 
 		slog.Debug("CB-31d: extracted get_call_chain params",

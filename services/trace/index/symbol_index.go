@@ -467,7 +467,7 @@ func (idx *SymbolIndex) Search(ctx context.Context, query string, limit int) ([]
 		}
 
 		nameLower := strings.ToLower(sym.Name)
-		score, matchType := computeMatchScore(query, queryLower, sym.Name, nameLower, sym.Kind)
+		score, matchType := computeMatchScore(query, queryLower, sym.Name, nameLower, sym.Kind, sym.FilePath, sym.Exported)
 
 		if score >= 0 {
 			results = append(results, scoredSymbol{
@@ -503,15 +503,22 @@ func (idx *SymbolIndex) Search(ctx context.Context, query string, limit int) ([]
 
 // computeMatchScore calculates a detailed match score for fuzzy search.
 //
-// Enhanced scoring system (Feb 14, 2026):
+// Description:
 //
-//	Score = base_score * 10000 +
+//	Multi-signal scoring system that ranks search results by relevance.
+//	Uses 7 signals: match type, position, length, kind, test file, export
+//	visibility, and directory depth.
+//
+//	Score = base_score * 100000 +
+//	        test_file_penalty (0 or 50000) +
+//	        export_penalty (0 or 20000) +
+//	        depth_penalty (0-5000) +
 //	        position_penalty * 100 +
 //	        length_penalty * 10 +
 //	        kind_penalty
 //
-// Where lower scores are better. This provides much finer granularity than
-// the old 0-3 system, allowing proper ranking of match quality.
+//	Where lower scores are better. Exact matches always return 0 (plus
+//	contextual penalties for test files and unexported symbols).
 //
 // Inputs:
 //
@@ -520,6 +527,8 @@ func (idx *SymbolIndex) Search(ctx context.Context, query string, limit int) ([]
 //	name - Symbol name (preserves case).
 //	nameLower - Lowercase version of name.
 //	kind - Symbol kind (function, type, etc.).
+//	filePath - Source file path for test-file and depth scoring.
+//	exported - Whether the symbol is publicly visible.
 //
 // Outputs:
 //
@@ -535,8 +544,12 @@ func (idx *SymbolIndex) Search(ctx context.Context, query string, limit int) ([]
 //	4 = Fuzzy match (Levenshtein)
 //	-1 = No match
 //
+// IT-05 SR1: Added filePath and exported parameters for multi-signal scoring.
+// Previously, test file symbols scored equally with source symbols, causing
+// wrong-match errors in 8/29 integration tests.
+//
 // Thread Safety: Safe for concurrent use (stateless function).
-func computeMatchScore(query, queryLower, name, nameLower string, kind ast.SymbolKind) (int, string) {
+func computeMatchScore(query, queryLower, name, nameLower string, kind ast.SymbolKind, filePath string, exported bool) (int, string) {
 	// Base score determines primary match type
 	var baseScore int
 	var matchType string
@@ -544,7 +557,10 @@ func computeMatchScore(query, queryLower, name, nameLower string, kind ast.Symbo
 
 	// 1. Exact match (highest priority)
 	if nameLower == queryLower {
-		return 0, "exact" // Perfect match, no need for further scoring
+		// IT-05 SR1: Even exact matches get contextual penalties so that
+		// "main" in main.go outranks "main" in internal/warpc/gen/main.go
+		score := computeContextualPenalties(filePath, exported, name)
+		return score, "exact"
 	}
 
 	// 2. Prefix match
@@ -591,14 +607,135 @@ func computeMatchScore(query, queryLower, name, nameLower string, kind ast.Symbo
 	// Kind penalty: Prefer functions/methods over types/variables (0-9)
 	kindPenalty := getKindPenalty(kind)
 
+	// IT-05 SR1: Contextual penalties for test files, unexported symbols, and deep paths
+	contextPenalty := computeContextualPenalties(filePath, exported, name)
+
 	// Composite score: lower is better
-	// Format: BMMPPLK where B=base, MM=matchPos, PP=length, L=kind
-	score := baseScore*10000 +
+	score := baseScore*100000 +
+		contextPenalty +
 		positionPenalty*100 +
 		lengthPenalty*10 +
 		kindPenalty
 
 	return score, matchType
+}
+
+// computeContextualPenalties calculates penalties based on file path, export status,
+// and symbol name conventions.
+//
+// Description:
+//
+//	IT-05 SR1: Three contextual signals that disambiguate between symbols
+//	with similar names:
+//
+//	1. Test file penalty (+50000): Symbols in test files are deprioritized
+//	   because integration queries rarely target test helpers.
+//	2. Export penalty (+20000): Unexported/private symbols (underscore prefix,
+//	   Go lowercase, Python dunder) are deprioritized.
+//	3. Depth penalty (+1000 per level beyond 2): Deeply nested files are
+//	   less likely to be the intended target.
+//
+// Inputs:
+//
+//	filePath - Source file path (forward-slash separated).
+//	exported - Whether the symbol is publicly visible.
+//	name - Symbol name for underscore-prefix detection.
+//
+// Outputs:
+//
+//	int - Combined penalty score (0 = no penalties).
+//
+// Thread Safety: Safe for concurrent use (stateless function).
+func computeContextualPenalties(filePath string, exported bool, name string) int {
+	penalty := 0
+
+	// Signal 1: Test file penalty (+50000)
+	// Symbols in test files should almost never outrank source symbols.
+	if isTestFile(filePath) {
+		penalty += 50000
+	}
+
+	// Signal 2: Export/visibility penalty (+20000)
+	// Unexported symbols are less likely to be the user's intended target.
+	// Check both the Exported field and naming conventions.
+	if !exported {
+		penalty += 20000
+	}
+	// Additionally penalize underscore-prefixed names (Python private convention)
+	if len(name) > 0 && name[0] == '_' {
+		penalty += 10000
+	}
+
+	// Signal 3: Directory depth penalty (+1000 per level beyond 2)
+	// "internal/warpc/gen/main.go" (depth 3) is less likely than "cmd/main.go" (depth 1).
+	depth := strings.Count(filePath, "/")
+	if depth > 2 {
+		penalty += (depth - 2) * 1000
+	}
+
+	return penalty
+}
+
+// isTestFile returns true if the file path indicates a test file.
+//
+// Description:
+//
+//	Detects test files across Go, Python, JavaScript, and TypeScript:
+//	  - Go: *_test.go
+//	  - Python: test_*.py, *_test.py, conftest.py
+//	  - JS/TS: *.test.js, *.spec.ts, *.test.tsx, etc.
+//	  - Directory: /test/, /tests/, /__tests__/
+//
+// Inputs:
+//
+//	filePath - File path to check.
+//
+// Outputs:
+//
+//	bool - True if the file is a test file.
+//
+// Thread Safety: Safe for concurrent use (stateless function).
+func isTestFile(filePath string) bool {
+	lower := strings.ToLower(filePath)
+
+	// Directory-based detection — check both mid-path ("/test/") and path-start ("test/")
+	for _, dir := range []string{"test/", "tests/", "__tests__/", "testing/"} {
+		if strings.HasPrefix(lower, dir) || strings.Contains(lower, "/"+dir) {
+			return true
+		}
+	}
+
+	// File-suffix detection (Go)
+	if strings.HasSuffix(lower, "_test.go") {
+		return true
+	}
+
+	// File-suffix detection (Python)
+	if strings.HasSuffix(lower, "_test.py") || strings.HasSuffix(lower, "conftest.py") {
+		return true
+	}
+
+	// File-prefix detection (Python) — check the filename portion
+	lastSlash := strings.LastIndex(lower, "/")
+	fileName := lower
+	if lastSlash >= 0 {
+		fileName = lower[lastSlash+1:]
+	}
+	if strings.HasPrefix(fileName, "test_") {
+		return true
+	}
+
+	// File-suffix detection (JS/TS)
+	for _, suffix := range []string{
+		".test.js", ".test.ts", ".test.jsx", ".test.tsx",
+		".spec.js", ".spec.ts", ".spec.jsx", ".spec.tsx",
+	} {
+		if strings.HasSuffix(lower, suffix) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // findCamelCaseWordMatch finds if query matches a word boundary in camelCase/PascalCase name.

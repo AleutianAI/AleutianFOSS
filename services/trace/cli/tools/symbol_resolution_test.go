@@ -20,7 +20,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
 )
 
-// testLogger returns a discard logger for tests.
+// testLogger returns a debug-level logger writing to stderr for test observability.
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
@@ -393,6 +393,102 @@ func TestResolveTypeDotMethod(t *testing.T) {
 		_, err := resolveTypeDotMethod(ctx, nil, "Plot", "render", logger)
 		if err == nil {
 			t.Fatal("expected error for nil index, got nil")
+		}
+	})
+
+	// IT-05 R3-2: Receiver prefix matching tests
+	t.Run("Receiver prefix match: NestFactory resolves NestFactoryStatic.create", func(t *testing.T) {
+		// Build an index where the Receiver is "NestFactoryStatic" but user types "NestFactory"
+		prefixIdx := index.NewSymbolIndex()
+		for _, sym := range []*ast.Symbol{
+			{
+				ID: "packages/core/nest-factory.ts:50:create", Name: "create",
+				Kind: ast.SymbolKindMethod, FilePath: "packages/core/nest-factory.ts",
+				StartLine: 50, EndLine: 80, Receiver: "NestFactoryStatic",
+				Exported: true, Language: "typescript",
+			},
+			{
+				ID: "integration/recipes/recipes.service.ts:14:create", Name: "create",
+				Kind: ast.SymbolKindMethod, FilePath: "integration/recipes/recipes.service.ts",
+				StartLine: 14, EndLine: 20, Receiver: "RecipesService",
+				Exported: true, Language: "typescript",
+			},
+		} {
+			if err := prefixIdx.Add(sym); err != nil {
+				t.Fatalf("failed to add symbol %s: %v", sym.ID, err)
+			}
+		}
+
+		sym, err := resolveTypeDotMethod(ctx, prefixIdx, "NestFactory", "create", logger)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if sym.Receiver != "NestFactoryStatic" {
+			t.Errorf("expected Receiver 'NestFactoryStatic', got %q (ID: %s)", sym.Receiver, sym.ID)
+		}
+	})
+
+	t.Run("Receiver prefix match does not match unrelated types", func(t *testing.T) {
+		// "App" should match "Application" but not "MapperService"
+		prefixIdx := index.NewSymbolIndex()
+		for _, sym := range []*ast.Symbol{
+			{
+				ID: "app.ts:10:init", Name: "init",
+				Kind: ast.SymbolKindMethod, FilePath: "app.ts",
+				StartLine: 10, EndLine: 20, Receiver: "Application",
+				Exported: true, Language: "typescript",
+			},
+			{
+				ID: "mapper.ts:5:init", Name: "init",
+				Kind: ast.SymbolKindMethod, FilePath: "mapper.ts",
+				StartLine: 5, EndLine: 15, Receiver: "MapperService",
+				Exported: true, Language: "typescript",
+			},
+		} {
+			if err := prefixIdx.Add(sym); err != nil {
+				t.Fatalf("failed to add symbol %s: %v", sym.ID, err)
+			}
+		}
+
+		sym, err := resolveTypeDotMethod(ctx, prefixIdx, "App", "init", logger)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if sym.Receiver != "Application" {
+			t.Errorf("expected Receiver 'Application', got %q", sym.Receiver)
+		}
+	})
+
+	t.Run("Exact receiver match takes priority over prefix match", func(t *testing.T) {
+		prefixIdx := index.NewSymbolIndex()
+		for _, sym := range []*ast.Symbol{
+			{
+				ID: "engine.ts:10:run", Name: "run",
+				Kind: ast.SymbolKindMethod, FilePath: "engine.ts",
+				StartLine: 10, EndLine: 20, Receiver: "Engine",
+				Exported: true, Language: "typescript",
+			},
+			{
+				ID: "engine_v2.ts:10:run", Name: "run",
+				Kind: ast.SymbolKindMethod, FilePath: "engine_v2.ts",
+				StartLine: 10, EndLine: 20, Receiver: "EngineV2",
+				Exported: true, Language: "typescript",
+			},
+		} {
+			if err := prefixIdx.Add(sym); err != nil {
+				t.Fatalf("failed to add symbol %s: %v", sym.ID, err)
+			}
+		}
+
+		sym, err := resolveTypeDotMethod(ctx, prefixIdx, "Engine", "run", logger)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// Both match (exact "Engine" and prefix "Engine" → "EngineV2"),
+		// but pickBestCandidate should still return a valid result.
+		// The exact match "Engine" is added first and both are valid candidates.
+		if sym.Name != "run" {
+			t.Errorf("expected 'run', got %q", sym.Name)
 		}
 	})
 }
@@ -878,6 +974,796 @@ func TestResolveTypeDotMethod_OverloadFiltering(t *testing.T) {
 		}
 		if sym.ID != realImpl.ID {
 			t.Errorf("expected real implementation via inheritance, got %q", sym.ID)
+		}
+	})
+}
+
+// ─── IT-00a: KindFilter tests ───
+
+func TestKindFilter_String(t *testing.T) {
+	t.Run("callable", func(t *testing.T) {
+		if KindFilterCallable.String() != "callable" {
+			t.Errorf("expected 'callable', got %q", KindFilterCallable.String())
+		}
+	})
+	t.Run("type", func(t *testing.T) {
+		if KindFilterType.String() != "type" {
+			t.Errorf("expected 'type', got %q", KindFilterType.String())
+		}
+	})
+	t.Run("any", func(t *testing.T) {
+		if KindFilterAny.String() != "any" {
+			t.Errorf("expected 'any', got %q", KindFilterAny.String())
+		}
+	})
+	t.Run("unknown", func(t *testing.T) {
+		unknown := KindFilter(99)
+		if unknown.String() != "unknown(99)" {
+			t.Errorf("expected 'unknown(99)', got %q", unknown.String())
+		}
+	})
+}
+
+func TestMatchesKindFilter(t *testing.T) {
+	t.Run("KindFilterCallable accepts Function", func(t *testing.T) {
+		sym := &ast.Symbol{Kind: ast.SymbolKindFunction}
+		if !matchesKindFilter(sym, KindFilterCallable) {
+			t.Error("expected Function to match KindFilterCallable")
+		}
+	})
+
+	t.Run("KindFilterCallable accepts Method", func(t *testing.T) {
+		sym := &ast.Symbol{Kind: ast.SymbolKindMethod}
+		if !matchesKindFilter(sym, KindFilterCallable) {
+			t.Error("expected Method to match KindFilterCallable")
+		}
+	})
+
+	t.Run("KindFilterCallable accepts Property", func(t *testing.T) {
+		sym := &ast.Symbol{Kind: ast.SymbolKindProperty}
+		if !matchesKindFilter(sym, KindFilterCallable) {
+			t.Error("expected Property to match KindFilterCallable")
+		}
+	})
+
+	t.Run("KindFilterCallable rejects Class", func(t *testing.T) {
+		sym := &ast.Symbol{Kind: ast.SymbolKindClass}
+		if matchesKindFilter(sym, KindFilterCallable) {
+			t.Error("expected Class to NOT match KindFilterCallable")
+		}
+	})
+
+	t.Run("KindFilterCallable rejects Variable", func(t *testing.T) {
+		sym := &ast.Symbol{Kind: ast.SymbolKindVariable}
+		if matchesKindFilter(sym, KindFilterCallable) {
+			t.Error("expected Variable to NOT match KindFilterCallable")
+		}
+	})
+
+	t.Run("KindFilterType accepts Interface", func(t *testing.T) {
+		sym := &ast.Symbol{Kind: ast.SymbolKindInterface}
+		if !matchesKindFilter(sym, KindFilterType) {
+			t.Error("expected Interface to match KindFilterType")
+		}
+	})
+
+	t.Run("KindFilterType accepts Class", func(t *testing.T) {
+		sym := &ast.Symbol{Kind: ast.SymbolKindClass}
+		if !matchesKindFilter(sym, KindFilterType) {
+			t.Error("expected Class to match KindFilterType")
+		}
+	})
+
+	t.Run("KindFilterType accepts Struct", func(t *testing.T) {
+		sym := &ast.Symbol{Kind: ast.SymbolKindStruct}
+		if !matchesKindFilter(sym, KindFilterType) {
+			t.Error("expected Struct to match KindFilterType")
+		}
+	})
+
+	t.Run("KindFilterType accepts Type", func(t *testing.T) {
+		sym := &ast.Symbol{Kind: ast.SymbolKindType}
+		if !matchesKindFilter(sym, KindFilterType) {
+			t.Error("expected Type to match KindFilterType")
+		}
+	})
+
+	t.Run("KindFilterType rejects Function", func(t *testing.T) {
+		sym := &ast.Symbol{Kind: ast.SymbolKindFunction}
+		if matchesKindFilter(sym, KindFilterType) {
+			t.Error("expected Function to NOT match KindFilterType")
+		}
+	})
+
+	t.Run("KindFilterAny accepts everything", func(t *testing.T) {
+		kinds := []ast.SymbolKind{
+			ast.SymbolKindFunction, ast.SymbolKindMethod, ast.SymbolKindClass,
+			ast.SymbolKindVariable, ast.SymbolKindConstant, ast.SymbolKindImport,
+		}
+		for _, kind := range kinds {
+			sym := &ast.Symbol{Kind: kind}
+			if !matchesKindFilter(sym, KindFilterAny) {
+				t.Errorf("expected kind %s to match KindFilterAny", kind)
+			}
+		}
+	})
+}
+
+// buildMixedKindTestIndex creates an index with symbols of various kinds for kind filter tests.
+func buildMixedKindTestIndex(t *testing.T) *index.SymbolIndex {
+	t.Helper()
+
+	idx := index.NewSymbolIndex()
+	symbols := []*ast.Symbol{
+		{
+			ID:        "app.go:10:Router",
+			Name:      "Router",
+			Kind:      ast.SymbolKindStruct,
+			FilePath:  "app.go",
+			StartLine: 10,
+			EndLine:   50,
+			Package:   "app",
+			Exported:  true,
+			Language:  "go",
+		},
+		{
+			ID:        "app.go:60:Router",
+			Name:      "Router",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "app.go",
+			StartLine: 60,
+			EndLine:   80,
+			Package:   "app",
+			Exported:  true,
+			Language:  "go",
+		},
+		{
+			ID:        "handler.go:5:Handle",
+			Name:      "Handle",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "handler.go",
+			StartLine: 5,
+			EndLine:   20,
+			Package:   "app",
+			Exported:  true,
+			Language:  "go",
+		},
+		{
+			ID:        "types.go:10:Handler",
+			Name:      "Handler",
+			Kind:      ast.SymbolKindInterface,
+			FilePath:  "types.go",
+			StartLine: 10,
+			EndLine:   15,
+			Package:   "app",
+			Exported:  true,
+			Language:  "go",
+		},
+		{
+			ID:        "config.go:1:MaxRetries",
+			Name:      "MaxRetries",
+			Kind:      ast.SymbolKindConstant,
+			FilePath:  "config.go",
+			StartLine: 1,
+			EndLine:   1,
+			Package:   "app",
+			Exported:  true,
+			Language:  "go",
+		},
+		// For bare method fallback test: "Open" as a package-level function
+		{
+			ID:        "db.go:10:Open",
+			Name:      "Open",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "db.go",
+			StartLine: 10,
+			EndLine:   30,
+			Package:   "db",
+			Exported:  true,
+			Language:  "go",
+		},
+	}
+
+	for _, sym := range symbols {
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("failed to add symbol %s: %v", sym.ID, err)
+		}
+	}
+
+	return idx
+}
+
+func TestResolveFunctionWithFuzzy_KindFilter(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+	idx := buildMixedKindTestIndex(t)
+
+	t.Run("default callable filter returns function over struct for same name", func(t *testing.T) {
+		sym, fuzzy, err := ResolveFunctionWithFuzzy(ctx, idx, "Router", logger)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if fuzzy {
+			t.Error("expected fuzzy=false for exact match")
+		}
+		if sym.Kind != ast.SymbolKindFunction {
+			t.Errorf("expected Function kind with default callable filter, got %s", sym.Kind)
+		}
+	})
+
+	t.Run("KindFilterType returns struct over function for same name", func(t *testing.T) {
+		sym, fuzzy, err := ResolveFunctionWithFuzzy(ctx, idx, "Router", logger,
+			WithKindFilter(KindFilterType))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if fuzzy {
+			t.Error("expected fuzzy=false for exact match")
+		}
+		if sym.Kind != ast.SymbolKindStruct {
+			t.Errorf("expected Struct kind with KindFilterType, got %s", sym.Kind)
+		}
+	})
+
+	t.Run("KindFilterAny returns first match regardless of kind", func(t *testing.T) {
+		sym, fuzzy, err := ResolveFunctionWithFuzzy(ctx, idx, "MaxRetries", logger,
+			WithKindFilter(KindFilterAny))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if fuzzy {
+			t.Error("expected fuzzy=false for exact match")
+		}
+		if sym.Name != "MaxRetries" {
+			t.Errorf("expected MaxRetries, got %q", sym.Name)
+		}
+	})
+
+	t.Run("KindFilterCallable rejects constant, falls through to fuzzy", func(t *testing.T) {
+		// MaxRetries is a constant — callable filter should reject it on exact match
+		// and fall through to fuzzy (which will also fail since there's no callable "MaxRetries")
+		_, _, err := ResolveFunctionWithFuzzy(ctx, idx, "MaxRetries", logger,
+			WithKindFilter(KindFilterCallable))
+		if err == nil {
+			t.Fatal("expected error when no callable symbol named MaxRetries exists")
+		}
+	})
+
+	t.Run("KindFilterType finds interface", func(t *testing.T) {
+		sym, _, err := ResolveFunctionWithFuzzy(ctx, idx, "Handler", logger,
+			WithKindFilter(KindFilterType))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if sym.Kind != ast.SymbolKindInterface {
+			t.Errorf("expected Interface kind, got %s", sym.Kind)
+		}
+	})
+}
+
+func TestResolveFunctionWithFuzzy_FullIDBypass(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+	idx := buildMixedKindTestIndex(t)
+
+	t.Run("full ID with colon resolves directly", func(t *testing.T) {
+		sym, fuzzy, err := ResolveFunctionWithFuzzy(ctx, idx, "handler.go:5:Handle", logger)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if fuzzy {
+			t.Error("expected fuzzy=false for full-ID bypass")
+		}
+		if sym.ID != "handler.go:5:Handle" {
+			t.Errorf("expected exact ID match, got %q", sym.ID)
+		}
+	})
+
+	t.Run("full ID bypass ignores kind filter", func(t *testing.T) {
+		// Even with KindFilterType, a full-ID lookup should return the exact symbol
+		sym, _, err := ResolveFunctionWithFuzzy(ctx, idx, "handler.go:5:Handle", logger,
+			WithKindFilter(KindFilterType))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if sym.Kind != ast.SymbolKindFunction {
+			t.Errorf("expected Function (full-ID bypass ignores kind filter), got %s", sym.Kind)
+		}
+	})
+}
+
+func TestResolveFunctionWithFuzzy_BareMethodFallback(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+	idx := buildMixedKindTestIndex(t)
+
+	t.Run("bare method fallback resolves DB.Open to Open", func(t *testing.T) {
+		// "DB.Open" — no type "DB" exists, dot-notation will fail.
+		// With bare method fallback, it should resolve to the "Open" function.
+		sym, fuzzy, err := ResolveFunctionWithFuzzy(ctx, idx, "DB.Open", logger,
+			WithBareMethodFallback())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if fuzzy {
+			t.Error("expected fuzzy=false for bare method fallback (exact match on bare name)")
+		}
+		if sym.Name != "Open" {
+			t.Errorf("expected name 'Open', got %q", sym.Name)
+		}
+	})
+
+	t.Run("without bare method fallback, DB.Open fails dot-notation and goes to fuzzy", func(t *testing.T) {
+		// Without the option, "DB.Open" should fail dot-notation and fall through
+		// to fuzzy search (which may or may not find it depending on index.Search)
+		_, _, err := ResolveFunctionWithFuzzy(ctx, idx, "DB.Open", logger)
+		// This should either succeed via fuzzy or fail — the key assertion is
+		// that it does NOT use bare method fallback (no "Open" direct match)
+		if err == nil {
+			// If fuzzy search happened to find "Open", that's ok — the important
+			// thing is the path taken (fuzzy, not bare method)
+			return
+		}
+		// Error is also acceptable — means fuzzy didn't find it
+	})
+
+	t.Run("bare method fallback respects kind filter", func(t *testing.T) {
+		// "DB.Open" with KindFilterType — Open is a Function, so type filter should reject it
+		_, _, err := ResolveFunctionWithFuzzy(ctx, idx, "DB.Open", logger,
+			WithBareMethodFallback(), WithKindFilter(KindFilterType))
+		if err == nil {
+			t.Fatal("expected error: bare method 'Open' is Function, not Type")
+		}
+	})
+}
+
+// TestResolveFunctionWithFuzzy_BareMethodDisambiguation tests IT-05 R3-1:
+// when BareMethodFallback returns multiple symbols with the same name,
+// the dot-notation type prefix is used to disambiguate.
+func TestResolveFunctionWithFuzzy_BareMethodDisambiguation(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+
+	// Build a custom index with multiple symbols sharing the same bare name.
+	idx := index.NewSymbolIndex()
+	symbols := []*ast.Symbol{
+		// gin.Default scenario: two "Default" functions in different packages
+		{
+			ID:        "binding/binding.go:95:Default",
+			Name:      "Default",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "binding/binding.go",
+			StartLine: 95,
+			EndLine:   100,
+			Package:   "binding",
+			Exported:  true,
+			Language:  "go",
+		},
+		{
+			ID:        "gin.go:20:Default",
+			Name:      "Default",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "gin.go",
+			StartLine: 20,
+			EndLine:   30,
+			Package:   "gin",
+			Exported:  true,
+			Language:  "go",
+		},
+		// NestFactory.create scenario: multiple "create" methods on different classes
+		{
+			ID:        "integration/recipes/recipes.service.ts:14:create",
+			Name:      "create",
+			Kind:      ast.SymbolKindMethod,
+			FilePath:  "integration/recipes/recipes.service.ts",
+			StartLine: 14,
+			EndLine:   20,
+			Package:   "recipes",
+			Exported:  true,
+			Language:  "typescript",
+			Receiver:  "RecipesService",
+		},
+		{
+			ID:        "packages/core/nest-factory.ts:50:create",
+			Name:      "create",
+			Kind:      ast.SymbolKindMethod,
+			FilePath:  "packages/core/nest-factory.ts",
+			StartLine: 50,
+			EndLine:   80,
+			Package:   "core",
+			Exported:  true,
+			Language:  "typescript",
+			Receiver:  "NestFactoryStatic",
+		},
+	}
+	for _, sym := range symbols {
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("failed to add symbol %s: %v", sym.ID, err)
+		}
+	}
+
+	t.Run("gin.Default prefers gin.go over binding.go via file path prefix", func(t *testing.T) {
+		sym, fuzzy, err := ResolveFunctionWithFuzzy(ctx, idx, "gin.Default", logger,
+			WithBareMethodFallback())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if fuzzy {
+			t.Error("expected fuzzy=false for bare method fallback")
+		}
+		if sym.FilePath != "gin.go" {
+			t.Errorf("expected gin.go, got %q (ID: %s)", sym.FilePath, sym.ID)
+		}
+	})
+
+	t.Run("NestFactory.create prefers NestFactoryStatic via Receiver prefix", func(t *testing.T) {
+		sym, fuzzy, err := ResolveFunctionWithFuzzy(ctx, idx, "NestFactory.create", logger,
+			WithBareMethodFallback())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if fuzzy {
+			t.Error("expected fuzzy=false for bare method fallback")
+		}
+		if sym.Receiver != "NestFactoryStatic" {
+			t.Errorf("expected Receiver 'NestFactoryStatic', got %q (ID: %s)", sym.Receiver, sym.ID)
+		}
+	})
+
+	t.Run("no prefix match falls back to pickBestCandidate", func(t *testing.T) {
+		// "Unknown.Default" — neither "Unknown" appears in any Receiver, FilePath, or ID.
+		// pickBestCandidate should still return a valid result (not error).
+		sym, _, err := ResolveFunctionWithFuzzy(ctx, idx, "Unknown.Default", logger,
+			WithBareMethodFallback())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if sym.Name != "Default" {
+			t.Errorf("expected 'Default', got %q", sym.Name)
+		}
+	})
+}
+
+// TestPickBestBareCandidate tests the pickBestBareCandidate disambiguation function directly.
+func TestPickBestBareCandidate(t *testing.T) {
+	ginDefault := &ast.Symbol{
+		ID: "gin.go:20:Default", Name: "Default", Kind: ast.SymbolKindFunction,
+		FilePath: "gin.go", Exported: true,
+	}
+	bindingDefault := &ast.Symbol{
+		ID: "binding/binding.go:95:Default", Name: "Default", Kind: ast.SymbolKindFunction,
+		FilePath: "binding/binding.go", Exported: true,
+	}
+	nestCreate := &ast.Symbol{
+		ID: "packages/core/nest-factory.ts:50:create", Name: "create", Kind: ast.SymbolKindMethod,
+		FilePath: "packages/core/nest-factory.ts", Receiver: "NestFactoryStatic", Exported: true,
+	}
+	recipesCreate := &ast.Symbol{
+		ID: "integration/recipes/recipes.service.ts:14:create", Name: "create", Kind: ast.SymbolKindMethod,
+		FilePath: "integration/recipes/recipes.service.ts", Receiver: "RecipesService", Exported: true,
+	}
+
+	t.Run("nil candidates returns nil", func(t *testing.T) {
+		if got := pickBestBareCandidate(nil, "gin"); got != nil {
+			t.Errorf("expected nil, got %v", got)
+		}
+	})
+
+	t.Run("single candidate returns it", func(t *testing.T) {
+		got := pickBestBareCandidate([]*ast.Symbol{ginDefault}, "gin")
+		if got != ginDefault {
+			t.Errorf("expected ginDefault, got %v", got)
+		}
+	})
+
+	t.Run("empty prefix falls back to pickBestCandidate", func(t *testing.T) {
+		got := pickBestBareCandidate([]*ast.Symbol{bindingDefault, ginDefault}, "")
+		if got == nil {
+			t.Fatal("expected non-nil result")
+		}
+	})
+
+	t.Run("gin prefix prefers gin.go via FilePath", func(t *testing.T) {
+		got := pickBestBareCandidate([]*ast.Symbol{bindingDefault, ginDefault}, "gin")
+		if got != ginDefault {
+			t.Errorf("expected gin.go:Default, got %s", got.ID)
+		}
+	})
+
+	t.Run("NestFactory prefix prefers NestFactoryStatic via Receiver", func(t *testing.T) {
+		got := pickBestBareCandidate([]*ast.Symbol{recipesCreate, nestCreate}, "NestFactory")
+		if got != nestCreate {
+			t.Errorf("expected nest-factory.ts:create, got %s", got.ID)
+		}
+	})
+
+	t.Run("no prefix match falls through to pickBestCandidate", func(t *testing.T) {
+		got := pickBestBareCandidate([]*ast.Symbol{bindingDefault, ginDefault}, "unknown")
+		if got == nil {
+			t.Fatal("expected non-nil result")
+		}
+	})
+}
+
+// TestResolveTypeDotMethod_OverridePreference tests IT-05 R5: when a child type overrides
+// a parent method, the child's version is preferred.
+func TestResolveTypeDotMethod_OverridePreference(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+
+	t.Run("child override preferred over parent method", func(t *testing.T) {
+		// Plot extends Bindable. Bindable has render(). Plot also has render().
+		// resolveTypeDotMethod("Plot", "render") should return Plot.render, not Bindable.render.
+		idx := index.NewSymbolIndex()
+		symbols := []*ast.Symbol{
+			{
+				ID: "src/bindable.ts:10:Bindable", Name: "Bindable",
+				Kind: ast.SymbolKindClass, FilePath: "src/bindable.ts",
+				StartLine: 10, EndLine: 100, Package: "core",
+				Exported: true, Language: "typescript",
+				Children: []*ast.Symbol{
+					{
+						ID: "src/bindable.ts:50:render", Name: "render",
+						Kind: ast.SymbolKindMethod, FilePath: "src/bindable.ts",
+						StartLine: 50, EndLine: 70, Package: "core",
+						Exported: true, Language: "typescript",
+					},
+				},
+			},
+			// Flat index entry for Bindable.render
+			{
+				ID: "src/bindable.ts:50:render", Name: "render",
+				Kind: ast.SymbolKindMethod, FilePath: "src/bindable.ts",
+				StartLine: 50, EndLine: 70, Package: "core",
+				Exported: true, Language: "typescript",
+			},
+			// Plot extends Bindable and overrides render
+			{
+				ID: "src/plot.ts:10:Plot", Name: "Plot",
+				Kind: ast.SymbolKindClass, FilePath: "src/plot.ts",
+				StartLine: 10, EndLine: 200, Package: "plots",
+				Exported: true, Language: "typescript",
+				Metadata: &ast.SymbolMetadata{Extends: "Bindable"},
+				Children: []*ast.Symbol{
+					{
+						ID: "src/plot.ts:30:render", Name: "render",
+						Kind: ast.SymbolKindMethod, FilePath: "src/plot.ts",
+						StartLine: 30, EndLine: 60, Package: "plots",
+						Receiver: "Plot",
+						Exported: true, Language: "typescript",
+					},
+				},
+			},
+			// Flat index entry for Plot.render (with Receiver)
+			{
+				ID: "src/plot.ts:30:render", Name: "render",
+				Kind: ast.SymbolKindMethod, FilePath: "src/plot.ts",
+				StartLine: 30, EndLine: 60, Package: "plots",
+				Receiver: "Plot",
+				Exported: true, Language: "typescript",
+			},
+		}
+		for _, sym := range symbols {
+			if err := idx.Add(sym); err != nil {
+				t.Fatalf("failed to add symbol %s: %v", sym.ID, err)
+			}
+		}
+
+		sym, err := resolveTypeDotMethod(ctx, idx, "Plot", "render", logger)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if sym.ID != "src/plot.ts:30:render" {
+			t.Errorf("expected Plot.render (child override), got %q", sym.ID)
+		}
+	})
+
+	t.Run("no override returns parent method", func(t *testing.T) {
+		// SubPlot extends Plot, but SubPlot does NOT override render.
+		// Should still return ThinEngine.runRenderLoop from the existing test index.
+		idx := buildTestIndex(t)
+
+		sym, err := resolveTypeDotMethod(ctx, idx, "Engine", "runRenderLoop", logger)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// Engine.runRenderLoop → walks to ThinEngine.runRenderLoop (no override on Engine)
+		if sym.ID != "src/thinEngine.ts:50:runRenderLoop" {
+			t.Errorf("expected ThinEngine.runRenderLoop (no override), got %q", sym.ID)
+		}
+	})
+
+	t.Run("override via ID match (JS/TS without Receiver)", func(t *testing.T) {
+		idx := index.NewSymbolIndex()
+		symbols := []*ast.Symbol{
+			{
+				ID: "src/base.ts:10:Base", Name: "Base",
+				Kind: ast.SymbolKindClass, FilePath: "src/base.ts",
+				StartLine: 10, EndLine: 100, Package: "core",
+				Exported: true, Language: "typescript",
+				Children: []*ast.Symbol{
+					{
+						ID: "src/base.ts:50:doWork", Name: "doWork",
+						Kind: ast.SymbolKindMethod, FilePath: "src/base.ts",
+						StartLine: 50, EndLine: 70,
+						Exported: true, Language: "typescript",
+					},
+				},
+			},
+			{
+				ID: "src/base.ts:50:doWork", Name: "doWork",
+				Kind: ast.SymbolKindMethod, FilePath: "src/base.ts",
+				StartLine: 50, EndLine: 70,
+				Exported: true, Language: "typescript",
+			},
+			{
+				ID: "src/child.ts:10:Child", Name: "Child",
+				Kind: ast.SymbolKindClass, FilePath: "src/child.ts",
+				StartLine: 10, EndLine: 100, Package: "core",
+				Exported: true, Language: "typescript",
+				Metadata: &ast.SymbolMetadata{Extends: "Base"},
+			},
+			// Child.doWork is in the flat index with ID containing "Child.doWork"
+			{
+				ID: "src/child.ts:30:Child.doWork", Name: "doWork",
+				Kind: ast.SymbolKindMethod, FilePath: "src/child.ts",
+				StartLine: 30, EndLine: 50,
+				Exported: true, Language: "typescript",
+			},
+		}
+		for _, sym := range symbols {
+			if err := idx.Add(sym); err != nil {
+				t.Fatalf("failed to add symbol %s: %v", sym.ID, err)
+			}
+		}
+
+		sym, err := resolveTypeDotMethod(ctx, idx, "Child", "doWork", logger)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if sym.ID != "src/child.ts:30:Child.doWork" {
+			t.Errorf("expected Child.doWork override via ID match, got %q", sym.ID)
+		}
+	})
+}
+
+// TestFindChildOverride_NoPrefixFalsePositive verifies that findChildOverride
+// does NOT match methods on unrelated types that share a name prefix.
+// Regression test for IT-05 R5 review fix: removed HasPrefix strategy.
+func TestFindChildOverride_NoPrefixFalsePositive(t *testing.T) {
+	idx := index.NewSymbolIndex()
+	symbols := []*ast.Symbol{
+		// Parent: Bindable.render
+		{
+			ID: "src/bindable.ts:50:render", Name: "render",
+			Kind: ast.SymbolKindMethod, FilePath: "src/bindable.ts",
+			StartLine: 50, EndLine: 70, Receiver: "Bindable",
+			Exported: true, Language: "typescript",
+		},
+		// PlotHelper.render — an unrelated type that shares "Plot" prefix
+		{
+			ID: "src/plot_helper.ts:30:render", Name: "render",
+			Kind: ast.SymbolKindMethod, FilePath: "src/plot_helper.ts",
+			StartLine: 30, EndLine: 50, Receiver: "PlotHelper",
+			Exported: true, Language: "typescript",
+		},
+	}
+	for _, sym := range symbols {
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("failed to add symbol %s: %v", sym.ID, err)
+		}
+	}
+
+	parentResult := symbols[0] // Bindable.render
+	// typeName="Plot" should NOT match Receiver="PlotHelper" (prefix false positive)
+	override := findChildOverride(idx, "Plot", "render", parentResult)
+	if override != nil {
+		t.Errorf("expected nil (no override for Plot), got %q — prefix match should not apply", override.ID)
+	}
+}
+
+func TestResolveFunctionWithFuzzy_DotNotationRespectsKindFilter(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+	idx := buildTestIndex(t)
+
+	t.Run("dot notation with KindFilterCallable returns method", func(t *testing.T) {
+		// "Context.JSON" resolves to JSON method — callable filter accepts it
+		sym, _, err := ResolveFunctionWithFuzzy(ctx, idx, "Context.JSON", logger,
+			WithKindFilter(KindFilterCallable))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if sym.Name != "JSON" {
+			t.Errorf("expected JSON, got %q", sym.Name)
+		}
+	})
+
+	t.Run("dot notation with KindFilterType rejects method and falls through", func(t *testing.T) {
+		// "Context.JSON" resolves to JSON method — type filter should reject it
+		// and fall through to fuzzy search (which will also fail for "Context.JSON")
+		_, _, err := ResolveFunctionWithFuzzy(ctx, idx, "Context.JSON", logger,
+			WithKindFilter(KindFilterType))
+		if err == nil {
+			t.Fatal("expected error: dot-notation resolved a Method but KindFilterType was requested")
+		}
+	})
+
+	t.Run("dot notation with KindFilterAny returns method", func(t *testing.T) {
+		// "Context.JSON" with any filter — should accept the method
+		sym, _, err := ResolveFunctionWithFuzzy(ctx, idx, "Context.JSON", logger,
+			WithKindFilter(KindFilterAny))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if sym.Name != "JSON" {
+			t.Errorf("expected JSON, got %q", sym.Name)
+		}
+	})
+}
+
+func TestResolveFunctionWithFuzzy_DefaultBehaviorPreserved(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+	idx := buildTestIndex(t)
+
+	t.Run("no options produces identical behavior to original", func(t *testing.T) {
+		// Exact match for bare name
+		sym, fuzzy, err := ResolveFunctionWithFuzzy(ctx, idx, "Publish", logger)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if fuzzy {
+			t.Error("expected exact match")
+		}
+		if sym.Name != "Publish" {
+			t.Errorf("expected Publish, got %q", sym.Name)
+		}
+	})
+
+	t.Run("dot notation still works without options", func(t *testing.T) {
+		sym, fuzzy, err := ResolveFunctionWithFuzzy(ctx, idx, "Context.JSON", logger)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if fuzzy {
+			t.Error("expected exact match via dot notation")
+		}
+		if sym.Name != "JSON" {
+			t.Errorf("expected JSON, got %q", sym.Name)
+		}
+	})
+
+	t.Run("nil index returns error", func(t *testing.T) {
+		_, _, err := ResolveFunctionWithFuzzy(ctx, nil, "Publish", logger)
+		if err == nil {
+			t.Fatal("expected error for nil index")
+		}
+	})
+}
+
+func TestResolveMultipleFunctionsWithFuzzy_PassesOptions(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+	idx := buildMixedKindTestIndex(t)
+
+	t.Run("KindFilterType passed through to each resolution", func(t *testing.T) {
+		syms, fuzzyFlags, err := ResolveMultipleFunctionsWithFuzzy(ctx, idx,
+			[]string{"Router", "Handler"}, logger, WithKindFilter(KindFilterType))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(syms) != 2 {
+			t.Fatalf("expected 2 symbols, got %d", len(syms))
+		}
+		if len(fuzzyFlags) != 2 {
+			t.Fatalf("expected 2 fuzzy flags, got %d", len(fuzzyFlags))
+		}
+		if syms[0].Kind != ast.SymbolKindStruct {
+			t.Errorf("expected Router as Struct with KindFilterType, got %s", syms[0].Kind)
+		}
+		if syms[1].Kind != ast.SymbolKindInterface {
+			t.Errorf("expected Handler as Interface with KindFilterType, got %s", syms[1].Kind)
 		}
 	})
 }

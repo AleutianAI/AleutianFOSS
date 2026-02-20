@@ -34,7 +34,7 @@ tools:
       - usages of
       - find references
     use_when: "User asks who or what calls a specific function. The target function is the OBJECT being called. Examples: 'who calls parseConfig?', 'what calls the validate function?', 'find usages of Process', 'where is Open called from?'. NEVER use for 'what does X call' or 'what functions does X call' — those are find_callees queries."
-    avoid_when: "User asks what a function calls or depends on. The target function is the SUBJECT doing the calling. Examples: 'what does X call?', 'what functions does Build call?', 'what methods does X invoke?'. Use find_callees instead."
+    avoid_when: "NEVER use find_callers when the query contains 'call chain', 'call graph', 'call hierarchy', 'call tree', 'transitive', or 'recursive' — use get_call_chain instead. NEVER use find_callers when user asks what a function calls or depends on. The target function is the SUBJECT doing the calling. Examples: 'what does X call?', 'what functions does Build call?', 'what methods does X invoke?'. Use find_callees instead."
     instead_of:
       - tool: Grep
         when: "Searching for function call patterns in code"

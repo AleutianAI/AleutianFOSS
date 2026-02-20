@@ -1127,8 +1127,11 @@ func (b *Builder) extractCallEdges(ctx context.Context, state *buildState, sym *
 		// Try to resolve the target to a symbol ID
 		targetID := b.resolveCallTarget(state, call, sym)
 		if targetID == "" {
-			// Create placeholder for unresolved external call
-			targetID = b.getOrCreatePlaceholder(state, "", call.Target)
+			// IT-05a: Infer package from the calling file's imports before
+			// creating the placeholder. This gives external nodes accurate
+			// package information (e.g., "pd.read_csv" → package "pandas").
+			pkg := inferPackageFromCall(call, state.fileImports[sym.FilePath])
+			targetID = b.getOrCreatePlaceholder(state, pkg, call.Target)
 			callsUnresolved++
 		} else {
 			callsResolved++
@@ -1754,6 +1757,82 @@ func extractTypeName(typeExpr string) string {
 	}
 
 	return typeExpr
+}
+
+// inferPackageFromCall infers the external package/module for an unresolved call target
+// by cross-referencing the call's dot-prefix against the calling file's import table.
+//
+// Description:
+//
+//	IT-05a: When a call target like "pd.read_csv" cannot be resolved to a symbol in the
+//	graph, this function determines which external package it belongs to by checking
+//	the file's imports. This enables accurate external boundary detection in traversal
+//	tools (get_call_chain, find_callees, etc.).
+//
+//	Resolution strategy (checked in order):
+//	  1. Dot-prefix alias match: "pd.read_csv" → prefix "pd" → import {Path: "pandas", Alias: "pd"} → "pandas"
+//	  2. Dot-prefix path-segment match: "os.MkdirAll" → prefix "os" → import {Path: "os"} → "os"
+//	  3. Bare name in import Names: "Flask()" → import {Path: "flask", Names: ["Flask"]} → "flask"
+//	  4. No match → returns "" (unknown external)
+//
+// Inputs:
+//   - call: The unresolved call site. call.Target contains the raw call text.
+//   - fileImports: The import list for the file containing the call.
+//
+// Outputs:
+//   - string: The inferred package/module path, or "" if no match found.
+//
+// Thread Safety: Safe for concurrent use (reads only).
+func inferPackageFromCall(call ast.CallSite, fileImports []ast.Import) string {
+	if len(fileImports) == 0 {
+		return ""
+	}
+
+	target := call.Target
+
+	// Strategy 1 & 2: Dot-prefix lookup.
+	// "pd.read_csv" → prefix = "pd"
+	// "os.path.join" → prefix = "os"
+	if dotIdx := strings.IndexByte(target, '.'); dotIdx > 0 {
+		prefix := target[:dotIdx]
+
+		for _, imp := range fileImports {
+			// Strategy 1: Alias match (e.g., pd → pandas)
+			if imp.Alias != "" && imp.Alias == prefix {
+				return imp.Path
+			}
+
+			// Strategy 2: Path last segment match (e.g., os → os, http → net/http)
+			lastSeg := imp.Path
+			if slashIdx := strings.LastIndexByte(imp.Path, '/'); slashIdx >= 0 {
+				lastSeg = imp.Path[slashIdx+1:]
+			}
+			// Also handle Python dotted paths: "os.path" → last segment "path",
+			// but the prefix might be "os" matching the first segment.
+			firstSeg := imp.Path
+			if dotSeg := strings.IndexByte(imp.Path, '.'); dotSeg >= 0 {
+				firstSeg = imp.Path[:dotSeg]
+			}
+			if lastSeg == prefix || firstSeg == prefix {
+				return imp.Path
+			}
+		}
+	}
+
+	// Strategy 3: Bare name in import Names.
+	// "Flask()" → import {Path: "flask", Names: ["Flask"]} → "flask"
+	// "Router()" → import {Path: "express", Names: ["Router"]} → "express"
+	for _, imp := range fileImports {
+		for _, name := range imp.Names {
+			// Handle aliased names: "merge as pd_merge" → original is "merge"
+			localName, _ := parseAliasedName(name)
+			if localName == target {
+				return imp.Path
+			}
+		}
+	}
+
+	return ""
 }
 
 // getOrCreatePlaceholder returns an existing placeholder or creates a new one.
