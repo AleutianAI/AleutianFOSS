@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -218,6 +219,17 @@ func (p *JavaScriptParser) Parse(ctx context.Context, content []byte, filePath s
 				}
 			}
 		}
+	}
+
+	// IT-06b Issue 1: Post-pass — emit synthetic class symbols for module.exports
+	// pseudo-classes. In CommonJS codebases (e.g., Express), patterns like:
+	//   var app = exports = module.exports = {}
+	//   app.init = function init() { ... }
+	// create methods with Receiver="Application" but no parent class symbol.
+	// This post-pass creates a synthetic SymbolKindClass for each semantic type name,
+	// making them discoverable by find_implementations and find_references.
+	if len(exportAliases) > 0 {
+		p.emitSyntheticClassSymbols(exportAliases, filePath, result)
 	}
 
 	// Validate result
@@ -1536,6 +1548,114 @@ func (p *JavaScriptParser) buildModuleExportAliases(rootNode *sitter.Node, conte
 	}
 
 	return aliases
+}
+
+// emitSyntheticClassSymbols creates class symbols for CommonJS module.exports pseudo-classes.
+//
+// Description:
+//
+//	IT-06b Issue 1: In codebases like Express.js, module.exports patterns create methods
+//	with a Receiver (e.g., "Application") but no parent class symbol exists in the index.
+//	This makes the semantic type name invisible to tools like find_implementations.
+//
+//	This method creates a synthetic SymbolKindClass for each unique semantic type name
+//	found in exportAliases, collects all methods with a matching Receiver as Children,
+//	and uses the original variable's location for the synthetic symbol.
+//
+// Inputs:
+//   - exportAliases: Map from variable names to semantic type names (e.g., "app" → "Application").
+//   - filePath: The source file path.
+//   - result: The ParseResult to append synthetic symbols to.
+//
+// Thread Safety: Not safe for concurrent use (modifies result).
+func (p *JavaScriptParser) emitSyntheticClassSymbols(exportAliases map[string]string, filePath string, result *ParseResult) {
+	// Deduplicate: multiple variables may alias the same semantic type
+	// (e.g., "app" and "exports" both → "Application").
+	emitted := make(map[string]bool)
+
+	// Sort variable names for deterministic iteration order.
+	// When multiple variables alias the same semantic name (e.g., "app" and "exports"
+	// both → "Application"), the first alphabetically determines the location used.
+	varNames := make([]string, 0, len(exportAliases))
+	for varName := range exportAliases {
+		varNames = append(varNames, varName)
+	}
+	sort.Strings(varNames)
+
+	for _, varName := range varNames {
+		semanticName := exportAliases[varName]
+		if emitted[semanticName] {
+			continue
+		}
+
+		// Check if a real class/interface symbol with this name already exists.
+		// If so, don't emit a synthetic duplicate (this can happen if the file
+		// also contains `class Application { ... }`).
+		alreadyExists := false
+		for _, sym := range result.Symbols {
+			if sym.Name == semanticName && (sym.Kind == SymbolKindClass || sym.Kind == SymbolKindInterface) {
+				alreadyExists = true
+				break
+			}
+		}
+		if alreadyExists {
+			continue
+		}
+
+		// Find the original variable symbol to get its location.
+		var varSym *Symbol
+		for _, sym := range result.Symbols {
+			if sym.Name == varName && sym.Kind == SymbolKindVariable {
+				varSym = sym
+				break
+			}
+		}
+
+		// Determine location: use the variable symbol if found, otherwise use line 1.
+		startLine := 1
+		endLine := 1
+		startCol := 0
+		endCol := 0
+		if varSym != nil {
+			startLine = varSym.StartLine
+			endLine = varSym.EndLine
+			startCol = varSym.StartCol
+			endCol = varSym.EndCol
+		}
+
+		// Collect all methods with Receiver == semanticName as Children.
+		var children []*Symbol
+		for _, sym := range result.Symbols {
+			if sym.Receiver == semanticName && (sym.Kind == SymbolKindMethod || sym.Kind == SymbolKindFunction || sym.Kind == SymbolKindProperty) {
+				children = append(children, sym)
+			}
+		}
+
+		syntheticSym := &Symbol{
+			ID:         GenerateID(filePath, startLine, semanticName),
+			Name:       semanticName,
+			Kind:       SymbolKindClass,
+			FilePath:   filePath,
+			Language:   "javascript",
+			Exported:   true,
+			StartLine:  startLine,
+			EndLine:    endLine,
+			StartCol:   startCol,
+			EndCol:     endCol,
+			Children:   children,
+			DocComment: fmt.Sprintf("Synthetic class derived from module.exports alias '%s'.", varName),
+		}
+
+		result.Symbols = append(result.Symbols, syntheticSym)
+		emitted[semanticName] = true
+
+		slog.Debug("IT-06b: emitted synthetic class symbol",
+			slog.String("name", semanticName),
+			slog.String("file", filePath),
+			slog.String("alias_of", varName),
+			slog.Int("children", len(children)),
+		)
+	}
 }
 
 // findModuleExportVarDecl finds variable names assigned to module.exports in a var/let/const declaration.

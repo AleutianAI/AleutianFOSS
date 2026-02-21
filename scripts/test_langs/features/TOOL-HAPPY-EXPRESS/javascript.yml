@@ -1473,86 +1473,94 @@ tests:
       - type: graph_tool_used
 
   - id: 7098
-    name: express_write
+    name: express_trace_request_pipeline
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against Express web framework.
+      Trace the request processing pipeline in Express.
     query: |
-      Create a new test middleware
+      What is the complete call chain from incoming request to response in Express?
     expected_state: COMPLETE
     reference_answer: |
-      The Write tool processes test middleware for
-      the Express web framework codebase.
+      Request processing flows through app.handle, which creates the
+      middleware stack, iterates through layers via next(), matches
+      routes, and dispatches to the final route handler.
     validations:
       - type: graph_tool_used
 
   - id: 7099
-    name: express_write_b
+    name: express_trace_router_matching
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against Express web framework (test B).
+      Trace route matching logic in Express Router.
     query: |
-      Write a custom error handler
+      How does Express Router match a URL path to a route handler?
     expected_state: COMPLETE
     reference_answer: |
-      The Write tool processes custom error handler for
-      the Express web framework codebase.
+      Router matching iterates through the layer stack, each layer
+      tests its path regex against the request URL, extracts named
+      parameters via path-to-regexp captures, and dispatches to
+      the matched route's handler chain.
     validations:
       - type: graph_tool_used
 
   - id: 7100
-    name: express_write_c
+    name: express_trace_error_middleware
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against Express web framework (test C).
+      Trace error handling middleware flow in Express.
     query: |
-      Create a route helper
+      Trace how errors propagate through Express middleware to the error handler
     expected_state: COMPLETE
     reference_answer: |
-      The Write tool processes route helper for
-      the Express web framework codebase.
+      When next(err) is called, Express skips normal middleware and
+      routes to error-handling middleware (4-argument functions),
+      flowing through the layer stack until an error handler responds
+      or the default error handler sends a 500.
     validations:
       - type: graph_tool_used
 
   - id: 7101
-    name: express_edit
+    name: express_trace_response_send
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against Express web framework.
+      Trace the response sending flow in Express.
     query: |
-      Modify the app.handle method
+      What functions are involved when res.send() writes a response?
     expected_state: COMPLETE
     reference_answer: |
-      The Edit tool processes app.handle method for
-      the Express web framework codebase.
+      res.send sets Content-Type based on the body type, encodes the
+      body (string/buffer/JSON), sets Content-Length, applies ETag
+      generation, checks freshness for 304, and writes to the socket.
     validations:
       - type: graph_tool_used
 
   - id: 7102
-    name: express_edit_b
+    name: express_trace_static_serve
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against Express web framework (test B).
+      Trace static file serving in Express.
     query: |
-      Update the Router.route
+      What is the call path for serving static files via express.static?
     expected_state: COMPLETE
     reference_answer: |
-      The Edit tool processes Router.route for
-      the Express web framework codebase.
+      express.static creates a serve-static middleware which resolves
+      the file path, checks the file system, sets cache headers,
+      handles range requests, and streams the file via send.
     validations:
       - type: graph_tool_used
 
   - id: 7103
-    name: express_edit_c
+    name: express_trace_body_parsing
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against Express web framework (test C).
+      Trace body parsing middleware flow in Express.
     query: |
-      Fix the res.send implementation
+      How does Express parse JSON request bodies through middleware?
     expected_state: COMPLETE
     reference_answer: |
-      The Edit tool processes res.send implementation for
-      the Express web framework codebase.
+      express.json() middleware checks Content-Type, reads the raw body
+      stream, parses JSON via JSON.parse with reviver support, and
+      attaches the parsed object to req.body for downstream handlers.
     validations:
       - type: graph_tool_used
 
@@ -1725,44 +1733,47 @@ tests:
       - type: graph_tool_used
 
   - id: 7116
-    name: express_json
+    name: express_trace_app_listen
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against Express web framework.
+      Trace the app.listen startup flow in Express.
     query: |
-      Parse the package.json deps
+      What functions are called when Express starts listening on a port?
     expected_state: COMPLETE
     reference_answer: |
-      The JSON tool processes package.json deps for
-      the Express web framework codebase.
+      app.listen creates an http.Server with the app as the request
+      handler, binds to the specified port, and returns the server
+      instance for later shutdown.
     validations:
       - type: graph_tool_used
 
   - id: 7117
-    name: express_json_b
+    name: express_trace_view_rendering
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against Express web framework (test B).
+      Trace view/template rendering in Express.
     query: |
-      Extract info from test fixtures
+      How does res.render() flow from Express to the template engine?
     expected_state: COMPLETE
     reference_answer: |
-      The JSON tool processes test fixtures for
-      the Express web framework codebase.
+      res.render resolves the view, creates a View object that locates
+      the template file, delegates to the registered engine's render
+      function, and sends the rendered HTML as the response.
     validations:
       - type: graph_tool_used
 
   - id: 7118
-    name: express_json_c
+    name: express_trace_sub_app_mount
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against Express web framework (test C).
+      Trace sub-application mounting in Express.
     query: |
-      Read the example app configs
+      What happens when a sub-app is mounted via app.use('/api', subApp)?
     expected_state: COMPLETE
     reference_answer: |
-      The JSON tool processes example app configs for
-      the Express web framework codebase.
+      Mounting registers the sub-app as a handler on a layer with the
+      mount path. On matching requests, Express strips the mount path,
+      adjusts req.baseUrl, and delegates to the sub-app's handle method.
     validations:
       - type: graph_tool_used
 
@@ -2125,18 +2136,18 @@ tests:
       - type: crs_trace_step_present
 
   - id: 7145
-    name: express_crs_write
+    name: express_crs_trace_flow
     category: TOOL_CRS_VERIFICATION
     description: >
-      GR-58/IT-35: Verify write tool produces CRS TraceStep against Express.
+      CRS verification: trace analysis records CRS state correctly.
     query: |
-      Write a test file for Express middleware.
+      Trace how errors propagate through Express middleware layers
     expected_state: COMPLETE
     reference_answer: |
-      write tool was used and produced a CRS TraceStep with appropriate metadata.
+      The trace analysis tool records CRS state for middleware error
+      propagation in the Express.js web framework codebase.
     validations:
-      - type: graph_tool_used
-      - type: crs_trace_step_present
+      - type: crs_state_recorded
 
   - id: 7146
     name: express_crs_tree

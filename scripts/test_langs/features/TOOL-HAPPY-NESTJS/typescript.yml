@@ -1486,86 +1486,97 @@ tests:
       - type: graph_tool_used
 
   - id: 8098
-    name: nestjs_write
+    name: nestjs_trace_request_pipeline
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against NestJS framework.
+      Trace the request handling pipeline in NestJS.
     query: |
-      Create a new test module
+      What is the complete call chain from incoming HTTP request to controller method in NestJS?
     expected_state: COMPLETE
     reference_answer: |
-      The Write tool processes test module for
-      the NestJS framework codebase.
+      Request handling flows through the HTTP adapter, global middleware,
+      guard execution, interceptor chain, pipe validation, controller
+      method invocation, and response mapping back through interceptors.
     validations:
       - type: graph_tool_used
 
   - id: 8099
-    name: nestjs_write_b
+    name: nestjs_trace_dependency_injection
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against NestJS framework (test B).
+      Trace dependency injection container resolution in NestJS.
     query: |
-      Write a custom decorator
+      How does NestJS resolve and inject dependencies when creating a provider?
     expected_state: COMPLETE
     reference_answer: |
-      The Write tool processes custom decorator for
-      the NestJS framework codebase.
+      DI resolution flows through the Injector which scans constructor
+      parameters via reflection metadata, recursively resolves each
+      dependency from the module's provider registry, handles scope
+      (singleton/request/transient), and instantiates the provider.
     validations:
       - type: graph_tool_used
 
   - id: 8100
-    name: nestjs_write_c
+    name: nestjs_trace_module_init
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against NestJS framework (test C).
+      Trace module initialization lifecycle in NestJS.
     query: |
-      Create a guard helper
+      Trace the call chain for NestJS module initialization at startup
     expected_state: COMPLETE
     reference_answer: |
-      The Write tool processes guard helper for
-      the NestJS framework codebase.
+      Module initialization flows through NestFactory.create, which
+      scans module metadata, builds the dependency graph, resolves
+      imports, registers providers/controllers, calls onModuleInit
+      hooks, and starts the HTTP listener.
     validations:
       - type: graph_tool_used
 
   - id: 8101
-    name: nestjs_edit
+    name: nestjs_trace_guard_execution
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against NestJS framework.
+      Trace guard execution flow in NestJS.
     query: |
-      Modify the NestFactory.create
+      What functions are involved when NestJS evaluates route guards?
     expected_state: COMPLETE
     reference_answer: |
-      The Edit tool processes NestFactory.create for
-      the NestJS framework codebase.
+      Guard execution flows through the GuardsConsumer which collects
+      global, controller, and handler-level guards, calls canActivate
+      on each sequentially, and short-circuits with ForbiddenException
+      if any guard returns false.
     validations:
       - type: graph_tool_used
 
   - id: 8102
-    name: nestjs_edit_b
+    name: nestjs_trace_interceptor_chain
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against NestJS framework (test B).
+      Trace interceptor chain execution in NestJS.
     query: |
-      Update the module scanning
+      How do NestJS interceptors wrap the handler execution?
     expected_state: COMPLETE
     reference_answer: |
-      The Edit tool processes module scanning for
-      the NestJS framework codebase.
+      Interceptors form an RxJS Observable chain via InterceptorsConsumer.
+      Each interceptor's intercept() receives an ExecutionContext and
+      CallHandler, can transform the response stream, add logging,
+      or modify the result through Observable operators.
     validations:
       - type: graph_tool_used
 
   - id: 8103
-    name: nestjs_edit_c
+    name: nestjs_trace_pipe_validation
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against NestJS framework (test C).
+      Trace validation pipe execution in NestJS.
     query: |
-      Fix the route registration
+      What is the call path for request body validation through pipes?
     expected_state: COMPLETE
     reference_answer: |
-      The Edit tool processes route registration for
-      the NestJS framework codebase.
+      Pipe validation flows through PipesConsumer which calls each
+      pipe's transform method. ValidationPipe uses class-transformer
+      to instantiate the DTO, class-validator to validate constraints,
+      and throws BadRequestException on validation failure.
     validations:
       - type: graph_tool_used
 
@@ -1738,44 +1749,50 @@ tests:
       - type: graph_tool_used
 
   - id: 8116
-    name: nestjs_json
+    name: nestjs_trace_exception_filter
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against NestJS framework.
+      Trace exception filter handling in NestJS.
     query: |
-      Parse the package.json
+      How does NestJS route exceptions to the appropriate exception filter?
     expected_state: COMPLETE
     reference_answer: |
-      The JSON tool processes package.json for
-      the NestJS framework codebase.
+      Exception handling flows through ExceptionsHandler which catches
+      thrown exceptions, searches for matching exception filters from
+      handler to controller to global level, and delegates to the
+      filter's catch method or the default BaseExceptionFilter.
     validations:
       - type: graph_tool_used
 
   - id: 8117
-    name: nestjs_json_b
+    name: nestjs_trace_middleware_apply
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against NestJS framework (test B).
+      Trace middleware application in NestJS.
     query: |
-      Extract info from tsconfig.json
+      What functions apply middleware to routes in NestJS?
     expected_state: COMPLETE
     reference_answer: |
-      The JSON tool processes tsconfig.json for
-      the NestJS framework codebase.
+      Middleware application flows through MiddlewareModule which
+      resolves middleware from the configure method, matches routes
+      via RoutesMapper, and registers them with the HTTP adapter
+      in the correct execution order.
     validations:
       - type: graph_tool_used
 
   - id: 8118
-    name: nestjs_json_c
+    name: nestjs_trace_websocket_gateway
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against NestJS framework (test C).
+      Trace WebSocket gateway message handling in NestJS.
     query: |
-      Read the lerna.json
+      How does NestJS route incoming WebSocket messages to gateway handlers?
     expected_state: COMPLETE
     reference_answer: |
-      The JSON tool processes lerna.json for
-      the NestJS framework codebase.
+      WebSocket message handling flows through the WebSocketGateway
+      which registers with the IoAdapter, listens for events matching
+      @SubscribeMessage decorators, pipes messages through the same
+      guard/interceptor/pipe chain as HTTP, and emits responses.
     validations:
       - type: graph_tool_used
 

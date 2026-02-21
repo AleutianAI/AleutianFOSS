@@ -48,6 +48,10 @@ type GetCallChainParams struct {
 	// IT-05 R5: When set, provides the resolved destination symbol ID for
 	// dual-endpoint resolution. Used to enhance output messaging.
 	DestinationName string
+
+	// PackageHint is an optional package/module context extracted from the query.
+	// IT-06c: Used to disambiguate when multiple symbols share the same name.
+	PackageHint string
 }
 
 // GetCallChainOutput contains the structured result.
@@ -280,14 +284,36 @@ func (t *getCallChainTool) Execute(ctx context.Context, params map[string]any) (
 			for i, n := range nodes {
 				syms[i] = n.Symbol
 			}
-			best := disambiguateGraphNodes(syms)
-			if best != nil {
-				symbolID = best.ID
-				t.logger.Debug("get_call_chain: resolved via graph fallback with disambiguation",
-					slog.String("function_name", p.FunctionName),
-					slog.String("symbol_id", symbolID),
-					slog.Int("candidates", len(nodes)),
-				)
+			// IT-06c: Try package hint disambiguation first, then fall back
+			// to the existing disambiguateGraphNodes heuristic.
+			if p.PackageHint != "" {
+				filtered := filterByPackageHint(syms, p.PackageHint, t.logger, "get_call_chain")
+				if len(filtered) == 1 {
+					symbolID = filtered[0].ID
+					t.logger.Debug("get_call_chain: resolved via package hint",
+						slog.String("function_name", p.FunctionName),
+						slog.String("package_hint", p.PackageHint),
+						slog.String("symbol_id", symbolID),
+						slog.Int("candidates", len(nodes)),
+					)
+				} else {
+					// Multiple still remain after hint — use existing disambiguation
+					best := disambiguateGraphNodes(filtered)
+					if best != nil {
+						symbolID = best.ID
+					}
+				}
+			}
+			if symbolID == "" {
+				best := disambiguateGraphNodes(syms)
+				if best != nil {
+					symbolID = best.ID
+					t.logger.Debug("get_call_chain: resolved via graph fallback with disambiguation",
+						slog.String("function_name", p.FunctionName),
+						slog.String("symbol_id", symbolID),
+						slog.Int("candidates", len(nodes)),
+					)
+				}
 			}
 		}
 	}
@@ -488,6 +514,13 @@ func (t *getCallChainTool) parseParams(params map[string]any) (GetCallChainParam
 	if destRaw, ok := params["destination_name"]; ok {
 		if dest, ok := parseStringParam(destRaw); ok {
 			p.DestinationName = dest
+		}
+	}
+
+	// IT-06c: Extract package_hint (optional)
+	if hintRaw, ok := params["package_hint"]; ok {
+		if hint, ok := parseStringParam(hintRaw); ok && hint != "" {
+			p.PackageHint = hint
 		}
 	}
 

@@ -1475,86 +1475,92 @@ tests:
       - type: graph_tool_used
 
   - id: 5298
-    name: gin_write
+    name: gin_trace_request_lifecycle
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against Gin web framework.
+      Trace the HTTP request lifecycle through Gin's engine.
     query: |
-      Create a new middleware helper
+      What is the complete call chain from incoming HTTP request to response in Gin?
     expected_state: COMPLETE
     reference_answer: |
-      The Write tool processes middleware helper for
-      the Gin web framework codebase.
+      Request lifecycle flows through Engine.ServeHTTP, router tree lookup,
+      context creation, middleware chain execution, handler invocation,
+      and response writing back to the client.
     validations:
       - type: graph_tool_used
 
   - id: 5299
-    name: gin_write_b
+    name: gin_trace_middleware_chain
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against Gin web framework (test B).
+      Trace how middleware handlers chain together in Gin.
     query: |
-      Write a custom renderer
+      How does Gin's middleware chain execute handlers in sequence?
     expected_state: COMPLETE
     reference_answer: |
-      The Write tool processes custom renderer for
-      the Gin web framework codebase.
+      Middleware chaining works through Context.Next which increments
+      the handler index and calls the next handler in the chain,
+      allowing pre/post processing around the main handler.
     validations:
       - type: graph_tool_used
 
   - id: 5300
-    name: gin_write_c
+    name: gin_trace_route_registration
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against Gin web framework (test C).
+      Trace route registration and tree building in Gin.
     query: |
-      Create a test route setup
+      Trace the call chain from router.GET to the radix tree insertion
     expected_state: COMPLETE
     reference_answer: |
-      The Write tool processes test route setup for
-      the Gin web framework codebase.
+      Route registration flows from RouterGroup.GET through handle(),
+      which calculates the absolute path, combines group handlers with
+      route handlers, and inserts into the radix tree via addRoute.
     validations:
       - type: graph_tool_used
 
   - id: 5301
-    name: gin_edit
+    name: gin_trace_param_binding
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against Gin web framework.
+      Trace parameter binding and validation flow in Gin.
     query: |
-      Modify the Engine.ServeHTTP
+      What functions are involved when Gin binds JSON request body to a struct?
     expected_state: COMPLETE
     reference_answer: |
-      The Edit tool processes Engine.ServeHTTP for
-      the Gin web framework codebase.
+      JSON binding flows through Context.ShouldBindJSON, which delegates
+      to the JSON binding implementation, uses json.Decoder to parse the
+      request body, and runs struct validation via the validator package.
     validations:
       - type: graph_tool_used
 
   - id: 5302
-    name: gin_edit_b
+    name: gin_trace_error_handling
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against Gin web framework (test B).
+      Trace error handling and recovery in Gin.
     query: |
-      Update the Context.JSON rendering
+      How does Gin's Recovery middleware handle panics in handlers?
     expected_state: COMPLETE
     reference_answer: |
-      The Edit tool processes Context.JSON rendering for
-      the Gin web framework codebase.
+      Recovery middleware uses defer/recover to catch panics, logs the
+      stack trace, writes a 500 response via Context.AbortWithStatus,
+      and prevents the panic from crashing the server.
     validations:
       - type: graph_tool_used
 
   - id: 5303
-    name: gin_edit_c
+    name: gin_trace_response_render
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against Gin web framework (test C).
+      Trace the response rendering pipeline in Gin.
     query: |
-      Fix the router tree insertion
+      What is the call path from Context.JSON to the actual HTTP response write?
     expected_state: COMPLETE
     reference_answer: |
-      The Edit tool processes router tree insertion for
-      the Gin web framework codebase.
+      Context.JSON creates a JSON render object, sets content type header,
+      calls Render which marshals the data to JSON bytes, writes the
+      status code, and flushes the response to the client.
     validations:
       - type: graph_tool_used
 
@@ -1727,44 +1733,48 @@ tests:
       - type: graph_tool_used
 
   - id: 5316
-    name: gin_json
+    name: gin_trace_tree_lookup
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against Gin web framework.
+      Trace radix tree route lookup in Gin.
     query: |
-      Parse the go.mod deps
+      How does Gin's radix tree resolve a URL path to a handler?
     expected_state: COMPLETE
     reference_answer: |
-      The JSON tool processes go.mod deps for
-      the Gin web framework codebase.
+      Route lookup traverses the radix tree node by node, matching
+      path segments, extracting named parameters and wildcards,
+      and returning the matched handlers and parameter values.
     validations:
       - type: graph_tool_used
 
   - id: 5317
-    name: gin_json_b
+    name: gin_trace_context_pool
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against Gin web framework (test B).
+      Trace Context pool management in Gin.
     query: |
-      Extract info from test fixtures
+      How does Gin reuse Context objects via sync.Pool?
     expected_state: COMPLETE
     reference_answer: |
-      The JSON tool processes test fixtures for
-      the Gin web framework codebase.
+      Gin uses sync.Pool to recycle Context objects. On each request,
+      Engine.ServeHTTP gets a Context from the pool, resets it with
+      the new request/response, processes the request, then returns
+      the Context to the pool.
     validations:
       - type: graph_tool_used
 
   - id: 5318
-    name: gin_json_c
+    name: gin_trace_group_nesting
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against Gin web framework (test C).
+      Trace router group nesting and path computation in Gin.
     query: |
-      Read the benchmark config
+      How do nested router groups combine paths and middleware?
     expected_state: COMPLETE
     reference_answer: |
-      The JSON tool processes benchmark config for
-      the Gin web framework codebase.
+      RouterGroup.Group creates a new group with the combined base path
+      and a copy of the parent's handlers. When routes are added to the
+      nested group, paths are joined and handler chains are concatenated.
     validations:
       - type: graph_tool_used
 
@@ -2126,18 +2136,18 @@ tests:
       - type: crs_trace_step_present
 
   - id: 5345
-    name: gin_crs_write
+    name: gin_crs_trace_flow
     category: TOOL_CRS_VERIFICATION
     description: >
-      GR-58/IT-35: Verify write tool produces CRS TraceStep against Gin.
+      CRS verification: trace analysis records CRS state correctly.
     query: |
-      Write a test scaffolding file for Gin's context module.
+      Trace how errors propagate through Gin's middleware chain
     expected_state: COMPLETE
     reference_answer: |
-      write tool was used and produced a CRS TraceStep with appropriate metadata.
+      The trace analysis tool records CRS state for middleware error
+      propagation in the Gin web framework codebase.
     validations:
-      - type: graph_tool_used
-      - type: crs_trace_step_present
+      - type: crs_state_recorded
 
   - id: 5346
     name: gin_crs_diff

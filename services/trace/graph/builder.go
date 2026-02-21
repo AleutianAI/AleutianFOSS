@@ -709,6 +709,9 @@ func (b *Builder) extractSymbolEdges(ctx context.Context, state *buildState, sym
 
 	// IT-03a C-3: Extract type narrowing reference edges
 	b.extractTypeNarrowingEdges(state, sym)
+
+	// IT-06 Bug 9: Extract type annotation reference edges (parameter/return types)
+	b.extractTypeRefEdges(state, sym)
 }
 
 // extractReceiverEdge creates a RECEIVES edge from method to receiver type.
@@ -1061,6 +1064,59 @@ func (b *Builder) extractTypeNarrowingEdges(state *buildState, sym *ast.Symbol) 
 		targets := b.resolveSymbolByName(state, typeName, sym.FilePath)
 		if len(targets) == 0 {
 			continue
+		}
+		for _, targetID := range targets {
+			err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeReferences, sym.Location())
+			if err != nil && !strings.Contains(err.Error(), "already exists") {
+				state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+					FromID:   sym.ID,
+					ToID:     targetID,
+					EdgeType: EdgeTypeReferences,
+					Err:      err,
+				})
+			} else if err == nil {
+				state.result.Stats.EdgesCreated++
+			}
+		}
+	}
+}
+
+// extractTypeRefEdges creates REFERENCES edges from a symbol to types used in its
+// parameter annotations and return type annotations.
+//
+// IT-06 Bug 9: Type annotations like `def foo(x: Series) -> DataFrame` produce
+// TypeReference entries in the AST. This method resolves them to graph nodes and
+// creates EdgeTypeReferences edges, enabling find_references to discover usage
+// through type annotations (not just constructor calls).
+//
+// Inputs:
+//   - state: The build state containing symbol indexes.
+//   - sym: Any symbol that may have TypeReferences populated.
+//
+// Outputs:
+//   - None. Edges are added to state.graph, errors to state.result.EdgeErrors.
+//
+// Thread Safety:
+//
+//	Same as other extract*Edges methods — not safe for concurrent use on the
+//	same buildState, but the builder serializes calls.
+func (b *Builder) extractTypeRefEdges(state *buildState, sym *ast.Symbol) {
+	if len(sym.TypeReferences) == 0 {
+		return
+	}
+
+	// Deduplicate: a function referencing the same type in both params and return
+	// should produce only one edge.
+	seen := make(map[string]bool)
+	for _, typeRef := range sym.TypeReferences {
+		if seen[typeRef.Name] {
+			continue
+		}
+		seen[typeRef.Name] = true
+
+		targets := b.resolveSymbolByName(state, typeRef.Name, sym.FilePath)
+		if len(targets) == 0 {
+			continue // Don't create placeholders for type refs (matches extractTypeArgEdges behavior)
 		}
 		for _, targetID := range targets {
 			err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeReferences, sym.Location())

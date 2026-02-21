@@ -28,13 +28,10 @@ tools:
       - incoming calls
       - call sites
       - invocations of
-      - references to
       - called by
       - where is it called
-      - usages of
-      - find references
-    use_when: "User asks who or what calls a specific function. The target function is the OBJECT being called. Examples: 'who calls parseConfig?', 'what calls the validate function?', 'find usages of Process', 'where is Open called from?'. NEVER use for 'what does X call' or 'what functions does X call' — those are find_callees queries."
-    avoid_when: "NEVER use find_callers when the query contains 'call chain', 'call graph', 'call hierarchy', 'call tree', 'transitive', or 'recursive' — use get_call_chain instead. NEVER use find_callers when user asks what a function calls or depends on. The target function is the SUBJECT doing the calling. Examples: 'what does X call?', 'what functions does Build call?', 'what methods does X invoke?'. Use find_callees instead."
+    use_when: "User asks who or what CALLS a specific function. The query is about CALL relationships, not general usage. Examples: 'who calls parseConfig?', 'what calls the validate function?', 'where is Open called from?'. NEVER use for 'where is X used?' or 'find references to X' — those are find_references queries. NEVER use for 'what does X call?' — those are find_callees queries."
+    avoid_when: "NEVER use find_callers when the query asks 'where is X used?', 'references to X', 'usages of X', or 'find all uses of X' — use find_references instead. NEVER use find_callers when the query contains 'call chain', 'call graph', 'call hierarchy', 'call tree', 'transitive', or 'recursive' — use get_call_chain instead. NEVER use find_callers when user asks what a function calls or depends on — use find_callees instead."
     instead_of:
       - tool: Grep
         when: "Searching for function call patterns in code"
@@ -94,13 +91,22 @@ tools:
   - name: find_references
     keywords:
       - references
+      - references to
       - usages
+      - usages of
+      - find references
       - where is it used
+      - where is used
+      - used across
+      - is referenced
       - occurrences
       - all usages
       - find all uses
-    use_when: "User asks where a symbol is used or referenced"
-    avoid_when: "User specifically asks about callers (use find_callers)"
+      - type used
+      - struct used
+      - class used
+    use_when: "User asks WHERE a symbol (type, class, struct, function, variable) is USED or REFERENCED across the codebase. Examples: 'Where is Entry type used?', 'What code references Config?', 'Show usages of HandlerFunc', 'Where is the Request object used across the codebase?', 'Find all references to Flask class'. This is the correct tool for any 'where is X used?' or 'references to X' query."
+    avoid_when: "User specifically asks who CALLS a function (use find_callers). User asks what a function CALLS (use find_callees)."
     instead_of:
       - tool: Grep
         when: "Looking for all usages of a symbol"

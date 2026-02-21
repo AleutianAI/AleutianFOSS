@@ -212,7 +212,7 @@ detect_language_from_tests() {
 
 # If specific tests were provided without --lang, auto-detect language
 if [ -n "$SPECIFIC_TESTS" ] && [ -z "$LANGUAGE_FILTER" ]; then
-    AUTO_DETECTED_LANG=$(detect_language_from_tests "$SPECIFIC_TESTS")
+    AUTO_DETECTED_LANG=$(detect_language_from_tests "$SPECIFIC_TESTS" || true)
     if [ -n "$AUTO_DETECTED_LANG" ]; then
         LANGUAGE_FILTER="$AUTO_DETECTED_LANG"
         echo -e "${CYAN}Auto-detected language from test IDs: ${BOLD}$LANGUAGE_FILTER${NC}"
@@ -220,35 +220,57 @@ if [ -n "$SPECIFIC_TESTS" ] && [ -z "$LANGUAGE_FILTER" ]; then
     fi
 fi
 
-# Auto-detect TOOL-HAPPY feature dir from test IDs in the 5000+ range
-# Maps test ID ranges to the correct TOOL-HAPPY-* feature directory
+# Map a single test ID to its TOOL-HAPPY-* feature directory.
+# Uses the "hundreds digit" to distinguish projects within the same language range.
+# Ranges: Hugo=50xx, Badger=51xx, Gin=52xx, Flask=60xx, Pandas=61xx,
+#          Express=70xx, BabylonJS=71xx, NestJS=80xx, Plottable=81xx
+map_test_id_to_feature() {
+    local tid="$1"
+    if [ "$tid" -ge 5000 ] && [ "$tid" -le 5099 ]; then echo "TOOL-HAPPY-HUGO"
+    elif [ "$tid" -ge 5100 ] && [ "$tid" -le 5199 ]; then echo "TOOL-HAPPY-BADGER"
+    elif [ "$tid" -ge 5200 ] && [ "$tid" -le 5399 ]; then echo "TOOL-HAPPY-GIN"
+    elif [ "$tid" -ge 6000 ] && [ "$tid" -le 6099 ]; then echo "TOOL-HAPPY-FLASK"
+    elif [ "$tid" -ge 6100 ] && [ "$tid" -le 6299 ]; then echo "TOOL-HAPPY-PANDAS"
+    elif [ "$tid" -ge 7000 ] && [ "$tid" -le 7099 ]; then echo "TOOL-HAPPY-EXPRESS"
+    elif [ "$tid" -ge 7100 ] && [ "$tid" -le 7299 ]; then echo "TOOL-HAPPY-BABYLONJS"
+    elif [ "$tid" -ge 8000 ] && [ "$tid" -le 8099 ]; then echo "TOOL-HAPPY-NESTJS"
+    elif [ "$tid" -ge 8100 ] && [ "$tid" -le 8299 ]; then echo "TOOL-HAPPY-PLOTTABLE"
+    fi
+}
+
+# Auto-detect TOOL-HAPPY feature dir(s) from test IDs in the 5000+ range.
+# When test IDs span multiple projects, sets MULTI_FEATURE_FILTERS (space-separated)
+# instead of a single FEATURE_FILTER, enabling cross-project mode.
+MULTI_FEATURE_FILTERS=""
 if [ -n "$SPECIFIC_TESTS" ] && [ -z "$FEATURE_FILTER" ]; then
-    first_test_id=$(expand_test_spec "$SPECIFIC_TESTS" | awk '{print $1}')
-    if [ "$first_test_id" -ge 5000 ] 2>/dev/null; then
-        auto_feature=""
-        if [ "$first_test_id" -ge 5000 ] && [ "$first_test_id" -le 5039 ]; then
-            auto_feature="TOOL-HAPPY-HUGO"
-        elif [ "$first_test_id" -ge 5100 ] && [ "$first_test_id" -le 5139 ]; then
-            auto_feature="TOOL-HAPPY-BADGER"
-        elif [ "$first_test_id" -ge 5200 ] && [ "$first_test_id" -le 5239 ]; then
-            auto_feature="TOOL-HAPPY-GIN"
-        elif [ "$first_test_id" -ge 6000 ] && [ "$first_test_id" -le 6039 ]; then
-            auto_feature="TOOL-HAPPY-FLASK"
-        elif [ "$first_test_id" -ge 6100 ] && [ "$first_test_id" -le 6139 ]; then
-            auto_feature="TOOL-HAPPY-PANDAS"
-        elif [ "$first_test_id" -ge 7000 ] && [ "$first_test_id" -le 7039 ]; then
-            auto_feature="TOOL-HAPPY-EXPRESS"
-        elif [ "$first_test_id" -ge 7100 ] && [ "$first_test_id" -le 7139 ]; then
-            auto_feature="TOOL-HAPPY-BABYLONJS"
-        elif [ "$first_test_id" -ge 8000 ] && [ "$first_test_id" -le 8039 ]; then
-            auto_feature="TOOL-HAPPY-NESTJS"
-        elif [ "$first_test_id" -ge 8100 ] && [ "$first_test_id" -le 8139 ]; then
-            auto_feature="TOOL-HAPPY-PLOTTABLE"
-        fi
+    _all_tests=($(expand_test_spec "$SPECIFIC_TESTS"))
+    _features_list=""
+    for tid in "${_all_tests[@]}"; do
+        auto_feature=$(map_test_id_to_feature "$tid")
         if [ -n "$auto_feature" ]; then
-            FEATURE_FILTER="$auto_feature"
-            echo -e "${CYAN}Auto-detected feature from test IDs: ${BOLD}$FEATURE_FILTER${NC}"
+            # Deduplicate: only add if not already in the list (bash 3 compatible)
+            case " $_features_list " in
+                *" $auto_feature "*)
+                    ;; # already present
+                *)
+                    _features_list="$_features_list $auto_feature"
+                    ;;
+            esac
         fi
+    done
+    # Trim leading space
+    _features_list="${_features_list# }"
+
+    # Count unique features
+    _feature_count=$(echo "$_features_list" | wc -w | tr -d ' ')
+    if [ "$_feature_count" -eq 1 ]; then
+        # Single project — use existing single-feature path
+        FEATURE_FILTER="$_features_list"
+        echo -e "${CYAN}Auto-detected feature from test IDs: ${BOLD}$FEATURE_FILTER${NC}"
+    elif [ "$_feature_count" -gt 1 ]; then
+        # Multiple projects — store for cross-project loading
+        MULTI_FEATURE_FILTERS="$_features_list"
+        echo -e "${CYAN}Auto-detected $_feature_count features from test IDs: ${BOLD}${MULTI_FEATURE_FILTERS}${NC}"
     fi
 fi
 
@@ -1717,6 +1739,51 @@ main() {
             echo -e "${RED}Failed to load tool tests${NC}"
             exit 1
         fi
+        CROSS_PROJECT_MODE=true
+        echo ""
+    elif [ -n "$MULTI_FEATURE_FILTERS" ]; then
+        # Cross-project mode via -t with test IDs spanning multiple projects
+        echo ""
+        echo -e "${CYAN}Loading tests from multiple features (cross-project)...${NC}"
+        echo "  Features: $MULTI_FEATURE_FILTERS"
+
+        # Load each feature's YAML files by temporarily setting FEATURE_FILTER
+        local _saved_feature="$FEATURE_FILTER"
+        local _first=true
+        for mf_feature in $MULTI_FEATURE_FILTERS; do
+            FEATURE_FILTER="$mf_feature"
+            if [ "$_first" = true ]; then
+                # First load: initializes CRS_TESTS arrays
+                if ! load_yaml_tests; then
+                    echo -e "${YELLOW}Warning: failed to load $mf_feature${NC}"
+                fi
+                _first=false
+            else
+                # Subsequent loads: append to existing arrays
+                # We need to call load_yaml_tests but it resets arrays.
+                # Instead, save current state and merge after.
+                local _prev_tests=("${CRS_TESTS[@]}")
+                local _prev_ids=("${CRS_TEST_IDS[@]}")
+                local _prev_roots=("${CRS_TEST_PROJECT_ROOTS[@]}")
+                local _prev_names=("${CRS_TEST_PROJECT_NAMES[@]}")
+                if load_yaml_tests; then
+                    # Merge: prepend saved tests before newly loaded ones
+                    CRS_TESTS=("${_prev_tests[@]}" "${CRS_TESTS[@]}")
+                    CRS_TEST_IDS=("${_prev_ids[@]}" "${CRS_TEST_IDS[@]}")
+                    CRS_TEST_PROJECT_ROOTS=("${_prev_roots[@]}" "${CRS_TEST_PROJECT_ROOTS[@]}")
+                    CRS_TEST_PROJECT_NAMES=("${_prev_names[@]}" "${CRS_TEST_PROJECT_NAMES[@]}")
+                else
+                    # Load failed, restore
+                    CRS_TESTS=("${_prev_tests[@]}")
+                    CRS_TEST_IDS=("${_prev_ids[@]}")
+                    CRS_TEST_PROJECT_ROOTS=("${_prev_roots[@]}")
+                    CRS_TEST_PROJECT_NAMES=("${_prev_names[@]}")
+                    echo -e "${YELLOW}Warning: failed to load $mf_feature${NC}"
+                fi
+            fi
+        done
+        FEATURE_FILTER="$_saved_feature"
+        echo -e "${GREEN}Total loaded: ${#CRS_TESTS[@]} tests across ${MULTI_FEATURE_FILTERS}${NC}"
         CROSS_PROJECT_MODE=true
         echo ""
     elif [ -n "$FEATURE_FILTER" ] || [ -n "$LANGUAGE_FILTER" ]; then

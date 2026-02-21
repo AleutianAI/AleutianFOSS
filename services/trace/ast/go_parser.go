@@ -457,6 +457,8 @@ func (p *GoParser) processFunctionDecl(ctx context.Context, node *sitter.Node, c
 	var params string
 	var returns string
 	var bodyNode *sitter.Node
+	var paramListNode *sitter.Node  // IT-06 Bug 9: track for type ref extraction
+	var returnTypeNode *sitter.Node // IT-06 Bug 9: track standalone return type node
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
@@ -468,11 +470,14 @@ func (p *GoParser) processFunctionDecl(ctx context.Context, node *sitter.Node, c
 			plist := string(content[child.StartByte():child.EndByte()])
 			if params == "" {
 				params = plist
+				paramListNode = child // IT-06 Bug 9
 			} else {
 				returns = plist
+				returnTypeNode = child // IT-06 Bug 9: return parameter_list
 			}
 		case "type_identifier", "pointer_type", "slice_type", "map_type", "channel_type", "qualified_type", "interface_type", "struct_type", "function_type":
 			returns = string(content[child.StartByte():child.EndByte()])
+			returnTypeNode = child // IT-06 Bug 9
 		case "block":
 			// GR-41: Capture function body for call extraction
 			bodyNode = child
@@ -519,6 +524,25 @@ func (p *GoParser) processFunctionDecl(ctx context.Context, node *sitter.Node, c
 		sym.Calls = p.extractCallSites(ctx, bodyNode, content, filePath)
 	}
 
+	// IT-06 Bug 9: Extract type references from parameter and return type annotations
+	var typeRefs []TypeReference
+	if paramListNode != nil {
+		typeRefs = append(typeRefs, extractGoTypeRefsFromParamList(paramListNode, content, filePath)...)
+	}
+	if returnTypeNode != nil {
+		if returnTypeNode.Type() == "parameter_list" {
+			typeRefs = append(typeRefs, extractGoTypeRefsFromParamList(returnTypeNode, content, filePath)...)
+		} else {
+			typeRefs = append(typeRefs, extractGoReturnTypeRefs(returnTypeNode, content, filePath)...)
+		}
+	}
+	if len(typeRefs) > 0 {
+		if len(typeRefs) > MaxTypeReferencesPerSymbol {
+			typeRefs = typeRefs[:MaxTypeReferencesPerSymbol]
+		}
+		sym.TypeReferences = typeRefs
+	}
+
 	result.Symbols = append(result.Symbols, sym)
 }
 
@@ -541,6 +565,8 @@ func (p *GoParser) processMethodDecl(ctx context.Context, node *sitter.Node, con
 	var params string
 	var returns string
 	var bodyNode *sitter.Node
+	var paramListNode *sitter.Node  // IT-06 Bug 9: track params (not receiver) for type ref extraction
+	var returnTypeNode *sitter.Node // IT-06 Bug 9: track standalone return type node
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
@@ -552,14 +578,17 @@ func (p *GoParser) processMethodDecl(ctx context.Context, node *sitter.Node, con
 				receiverStr = plist
 			} else if params == "" {
 				params = plist
+				paramListNode = child // IT-06 Bug 9: second parameter_list is params
 			} else {
 				// Third parameter_list is returns
 				returns = plist
+				returnTypeNode = child // IT-06 Bug 9: third parameter_list is return types
 			}
 		case "field_identifier":
 			name = string(content[child.StartByte():child.EndByte()])
 		case "type_identifier", "pointer_type", "slice_type", "map_type", "channel_type", "qualified_type":
 			returns = string(content[child.StartByte():child.EndByte()])
+			returnTypeNode = child // IT-06 Bug 9
 		case "block":
 			// GR-41: Capture method body for call extraction
 			bodyNode = child
@@ -610,7 +639,179 @@ func (p *GoParser) processMethodDecl(ctx context.Context, node *sitter.Node, con
 		sym.Calls = p.extractCallSites(ctx, bodyNode, content, filePath)
 	}
 
+	// IT-06 Bug 9: Extract type references from parameter and return type annotations
+	var typeRefs []TypeReference
+	if paramListNode != nil {
+		typeRefs = append(typeRefs, extractGoTypeRefsFromParamList(paramListNode, content, filePath)...)
+	}
+	if returnTypeNode != nil {
+		if returnTypeNode.Type() == "parameter_list" {
+			typeRefs = append(typeRefs, extractGoTypeRefsFromParamList(returnTypeNode, content, filePath)...)
+		} else {
+			typeRefs = append(typeRefs, extractGoReturnTypeRefs(returnTypeNode, content, filePath)...)
+		}
+	}
+	if len(typeRefs) > 0 {
+		if len(typeRefs) > MaxTypeReferencesPerSymbol {
+			typeRefs = typeRefs[:MaxTypeReferencesPerSymbol]
+		}
+		sym.TypeReferences = typeRefs
+	}
+
 	result.Symbols = append(result.Symbols, sym)
+}
+
+// goTypeSkipList contains Go built-in types that should not produce TypeReference entries.
+var goTypeSkipList = map[string]bool{
+	// Numeric types
+	"int": true, "int8": true, "int16": true, "int32": true, "int64": true,
+	"uint": true, "uint8": true, "uint16": true, "uint32": true, "uint64": true,
+	"uintptr": true, "float32": true, "float64": true,
+	"complex64": true, "complex128": true,
+	// String and byte types
+	"string": true, "byte": true, "rune": true,
+	// Boolean
+	"bool": true,
+	// Other builtins
+	"error": true, "any": true, "comparable": true,
+}
+
+// extractGoTypeRefsFromParamList walks a tree-sitter parameter_list node and extracts
+// non-builtin type identifiers as TypeReference entries.
+//
+// Description:
+//
+//	Go parameter_list contains parameter_declaration children, each with
+//	identifier(s) and a type node (type_identifier, pointer_type, etc.).
+//	This walks the type nodes to find type_identifier leaves.
+//
+// IT-06 Bug 9: Enables graph edges from Go function parameter/return types.
+//
+// Inputs:
+//   - paramListNode: A tree-sitter "parameter_list" node.
+//   - content: Source file bytes.
+//   - filePath: Relative path for Location.
+//
+// Outputs:
+//   - []TypeReference: Non-builtin type identifiers found in the parameter list.
+func extractGoTypeRefsFromParamList(paramListNode *sitter.Node, content []byte, filePath string) []TypeReference {
+	if paramListNode == nil {
+		return nil
+	}
+
+	var refs []TypeReference
+	seen := make(map[string]bool)
+
+	var walkType func(node *sitter.Node)
+	walkType = func(node *sitter.Node) {
+		if node == nil || len(refs) >= MaxTypeReferencesPerSymbol {
+			return
+		}
+
+		switch node.Type() {
+		case "type_identifier":
+			name := string(content[node.StartByte():node.EndByte()])
+			if !goTypeSkipList[name] && !seen[name] {
+				seen[name] = true
+				refs = append(refs, TypeReference{
+					Name: name,
+					Location: Location{
+						FilePath:  filePath,
+						StartLine: int(node.StartPoint().Row + 1),
+						EndLine:   int(node.EndPoint().Row + 1),
+						StartCol:  int(node.StartPoint().Column),
+						EndCol:    int(node.EndPoint().Column),
+					},
+				})
+			}
+			return
+		case "qualified_type":
+			// For context.Context — extract "Context" (the type_identifier part)
+			// but skip since it's external. Walk children to find type_identifier.
+			for i := 0; i < int(node.ChildCount()); i++ {
+				child := node.Child(i)
+				if child.Type() == "type_identifier" {
+					walkType(child)
+				}
+			}
+			return
+		}
+
+		// Recurse into children (pointer_type, slice_type, map_type, etc.)
+		for i := 0; i < int(node.ChildCount()); i++ {
+			walkType(node.Child(i))
+		}
+	}
+
+	// Walk each parameter_declaration or variadic_parameter_declaration in the list
+	for i := 0; i < int(paramListNode.ChildCount()); i++ {
+		child := paramListNode.Child(i)
+		if child.Type() == "parameter_declaration" || child.Type() == "variadic_parameter_declaration" {
+			// The type is the last non-identifier child. Walk all children that are type nodes.
+			for j := 0; j < int(child.ChildCount()); j++ {
+				typeChild := child.Child(j)
+				switch typeChild.Type() {
+				case "type_identifier", "pointer_type", "slice_type", "map_type",
+					"channel_type", "qualified_type", "interface_type", "struct_type",
+					"function_type", "array_type":
+					walkType(typeChild)
+				}
+			}
+		}
+	}
+
+	return refs
+}
+
+// extractGoReturnTypeRefs extracts TypeReference entries from a standalone return type node.
+//
+// IT-06 Bug 9: For functions returning a single type (not a parameter_list of returns),
+// the return type appears as a direct child of the function_declaration.
+//
+// Inputs:
+//   - typeNode: A tree-sitter type node (type_identifier, pointer_type, etc.).
+//   - content: Source file bytes.
+//   - filePath: Relative path for Location.
+//
+// Outputs:
+//   - []TypeReference: Non-builtin type identifiers found in the return type.
+func extractGoReturnTypeRefs(typeNode *sitter.Node, content []byte, filePath string) []TypeReference {
+	if typeNode == nil {
+		return nil
+	}
+
+	var refs []TypeReference
+	seen := make(map[string]bool)
+
+	var walk func(node *sitter.Node)
+	walk = func(node *sitter.Node) {
+		if node == nil || len(refs) >= MaxTypeReferencesPerSymbol {
+			return
+		}
+		if node.Type() == "type_identifier" {
+			name := string(content[node.StartByte():node.EndByte()])
+			if !goTypeSkipList[name] && !seen[name] {
+				seen[name] = true
+				refs = append(refs, TypeReference{
+					Name: name,
+					Location: Location{
+						FilePath:  filePath,
+						StartLine: int(node.StartPoint().Row + 1),
+						EndLine:   int(node.EndPoint().Row + 1),
+						StartCol:  int(node.StartPoint().Column),
+						EndCol:    int(node.EndPoint().Column),
+					},
+				})
+			}
+			return
+		}
+		for i := 0; i < int(node.ChildCount()); i++ {
+			walk(node.Child(i))
+		}
+	}
+
+	walk(typeNode)
+	return refs
 }
 
 // extractReceiverTypeFromString extracts the type name from a receiver string.

@@ -1474,86 +1474,92 @@ tests:
       - type: graph_tool_used
 
   - id: 5198
-    name: badger_write
+    name: badger_trace_error_paths
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against Badger key-value store.
+      Trace error propagation paths in Badger's DB operations.
     query: |
-      Create a new test helper for DB setup
+      How do errors propagate from disk I/O failures up through DB.Open?
     expected_state: COMPLETE
     reference_answer: |
-      The Write tool processes test helper for DB setup for
-      the Badger key-value store codebase.
+      Errors from disk operations (file open, mmap, directory sync) propagate
+      through manifest loading, memtable recovery, and value log initialization
+      back to DB.Open callers with wrapped context.
     validations:
       - type: graph_tool_used
 
   - id: 5199
-    name: badger_write_b
+    name: badger_trace_compaction_flow
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against Badger key-value store (test B).
+      Trace the compaction pipeline flow in Badger.
     query: |
-      Write a benchmark config
+      What is the complete call flow for LSM tree compaction?
     expected_state: COMPLETE
     reference_answer: |
-      The Write tool processes benchmark config for
-      the Badger key-value store codebase.
+      Compaction flows from the compaction manager through level selection,
+      table merging, key range computation, and new table creation in the
+      levels controller.
     validations:
       - type: graph_tool_used
 
   - id: 5200
-    name: badger_write_c
+    name: badger_trace_gc_pipeline
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against Badger key-value store (test C).
+      Trace the garbage collection pipeline in Badger's value log.
     query: |
-      Create a sample data loader
+      Trace the call chain for value log garbage collection
     expected_state: COMPLETE
     reference_answer: |
-      The Write tool processes sample data loader for
-      the Badger key-value store codebase.
+      Value log GC flows from RunValueLogGC through log file selection,
+      entry iteration, rewriting valid entries, and discarding stale
+      value log files.
     validations:
       - type: graph_tool_used
 
   - id: 5201
-    name: badger_edit
+    name: badger_trace_txn_lifecycle
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against Badger key-value store.
+      Trace the transaction lifecycle in Badger.
     query: |
-      Modify the DB.Open initialization
+      What is the full lifecycle of a Badger transaction from creation to commit?
     expected_state: COMPLETE
     reference_answer: |
-      The Edit tool processes DB.Open initialization for
-      the Badger key-value store codebase.
+      Transaction lifecycle: DB.NewTransaction creates a Txn, which tracks
+      reads and writes. On Commit, it acquires a commit timestamp, writes
+      to the value log, then applies to the LSM tree via batch operations.
     validations:
       - type: graph_tool_used
 
   - id: 5202
-    name: badger_edit_b
+    name: badger_trace_iterator_seek
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against Badger key-value store (test B).
+      Trace the iterator seek path across LSM levels.
     query: |
-      Update the compaction threshold
+      What functions are involved when Iterator.Seek traverses the LSM tree?
     expected_state: COMPLETE
     reference_answer: |
-      The Edit tool processes compaction threshold for
-      the Badger key-value store codebase.
+      Iterator.Seek involves merge iterator coordination across levels,
+      table index binary search, block cache lookup, and bloom filter
+      checks for efficient key location.
     validations:
       - type: graph_tool_used
 
   - id: 5203
-    name: badger_edit_c
+    name: badger_trace_write_batch
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against Badger key-value store (test C).
+      Trace the batch write path in Badger.
     query: |
-      Fix the value log GC trigger
+      What is the call path for writing a batch of entries to Badger?
     expected_state: COMPLETE
     reference_answer: |
-      The Edit tool processes value log GC trigger for
-      the Badger key-value store codebase.
+      Batch write flows through WriteBatch.Set, accumulating entries,
+      then WriteBatch.Flush commits through the transaction pipeline
+      to the value log and memtable.
     validations:
       - type: graph_tool_used
 
@@ -1726,44 +1732,47 @@ tests:
       - type: graph_tool_used
 
   - id: 5216
-    name: badger_json
+    name: badger_trace_manifest_sync
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against Badger key-value store.
+      Trace the manifest file synchronization flow.
     query: |
-      Parse the go.mod deps
+      How does Badger maintain manifest consistency during table operations?
     expected_state: COMPLETE
     reference_answer: |
-      The JSON tool processes go.mod deps for
-      the Badger key-value store codebase.
+      Manifest operations go through manifestFile.addChanges which
+      serializes level changes, writes to the manifest file with
+      CRC checksums, and syncs to disk for crash recovery.
     validations:
       - type: graph_tool_used
 
   - id: 5217
-    name: badger_json_b
+    name: badger_trace_memtable_flush
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against Badger key-value store (test B).
+      Trace the memtable flush to SSTable path.
     query: |
-      Extract info from benchmark results JSON
+      What is the call chain when a memtable is flushed to an SSTable on disk?
     expected_state: COMPLETE
     reference_answer: |
-      The JSON tool processes benchmark results JSON for
-      the Badger key-value store codebase.
+      Memtable flush involves skiplist iteration, table builder accumulation,
+      block encoding, index creation, bloom filter generation, and file
+      sync to create a new SSTable.
     validations:
       - type: graph_tool_used
 
   - id: 5218
-    name: badger_json_c
+    name: badger_trace_cache_eviction
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against Badger key-value store (test C).
+      Trace the block cache eviction mechanism.
     query: |
-      Read the test config files
+      How does the block cache handle eviction when capacity is reached?
     expected_state: COMPLETE
     reference_answer: |
-      The JSON tool processes test config files for
-      the Badger key-value store codebase.
+      The block cache uses a concurrent LRU or RISTRETTO-based policy
+      for eviction, coordinating between admission and eviction to
+      maintain cache efficiency under memory pressure.
     validations:
       - type: graph_tool_used
 
@@ -2139,18 +2148,18 @@ tests:
       - type: crs_trace_step_present
 
   - id: 5246
-    name: badger_crs_json
+    name: badger_crs_trace_flow
     category: TOOL_CRS_VERIFICATION
     description: >
-      GR-58/IT-41: Verify json tool produces CRS TraceStep against Badger.
+      CRS verification: trace analysis records CRS state correctly.
     query: |
-      Parse the JSON configuration structure in Badger's options.
+      Trace how errors propagate from value log corruption to the caller
     expected_state: COMPLETE
     reference_answer: |
-      json tool was used and produced a CRS TraceStep with appropriate metadata.
+      The trace analysis tool records CRS state for value log corruption
+      error propagation in the Badger key-value store codebase.
     validations:
-      - type: graph_tool_used
-      - type: crs_trace_step_present
+      - type: crs_state_recorded
 
   # -- IT-01/IT-02/IT-03: Second CRS TraceStep Verification --
 

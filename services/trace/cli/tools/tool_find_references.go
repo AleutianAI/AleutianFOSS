@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/telemetry"
 )
 
 // =============================================================================
@@ -41,12 +43,27 @@ type FindReferencesParams struct {
 	// Limit is the maximum number of references to return.
 	// Default: 100
 	Limit int
+
+	// PackageHint is an optional package/module context extracted from the query.
+	// IT-06c: Used to disambiguate when multiple symbols share the same name
+	// during ResolveFunctionWithFuzzy exact-match phase.
+	PackageHint string
 }
 
 // FindReferencesOutput contains the structured result.
 type FindReferencesOutput struct {
 	// SymbolName is the symbol that was searched for.
 	SymbolName string `json:"symbol_name"`
+
+	// ResolvedName is the actual symbol name after resolution (may differ from
+	// SymbolName if fuzzy matching was used).
+	ResolvedName string `json:"resolved_name,omitempty"`
+
+	// DefinedAt is where the resolved symbol is defined (file:line).
+	DefinedAt string `json:"defined_at,omitempty"`
+
+	// SymbolKind is the kind of the resolved symbol (function, struct, interface, etc.).
+	SymbolKind string `json:"symbol_kind,omitempty"`
 
 	// ReferenceCount is the number of references found.
 	ReferenceCount int `json:"reference_count"`
@@ -79,6 +96,7 @@ type ReferenceInfo struct {
 //
 //	Finds all references to a symbol (function, type, variable).
 //	Returns all locations where the symbol is used, not just calls.
+//	Uses shared ResolveFunctionWithFuzzy for symbol resolution (IT-06, IT-00a).
 //
 // Thread Safety: Safe for concurrent use. All operations are read-only.
 type findReferencesTool struct {
@@ -93,6 +111,8 @@ type findReferencesTool struct {
 //
 //	Creates a tool that finds all references to a symbol.
 //	Useful for refactoring and understanding symbol usage.
+//	Supports exact match, dot-notation (Type.Method), and fuzzy resolution
+//	via the shared ResolveFunctionWithFuzzy pipeline.
 //
 // Inputs:
 //
@@ -105,8 +125,8 @@ type findReferencesTool struct {
 //
 // Limitations:
 //
-//   - Symbol names must match exactly (no fuzzy matching)
-//   - References are code locations, not semantic relationships
+//   - Resolves to a single best-match symbol (not all symbols of the same name)
+//   - References are code locations based on graph edges, not semantic relationships
 //
 // Assumptions:
 //
@@ -137,7 +157,7 @@ func (t *findReferencesTool) Definition() ToolDefinition {
 		Parameters: map[string]ParamDef{
 			"symbol_name": {
 				Type:        ParamTypeString,
-				Description: "Name of the symbol to find references for",
+				Description: "Name of the symbol to find references for (e.g., 'Entry', 'Config', 'Router', 'DB.Open')",
 				Required:    true,
 			},
 			"limit": {
@@ -156,6 +176,28 @@ func (t *findReferencesTool) Definition() ToolDefinition {
 }
 
 // Execute runs the find_references tool.
+//
+// Description:
+//
+//	Resolves the symbol name via shared ResolveFunctionWithFuzzy (IT-06 Bug 1 fix),
+//	then queries the graph for all incoming reference edges. Produces three distinct
+//	output paths (IT-06 Bug 2 fix):
+//	  - Symbol not found: informative "not found" message
+//	  - Symbol found, 0 references: honest "exists but no edges" message
+//	  - Symbol found, N references: reference list with definition location
+//
+//	All output paths include a definitive footer (IT-06 Bug 3 fix) and use the
+//	"not found" pattern compatible with the synthesis gate (IT-06 Bug 4 fix).
+//
+// Inputs:
+//   - ctx: Context for cancellation and timeout. Must not be nil.
+//   - params: Tool parameters containing "symbol_name" (required) and "limit" (optional).
+//
+// Outputs:
+//   - *Result: Tool result with OutputText for LLM consumption. Never nil on success.
+//   - error: Non-nil only for infrastructure failures (context cancellation, graph errors).
+//
+// Thread Safety: This method is safe for concurrent use.
 func (t *findReferencesTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
 	start := time.Now()
 
@@ -186,64 +228,171 @@ func (t *findReferencesTool) Execute(ctx context.Context, params map[string]any)
 	)
 	defer span.End()
 
-	// Find symbol IDs and their references
-	var allReferences []ReferenceInfo
-	var symbolMatches int
-	if t.index != nil {
-		matches := t.index.GetByName(p.SymbolName)
-		symbolMatches = len(matches)
-		for _, sym := range matches {
-			if sym == nil {
-				continue
-			}
+	// IT-06 M-2: Use trace-enriched logger for all log entries in this execution
+	logger := telemetry.LoggerWithTrace(ctx, t.logger)
 
-			locations, gErr := t.graph.FindReferencesByID(ctx, sym.ID, graph.WithLimit(p.Limit))
-			if gErr != nil {
-				continue
-			}
+	// IT-06 Bug 1: Use shared ResolveFunctionWithFuzzy instead of inline GetByName.
+	// KindFilterAny because find_references operates on any symbol kind.
+	//
+	// IT-06c: When a package hint is available, try package-aware exact match first.
+	// This prevents "Config" in a 20-project monorepo from resolving to the wrong
+	// package's Config when the query says "in flask".
+	var sym *ast.Symbol
+	var fuzzy bool
+	var resolveErr error
 
-			for _, loc := range locations {
-				allReferences = append(allReferences, ReferenceInfo{
-					SymbolID: sym.ID,
-					Package:  sym.Package,
-					File:     loc.FilePath,
-					Line:     loc.StartLine,
-					Column:   loc.StartCol,
-				})
-
-				if len(allReferences) >= p.Limit {
-					break
-				}
-			}
-
-			if len(allReferences) >= p.Limit {
-				break
+	if p.PackageHint != "" && t.index != nil {
+		exactMatches := t.index.GetByName(p.SymbolName)
+		if len(exactMatches) > 1 {
+			filtered := filterByPackageHint(exactMatches, p.PackageHint, logger, "find_references")
+			if len(filtered) < len(exactMatches) {
+				// Package hint narrowed the matches — pick the most significant
+				sym = pickMostSignificantSymbol(filtered)
+				logger.Info("IT-06c: find_references resolved via package hint",
+					slog.String("symbol", p.SymbolName),
+					slog.String("hint", p.PackageHint),
+					slog.String("resolved", sym.Name),
+					slog.String("file", sym.FilePath),
+					slog.Int("before", len(exactMatches)),
+					slog.Int("after", len(filtered)),
+				)
 			}
 		}
 	}
 
-	// Build typed output
+	// Fall back to standard resolution if package hint didn't narrow results
+	if sym == nil {
+		sym, fuzzy, resolveErr = ResolveFunctionWithFuzzy(ctx, t.index, p.SymbolName, logger,
+			WithKindFilter(KindFilterAny))
+	}
+
+	if resolveErr != nil {
+		// Path A: Symbol not found — return informative "not found" message
+		span.SetAttributes(
+			attribute.Bool("symbol_resolved", false),
+			attribute.Int("reference_count", 0),
+		)
+
+		outputText := t.formatTextNotFound(p.SymbolName)
+		output := FindReferencesOutput{
+			SymbolName:     p.SymbolName,
+			ReferenceCount: 0,
+			References:     []ReferenceInfo{},
+		}
+
+		duration := time.Since(start)
+		toolStep := crs.NewTraceStepBuilder().
+			WithAction("tool_find_references").
+			WithTarget(p.SymbolName).
+			WithTool("find_references").
+			WithDuration(duration).
+			WithMetadata("reference_count", "0").
+			WithMetadata("symbol_resolved", "false").
+			Build()
+
+		return &Result{
+			Success:    true,
+			Output:     output,
+			OutputText: outputText,
+			TokensUsed: estimateTokens(outputText),
+			TraceStep:  &toolStep,
+			Duration:   duration,
+		}, nil
+	}
+
+	if fuzzy {
+		logger.Info("find_references: fuzzy match",
+			slog.String("query", p.SymbolName),
+			slog.String("matched", sym.Name),
+		)
+	}
+
+	span.SetAttributes(
+		attribute.Bool("symbol_resolved", true),
+		attribute.String("resolved_name", sym.Name),
+		attribute.String("resolved_id", sym.ID),
+		attribute.String("symbol_kind", sym.Kind.String()),
+		attribute.Bool("fuzzy_match", fuzzy),
+	)
+
+	// Find all references to the resolved symbol.
+	// IT-06 Bug 6: Fetch extra results to allow sorting by relevance before truncating.
+	// Without this, graph insertion order determines results, causing test/benchmark files
+	// (e.g., asv_bench/) to dominate when they're indexed before core modules.
+	fetchLimit := p.Limit * 3
+	if fetchLimit < 100 {
+		fetchLimit = 100
+	}
+	locations, gErr := t.graph.FindReferencesByID(ctx, sym.ID, graph.WithLimit(fetchLimit))
+	if gErr != nil {
+		return nil, fmt.Errorf("find references for '%s': %w", sym.Name, gErr)
+	}
+
+	// Build references from locations, deduplicating by file:line.
+	// IT-06c M-9: The graph can return duplicate reference edges for the same location
+	// (e.g., from multiple edge types). Dedup ensures clean output.
+	var allReferences []ReferenceInfo
+	seen := make(map[string]bool, len(locations))
+	for _, loc := range locations {
+		key := fmt.Sprintf("%s:%d", loc.FilePath, loc.StartLine)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		allReferences = append(allReferences, ReferenceInfo{
+			SymbolID: sym.ID,
+			Package:  sym.Package,
+			File:     loc.FilePath,
+			Line:     loc.StartLine,
+			Column:   loc.StartCol,
+		})
+	}
+
+	// IT-06 Bug 6: Sort references — core source files before test/benchmark files.
+	// This ensures the LLM sees the most relevant references first.
+	sort.SliceStable(allReferences, func(i, j int) bool {
+		iTest := isTestFile(allReferences[i].File)
+		jTest := isTestFile(allReferences[j].File)
+		if iTest != jTest {
+			return !iTest // non-test files sort first
+		}
+		return false // preserve relative order within same category
+	})
+
+	// Truncate to requested limit after sorting
+	if len(allReferences) > p.Limit {
+		allReferences = allReferences[:p.Limit]
+	}
+
+	// IT-06 Change 3: Build output with definition location
+	definedAt := fmt.Sprintf("%s:%d", sym.FilePath, sym.StartLine)
 	output := FindReferencesOutput{
 		SymbolName:     p.SymbolName,
+		ResolvedName:   sym.Name,
+		DefinedAt:      definedAt,
+		SymbolKind:     sym.Kind.String(),
 		ReferenceCount: len(allReferences),
 		References:     allReferences,
 	}
 
-	// Format text output
-	outputText := t.formatText(p.SymbolName, allReferences)
+	// Format text output — Path B (0 refs) or Path C (N refs)
+	outputText := t.formatText(p.SymbolName, sym, allReferences)
 
 	span.SetAttributes(attribute.Int("reference_count", len(allReferences)))
 
 	duration := time.Since(start)
 
-	// Build CRS TraceStep for reasoning trace continuity
+	// IT-06 Change 4: Enhanced CRS TraceStep metadata
 	toolStep := crs.NewTraceStepBuilder().
 		WithAction("tool_find_references").
 		WithTarget(p.SymbolName).
 		WithTool("find_references").
 		WithDuration(duration).
 		WithMetadata("reference_count", fmt.Sprintf("%d", len(allReferences))).
-		WithMetadata("symbol_matches", fmt.Sprintf("%d", symbolMatches)).
+		WithMetadata("symbol_resolved", "true").
+		WithMetadata("resolved_name", sym.Name).
+		WithMetadata("symbol_kind", sym.Kind.String()).
+		WithMetadata("fuzzy_match", fmt.Sprintf("%t", fuzzy)).
 		Build()
 
 	return &Result{
@@ -268,7 +417,7 @@ func (t *findReferencesTool) parseParams(params map[string]any) (FindReferencesP
 			p.SymbolName = name
 		}
 	}
-	if err := ValidateSymbolName(p.SymbolName, "symbol_name", "'Session', 'app', 'Logger'"); err != nil {
+	if err := ValidateSymbolName(p.SymbolName, "symbol_name", "'Session', 'app', 'Logger', 'DB.Open'"); err != nil {
 		return p, err
 	}
 
@@ -279,26 +428,98 @@ func (t *findReferencesTool) parseParams(params map[string]any) (FindReferencesP
 		}
 	}
 
+	// IT-06c: Extract package_hint (optional)
+	if hintRaw, ok := params["package_hint"]; ok {
+		if hint, ok := parseStringParam(hintRaw); ok && hint != "" {
+			p.PackageHint = hint
+		}
+	}
+
 	return p, nil
 }
 
-// formatText creates a human-readable text summary.
-func (t *findReferencesTool) formatText(symbolName string, refs []ReferenceInfo) string {
+// formatTextNotFound creates output for Path A: symbol not found in the codebase.
+//
+// Description:
+//
+//	IT-06 Bug 2/4: Produces a distinct message when the symbol cannot be resolved,
+//	using the "not found" pattern that the synthesis gate recognizes (GR-59 Rev 4b).
+//	Includes a definitive footer (IT-06 Bug 3).
+//
+// Inputs:
+//   - symbolName: The original user query string.
+//
+// Outputs:
+//   - string: Formatted text output for LLM consumption.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (t *findReferencesTool) formatTextNotFound(symbolName string) string {
 	var sb strings.Builder
 
+	sb.WriteString(fmt.Sprintf("## GRAPH RESULT: Symbol '%s' not found\n\n", symbolName))
+	sb.WriteString(fmt.Sprintf("Symbol '%s' not found in the codebase.\n", symbolName))
+	sb.WriteString("The graph has been fully indexed - this is the definitive answer.\n\n")
+	sb.WriteString("**Do NOT use Grep to search further** - the graph already analyzed all source files.\n")
+
+	return sb.String()
+}
+
+// formatText creates a human-readable text summary for resolved symbols.
+//
+// Description:
+//
+//	Handles two output paths:
+//	  - Path B: Symbol resolved but 0 references (honest "exists but no edges" message)
+//	  - Path C: Symbol resolved with N references (reference list with definition location)
+//
+//	Both paths include definition location and a definitive footer (IT-06 Bug 3).
+//
+// Inputs:
+//   - symbolName: The original user query string.
+//   - sym: The resolved symbol. Must not be nil.
+//   - refs: The reference locations (may be empty).
+//
+// Outputs:
+//   - string: Formatted text output for LLM consumption.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (t *findReferencesTool) formatText(symbolName string, sym *ast.Symbol, refs []ReferenceInfo) string {
+	var sb strings.Builder
+
+	definedAt := fmt.Sprintf("%s:%d", sym.FilePath, sym.StartLine)
+
 	if len(refs) == 0 {
-		sb.WriteString(fmt.Sprintf("No references found for '%s'.\n", symbolName))
+		// Path B: Symbol found, 0 references
+		sb.WriteString(fmt.Sprintf("## GRAPH RESULT: References to '%s' not found\n\n", symbolName))
+		sb.WriteString(fmt.Sprintf("Symbol defined at: %s (kind: %s, package: %s)\n\n", definedAt, sym.Kind.String(), sym.Package))
+		sb.WriteString("The symbol exists in the codebase but has no incoming reference edges in the code graph.\n")
+		sb.WriteString("This may mean the symbol is referenced via type annotations, imports, or patterns\n")
+		sb.WriteString("that static analysis cannot track as edges.\n\n")
+		sb.WriteString("The graph has been fully indexed - this is the definitive answer.\n\n")
+		sb.WriteString("**Do NOT use Grep to search further** - the graph already analyzed all source files.\n")
 		return sb.String()
 	}
 
-	sb.WriteString(fmt.Sprintf("Found %d references to '%s':\n\n", len(refs), symbolName))
+	// Path C: Symbol found, N references
+	if symbolName != sym.Name {
+		sb.WriteString(fmt.Sprintf("Found %d references to '%s' (resolved from '%s'):\n", len(refs), sym.Name, symbolName))
+	} else {
+		sb.WriteString(fmt.Sprintf("Found %d references to '%s':\n", len(refs), sym.Name))
+	}
+	sb.WriteString(fmt.Sprintf("Defined at: %s (kind: %s, package: %s)\n\n", definedAt, sym.Kind.String(), sym.Package))
 
 	for _, ref := range refs {
-		sb.WriteString(fmt.Sprintf("• %s:%d:%d\n", ref.File, ref.Line, ref.Column))
 		if ref.Package != "" {
-			sb.WriteString(fmt.Sprintf("  Package: %s\n", ref.Package))
+			sb.WriteString(fmt.Sprintf("• %s:%d:%d    (package: %s)\n", ref.File, ref.Line, ref.Column, ref.Package))
+		} else {
+			sb.WriteString(fmt.Sprintf("• %s:%d:%d\n", ref.File, ref.Line, ref.Column))
 		}
 	}
+
+	// GR-59 Group A: Signal definitiveness on success path.
+	sb.WriteString("\n---\n")
+	sb.WriteString("The graph has been fully indexed — these results are exhaustive.\n")
+	sb.WriteString("**Do NOT use Grep or Read to verify** — the graph already analyzed all source files.\n")
 
 	return sb.String()
 }

@@ -41,6 +41,10 @@ type FindCallersParams struct {
 	// Limit is the maximum number of callers to return.
 	// Default: 50, Max: 1000
 	Limit int
+
+	// PackageHint is an optional package/module context extracted from the query.
+	// IT-06c Bug C: Used to disambiguate when multiple symbols share the same name.
+	PackageHint string
 }
 
 // FindCallersOutput contains the structured result.
@@ -255,6 +259,12 @@ func (t *findCallersTool) Execute(ctx context.Context, params map[string]any) (*
 			// O(1) index lookup for bare names
 			symbols = t.index.GetByName(p.FunctionName)
 
+			// IT-06c Bug C: When multiple symbols match and a package hint is available,
+			// disambiguate by preferring symbols from the hinted package/directory.
+			if len(symbols) > 1 && p.PackageHint != "" {
+				symbols = filterByPackageHint(symbols, p.PackageHint, t.logger, "find_callers")
+			}
+
 			// P1: If no exact match, try fuzzy search (Feb 14, 2026)
 			if len(symbols) == 0 {
 				symbol, fuzzy, err := ResolveFunctionWithFuzzy(ctx, t.index, p.FunctionName, t.logger)
@@ -415,6 +425,13 @@ func (t *findCallersTool) parseParams(params map[string]any) (FindCallersParams,
 				limit = 1000
 			}
 			p.Limit = limit
+		}
+	}
+
+	// IT-06c Bug C: Extract package_hint (optional)
+	if hintRaw, ok := params["package_hint"]; ok {
+		if hint, ok := parseStringParam(hintRaw); ok && hint != "" {
+			p.PackageHint = hint
 		}
 	}
 
@@ -596,7 +613,7 @@ func (t *findCallersTool) formatText(functionName string, results map[string]*gr
 			sb.WriteString(fmt.Sprintf("No function named '%s' exists in this codebase.\n", functionName))
 		} else {
 			sb.WriteString(fmt.Sprintf("## GRAPH RESULT: Callers of '%s' not found\n\n", functionName))
-			sb.WriteString(fmt.Sprintf("The function '%s' is not called anywhere (dead code or entry point).\n", functionName))
+			sb.WriteString(fmt.Sprintf("The function '%s' has no internal callers found — it is likely a public API entry point or externally invoked.\n", functionName))
 		}
 		sb.WriteString("The graph has been fully indexed - this is the definitive answer.\n\n")
 		sb.WriteString("**Do NOT use Grep to search further** - the graph already analyzed all source files.\n")
@@ -712,7 +729,7 @@ func (t *findCallersTool) formatTextWithInheritance(functionName string, results
 			sb.WriteString(fmt.Sprintf("No function named '%s' exists in this codebase.\n", functionName))
 		} else {
 			sb.WriteString(fmt.Sprintf("## GRAPH RESULT: Callers of '%s' not found\n\n", functionName))
-			sb.WriteString(fmt.Sprintf("The function '%s' is not called anywhere (dead code or entry point).\n", functionName))
+			sb.WriteString(fmt.Sprintf("The function '%s' has no internal callers found — it is likely a public API entry point or externally invoked.\n", functionName))
 		}
 		sb.WriteString("The graph has been fully indexed - this is the definitive answer.\n\n")
 		sb.WriteString("**Do NOT use Grep to search further** - the graph already analyzed all source files.\n")

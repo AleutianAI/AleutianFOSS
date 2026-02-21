@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
 )
@@ -500,7 +501,7 @@ func TestExtractFunctionNameFromQuery_RegressionNonInterference(t *testing.T) {
 		{
 			name:  "regression: CamelCase fallback",
 			query: "What about HandleHTTP",
-			want:  "about", // Pre-existing: Pattern 7 picks "about" (valid, ≤15 chars) before "HandleHTTP"
+			want:  "HandleHTTP", // IT-06: "about" no longer passes isFunctionLikeName (not PascalCase/CamelCase/snake_case)
 		},
 		{
 			name:  "regression: snake_case via callers-of pattern",
@@ -608,6 +609,51 @@ func TestExtractFunctionNameFromQuery_AllNineProjects(t *testing.T) {
 	}
 }
 
+// IT-06c: Test that "Build method" extraction works after removing "build" from
+// isValidSymbolNameBeforeKindKeyword skipWords, and that Pattern 1 skips articles.
+func TestExtractFunctionNameFromQuery_BuildMethodExtraction(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{
+			name:  "Hugo: Build method with article",
+			query: "What functions does the Build method call in hugolib?",
+			want:  "Build",
+		},
+		{
+			name:  "Hugo: Build method without article",
+			query: "What functions does Build method call?",
+			want:  "Build",
+		},
+		{
+			name:  "Hugo: Build function with article",
+			query: "What does the Build function call?",
+			want:  "Build",
+		},
+		{
+			name:  "Hugo: Build without kind keyword (CRS verification query)",
+			query: "What functions does the Build method call?",
+			want:  "Build",
+		},
+		{
+			name:  "Verb 'build' should not extract from non-symbol context",
+			query: "build the call graph from parseConfig",
+			want:  "parseConfig",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractFunctionNameFromQuery(tt.query)
+			if got != tt.want {
+				t.Errorf("extractFunctionNameFromQuery(%q) = %q, want %q", tt.query, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestExtractFunctionNameFromQuery_EmptyAndNil verifies safe behavior on edge inputs.
 func TestExtractFunctionNameFromQuery_EmptyAndNil(t *testing.T) {
 	tests := []struct {
@@ -620,7 +666,7 @@ func TestExtractFunctionNameFromQuery_EmptyAndNil(t *testing.T) {
 		{"only common words", "the a an this that", ""},
 		{"only punctuation", "???...!!!", ""},
 		{"single common word", "function", ""},
-		{"query with no function-like words", "how are you doing today", "you"}, // Pre-existing: "you" passes isFunctionLikeName (≤15 chars)
+		{"query with no function-like words", "how are you doing today", ""}, // IT-06: "you" no longer passes isFunctionLikeName (not PascalCase/CamelCase/snake_case)
 	}
 
 	for _, tt := range tests {
@@ -631,6 +677,78 @@ func TestExtractFunctionNameFromQuery_EmptyAndNil(t *testing.T) {
 					tt.query, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestIsValidFunctionName_RejectsBrackets verifies that symbol names containing
+// brackets, braces, or angle brackets are rejected.
+// IT-06b Issue 2: "[Tool calls: Grep]" contaminated ConversationHistory,
+// causing "Grep]" to be extracted as a valid symbol name.
+func TestIsValidFunctionName_RejectsBrackets(t *testing.T) {
+	tests := []struct {
+		name string
+		s    string
+		want bool
+	}{
+		{"bare name is valid", "Grep", true},
+		{"trailing bracket rejected", "Grep]", false},
+		{"leading bracket rejected", "[Tool", false},
+		{"curly brace rejected", "Config{}", false},
+		{"angle bracket rejected", "List<T>", false},
+		{"parentheses rejected", "func()", false},
+		{"CamelCase valid", "HandlerFunc", true},
+		{"snake_case valid", "full_dispatch_request", true},
+		{"dot notation valid", "DB.Open", true}, // dots are OK
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isValidFunctionName(tt.s)
+			if got != tt.want {
+				t.Errorf("isValidFunctionName(%q) = %v, want %v", tt.s, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestExtractFunctionNameFromQuery_ToolCallContamination verifies that
+// tool call placeholder messages like "[Tool calls: Grep]" do not produce
+// the CORRUPTED symbol name "Grep]" that caused IT-06b Issue 2.
+//
+// Before fix: "[Tool calls: Grep]" → "Grep]" (bracket not stripped, passed validation)
+// After fix: "[Tool calls: Grep]" → "Tool" (brackets stripped, "Grep" also valid)
+//
+// The primary defense is that extractFunctionNameFromContext no longer scans
+// ConversationHistory, so this input never reaches extractFunctionNameFromQuery.
+// This test verifies the secondary defense: brackets are stripped and "Grep]" is impossible.
+func TestExtractFunctionNameFromQuery_ToolCallContamination(t *testing.T) {
+	// The critical assertion: "Grep]" (with trailing bracket) must NEVER be returned.
+	// Before IT-06b fix, this returned "Grep]". Now brackets are stripped by Trim
+	// and rejected by isValidFunctionName.
+	got := extractFunctionNameFromQuery("[Tool calls: Grep]")
+	if got == "Grep]" {
+		t.Errorf("extractFunctionNameFromQuery returned corrupted name %q — IT-06b regression", got)
+	}
+	// After fix, "Tool" is extracted (brackets stripped, CamelCase) — this is a harmless
+	// generic word that won't match any real symbol. The primary defense (ConversationHistory
+	// removal) prevents this path from ever being exercised in production.
+	if got != "Tool" {
+		t.Logf("extractFunctionNameFromQuery(%q) = %q (expected 'Tool' after bracket stripping)", "[Tool calls: Grep]", got)
+	}
+}
+
+// TestExtractFunctionNameFromContext_NoHistoryContamination verifies the primary
+// IT-06b Issue 2 fix: extractFunctionNameFromContext no longer scans ConversationHistory.
+func TestExtractFunctionNameFromContext_NoHistoryContamination(t *testing.T) {
+	ctx := &agent.AssembledContext{
+		ConversationHistory: []agent.Message{
+			{Role: "assistant", Content: "[Tool calls: Grep]"},
+			{Role: "assistant", Content: "[Tool calls: find_references]"},
+		},
+		ToolResults: nil, // No tool results — forces history fallback (which is now removed)
+	}
+	got := extractFunctionNameFromContext(ctx)
+	if got != "" {
+		t.Errorf("extractFunctionNameFromContext with only ConversationHistory returned %q, want empty (IT-06b: history scanning removed)", got)
 	}
 }
 
@@ -1694,7 +1812,7 @@ func TestExtractDestinationCandidates(t *testing.T) {
 		{
 			name:  "from X to Y: extracts destination",
 			query: "Show the call chain from Engine.runRenderLoop to mesh rendering",
-			want:  []string{"mesh"}, // "mesh" is a valid 4-char candidate for stem expansion
+			want:  nil, // IT-06: "mesh" no longer passes isFunctionLikeName (lowercase, no structural signal)
 		},
 		{
 			name:  "from X to Y with CamelCase destination",
@@ -1756,6 +1874,65 @@ func TestExtractDestinationCandidates(t *testing.T) {
 				if !found {
 					t.Errorf("extractDestinationCandidates(%q) = %v, missing expected candidate %q", tt.query, got, expected)
 				}
+			}
+		})
+	}
+}
+
+// IT-06c Bug C: Test extractPackageContextFromQuery.
+func TestExtractPackageContextFromQuery(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{
+			name:  "in hugolib at end",
+			query: "What functions does the Build method call in hugolib?",
+			want:  "hugolib",
+		},
+		{
+			name:  "in gin at end",
+			query: "What does Engine.Run call in gin?",
+			want:  "gin",
+		},
+		{
+			name:  "in flask mid-query",
+			query: "Who calls request in flask across the codebase?",
+			want:  "flask",
+		},
+		{
+			name:  "the hugolib package",
+			query: "Find callers of Build in the hugolib package",
+			want:  "hugolib",
+		},
+		{
+			name:  "no package context",
+			query: "What functions does Build call?",
+			want:  "",
+		},
+		{
+			name:  "in the codebase should not match",
+			query: "Where is Build used in the codebase?",
+			want:  "",
+		},
+		{
+			name:  "in the project should not match",
+			query: "Find callers in the project",
+			want:  "",
+		},
+		{
+			name:  "package with underscore",
+			query: "What does read_csv call in pandas_core?",
+			want:  "pandas_core",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractPackageContextFromQuery(tt.query)
+			if got != tt.want {
+				t.Errorf("extractPackageContextFromQuery(%q) = %q, want %q", tt.query, got, tt.want)
 			}
 		})
 	}

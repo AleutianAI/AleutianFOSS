@@ -2683,3 +2683,115 @@ function Layer(path, options, fn) {
 		t.Errorf("expected Layer kind to be %q (constructor function), got %q", SymbolKindClass, layerSym.Kind)
 	}
 }
+
+// TestJavaScriptParser_SyntheticClassFromModuleExports verifies IT-06b Issue 1:
+// When module.exports creates a semantic type name (e.g., "Application" from
+// "var app = module.exports = {}") and prototype methods reference that name
+// as their Receiver, a synthetic SymbolKindClass is emitted so that the
+// semantic name is discoverable in the index.
+func TestJavaScriptParser_SyntheticClassFromModuleExports(t *testing.T) {
+	parser := NewJavaScriptParser()
+	// Simulates Express's lib/application.js pattern
+	content := `
+var app = exports = module.exports = {};
+
+app.init = function init() {
+  this.cache = {};
+};
+
+app.listen = function listen() {
+  var server = http.createServer(this);
+  return server.listen.apply(server, arguments);
+};
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "lib/application.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify synthetic "Application" class symbol exists
+	var syntheticSym *Symbol
+	var varSym *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Application" && sym.Kind == SymbolKindClass {
+			syntheticSym = sym
+		}
+		if sym.Name == "app" && sym.Kind == SymbolKindVariable {
+			varSym = sym
+		}
+	}
+
+	if syntheticSym == nil {
+		t.Fatal("expected synthetic class symbol 'Application' (from module.exports alias of 'app')")
+	}
+
+	if !syntheticSym.Exported {
+		t.Error("expected synthetic Application to be Exported")
+	}
+
+	if varSym == nil {
+		t.Fatal("expected variable symbol 'app'")
+	}
+
+	// Verify the synthetic symbol uses the variable's location
+	if syntheticSym.StartLine != varSym.StartLine {
+		t.Errorf("expected synthetic symbol StartLine=%d (matching 'app' variable), got %d",
+			varSym.StartLine, syntheticSym.StartLine)
+	}
+
+	// Verify Children contain the prototype methods
+	if len(syntheticSym.Children) != 2 {
+		t.Errorf("expected 2 children (init, listen), got %d", len(syntheticSym.Children))
+		for _, child := range syntheticSym.Children {
+			t.Logf("  child: %s (%s)", child.Name, child.Kind)
+		}
+	} else {
+		childNames := make(map[string]bool)
+		for _, child := range syntheticSym.Children {
+			childNames[child.Name] = true
+			if child.Receiver != "Application" {
+				t.Errorf("expected child %s to have Receiver='Application', got %q", child.Name, child.Receiver)
+			}
+		}
+		if !childNames["init"] {
+			t.Error("expected child 'init'")
+		}
+		if !childNames["listen"] {
+			t.Error("expected child 'listen'")
+		}
+	}
+
+	// Verify DocComment indicates synthetic origin
+	if syntheticSym.DocComment == "" {
+		t.Error("expected DocComment indicating synthetic origin")
+	}
+}
+
+// TestJavaScriptParser_SyntheticClassNoDuplicate verifies that when a real class
+// with the semantic name already exists, no synthetic duplicate is emitted.
+func TestJavaScriptParser_SyntheticClassNoDuplicate(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `
+class Application {
+  constructor() {}
+}
+
+module.exports = Application;
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "lib/application.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Count how many "Application" class symbols exist
+	count := 0
+	for _, sym := range result.Symbols {
+		if sym.Name == "Application" && sym.Kind == SymbolKindClass {
+			count++
+		}
+	}
+
+	if count != 1 {
+		t.Errorf("expected exactly 1 Application class symbol (no synthetic duplicate), got %d", count)
+	}
+}

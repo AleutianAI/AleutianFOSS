@@ -41,6 +41,10 @@ type FindImplementationsParams struct {
 	// Limit is the maximum number of implementations to return.
 	// Default: 50, Max: 1000
 	Limit int
+
+	// PackageHint is an optional package/module context extracted from the query.
+	// IT-06c: Used to disambiguate when multiple types share the same name.
+	PackageHint string
 }
 
 // FindImplementationsOutput contains the structured result.
@@ -220,6 +224,13 @@ func (t *findImplementationsTool) Execute(ctx context.Context, params map[string
 
 	if t.index != nil {
 		symbols := t.index.GetByName(p.InterfaceName)
+
+		// IT-06c: When multiple symbols match and a package hint is available,
+		// disambiguate before kind-filtering.
+		if len(symbols) > 1 && p.PackageHint != "" {
+			symbols = filterByPackageHint(symbols, p.PackageHint, t.logger, "find_implementations")
+		}
+
 		allIndexSymbols = symbols
 
 		// IT-03 C-3a: Accept interfaces, classes, and structs as valid targets.
@@ -373,6 +384,13 @@ func (t *findImplementationsTool) parseParams(params map[string]any) (FindImplem
 				limit = 1000
 			}
 			p.Limit = limit
+		}
+	}
+
+	// IT-06c: Extract package_hint (optional)
+	if hintRaw, ok := params["package_hint"]; ok {
+		if hint, ok := parseStringParam(hintRaw); ok && hint != "" {
+			p.PackageHint = hint
 		}
 	}
 

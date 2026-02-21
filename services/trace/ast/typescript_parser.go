@@ -646,6 +646,7 @@ func (p *TypeScriptParser) processFunction(ctx context.Context, node *sitter.Nod
 	var docstring string
 	var isAsync bool
 	var bodyNode *sitter.Node
+	var typeRefs []TypeReference // IT-06 Bug 9
 
 	// Get preceding comment
 	docstring = p.getPrecedingComment(node, content)
@@ -661,8 +662,14 @@ func (p *TypeScriptParser) processFunction(ctx context.Context, node *sitter.Nod
 			typeParams = p.extractTypeParameters(child, content)
 		case "formal_parameters":
 			params = string(content[child.StartByte():child.EndByte()])
+			// IT-06 Bug 9: Extract type refs from parameter annotations
+			paramRefs := extractTSParamTypeRefs(child, content, filePath)
+			typeRefs = append(typeRefs, paramRefs...)
 		case "type_annotation":
 			returnType = p.extractTypeAnnotation(child, content)
+			// IT-06 Bug 9: Extract type refs from return type annotation
+			retRefs := extractTSTypeRefsFromAnnotation(child, content, filePath)
+			typeRefs = append(typeRefs, retRefs...)
 		case tsNodeStatementBlock:
 			bodyNode = child
 		}
@@ -729,6 +736,11 @@ func (p *TypeScriptParser) processFunction(ctx context.Context, node *sitter.Nod
 			}
 			sym.Metadata.TypeNarrowings = narrowings
 		}
+	}
+
+	// IT-06 Bug 9: Set type annotation references
+	if len(typeRefs) > 0 {
+		sym.TypeReferences = typeRefs
 	}
 
 	return sym
@@ -841,6 +853,7 @@ func (p *TypeScriptParser) processMethod(ctx context.Context, node *sitter.Node,
 	var isStatic bool
 	var isAbstract bool
 	var bodyNode *sitter.Node
+	var typeRefs []TypeReference // IT-06 Bug 9
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
@@ -859,8 +872,14 @@ func (p *TypeScriptParser) processMethod(ctx context.Context, node *sitter.Node,
 			typeParams = p.extractTypeParameters(child, content)
 		case "formal_parameters":
 			params = string(content[child.StartByte():child.EndByte()])
+			// IT-06 Bug 9: Extract type refs from parameter annotations
+			paramRefs := extractTSParamTypeRefs(child, content, filePath)
+			typeRefs = append(typeRefs, paramRefs...)
 		case "type_annotation":
 			returnType = p.extractTypeAnnotation(child, content)
+			// IT-06 Bug 9: Extract type refs from return type annotation
+			retRefs := extractTSTypeRefsFromAnnotation(child, content, filePath)
+			typeRefs = append(typeRefs, retRefs...)
 		case tsNodeStatementBlock:
 			bodyNode = child
 		}
@@ -918,6 +937,11 @@ func (p *TypeScriptParser) processMethod(ctx context.Context, node *sitter.Node,
 		if len(narrowings) > 0 {
 			sym.Metadata.TypeNarrowings = narrowings
 		}
+	}
+
+	// IT-06 Bug 9: Set type annotation references
+	if len(typeRefs) > 0 {
+		sym.TypeReferences = typeRefs
 	}
 
 	return sym
@@ -1464,6 +1488,106 @@ func (p *TypeScriptParser) processVariableDeclarator(node *sitter.Node, content 
 		StartCol:  int(node.StartPoint().Column),
 		EndCol:    int(node.EndPoint().Column),
 	}
+}
+
+// tsTypeSkipList contains TypeScript primitive types that should not produce TypeReference entries.
+var tsTypeSkipList = map[string]bool{
+	"string": true, "number": true, "boolean": true, "void": true,
+	"any": true, "unknown": true, "never": true, "null": true,
+	"undefined": true, "object": true, "symbol": true, "bigint": true,
+}
+
+// extractTSTypeRefsFromAnnotation walks a tree-sitter type_annotation node and extracts
+// non-primitive type identifiers as TypeReference entries.
+//
+// IT-06 Bug 9: Enables graph edges from TypeScript type annotations.
+//
+// Inputs:
+//   - annNode: The tree-sitter "type_annotation" node (contains ":" + type expression).
+//   - content: Source file bytes.
+//   - filePath: Relative path for Location.
+//
+// Outputs:
+//   - []TypeReference: Non-primitive type identifiers found in the annotation.
+func extractTSTypeRefsFromAnnotation(annNode *sitter.Node, content []byte, filePath string) []TypeReference {
+	if annNode == nil {
+		return nil
+	}
+
+	var refs []TypeReference
+	seen := make(map[string]bool)
+
+	var walk func(node *sitter.Node)
+	walk = func(node *sitter.Node) {
+		if node == nil || len(refs) >= MaxTypeReferencesPerSymbol {
+			return
+		}
+
+		switch node.Type() {
+		case tsNodeTypeIdentifier, tsNodeIdentifier:
+			name := string(content[node.StartByte():node.EndByte()])
+			if !tsTypeSkipList[name] && !seen[name] {
+				seen[name] = true
+				refs = append(refs, TypeReference{
+					Name: name,
+					Location: Location{
+						FilePath:  filePath,
+						StartLine: int(node.StartPoint().Row + 1),
+						EndLine:   int(node.EndPoint().Row + 1),
+						StartCol:  int(node.StartPoint().Column),
+						EndCol:    int(node.EndPoint().Column),
+					},
+				})
+			}
+			return // don't recurse into identifier children
+		case tsNodePredefinedType:
+			return // skip "string", "number", etc. — these are leaf nodes
+		}
+
+		for i := 0; i < int(node.ChildCount()); i++ {
+			walk(node.Child(i))
+		}
+	}
+
+	walk(annNode)
+	return refs
+}
+
+// extractTSParamTypeRefs extracts TypeReference entries from formal parameter type annotations.
+//
+// IT-06 Bug 9: Enables graph edges from parameter type annotations like "foo(x: User)".
+//
+// Inputs:
+//   - paramsNode: The tree-sitter "formal_parameters" node.
+//   - content: Source file bytes.
+//   - filePath: Relative path for Location.
+//
+// Outputs:
+//   - []TypeReference: Non-primitive type identifiers from all parameter annotations.
+func extractTSParamTypeRefs(paramsNode *sitter.Node, content []byte, filePath string) []TypeReference {
+	if paramsNode == nil {
+		return nil
+	}
+
+	var refs []TypeReference
+
+	for i := 0; i < int(paramsNode.ChildCount()); i++ {
+		child := paramsNode.Child(i)
+
+		switch child.Type() {
+		case tsNodeRequiredParameter, tsNodeOptionalParameter:
+			for j := 0; j < int(child.ChildCount()); j++ {
+				typeChild := child.Child(j)
+				if typeChild.Type() == tsNodeTypeAnnotation {
+					paramRefs := extractTSTypeRefsFromAnnotation(typeChild, content, filePath)
+					refs = append(refs, paramRefs...)
+					break
+				}
+			}
+		}
+	}
+
+	return refs
 }
 
 // extractTypeParameters extracts type parameters from a type_parameters node.

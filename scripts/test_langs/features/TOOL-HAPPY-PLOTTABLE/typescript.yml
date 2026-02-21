@@ -1487,86 +1487,98 @@ tests:
       - type: graph_tool_used
 
   - id: 8198
-    name: plottable_write
+    name: plottable_trace_render_pipeline
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against Plottable charting library.
+      Trace the component render pipeline in Plottable.
     query: |
-      Create a new test chart setup
+      What is the complete call chain when a Plottable plot renders to SVG?
     expected_state: COMPLETE
     reference_answer: |
-      The Write tool processes test chart setup for
-      the Plottable charting library codebase.
+      Plot rendering flows through Component.renderTo which creates the
+      SVG container, calls requestedSpace for layout computation,
+      computeLayout for size allocation, and renderImmediately which
+      draws axes, gridlines, and plot areas.
     validations:
       - type: graph_tool_used
 
   - id: 8199
-    name: plottable_write_b
+    name: plottable_trace_scale_update
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against Plottable charting library (test B).
+      Trace scale domain update flow in Plottable.
     query: |
-      Write a custom scale
+      How does Plottable update scale domains when data changes?
     expected_state: COMPLETE
     reference_answer: |
-      The Write tool processes custom scale for
-      the Plottable charting library codebase.
+      Scale updates flow through Dataset changes triggering
+      QuantitativeScale.autoDomain, which collects extents from all
+      connected plots, merges them, applies padding, and updates
+      the domain triggering a re-render.
     validations:
       - type: graph_tool_used
 
   - id: 8200
-    name: plottable_write_c
+    name: plottable_trace_interaction_dispatch
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against Plottable charting library (test C).
+      Trace user interaction dispatch in Plottable.
     query: |
-      Create a plot helper
+      Trace the call chain from mouse click to interaction callback
     expected_state: COMPLETE
     reference_answer: |
-      The Write tool processes plot helper for
-      the Plottable charting library codebase.
+      Interaction dispatch flows through the Dispatcher which listens
+      for DOM events, translates to Plottable coordinates, matches
+      against registered Interactions (Click, Drag, Key), and
+      invokes the user's callback with the event data.
     validations:
       - type: graph_tool_used
 
   - id: 8201
-    name: plottable_edit
+    name: plottable_trace_layout_engine
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against Plottable charting library.
+      Trace the layout engine in Plottable.
     query: |
-      Modify the Plot.renderImmediately
+      What functions compute component layout and space allocation?
     expected_state: COMPLETE
     reference_answer: |
-      The Edit tool processes Plot.renderImmediately for
-      the Plottable charting library codebase.
+      Layout computation flows through Table.requestedSpace which
+      recursively queries child components, allocates space via
+      computeLayout distributing available width/height, and positions
+      each component within its allocated bounds.
     validations:
       - type: graph_tool_used
 
   - id: 8202
-    name: plottable_edit_b
+    name: plottable_trace_axis_render
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against Plottable charting library (test B).
+      Trace axis rendering in Plottable.
     query: |
-      Update the Scale.domain setter
+      How does Plottable render axis ticks and labels?
     expected_state: COMPLETE
     reference_answer: |
-      The Edit tool processes Scale.domain setter for
-      the Plottable charting library codebase.
+      Axis rendering flows through Axis.renderImmediately which calls
+      the tick generator for the scale's domain, positions tick marks,
+      formats tick labels via the Formatter, rotates/wraps text as
+      needed, and draws baseline and gridlines.
     validations:
       - type: graph_tool_used
 
   - id: 8203
-    name: plottable_edit_c
+    name: plottable_trace_dataset_binding
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against Plottable charting library (test C).
+      Trace dataset binding to plot components in Plottable.
     query: |
-      Fix the Component.anchor
+      What is the call path when a dataset is added to a plot?
     expected_state: COMPLETE
     reference_answer: |
-      The Edit tool processes Component.anchor for
-      the Plottable charting library codebase.
+      Dataset binding flows through Plot.addDataset which registers
+      the dataset, subscribes to its update events, triggers
+      _onDatasetUpdate to recalculate extents and accessor mappings,
+      and schedules a re-render.
     validations:
       - type: graph_tool_used
 
@@ -1739,44 +1751,50 @@ tests:
       - type: graph_tool_used
 
   - id: 8216
-    name: plottable_json
+    name: plottable_trace_color_scheme
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against Plottable charting library.
+      Trace color scale application in Plottable.
     query: |
-      Parse the package.json
+      How does Plottable apply color scales to data points in a scatter plot?
     expected_state: COMPLETE
     reference_answer: |
-      The JSON tool processes package.json for
-      the Plottable charting library codebase.
+      Color scale application flows through Plot.attr which maps the
+      color accessor through the InterpolatedColor scale, converting
+      data values to the color range via d3-interpolate, and applying
+      the fill/stroke attribute during rendering.
     validations:
       - type: graph_tool_used
 
   - id: 8217
-    name: plottable_json_b
+    name: plottable_trace_selection
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against Plottable charting library (test B).
+      Trace data selection and highlighting in Plottable.
     query: |
-      Extract info from tsconfig.json
+      What functions handle selecting and highlighting data entities?
     expected_state: COMPLETE
     reference_answer: |
-      The JSON tool processes tsconfig.json for
-      the Plottable charting library codebase.
+      Selection flows through SelectionInteraction which calls
+      Plot.entitiesIn with the selection bounds, returns matching
+      PlotEntity objects with their data/position/component references,
+      and applies CSS classes for visual highlighting.
     validations:
       - type: graph_tool_used
 
   - id: 8218
-    name: plottable_json_c
+    name: plottable_trace_animator
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against Plottable charting library (test C).
+      Trace animation application in Plottable.
     query: |
-      Read the test config
+      How does Plottable animate transitions between data states?
     expected_state: COMPLETE
     reference_answer: |
-      The JSON tool processes test config for
-      the Plottable charting library codebase.
+      Animation flows through the Animator interface. EasingAnimator
+      uses requestAnimationFrame to interpolate attribute values over
+      the specified duration with easing functions, updating SVG
+      element attributes each frame until completion.
     validations:
       - type: graph_tool_used
 

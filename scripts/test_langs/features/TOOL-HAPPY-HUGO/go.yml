@@ -1497,92 +1497,97 @@ tests:
     validations:
       - type: graph_tool_used
 
-  # ── IT-35: Write (a/b/c) ──
+  # ── IT-35: Trace Analysis (a/b/c) ──
 
   - id: 5098
-    name: hugo_write
+    name: hugo_trace_template_rendering
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against Hugo. Create a new file.
+      Trace the template rendering pipeline in Hugo.
     query: |
-      Create a new test helper file for page testing
+      What is the call chain from page rendering to template execution?
     expected_state: COMPLETE
     reference_answer: |
-      Write tool creates a new file with the specified content. For Hugo,
-      a test helper would go in hugolib/ alongside existing test files.
+      Page rendering flows through the site publisher, page output rendering,
+      template lookup by layout, and Go template execution with the page
+      context as the data source.
     validations:
       - type: graph_tool_used
 
   - id: 5099
-    name: hugo_write_b
+    name: hugo_trace_config_loading
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against Hugo (test B). Create a config file.
+      Trace config loading and merging in Hugo.
     query: |
-      Write a sample Hugo configuration file in TOML format
+      How does Hugo load and merge configuration from multiple sources?
     expected_state: COMPLETE
     reference_answer: |
-      Write tool creates the specified file. A Hugo config.toml includes
-      baseURL, title, theme, and content-related settings.
+      Config loading flows through config file discovery, TOML/YAML/JSON
+      parsing, environment variable overlay, and config merging to produce
+      the final site configuration.
     validations:
       - type: graph_tool_used
 
   - id: 5100
-    name: hugo_write_c
+    name: hugo_trace_content_pipeline
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against Hugo (test C). Create a markdown content file.
+      Trace the content processing pipeline in Hugo.
     query: |
-      Create a new content page with front matter for Hugo
+      Trace the call chain from content file reading to HTML output
     expected_state: COMPLETE
     reference_answer: |
-      Write tool creates a markdown file with YAML front matter including
-      title, date, draft status, and content body for Hugo processing.
+      Content processing flows through file reading, front matter parsing,
+      Markdown rendering via Goldmark, shortcode expansion, and final
+      HTML output generation.
     validations:
       - type: graph_tool_used
 
-  # ── IT-36: Edit (a/b/c) ──
+  # ── IT-36: Trace Analysis (d/e/f) ──
 
   - id: 5101
-    name: hugo_edit
+    name: hugo_trace_taxonomy_build
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against Hugo. Modify an existing file.
+      Trace taxonomy page generation in Hugo.
     query: |
-      Add a new method to the HugoSites struct in hugo_sites.go
+      What functions are involved in building taxonomy pages?
     expected_state: COMPLETE
     reference_answer: |
-      Edit tool modifies the specified file content. Adding a method to
-      HugoSites requires editing hugolib/hugo_sites.go with the new
-      method definition using a pointer receiver.
+      Taxonomy building involves collecting taxonomy terms from page front
+      matter, creating taxonomy nodes, generating list and term pages,
+      and applying taxonomy-specific templates.
     validations:
       - type: graph_tool_used
 
   - id: 5102
-    name: hugo_edit_b
+    name: hugo_trace_resource_transform
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against Hugo (test B). Modify configuration handling.
+      Trace resource transformation pipeline in Hugo.
     query: |
-      Edit the config loading to add a new configuration option
+      How do resource transformations (like SCSS compilation) flow through Hugo?
     expected_state: COMPLETE
     reference_answer: |
-      Edit tool modifies the config file to add the new option. This
-      requires updating the config struct and the loading logic.
+      Resource transformations flow through the resource transformation chain,
+      applying filters like ToCSS, PostCSS, Minify, and Fingerprint
+      sequentially with caching of intermediate results.
     validations:
       - type: graph_tool_used
 
   - id: 5103
-    name: hugo_edit_c
+    name: hugo_trace_livereload
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against Hugo (test C). Fix a bug in rendering.
+      Trace the live reload notification flow in Hugo server.
     query: |
-      Fix the error handling in the page rendering pipeline
+      What is the call path from file change detection to browser live reload?
     expected_state: COMPLETE
     reference_answer: |
-      Edit tool modifies the rendering code to improve error handling,
-      wrapping errors with context and ensuring proper propagation.
+      File change detection triggers a rebuild via the watcher, which
+      identifies affected pages, performs incremental rebuild, and sends
+      a WebSocket notification to connected browsers for live reload.
     validations:
       - type: graph_tool_used
 
@@ -1768,48 +1773,50 @@ tests:
     validations:
       - type: graph_tool_used
 
-  # ── IT-41: JSON (a/b/c) ──
+  # ── IT-41: Trace Analysis (g/h/i) ──
 
   - id: 5116
-    name: hugo_json
+    name: hugo_trace_shortcode_exec
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against Hugo. Parse a JSON config file.
+      Trace shortcode parsing and execution in Hugo.
     query: |
-      Parse the package.json or any JSON configuration file
+      How are shortcodes parsed and executed during content rendering?
     expected_state: COMPLETE
     reference_answer: |
-      JSON tool parses the JSON file and returns structured data including
-      package metadata, dependencies, and build configuration.
+      Shortcode processing involves lexing shortcode syntax from content,
+      building a shortcode tree, resolving shortcode templates, and
+      executing them with the page context during rendering.
     validations:
       - type: graph_tool_used
 
   - id: 5117
-    name: hugo_json_b
+    name: hugo_trace_menu_build
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against Hugo (test B). Query JSON data.
+      Trace menu construction in Hugo.
     query: |
-      Extract the Go module dependencies from go.mod or related JSON
+      What is the call chain for building navigation menus from config and pages?
     expected_state: COMPLETE
     reference_answer: |
-      JSON tool extracts dependency information showing Hugo's key
-      dependencies including goldmark, tree-sitter bindings, and
-      the Go standard library extensions.
+      Menu building collects menu entries from both site config and page
+      front matter, sorts them by weight and name, builds the menu
+      hierarchy, and makes it available via .Site.Menus in templates.
     validations:
       - type: graph_tool_used
 
   - id: 5118
-    name: hugo_json_c
+    name: hugo_trace_image_processing
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against Hugo (test C). Parse test fixture JSON.
+      Trace image processing pipeline in Hugo.
     query: |
-      Parse any JSON test fixture files in the test data
+      What functions are involved when Hugo processes and resizes an image?
     expected_state: COMPLETE
     reference_answer: |
-      JSON tool parses test fixture data used in Hugo's test suite,
-      including sample site configurations and content metadata.
+      Image processing flows through the image resource, applying
+      resize/crop/fit operations via the imaging library, caching
+      processed variants, and generating output paths for the processed images.
     validations:
       - type: graph_tool_used
 
@@ -2213,18 +2220,18 @@ tests:
       - type: crs_trace_step_present
 
   - id: 5145
-    name: hugo_crs_edit
+    name: hugo_crs_trace_flow
     category: TOOL_CRS_VERIFICATION
     description: >
-      GR-58/IT-36: Verify edit tool produces CRS TraceStep against Hugo.
+      CRS verification: trace analysis records CRS state correctly.
     query: |
-      Edit the hugolib/site.go file to add a comment.
+      Trace how errors propagate through Hugo's template execution pipeline
     expected_state: COMPLETE
     reference_answer: |
-      edit tool was used and produced a CRS TraceStep with appropriate metadata.
+      The trace analysis tool records CRS state for template execution
+      error propagation in the Hugo static site generator codebase.
     validations:
-      - type: graph_tool_used
-      - type: crs_trace_step_present
+      - type: crs_state_recorded
 
   - id: 5146
     name: hugo_crs_tree

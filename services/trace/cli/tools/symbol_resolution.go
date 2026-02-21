@@ -236,14 +236,22 @@ func ResolveFunctionWithFuzzy(
 	exactMatches := index.GetByName(name)
 	if len(exactMatches) > 0 {
 		if cfg.kindFilter == KindFilterAny {
+			// IT-06 Bug 5: When multiple symbols share the same name, prefer
+			// higher-significance kinds (class > struct > interface > function > method)
+			// over low-significance kinds (field, variable, parameter). Without this,
+			// "Engine" in BabylonJS resolves to a field instead of the Engine class,
+			// and "Request" in Express resolves to a test variable instead of the
+			// Request object in lib/request.js.
+			best := pickMostSignificantSymbol(exactMatches)
 			logger.Info("Symbol resolution: exact match",
 				slog.String("query", name),
-				slog.String("resolved", exactMatches[0].Name),
-				slog.String("kind", exactMatches[0].Kind.String()),
-				slog.String("file", exactMatches[0].FilePath),
-				slog.Int("line", exactMatches[0].StartLine),
+				slog.String("resolved", best.Name),
+				slog.String("kind", best.Kind.String()),
+				slog.String("file", best.FilePath),
+				slog.Int("line", best.StartLine),
+				slog.Int("candidates", len(exactMatches)),
 			)
-			return exactMatches[0], false, nil
+			return best, false, nil
 		}
 		// Apply kind filter — find first match of the right kind
 		for _, sym := range exactMatches {
@@ -607,13 +615,27 @@ func resolveTypeDotMethod(
 			continue
 		}
 		if typeSym.Metadata == nil || typeSym.Metadata.Extends == "" {
+			logger.Debug("resolveTypeDotMethod: Strategy 4 skipped (no Extends metadata)",
+				slog.String("type", typeName),
+				slog.String("symbol_id", typeSym.ID),
+			)
 			continue
 		}
+
+		// IT-06b Issue 4: Strip qualified name prefixes before recursive lookup.
+		// Python base classes may be stored as "generic.NDFrame" but the index
+		// stores symbols by bare name "NDFrame". Defense-in-depth — the parser
+		// should also strip qualifiers (see python_parser.go IT-06b fix).
+		parentTypeName := typeSym.Metadata.Extends
+		if dotIdx := strings.LastIndex(parentTypeName, "."); dotIdx >= 0 {
+			parentTypeName = parentTypeName[dotIdx+1:]
+		}
+
 		logger.Debug("resolveTypeDotMethod: trying inheritance chain",
 			slog.String("type", typeName),
-			slog.String("extends", typeSym.Metadata.Extends),
+			slog.String("extends", parentTypeName),
 		)
-		parentSym, err := resolveTypeDotMethod(ctx, idx, typeSym.Metadata.Extends, methodName, logger)
+		parentSym, err := resolveTypeDotMethod(ctx, idx, parentTypeName, methodName, logger)
 		if err == nil {
 			// IT-05 R5 Fix: Check if original type overrides the parent method.
 			if override := findChildOverride(idx, typeName, methodName, parentSym); override != nil {
@@ -849,4 +871,263 @@ func pickBestBareCandidate(candidates []*ast.Symbol, typePrefix string) *ast.Sym
 		return pickBestCandidate(prefixMatches)
 	}
 	return pickBestCandidate(candidates)
+}
+
+// kindSignificance returns a ranking score for a symbol kind, where higher is more
+// significant. Used by pickMostSignificantSymbol to prefer classes and interfaces
+// over fields and variables when resolving ambiguous names.
+//
+// Description:
+//
+//	IT-06 Bug 5: When KindFilterAny is used and multiple symbols share the same name,
+//	the resolver must prefer higher-level constructs. For example, "Engine" should
+//	resolve to the Engine class rather than a field named "Engine" in some interface.
+//	"Request" should resolve to the Request object in lib/request.js rather than a
+//	local variable named "Request" in a test file.
+//
+// Inputs:
+//   - kind: The symbol kind to rank.
+//
+// Outputs:
+//   - int: Significance score (higher = more significant). Range 0-10.
+//
+// Thread Safety: This function is safe for concurrent use (pure function).
+func kindSignificance(kind ast.SymbolKind) int {
+	switch kind {
+	case ast.SymbolKindClass:
+		return 10
+	case ast.SymbolKindStruct:
+		return 10
+	case ast.SymbolKindInterface:
+		return 9
+	case ast.SymbolKindType:
+		return 8
+	case ast.SymbolKindEnum:
+		return 7
+	case ast.SymbolKindFunction:
+		return 6
+	case ast.SymbolKindMethod:
+		return 5
+	case ast.SymbolKindProperty:
+		return 4
+	case ast.SymbolKindConstant:
+		return 3
+	case ast.SymbolKindVariable:
+		return 2
+	case ast.SymbolKindField:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// pickMostSignificantSymbol selects the symbol with the highest kind significance
+// from a list of exact-name matches.
+//
+// Description:
+//
+//	IT-06 Bug 5: When multiple symbols share the same name and KindFilterAny is used,
+//	this function picks the most architecturally significant one. Among equal significance,
+//	prefers non-test files (files not containing "/test" or "_test") and shorter file paths.
+//
+// Inputs:
+//   - symbols: Non-empty slice of symbols with the same name. Must not be empty.
+//
+// Outputs:
+//   - *ast.Symbol: The most significant symbol. Never nil when input is non-empty.
+//
+// Thread Safety: This function is safe for concurrent use (stateless).
+func pickMostSignificantSymbol(symbols []*ast.Symbol) *ast.Symbol {
+	if len(symbols) == 1 {
+		return symbols[0]
+	}
+
+	// IT-06c H-3: If there are @overload stubs mixed with a real implementation,
+	// filter out the stubs first. Overload stubs (Python @overload) have no body
+	// and zero callees — the real implementation should always be preferred.
+	symbols = filterOutOverloadStubs(symbols)
+	if len(symbols) == 1 {
+		return symbols[0]
+	}
+
+	best := symbols[0]
+	bestSig := kindSignificance(best.Kind)
+	bestIsTest := isTestFile(best.FilePath)
+
+	for _, sym := range symbols[1:] {
+		sig := kindSignificance(sym.Kind)
+		isTest := isTestFile(sym.FilePath)
+
+		// Higher significance wins
+		if sig > bestSig {
+			best = sym
+			bestSig = sig
+			bestIsTest = isTest
+			continue
+		}
+		if sig < bestSig {
+			continue
+		}
+
+		// Equal significance: prefer non-test file over test file
+		if !isTest && bestIsTest {
+			best = sym
+			bestSig = sig
+			bestIsTest = isTest
+			continue
+		}
+		if isTest && !bestIsTest {
+			continue
+		}
+
+		// Equal significance, same test status: prefer shorter path (more central)
+		if len(sym.FilePath) < len(best.FilePath) {
+			best = sym
+			bestSig = sig
+			bestIsTest = isTest
+		}
+	}
+
+	return best
+}
+
+// filterOutOverloadStubs removes Python @overload stubs when a non-overload
+// implementation of the same name exists. If ALL symbols are overload stubs
+// (or none are), returns the original slice unchanged.
+//
+// IT-06c H-3: Python @overload stubs are type-checking hints with `...` bodies
+// and zero callees. The real implementation has the actual function body with callees.
+// Example: pandas read_csv has 4 @overload stubs + 1 real implementation.
+func filterOutOverloadStubs(symbols []*ast.Symbol) []*ast.Symbol {
+	if len(symbols) <= 1 {
+		return symbols
+	}
+
+	var nonOverloads []*ast.Symbol
+	hasOverloads := false
+
+	for _, sym := range symbols {
+		if sym.Metadata != nil && sym.Metadata.IsOverload {
+			hasOverloads = true
+		} else {
+			nonOverloads = append(nonOverloads, sym)
+		}
+	}
+
+	// Only filter if there's a mix: some overloads AND some non-overloads.
+	// If all are overloads or none are, return original.
+	if !hasOverloads || len(nonOverloads) == 0 {
+		return symbols
+	}
+
+	return nonOverloads
+}
+
+// isTestFile returns true if the file path looks like a test or benchmark file.
+//
+// Thread Safety: This function is safe for concurrent use (pure function).
+func isTestFile(filePath string) bool {
+	return strings.Contains(filePath, "/test") ||
+		strings.HasPrefix(filePath, "test/") ||
+		strings.Contains(filePath, "_test") ||
+		strings.Contains(filePath, "/tests/") ||
+		strings.HasPrefix(filePath, "tests/") ||
+		strings.Contains(filePath, "/benchmark") ||
+		strings.Contains(filePath, "/asv_bench/") ||
+		strings.HasPrefix(filePath, "asv_bench/") ||
+		strings.Contains(filePath, ".test.") ||
+		strings.Contains(filePath, ".spec.")
+}
+
+// filterByPackageHint narrows a list of symbols to those whose FilePath, Package,
+// or ID contains the given package hint. If no symbols match the hint, returns
+// the original list unchanged (don't lose symbols just because the hint was wrong).
+//
+// Description:
+//
+//	IT-06c Bug C: When index.GetByName("Build") returns 11 symbols across different
+//	packages, and the query contains "in hugolib", this function narrows the list
+//	to symbols from the hugolib directory/package. The hint is matched case-insensitively
+//	against FilePath, Package, and the directory component of the symbol's file path.
+//
+// Inputs:
+//   - symbols: Non-empty slice of symbols to filter.
+//   - hint: Package/directory name to match (e.g., "hugolib"). Must not be empty.
+//   - logger: Logger for observability.
+//   - toolName: Tool name for logging context.
+//
+// Outputs:
+//   - []*ast.Symbol: Filtered symbols. Same as input if no matches found.
+//
+// Thread Safety: This function is safe for concurrent use (stateless).
+func filterByPackageHint(symbols []*ast.Symbol, hint string, logger *slog.Logger, toolName string) []*ast.Symbol {
+	if hint == "" || len(symbols) <= 1 {
+		return symbols
+	}
+
+	lowerHint := strings.ToLower(hint)
+	var matches []*ast.Symbol
+
+	for _, sym := range symbols {
+		lowerPath := strings.ToLower(sym.FilePath)
+		lowerPkg := strings.ToLower(sym.Package)
+		lowerID := strings.ToLower(sym.ID)
+
+		// Match if hint appears in the file path, package name, or symbol ID.
+		// Use directory-boundary matching to avoid false positives:
+		// "hugolib" should match "hugolib/" or "/hugolib/" but not "nothugolib".
+		if containsPackageSegment(lowerPath, lowerHint) ||
+			containsPackageSegment(lowerPkg, lowerHint) ||
+			containsPackageSegment(lowerID, lowerHint) {
+			matches = append(matches, sym)
+		}
+	}
+
+	if len(matches) == 0 {
+		logger.Debug("IT-06c: package hint matched no symbols, using all",
+			slog.String("tool", toolName),
+			slog.String("hint", hint),
+			slog.Int("total", len(symbols)),
+		)
+		return symbols
+	}
+
+	logger.Info("IT-06c: package hint disambiguated symbols",
+		slog.String("tool", toolName),
+		slog.String("hint", hint),
+		slog.Int("before", len(symbols)),
+		slog.Int("after", len(matches)),
+	)
+	return matches
+}
+
+// containsPackageSegment checks if haystack contains needle as a path/package segment.
+// Returns true if needle appears at a directory boundary (preceded by "/" or start-of-string
+// and followed by "/" or end-of-string or "_" or ".").
+// This avoids false positives like "nothugolib" matching "hugolib".
+func containsPackageSegment(haystack, needle string) bool {
+	idx := 0
+	for {
+		pos := strings.Index(haystack[idx:], needle)
+		if pos < 0 {
+			return false
+		}
+		absPos := idx + pos
+		endPos := absPos + len(needle)
+
+		// Check boundary before the match
+		beforeOK := absPos == 0 || haystack[absPos-1] == '/' || haystack[absPos-1] == '.'
+		// Check boundary after the match
+		afterOK := endPos >= len(haystack) || haystack[endPos] == '/' || haystack[endPos] == '_' || haystack[endPos] == '.' || haystack[endPos] == ':'
+
+		if beforeOK && afterOK {
+			return true
+		}
+
+		// Move past this match and try again
+		idx = absPos + 1
+		if idx >= len(haystack) {
+			return false
+		}
+	}
 }

@@ -1489,86 +1489,94 @@ tests:
       - type: graph_tool_used
 
   - id: 6198
-    name: pandas_write
+    name: pandas_trace_indexing_path
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against Pandas data analysis library.
+      Trace the DataFrame indexing path in pandas.
     query: |
-      Create a new test DataFrame fixture
+      What is the call chain when accessing DataFrame rows via .loc[]?
     expected_state: COMPLETE
     reference_answer: |
-      The Write tool processes test DataFrame fixture for
-      the Pandas data analysis library codebase.
+      DataFrame.loc delegates to _LocIndexer.__getitem__, which validates
+      the key, calls _get_setitem_indexer for label-based lookup, and
+      retrieves data through BlockManager.reindex.
     validations:
       - type: graph_tool_used
 
   - id: 6199
-    name: pandas_write_b
+    name: pandas_trace_groupby_agg
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against Pandas data analysis library (test B).
+      Trace the groupby aggregation pipeline in pandas.
     query: |
-      Write a custom accessor
+      How does DataFrame.groupby().agg() execute internally?
     expected_state: COMPLETE
     reference_answer: |
-      The Write tool processes custom accessor for
-      the Pandas data analysis library codebase.
+      groupby creates a DataFrameGroupBy object, agg() resolves the
+      aggregation functions, applies them per-group via splitter iteration,
+      and combines results through concat operations.
     validations:
       - type: graph_tool_used
 
   - id: 6200
-    name: pandas_write_c
+    name: pandas_trace_merge_join
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against Pandas data analysis library (test C).
+      Trace the merge/join operation in pandas.
     query: |
-      Create a sample data generator
+      Trace the call chain for DataFrame.merge from input to output
     expected_state: COMPLETE
     reference_answer: |
-      The Write tool processes sample data generator for
-      the Pandas data analysis library codebase.
+      DataFrame.merge flows through merge() which validates join keys,
+      selects the join engine (hash or sort), executes the join via
+      _MergeOperation, and constructs the output DataFrame with
+      merged columns.
     validations:
       - type: graph_tool_used
 
   - id: 6201
-    name: pandas_edit
+    name: pandas_trace_read_csv
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against Pandas data analysis library.
+      Trace CSV parsing pipeline in pandas.
     query: |
-      Modify the DataFrame.merge method
+      What functions are involved when pandas reads a CSV file?
     expected_state: COMPLETE
     reference_answer: |
-      The Edit tool processes DataFrame.merge method for
-      the Pandas data analysis library codebase.
+      read_csv creates a TextFileReader which selects the parsing engine
+      (C or Python), parses headers, infers dtypes, converts columns,
+      and assembles the final DataFrame from parsed blocks.
     validations:
       - type: graph_tool_used
 
   - id: 6202
-    name: pandas_edit_b
+    name: pandas_trace_dtype_casting
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against Pandas data analysis library (test B).
+      Trace dtype casting flow in pandas.
     query: |
-      Update the GroupBy.agg
+      How does pandas handle dtype casting when assigning values to a column?
     expected_state: COMPLETE
     reference_answer: |
-      The Edit tool processes GroupBy.agg for
-      the Pandas data analysis library codebase.
+      Column assignment flows through DataFrame.__setitem__, which calls
+      _set_item on the BlockManager, triggering dtype inference,
+      possible block splitting, and upcasting if the new values
+      don't match the existing block dtype.
     validations:
       - type: graph_tool_used
 
   - id: 6203
-    name: pandas_edit_c
+    name: pandas_trace_apply_function
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against Pandas data analysis library (test C).
+      Trace the DataFrame.apply execution path in pandas.
     query: |
-      Fix the read_csv parser options
+      What is the call path for DataFrame.apply with a user function?
     expected_state: COMPLETE
     reference_answer: |
-      The Edit tool processes read_csv parser options for
-      the Pandas data analysis library codebase.
+      DataFrame.apply determines the execution axis, selects between
+      FrameApply and FrameRowApply, iterates over the axis applying
+      the function, and concatenates results respecting result_type.
     validations:
       - type: graph_tool_used
 
@@ -1741,44 +1749,50 @@ tests:
       - type: graph_tool_used
 
   - id: 6216
-    name: pandas_json
+    name: pandas_trace_missing_data
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against Pandas data analysis library.
+      Trace missing data handling in pandas.
     query: |
-      Parse the setup.cfg
+      How does pandas handle NaN propagation during arithmetic operations?
     expected_state: COMPLETE
     reference_answer: |
-      The JSON tool processes setup.cfg for
-      the Pandas data analysis library codebase.
+      Arithmetic operations go through array_ops which delegates to
+      the appropriate backend (numpy or ExtensionArray), applies
+      the operation element-wise, and propagates NaN values according
+      to the skipna parameter.
     validations:
       - type: graph_tool_used
 
   - id: 6217
-    name: pandas_json_b
+    name: pandas_trace_reindex
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against Pandas data analysis library (test B).
+      Trace the reindex operation in pandas.
     query: |
-      Extract info from pyproject.toml
+      What functions are called during DataFrame.reindex?
     expected_state: COMPLETE
     reference_answer: |
-      The JSON tool processes pyproject.toml for
-      the Pandas data analysis library codebase.
+      reindex validates the new index, calls BlockManager.reindex which
+      maps old positions to new positions, fills missing entries
+      according to the fill method, and returns a new DataFrame
+      with the reindexed data.
     validations:
       - type: graph_tool_used
 
   - id: 6218
-    name: pandas_json_c
+    name: pandas_trace_concat
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against Pandas data analysis library (test C).
+      Trace DataFrame concatenation in pandas.
     query: |
-      Read the CI config files
+      How does pd.concat combine multiple DataFrames?
     expected_state: COMPLETE
     reference_answer: |
-      The JSON tool processes CI config files for
-      the Pandas data analysis library codebase.
+      pd.concat creates a Concatenator which validates axes, computes
+      the union or intersection of columns, reindexes each DataFrame
+      to the common axis, and stacks blocks through BlockManager
+      concatenation.
     validations:
       - type: graph_tool_used
 

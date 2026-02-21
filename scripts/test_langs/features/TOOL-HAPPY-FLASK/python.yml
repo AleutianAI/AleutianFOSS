@@ -1478,86 +1478,92 @@ tests:
       - type: graph_tool_used
 
   - id: 6098
-    name: flask_write
+    name: flask_trace_request_dispatch
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against Flask web framework.
+      Trace the request dispatch flow in Flask.
     query: |
-      Create a new test fixture module
+      What is the complete call chain from WSGI entry to route handler in Flask?
     expected_state: COMPLETE
     reference_answer: |
-      The Write tool processes test fixture module for
-      the Flask web framework codebase.
+      Request dispatch flows through Flask.__call__, wsgi_app, request context
+      push, URL rule matching via Map.match, and dispatch to the view function
+      registered for that endpoint.
     validations:
       - type: graph_tool_used
 
   - id: 6099
-    name: flask_write_b
+    name: flask_trace_blueprint_registration
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against Flask web framework (test B).
+      Trace blueprint registration flow in Flask.
     query: |
-      Write a sample Flask app
+      How does Flask register blueprints and merge their routes?
     expected_state: COMPLETE
     reference_answer: |
-      The Write tool processes sample Flask app for
-      the Flask web framework codebase.
+      Blueprint registration flows through app.register_blueprint which
+      calls Blueprint.register, applying URL prefix, deferred setup functions,
+      and merging blueprint routes into the app's URL map.
     validations:
       - type: graph_tool_used
 
   - id: 6100
-    name: flask_write_c
+    name: flask_trace_error_handling
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against Flask web framework (test C).
+      Trace error handler resolution in Flask.
     query: |
-      Create a custom middleware
+      Trace the call chain when an exception occurs during request handling
     expected_state: COMPLETE
     reference_answer: |
-      The Write tool processes custom middleware for
-      the Flask web framework codebase.
+      Exception handling flows through handle_exception, which looks up
+      registered error handlers by exception class, falls back to the
+      default InternalServerError handler, and returns an error response.
     validations:
       - type: graph_tool_used
 
   - id: 6101
-    name: flask_edit
+    name: flask_trace_context_lifecycle
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against Flask web framework.
+      Trace request and application context lifecycle in Flask.
     query: |
-      Modify the Flask.wsgi_app method
+      What functions manage the request context push and pop lifecycle?
     expected_state: COMPLETE
     reference_answer: |
-      The Edit tool processes Flask.wsgi_app method for
-      the Flask web framework codebase.
+      Request context management involves RequestContext.push which sets up
+      the context local stack, creates the request/session objects, and
+      RequestContext.pop which tears down and runs teardown callbacks.
     validations:
       - type: graph_tool_used
 
   - id: 6102
-    name: flask_edit_b
+    name: flask_trace_template_rendering
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against Flask web framework (test B).
+      Trace template rendering flow in Flask.
     query: |
-      Update the route decorator
+      How does render_template flow from Flask to Jinja2 output?
     expected_state: COMPLETE
     reference_answer: |
-      The Edit tool processes route decorator for
-      the Flask web framework codebase.
+      render_template gets the Jinja2 environment, loads the template by name,
+      updates the context with template globals, renders the template to
+      a string, and signals template_rendered.
     validations:
       - type: graph_tool_used
 
   - id: 6103
-    name: flask_edit_c
+    name: flask_trace_session_handling
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against Flask web framework (test C).
+      Trace session handling in Flask.
     query: |
-      Fix the error handler registration
+      What is the call path for session creation and cookie signing in Flask?
     expected_state: COMPLETE
     reference_answer: |
-      The Edit tool processes error handler registration for
-      the Flask web framework codebase.
+      Session handling flows through SecureCookieSessionInterface which opens
+      the session by decoding the signed cookie, makes it available as
+      flask.session, and saves it back with itsdangerous signing on response.
     validations:
       - type: graph_tool_used
 
@@ -1730,44 +1736,47 @@ tests:
       - type: graph_tool_used
 
   - id: 6116
-    name: flask_json
+    name: flask_trace_url_routing
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against Flask web framework.
+      Trace URL rule matching in Flask.
     query: |
-      Parse the setup.cfg deps
+      How does Flask match an incoming URL to a registered route?
     expected_state: COMPLETE
     reference_answer: |
-      The JSON tool processes setup.cfg deps for
-      the Flask web framework codebase.
+      URL matching uses Werkzeug's Map and Rule system. The URL adapter
+      matches the path against compiled regex rules, extracts path
+      parameters, and returns the endpoint and argument values.
     validations:
       - type: graph_tool_used
 
   - id: 6117
-    name: flask_json_b
+    name: flask_trace_signal_dispatch
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against Flask web framework (test B).
+      Trace signal dispatch in Flask.
     query: |
-      Extract info from pyproject.toml
+      What functions are called when Flask dispatches the request_started signal?
     expected_state: COMPLETE
     reference_answer: |
-      The JSON tool processes pyproject.toml for
-      the Flask web framework codebase.
+      Signal dispatch uses Blinker. request_started.send triggers all
+      connected receivers with the app as sender, allowing extensions
+      to hook into the request lifecycle without subclassing.
     validations:
       - type: graph_tool_used
 
   - id: 6118
-    name: flask_json_c
+    name: flask_trace_response_build
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against Flask web framework (test C).
+      Trace response object construction in Flask.
     query: |
-      Read the test fixtures
+      How does Flask construct a Response from a view function's return value?
     expected_state: COMPLETE
     reference_answer: |
-      The JSON tool processes test fixtures for
-      the Flask web framework codebase.
+      Response construction flows through make_response which handles
+      string, tuple, and Response return types, applies after_request
+      handlers, sets cookies/headers, and returns a WSGI-compatible Response.
     validations:
       - type: graph_tool_used
 

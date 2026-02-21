@@ -82,33 +82,47 @@ Category: {{.Category}}
 
 {{end}}
 
-## Common Patterns - Caller vs Callee Distinction
+## Common Patterns - Tool Disambiguation
 
 **CB-31d Item 6: Critical disambiguation examples**
 
-Understanding direction is crucial for graph queries:
+Understanding the difference between CALLERS, CALLEES, and REFERENCES is crucial:
+
+**REFERENCES (where X is used, any usage):**
+- "Where is X used?"
+- "Where is the Entry type used across the codebase?"
+- "Find references to Config"
+- "Show usages of HandlerFunc"
+- "What code references the Request object?"
+→ Tool: find_references
+
+**CALLERS (who calls X, upstream CALL relationships only):**
+- "What calls X?"
+- "Who invokes X?"
+- "What functions call X?"
+→ Tool: find_callers
 
 **CALLEES (what X calls, downstream):**
 - "What functions does X call?"
 - "What does X invoke?"
 - "Show me X's dependencies"
-- "What functions are called BY X?"
 → Tool: find_callees
 
-**CALLERS (who calls X, upstream):**
-- "What calls X?"
-- "Who invokes X?"
-- "What depends ON X?"
-- "What functions call X?"
-→ Tool: find_callers
+**CRITICAL: "Where is X used?" → find_references (NOT find_callers)**
+- "Where is X used?" asks about ALL usages of a symbol, not just call sites
+- "Who calls X?" asks specifically about CALL relationships
+- These are DIFFERENT tools for DIFFERENT questions
 
 **Examples:**
+- Query: "Where is the Entry type used across the codebase?" → find_references (usage query)
+- Query: "Where is the HandlerFunc type used?" → find_references (usage query)
 - Query: "What functions does main call?" → find_callees (main calls them)
 - Query: "What functions call validateInput?" → find_callers (they call validateInput)
 - Query: "Show dependencies of Handler" → find_callees (Handler depends on them)
 - Query: "What depends on the config module?" → find_callers (they depend on config)
 
 **Key phrase patterns:**
+- "where is X used" / "references to X" / "usages of X" → find_references
 - "does X call" / "X calls" → find_callees (downstream from X)
 - "calls X" / "call X" / "invoke X" → find_callers (upstream to X)
 - "from X" / "starting at X" → find_callees (traverse down from X)

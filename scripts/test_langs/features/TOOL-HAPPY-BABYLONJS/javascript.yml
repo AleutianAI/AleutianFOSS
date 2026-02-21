@@ -1476,86 +1476,94 @@ tests:
       - type: graph_tool_used
 
   - id: 7198
-    name: babylonjs_write
+    name: babylonjs_trace_render_loop
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against Babylon.js 3D engine.
+      Trace the render loop pipeline in BabylonJS.
     query: |
-      Create a new test scene setup
+      What is the complete call chain for a single frame render in BabylonJS?
     expected_state: COMPLETE
     reference_answer: |
-      The Write tool processes test scene setup for
-      the Babylon.js 3D engine codebase.
+      Frame rendering flows through Engine.runRenderLoop, Scene.render
+      which evaluates active meshes, processes the render pipeline,
+      calls SubMesh.render, and submits draw calls to WebGL.
     validations:
       - type: graph_tool_used
 
   - id: 7199
-    name: babylonjs_write_b
+    name: babylonjs_trace_mesh_creation
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against Babylon.js 3D engine (test B).
+      Trace mesh creation and registration in BabylonJS.
     query: |
-      Write a custom shader
+      How does BabylonJS create and register a mesh in the scene graph?
     expected_state: COMPLETE
     reference_answer: |
-      The Write tool processes custom shader for
-      the Babylon.js 3D engine codebase.
+      Mesh creation flows through the Mesh constructor, which calls
+      AbstractMesh and TransformNode constructors, registers with the
+      Scene's mesh list, sets up geometry, and initializes bounding info.
     validations:
       - type: graph_tool_used
 
   - id: 7200
-    name: babylonjs_write_c
+    name: babylonjs_trace_material_compile
     category: TOOL_HAPPY_PATH
     description: >
-      Write tool against Babylon.js 3D engine (test C).
+      Trace material shader compilation in BabylonJS.
     query: |
-      Create a material helper
+      Trace the call chain from material assignment to shader compilation
     expected_state: COMPLETE
     reference_answer: |
-      The Write tool processes material helper for
-      the Babylon.js 3D engine codebase.
+      Material compilation flows through Material.isReady, which checks
+      shader availability, generates shader defines from material properties,
+      creates an Effect via the Engine, and compiles vertex/fragment shaders.
     validations:
       - type: graph_tool_used
 
   - id: 7201
-    name: babylonjs_edit
+    name: babylonjs_trace_camera_input
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against Babylon.js 3D engine.
+      Trace camera input handling in BabylonJS.
     query: |
-      Modify the Scene.render method
+      What functions process user input events for camera movement?
     expected_state: COMPLETE
     reference_answer: |
-      The Edit tool processes Scene.render method for
-      the Babylon.js 3D engine codebase.
+      Camera input flows through InputManager which dispatches pointer
+      and keyboard events to the active camera's input manager, which
+      routes to specific input classes like FreeCameraMouseInput that
+      update camera rotation and position.
     validations:
       - type: graph_tool_used
 
   - id: 7202
-    name: babylonjs_edit_b
+    name: babylonjs_trace_physics_step
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against Babylon.js 3D engine (test B).
+      Trace physics simulation step in BabylonJS.
     query: |
-      Update the Engine.runRenderLoop
+      How does BabylonJS execute a physics simulation step?
     expected_state: COMPLETE
     reference_answer: |
-      The Edit tool processes Engine.runRenderLoop for
-      the Babylon.js 3D engine codebase.
+      Physics stepping flows through PhysicsEngine.step which calls
+      the physics plugin (Cannon, Ammo, or Havok), updates impostor
+      transforms, synchronizes mesh positions with physics bodies,
+      and processes collision callbacks.
     validations:
       - type: graph_tool_used
 
   - id: 7203
-    name: babylonjs_edit_c
+    name: babylonjs_trace_texture_load
     category: TOOL_HAPPY_PATH
     description: >
-      Edit tool against Babylon.js 3D engine (test C).
+      Trace texture loading flow in BabylonJS.
     query: |
-      Fix the Mesh.dispose cleanup
+      What is the call path for loading a texture from URL to GPU?
     expected_state: COMPLETE
     reference_answer: |
-      The Edit tool processes Mesh.dispose cleanup for
-      the Babylon.js 3D engine codebase.
+      Texture loading flows through the Texture constructor, FileTools
+      for URL fetching, image decoding, Engine.createTexture for
+      WebGL texture allocation, and uploading pixel data to the GPU.
     validations:
       - type: graph_tool_used
 
@@ -1728,44 +1736,49 @@ tests:
       - type: graph_tool_used
 
   - id: 7216
-    name: babylonjs_json
+    name: babylonjs_trace_scene_serialize
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against Babylon.js 3D engine.
+      Trace scene serialization in BabylonJS.
     query: |
-      Parse the package.json
+      How does BabylonJS serialize a scene to JSON format?
     expected_state: COMPLETE
     reference_answer: |
-      The JSON tool processes package.json for
-      the Babylon.js 3D engine codebase.
+      Scene serialization calls SceneSerializer.Serialize which iterates
+      cameras, lights, meshes, materials, and particle systems, calling
+      each entity's serialize method to produce a JSON representation.
     validations:
       - type: graph_tool_used
 
   - id: 7217
-    name: babylonjs_json_b
+    name: babylonjs_trace_animation_eval
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against Babylon.js 3D engine (test B).
+      Trace animation evaluation in BabylonJS.
     query: |
-      Extract info from tsconfig.json
+      What functions evaluate animations during the render loop?
     expected_state: COMPLETE
     reference_answer: |
-      The JSON tool processes tsconfig.json for
-      the Babylon.js 3D engine codebase.
+      Animation evaluation flows through Scene._animate which processes
+      each Animatable, evaluates Animation key frames via interpolation,
+      applies easing functions, and sets target property values
+      through runtime animation paths.
     validations:
       - type: graph_tool_used
 
   - id: 7218
-    name: babylonjs_json_c
+    name: babylonjs_trace_picking
     category: TOOL_HAPPY_PATH
     description: >
-      JSON tool against Babylon.js 3D engine (test C).
+      Trace object picking/raycasting in BabylonJS.
     query: |
-      Read the build config
+      How does scene.pick resolve which mesh was clicked?
     expected_state: COMPLETE
     reference_answer: |
-      The JSON tool processes build config for
-      the Babylon.js 3D engine codebase.
+      Scene.pick creates a Ray from the screen coordinates, iterates
+      active meshes, tests bounding box intersection first, then
+      detailed triangle intersection, and returns the PickingInfo
+      with the closest hit mesh and intersection point.
     validations:
       - type: graph_tool_used
 
@@ -2127,32 +2140,32 @@ tests:
       - type: crs_trace_step_present
 
   - id: 7245
-    name: babylonjs_crs_edit
+    name: babylonjs_crs_trace_flow
     category: TOOL_CRS_VERIFICATION
     description: >
-      GR-58/IT-36: Verify edit tool produces CRS TraceStep against Babylon.js.
+      CRS verification: trace analysis records CRS state correctly.
     query: |
-      Edit the Scene.render method to add a debug log in Babylon.js.
+      Trace how errors propagate through BabylonJS shader compilation
     expected_state: COMPLETE
     reference_answer: |
-      edit tool was used and produced a CRS TraceStep with appropriate metadata.
+      The trace analysis tool records CRS state for shader compilation
+      error propagation in the BabylonJS 3D engine codebase.
     validations:
-      - type: graph_tool_used
-      - type: crs_trace_step_present
+      - type: crs_state_recorded
 
   - id: 7246
-    name: babylonjs_crs_json
+    name: babylonjs_crs_trace_render
     category: TOOL_CRS_VERIFICATION
     description: >
-      GR-58/IT-41: Verify json tool produces CRS TraceStep against Babylon.js.
+      CRS verification: trace render pipeline analysis records state.
     query: |
-      Output the JSON representation of the AbstractMesh class structure in Babylon.js.
+      Trace the render pipeline from scene evaluation to draw call submission
     expected_state: COMPLETE
     reference_answer: |
-      json tool was used and produced a CRS TraceStep with appropriate metadata.
+      The trace analysis tool records CRS state for render pipeline
+      analysis in the BabylonJS 3D engine codebase.
     validations:
-      - type: graph_tool_used
-      - type: crs_trace_step_present
+      - type: crs_state_recorded
 
   # -- IT-01/IT-02/IT-03: Second CRS TraceStep Verification --
 

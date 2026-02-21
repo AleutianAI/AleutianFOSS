@@ -541,8 +541,18 @@ func (p *PythonParser) processClass(ctx context.Context, node *sitter.Node, cont
 			for j := 0; j < int(child.ChildCount()); j++ {
 				arg := child.Child(j)
 				switch arg.Type() {
-				case "identifier", "attribute":
+				case "identifier":
 					bases = append(bases, string(content[arg.StartByte():arg.EndByte()]))
+				case "attribute":
+					// IT-06b Issue 4: Qualified names like "generic.NDFrame" must be
+					// stripped to bare name "NDFrame" for index lookup compatibility.
+					// The index stores symbols by bare name, not qualified path.
+					fullName := string(content[arg.StartByte():arg.EndByte()])
+					if dotIdx := strings.LastIndex(fullName, "."); dotIdx >= 0 {
+						bases = append(bases, fullName[dotIdx+1:])
+					} else {
+						bases = append(bases, fullName)
+					}
 				case "subscript":
 					// IT-03a Phase 15 P-1: Handle Protocol[T], Generic[T], etc.
 					// Extract the base name before the bracket (e.g., "Protocol" from "Protocol[T]")
@@ -670,6 +680,7 @@ func (p *PythonParser) extractClassMembers(ctx context.Context, body *sitter.Nod
 func (p *PythonParser) processClassVariable(node *sitter.Node, content []byte, filePath string) *Symbol {
 	var name string
 	var typeStr string
+	var typeRefs []TypeReference // IT-06 Bug 9
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
@@ -680,6 +691,8 @@ func (p *PythonParser) processClassVariable(node *sitter.Node, content []byte, f
 			}
 		case "type":
 			typeStr = string(content[child.StartByte():child.EndByte()])
+			// IT-06 Bug 9: Extract type refs from variable annotation
+			typeRefs = extractTypeRefsFromAnnotation(child, content, filePath)
 		}
 	}
 
@@ -692,7 +705,7 @@ func (p *PythonParser) processClassVariable(node *sitter.Node, content []byte, f
 		return nil
 	}
 
-	return &Symbol{
+	sym := &Symbol{
 		ID:        GenerateID(filePath, int(node.StartPoint().Row+1), name),
 		Name:      name,
 		Kind:      SymbolKindField,
@@ -705,6 +718,13 @@ func (p *PythonParser) processClassVariable(node *sitter.Node, content []byte, f
 		StartCol:  int(node.StartPoint().Column),
 		EndCol:    int(node.EndPoint().Column),
 	}
+
+	// IT-06 Bug 9: Set type annotation references
+	if len(typeRefs) > 0 {
+		sym.TypeReferences = typeRefs
+	}
+
+	return sym
 }
 
 // processMethod extracts a method from a class.
@@ -808,6 +828,7 @@ func (p *PythonParser) processFunction(ctx context.Context, node *sitter.Node, c
 	var docstring string
 	var isAsync bool
 	var bodyNode *sitter.Node
+	var typeRefs []TypeReference // IT-06 Bug 9: type annotation references
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
@@ -819,8 +840,14 @@ func (p *PythonParser) processFunction(ctx context.Context, node *sitter.Node, c
 			name = string(content[child.StartByte():child.EndByte()])
 		case "parameters":
 			params = string(content[child.StartByte():child.EndByte()])
+			// IT-06 Bug 9: Extract type refs from parameter annotations
+			paramRefs := extractParamTypeRefs(child, content, filePath)
+			typeRefs = append(typeRefs, paramRefs...)
 		case "type":
 			returnType = string(content[child.StartByte():child.EndByte()])
+			// IT-06 Bug 9: Extract type refs from return type annotation
+			retRefs := extractTypeRefsFromAnnotation(child, content, filePath)
+			typeRefs = append(typeRefs, retRefs...)
 		case "block":
 			bodyNode = child
 			docstring = p.extractDocstring(child, content)
@@ -844,6 +871,7 @@ func (p *PythonParser) processFunction(ctx context.Context, node *sitter.Node, c
 	}
 
 	// Check for special decorators
+	var isOverload bool
 	for _, dec := range decorators {
 		switch dec {
 		case "property":
@@ -852,6 +880,10 @@ func (p *PythonParser) processFunction(ctx context.Context, node *sitter.Node, c
 			isStatic = true
 		case "classmethod":
 			isStatic = true
+		case "overload":
+			// IT-06c H-3: Mark @overload stubs so symbol resolution can prefer
+			// the real implementation (which has actual callees).
+			isOverload = true
 		}
 	}
 
@@ -883,18 +915,24 @@ func (p *PythonParser) processFunction(ctx context.Context, node *sitter.Node, c
 	}
 
 	// Add metadata
-	if len(decorators) > 0 || returnType != "" || isAsync || isStatic {
+	if len(decorators) > 0 || returnType != "" || isAsync || isStatic || isOverload {
 		sym.Metadata = &SymbolMetadata{
 			Decorators: decorators,
 			ReturnType: returnType,
 			IsAsync:    isAsync,
 			IsStatic:   isStatic,
+			IsOverload: isOverload,
 		}
 	}
 
 	// GR-41: Extract call sites from function/method body
 	if bodyNode != nil {
 		sym.Calls = p.extractCallSites(ctx, bodyNode, content, filePath)
+	}
+
+	// IT-06 Bug 9: Set type annotation references
+	if len(typeRefs) > 0 {
+		sym.TypeReferences = typeRefs
 	}
 
 	return sym
@@ -953,6 +991,163 @@ func (p *PythonParser) extractDecorators(node *sitter.Node, content []byte) []st
 	}
 
 	return decorators
+}
+
+// pythonTypeSkipList contains Python primitive types and typing constructs that should
+// not produce TypeReference entries. These are language-level constructs, not user-defined types.
+var pythonTypeSkipList = map[string]bool{
+	// Python builtins
+	"str": true, "int": true, "float": true, "bool": true, "bytes": true,
+	"None": true, "object": true, "type": true, "complex": true,
+	// typing module constructs
+	"Optional": true, "Union": true, "List": true, "Dict": true,
+	"Tuple": true, "Set": true, "FrozenSet": true, "Type": true,
+	"Callable": true, "Any": true, "Sequence": true, "Mapping": true,
+	"Iterable": true, "Iterator": true, "Generator": true, "Coroutine": true,
+	"Awaitable": true, "AsyncIterator": true, "AsyncIterable": true,
+	"AsyncGenerator": true, "ClassVar": true, "Final": true,
+	"Literal": true, "TypeVar": true, "Generic": true, "Protocol": true,
+	"Annotated": true, "TypeAlias": true, "TypeGuard": true,
+	"Concatenate": true, "ParamSpec": true, "Self": true,
+	"Unpack": true, "Required": true, "NotRequired": true,
+	// collections.abc aliases
+	"MutableMapping": true, "MutableSequence": true, "MutableSet": true,
+	"AbstractSet": true, "Hashable": true, "Sized": true,
+	"Collection": true, "Reversible": true, "SupportsInt": true,
+	"SupportsFloat": true, "SupportsComplex": true, "SupportsBytes": true,
+	"SupportsAbs": true, "SupportsRound": true,
+}
+
+// extractTypeRefsFromAnnotation walks a tree-sitter "type" node and extracts
+// non-primitive type identifiers as TypeReference entries.
+//
+// Description:
+//
+//	Recursively walks the type annotation AST node to find identifier nodes
+//	representing user-defined types. Skips Python primitives and typing module
+//	constructs (Optional, List, Dict, etc.) since those are language plumbing,
+//	not user-defined types that would be meaningful for find_references.
+//
+// IT-06 Bug 9: This enables graph edges from type annotations.
+//
+// Inputs:
+//   - typeNode: The tree-sitter "type" node from a function return type,
+//     parameter annotation, or variable annotation.
+//   - content: Source file bytes.
+//   - filePath: Relative path for Location.
+//
+// Outputs:
+//   - []TypeReference: Non-primitive type identifiers found in the annotation.
+func extractTypeRefsFromAnnotation(typeNode *sitter.Node, content []byte, filePath string) []TypeReference {
+	if typeNode == nil {
+		return nil
+	}
+
+	var refs []TypeReference
+	seen := make(map[string]bool) // deduplicate within one annotation
+
+	var walk func(node *sitter.Node)
+	walk = func(node *sitter.Node) {
+		if node == nil || len(refs) >= MaxTypeReferencesPerSymbol {
+			return
+		}
+
+		switch node.Type() {
+		case "identifier":
+			name := string(content[node.StartByte():node.EndByte()])
+			if !pythonTypeSkipList[name] && !seen[name] {
+				seen[name] = true
+				refs = append(refs, TypeReference{
+					Name: name,
+					Location: Location{
+						FilePath:  filePath,
+						StartLine: int(node.StartPoint().Row + 1),
+						EndLine:   int(node.EndPoint().Row + 1),
+						StartCol:  int(node.StartPoint().Column),
+						EndCol:    int(node.EndPoint().Column),
+					},
+				})
+			}
+		case "attribute":
+			// For typing.List, typing.Optional — extract the leaf attribute name
+			// and check if it's in the skip list. If "List", skip it.
+			// If "mymodule.MyType", we want "MyType" but it's tricky to get just the leaf.
+			// Use the last identifier child as the name.
+			for i := int(node.ChildCount()) - 1; i >= 0; i-- {
+				child := node.Child(i)
+				if child.Type() == "identifier" {
+					name := string(content[child.StartByte():child.EndByte()])
+					if !pythonTypeSkipList[name] && !seen[name] {
+						seen[name] = true
+						refs = append(refs, TypeReference{
+							Name: name,
+							Location: Location{
+								FilePath:  filePath,
+								StartLine: int(child.StartPoint().Row + 1),
+								EndLine:   int(child.EndPoint().Row + 1),
+								StartCol:  int(child.StartPoint().Column),
+								EndCol:    int(child.EndPoint().Column),
+							},
+						})
+					}
+					break // only take the leaf identifier
+				}
+			}
+			return // don't recurse into attribute children — we handled it
+		}
+
+		// Recurse into children for subscript (List[X]), binary_operator (X | Y), etc.
+		for i := 0; i < int(node.ChildCount()); i++ {
+			walk(node.Child(i))
+		}
+	}
+
+	walk(typeNode)
+	return refs
+}
+
+// extractParamTypeRefs extracts TypeReference entries from function parameter type annotations.
+//
+// Description:
+//
+//	Walks the tree-sitter "parameters" node and finds typed_parameter and
+//	typed_default_parameter children. For each, extracts the "type" child
+//	and runs extractTypeRefsFromAnnotation on it.
+//
+// IT-06 Bug 9: Enables graph edges from parameter type annotations like "def foo(x: Series)".
+//
+// Inputs:
+//   - paramsNode: The tree-sitter "parameters" node.
+//   - content: Source file bytes.
+//   - filePath: Relative path for Location.
+//
+// Outputs:
+//   - []TypeReference: Non-primitive type identifiers from all parameter annotations.
+func extractParamTypeRefs(paramsNode *sitter.Node, content []byte, filePath string) []TypeReference {
+	if paramsNode == nil {
+		return nil
+	}
+
+	var refs []TypeReference
+
+	for i := 0; i < int(paramsNode.ChildCount()); i++ {
+		child := paramsNode.Child(i)
+
+		switch child.Type() {
+		case pyNodeTypedParameter, pyNodeTypedDefaultParameter:
+			// Look for the "type" child within the typed parameter
+			for j := 0; j < int(child.ChildCount()); j++ {
+				typeChild := child.Child(j)
+				if typeChild.Type() == pyNodeType {
+					paramRefs := extractTypeRefsFromAnnotation(typeChild, content, filePath)
+					refs = append(refs, paramRefs...)
+					break
+				}
+			}
+		}
+	}
+
+	return refs
 }
 
 // extractDecoratorsWithArgs extracts decorator names and their argument identifiers.
@@ -1102,6 +1297,7 @@ func (p *PythonParser) extractModuleVariables(root *sitter.Node, content []byte,
 func (p *PythonParser) processModuleVariable(node *sitter.Node, content []byte, filePath string) *Symbol {
 	var name string
 	var typeStr string
+	var typeRefs []TypeReference // IT-06 Bug 9
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
@@ -1112,6 +1308,8 @@ func (p *PythonParser) processModuleVariable(node *sitter.Node, content []byte, 
 			}
 		case "type":
 			typeStr = string(content[child.StartByte():child.EndByte()])
+			// IT-06 Bug 9: Extract type refs from variable annotation
+			typeRefs = extractTypeRefsFromAnnotation(child, content, filePath)
 		}
 	}
 
@@ -1132,7 +1330,7 @@ func (p *PythonParser) processModuleVariable(node *sitter.Node, content []byte, 
 		kind = SymbolKindConstant
 	}
 
-	return &Symbol{
+	sym := &Symbol{
 		ID:        GenerateID(filePath, int(node.StartPoint().Row+1), name),
 		Name:      name,
 		Kind:      kind,
@@ -1145,6 +1343,13 @@ func (p *PythonParser) processModuleVariable(node *sitter.Node, content []byte, 
 		StartCol:  int(node.StartPoint().Column),
 		EndCol:    int(node.EndPoint().Column),
 	}
+
+	// IT-06 Bug 9: Set type annotation references
+	if len(typeRefs) > 0 {
+		sym.TypeReferences = typeRefs
+	}
+
+	return sym
 }
 
 // extractDocstring extracts the docstring from a block node.
@@ -1243,8 +1448,17 @@ func isAllCaps(name string) bool {
 func extractSubscriptBaseName(node *sitter.Node, content []byte) string {
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
-		if child.Type() == "identifier" || child.Type() == "attribute" {
+		switch child.Type() {
+		case "identifier":
 			return string(content[child.StartByte():child.EndByte()])
+		case "attribute":
+			// IT-06b: Strip qualified prefixes (e.g., "typing.Protocol" → "Protocol")
+			// for index lookup compatibility, same as base class extraction.
+			fullName := string(content[child.StartByte():child.EndByte()])
+			if dotIdx := strings.LastIndex(fullName, "."); dotIdx >= 0 {
+				return fullName[dotIdx+1:]
+			}
+			return fullName
 		}
 	}
 	return ""

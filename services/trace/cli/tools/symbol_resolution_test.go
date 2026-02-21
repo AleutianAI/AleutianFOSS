@@ -459,6 +459,54 @@ func TestResolveTypeDotMethod(t *testing.T) {
 		}
 	})
 
+	// IT-06b Issue 4: Qualified base class names in Extends metadata should be
+	// stripped to bare name before recursive lookup.
+	t.Run("Qualified inheritance: Series.apply resolves via generic.NDFrame", func(t *testing.T) {
+		qualIdx := index.NewSymbolIndex()
+		for _, sym := range []*ast.Symbol{
+			// NDFrame class with an "apply" method
+			{
+				ID: "pandas/core/generic.py:100:NDFrame", Name: "NDFrame",
+				Kind: ast.SymbolKindClass, FilePath: "pandas/core/generic.py",
+				StartLine: 100, EndLine: 500, Package: "generic",
+				Exported: true, Language: "python",
+				Children: []*ast.Symbol{
+					{
+						ID: "pandas/core/generic.py:200:apply", Name: "apply",
+						Kind: ast.SymbolKindMethod, FilePath: "pandas/core/generic.py",
+						StartLine: 200, EndLine: 230, Package: "generic",
+						Exported: true, Language: "python",
+					},
+				},
+			},
+			// Series extends "generic.NDFrame" (qualified name)
+			{
+				ID: "pandas/core/series.py:50:Series", Name: "Series",
+				Kind: ast.SymbolKindClass, FilePath: "pandas/core/series.py",
+				StartLine: 50, EndLine: 400, Package: "series",
+				Exported: true, Language: "python",
+				Metadata: &ast.SymbolMetadata{
+					Extends: "generic.NDFrame",
+				},
+			},
+		} {
+			if err := qualIdx.Add(sym); err != nil {
+				t.Fatalf("failed to add symbol %s: %v", sym.ID, err)
+			}
+		}
+
+		sym, err := resolveTypeDotMethod(ctx, qualIdx, "Series", "apply", logger)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if sym.Name != "apply" {
+			t.Errorf("expected name 'apply', got %q", sym.Name)
+		}
+		if sym.ID != "pandas/core/generic.py:200:apply" {
+			t.Errorf("expected ID from NDFrame, got %q", sym.ID)
+		}
+	})
+
 	t.Run("Exact receiver match takes priority over prefix match", func(t *testing.T) {
 		prefixIdx := index.NewSymbolIndex()
 		for _, sym := range []*ast.Symbol{
@@ -1764,6 +1812,320 @@ func TestResolveMultipleFunctionsWithFuzzy_PassesOptions(t *testing.T) {
 		}
 		if syms[1].Kind != ast.SymbolKindInterface {
 			t.Errorf("expected Handler as Interface with KindFilterType, got %s", syms[1].Kind)
+		}
+	})
+}
+
+// TestPickMostSignificantSymbol verifies IT-06 Bug 5: KindFilterAny must prefer
+// higher-significance kinds (class/struct) over lower ones (field/variable).
+func TestPickMostSignificantSymbol(t *testing.T) {
+	t.Run("prefers class over field", func(t *testing.T) {
+		field := &ast.Symbol{
+			ID:       "nativeInterfaces.ts:427:Engine",
+			Name:     "Engine",
+			Kind:     ast.SymbolKindField,
+			FilePath: "packages/dev/core/src/Engines/Native/nativeInterfaces.ts",
+		}
+		class := &ast.Symbol{
+			ID:       "Engines/engine.ts:100:Engine",
+			Name:     "Engine",
+			Kind:     ast.SymbolKindClass,
+			FilePath: "packages/dev/core/src/Engines/engine.ts",
+		}
+		result := pickMostSignificantSymbol([]*ast.Symbol{field, class})
+		if result.Kind != ast.SymbolKindClass {
+			t.Errorf("expected class, got %s (ID: %s)", result.Kind, result.ID)
+		}
+	})
+
+	t.Run("prefers class over variable", func(t *testing.T) {
+		variable := &ast.Symbol{
+			ID:       "test/req.acceptsEncoding.js:4:Request",
+			Name:     "Request",
+			Kind:     ast.SymbolKindVariable,
+			FilePath: "test/req.acceptsEncoding.js",
+		}
+		class := &ast.Symbol{
+			ID:       "lib/request.js:10:Request",
+			Name:     "Request",
+			Kind:     ast.SymbolKindClass,
+			FilePath: "lib/request.js",
+		}
+		result := pickMostSignificantSymbol([]*ast.Symbol{variable, class})
+		if result.Kind != ast.SymbolKindClass {
+			t.Errorf("expected class, got %s (ID: %s)", result.Kind, result.ID)
+		}
+	})
+
+	t.Run("prefers non-test file at equal significance", func(t *testing.T) {
+		testVar := &ast.Symbol{
+			ID:       "test/req.js:4:Request",
+			Name:     "Request",
+			Kind:     ast.SymbolKindVariable,
+			FilePath: "test/req.js",
+		}
+		srcVar := &ast.Symbol{
+			ID:       "lib/request.js:10:Request",
+			Name:     "Request",
+			Kind:     ast.SymbolKindVariable,
+			FilePath: "lib/request.js",
+		}
+		result := pickMostSignificantSymbol([]*ast.Symbol{testVar, srcVar})
+		if result.FilePath != "lib/request.js" {
+			t.Errorf("expected lib/request.js, got %s", result.FilePath)
+		}
+	})
+
+	t.Run("prefers shorter path at equal significance and test status", func(t *testing.T) {
+		deep := &ast.Symbol{
+			ID:       "a/b/c/d/engine.ts:1:Engine",
+			Name:     "Engine",
+			Kind:     ast.SymbolKindClass,
+			FilePath: "a/b/c/d/engine.ts",
+		}
+		shallow := &ast.Symbol{
+			ID:       "src/engine.ts:1:Engine",
+			Name:     "Engine",
+			Kind:     ast.SymbolKindClass,
+			FilePath: "src/engine.ts",
+		}
+		result := pickMostSignificantSymbol([]*ast.Symbol{deep, shallow})
+		if result.FilePath != "src/engine.ts" {
+			t.Errorf("expected src/engine.ts, got %s", result.FilePath)
+		}
+	})
+
+	t.Run("single symbol returned as-is", func(t *testing.T) {
+		sym := &ast.Symbol{
+			ID:   "foo.go:1:Foo",
+			Name: "Foo",
+			Kind: ast.SymbolKindField,
+		}
+		result := pickMostSignificantSymbol([]*ast.Symbol{sym})
+		if result != sym {
+			t.Error("single symbol should be returned directly")
+		}
+	})
+}
+
+// TestKindSignificance verifies the ranking is internally consistent.
+func TestKindSignificance(t *testing.T) {
+	// Classes and structs should outrank fields and variables
+	if kindSignificance(ast.SymbolKindClass) <= kindSignificance(ast.SymbolKindField) {
+		t.Error("class should outrank field")
+	}
+	if kindSignificance(ast.SymbolKindStruct) <= kindSignificance(ast.SymbolKindVariable) {
+		t.Error("struct should outrank variable")
+	}
+	if kindSignificance(ast.SymbolKindInterface) <= kindSignificance(ast.SymbolKindMethod) {
+		t.Error("interface should outrank method")
+	}
+	if kindSignificance(ast.SymbolKindFunction) <= kindSignificance(ast.SymbolKindField) {
+		t.Error("function should outrank field")
+	}
+}
+
+// TestResolveFunctionWithFuzzy_KindFilterAny_PrefersClass verifies that when
+// KindFilterAny is used and multiple symbols share a name, the class/struct
+// is preferred over field/variable (IT-06 Bug 5 integration test).
+func TestResolveFunctionWithFuzzy_KindFilterAny_PrefersClass(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+	idx := index.NewSymbolIndex()
+
+	// Add a field named "Engine" first (simulates index order where field comes first)
+	field := &ast.Symbol{
+		ID:        "native.ts:427:Engine",
+		Name:      "Engine",
+		Kind:      ast.SymbolKindField,
+		FilePath:  "packages/native/nativeInterfaces.ts",
+		StartLine: 427,
+		EndLine:   428,
+		Language:  "typescript",
+	}
+	class := &ast.Symbol{
+		ID:        "engine.ts:100:Engine",
+		Name:      "Engine",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "packages/core/src/Engines/engine.ts",
+		StartLine: 100,
+		EndLine:   500,
+		Language:  "typescript",
+	}
+
+	if err := idx.Add(field); err != nil {
+		t.Fatalf("failed to add field: %v", err)
+	}
+	if err := idx.Add(class); err != nil {
+		t.Fatalf("failed to add class: %v", err)
+	}
+
+	sym, fuzzy, err := ResolveFunctionWithFuzzy(ctx, idx, "Engine", logger,
+		WithKindFilter(KindFilterAny))
+	if err != nil {
+		t.Fatalf("ResolveFunctionWithFuzzy() error: %v", err)
+	}
+	if fuzzy {
+		t.Error("expected exact match, not fuzzy")
+	}
+	if sym.Kind != ast.SymbolKindClass {
+		t.Errorf("expected class Engine, got %s at %s", sym.Kind, sym.FilePath)
+	}
+}
+
+// IT-06c Bug C: Tests for containsPackageSegment.
+func TestContainsPackageSegment(t *testing.T) {
+	tests := []struct {
+		name     string
+		haystack string
+		needle   string
+		want     bool
+	}{
+		{"exact directory match", "hugolib/hugo_sites_build.go", "hugolib", true},
+		{"subdirectory match", "src/hugolib/builder.go", "hugolib", true},
+		{"no false positive", "nothugolib/file.go", "hugolib", false},
+		{"suffix boundary", "hugolib_test/file.go", "hugolib", true}, // underscore boundary OK
+		{"colon boundary (ID)", "hugolib/build.go:42:Build", "hugolib", true},
+		{"dot boundary", "com.hugolib.Build", "hugolib", true},
+		{"empty haystack", "", "hugolib", false},
+		{"empty needle", "hugolib/file.go", "", false},
+		{"package at start", "gin/context.go", "gin", true},
+		{"package at end", "internal/gin", "gin", true},
+		{"mid-word no match", "binging/file.go", "gin", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := containsPackageSegment(tt.haystack, tt.needle)
+			if got != tt.want {
+				t.Errorf("containsPackageSegment(%q, %q) = %v, want %v", tt.haystack, tt.needle, got, tt.want)
+			}
+		})
+	}
+}
+
+// IT-06c Bug C: Tests for filterByPackageHint.
+func TestFilterByPackageHint(t *testing.T) {
+	logger := slog.Default()
+
+	// Create test symbols simulating Hugo's 11 "Build" matches
+	symbols := []*ast.Symbol{
+		{Name: "Build", FilePath: "common/maps/maps.go", Kind: ast.SymbolKindFunction, Package: "maps"},
+		{Name: "Build", FilePath: "hugolib/hugo_sites_build.go", Kind: ast.SymbolKindFunction, Package: "hugolib"},
+		{Name: "Build", FilePath: "resources/resource.go", Kind: ast.SymbolKindMethod, Package: "resources"},
+		{Name: "Build", FilePath: "hugofs/basefs.go", Kind: ast.SymbolKindFunction, Package: "hugofs"},
+		{Name: "Build", FilePath: "create/content.go", Kind: ast.SymbolKindFunction, Package: "create"},
+	}
+
+	t.Run("hugolib hint narrows to correct Build", func(t *testing.T) {
+		result := filterByPackageHint(symbols, "hugolib", logger, "find_callees")
+		if len(result) != 1 {
+			t.Fatalf("expected 1 match, got %d", len(result))
+		}
+		if result[0].FilePath != "hugolib/hugo_sites_build.go" {
+			t.Errorf("expected hugolib Build, got %s", result[0].FilePath)
+		}
+	})
+
+	t.Run("no hint returns all", func(t *testing.T) {
+		result := filterByPackageHint(symbols, "", logger, "find_callees")
+		if len(result) != len(symbols) {
+			t.Errorf("expected all %d symbols, got %d", len(symbols), len(result))
+		}
+	})
+
+	t.Run("non-matching hint returns all", func(t *testing.T) {
+		result := filterByPackageHint(symbols, "nonexistent", logger, "find_callees")
+		if len(result) != len(symbols) {
+			t.Errorf("expected all %d symbols (hint didn't match), got %d", len(symbols), len(result))
+		}
+	})
+
+	t.Run("single symbol skips filtering", func(t *testing.T) {
+		single := []*ast.Symbol{symbols[0]}
+		result := filterByPackageHint(single, "hugolib", logger, "find_callees")
+		if len(result) != 1 {
+			t.Errorf("expected 1 symbol unchanged, got %d", len(result))
+		}
+	})
+}
+
+// TestFilterOutOverloadStubs verifies IT-06c H-3: Python @overload stubs are
+// deprioritized during symbol resolution so the real implementation (with callees) wins.
+func TestFilterOutOverloadStubs(t *testing.T) {
+	t.Run("mixed overloads and real — keeps only real", func(t *testing.T) {
+		symbols := []*ast.Symbol{
+			{Name: "read_csv", StartLine: 310, Metadata: &ast.SymbolMetadata{IsOverload: true}},
+			{Name: "read_csv", StartLine: 320, Metadata: &ast.SymbolMetadata{IsOverload: true}},
+			{Name: "read_csv", StartLine: 330, Metadata: &ast.SymbolMetadata{IsOverload: true}},
+			{Name: "read_csv", StartLine: 340, Metadata: &ast.SymbolMetadata{IsOverload: true}},
+			{Name: "read_csv", StartLine: 350, Metadata: &ast.SymbolMetadata{Decorators: []string{"set_module"}}},
+		}
+		result := filterOutOverloadStubs(symbols)
+		if len(result) != 1 {
+			t.Fatalf("expected 1 non-overload symbol, got %d", len(result))
+		}
+		if result[0].StartLine != 350 {
+			t.Errorf("expected real implementation at line 350, got line %d", result[0].StartLine)
+		}
+	})
+
+	t.Run("all overloads — returns all unchanged", func(t *testing.T) {
+		symbols := []*ast.Symbol{
+			{Name: "foo", StartLine: 10, Metadata: &ast.SymbolMetadata{IsOverload: true}},
+			{Name: "foo", StartLine: 20, Metadata: &ast.SymbolMetadata{IsOverload: true}},
+		}
+		result := filterOutOverloadStubs(symbols)
+		if len(result) != 2 {
+			t.Fatalf("expected all 2 symbols (all overloads), got %d", len(result))
+		}
+	})
+
+	t.Run("no overloads — returns all unchanged", func(t *testing.T) {
+		symbols := []*ast.Symbol{
+			{Name: "bar", StartLine: 10},
+			{Name: "bar", StartLine: 20, Metadata: &ast.SymbolMetadata{Decorators: []string{"cache"}}},
+		}
+		result := filterOutOverloadStubs(symbols)
+		if len(result) != 2 {
+			t.Fatalf("expected all 2 symbols (no overloads), got %d", len(result))
+		}
+	})
+
+	t.Run("nil metadata — not considered overload", func(t *testing.T) {
+		symbols := []*ast.Symbol{
+			{Name: "baz", StartLine: 10, Metadata: nil},
+			{Name: "baz", StartLine: 20, Metadata: &ast.SymbolMetadata{IsOverload: true}},
+		}
+		result := filterOutOverloadStubs(symbols)
+		if len(result) != 1 {
+			t.Fatalf("expected 1 non-overload symbol, got %d", len(result))
+		}
+		if result[0].StartLine != 10 {
+			t.Errorf("expected symbol at line 10, got line %d", result[0].StartLine)
+		}
+	})
+
+	t.Run("single symbol — returned unchanged", func(t *testing.T) {
+		symbols := []*ast.Symbol{
+			{Name: "single", StartLine: 5, Metadata: &ast.SymbolMetadata{IsOverload: true}},
+		}
+		result := filterOutOverloadStubs(symbols)
+		if len(result) != 1 {
+			t.Fatalf("expected 1 symbol unchanged, got %d", len(result))
+		}
+	})
+
+	t.Run("pickMostSignificantSymbol prefers real over overloads", func(t *testing.T) {
+		// End-to-end: pickMostSignificantSymbol should pick the real implementation
+		symbols := []*ast.Symbol{
+			{Name: "read_csv", Kind: ast.SymbolKindFunction, StartLine: 310, FilePath: "pandas/io/parsers/readers.py", Metadata: &ast.SymbolMetadata{IsOverload: true}},
+			{Name: "read_csv", Kind: ast.SymbolKindFunction, StartLine: 320, FilePath: "pandas/io/parsers/readers.py", Metadata: &ast.SymbolMetadata{IsOverload: true}},
+			{Name: "read_csv", Kind: ast.SymbolKindFunction, StartLine: 350, FilePath: "pandas/io/parsers/readers.py", Metadata: &ast.SymbolMetadata{Decorators: []string{"set_module"}}},
+		}
+		best := pickMostSignificantSymbol(symbols)
+		if best.StartLine != 350 {
+			t.Errorf("expected pickMostSignificantSymbol to choose real impl at line 350, got line %d", best.StartLine)
 		}
 	})
 }

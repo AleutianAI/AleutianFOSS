@@ -295,6 +295,17 @@ func getSingleFormattedResult(results []agent.ToolResult) (string, bool) {
 	//   - "Found N" prefix — used by successful graph queries
 	//   - "these results are exhaustive" — definitive answer footer
 	trimmed := strings.TrimSpace(singleOutput)
+
+	// IT-06c: Do NOT pass through find_references positive results. Unlike other graph
+	// tools (find_callers, find_implementations) which return function names that are
+	// inherently semantic, find_references returns bare file:line lists. LLM synthesis
+	// transforms these into meaningful explanations (e.g., "used in route registration,
+	// middleware chains, ...") which dramatically improves gold standard match quality.
+	// Negative results ("not found") still pass through to prevent hallucination.
+	if strings.Contains(trimmed, "references to '") && !strings.Contains(strings.ToLower(trimmed), "not found") {
+		return "", false
+	}
+
 	if strings.Contains(trimmed, "## GRAPH RESULT") ||
 		strings.HasPrefix(trimmed, "Found ") ||
 		strings.Contains(trimmed, "these results are exhaustive") {

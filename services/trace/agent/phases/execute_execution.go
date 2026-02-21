@@ -1327,10 +1327,23 @@ func (p *ExecutePhase) extractToolParameters(
 			return nil, fmt.Errorf("could not extract function name from query for %s", toolName)
 		}
 
-		return map[string]interface{}{
+		params := map[string]interface{}{
 			"function_name": funcName,
 			"limit":         20,
-		}, nil
+		}
+
+		// IT-06c Bug C: Extract package context to disambiguate when multiple
+		// symbols share the same name (e.g., 11 "Build" functions in Hugo).
+		if pkgHint := extractPackageContextFromQuery(query); pkgHint != "" {
+			params["package_hint"] = pkgHint
+			slog.Info("IT-06c: extracted package context for disambiguation",
+				slog.String("tool", toolName),
+				slog.String("function_name", funcName),
+				slog.String("package_hint", pkgHint),
+			)
+		}
+
+		return params, nil
 
 	case "find_implementations":
 		// Extract interface/class name from query using implementation-specific patterns first,
@@ -1345,10 +1358,15 @@ func (p *ExecutePhase) extractToolParameters(
 		if interfaceName == "" {
 			return nil, fmt.Errorf("could not extract interface name from query")
 		}
-		return map[string]interface{}{
+		params := map[string]interface{}{
 			"interface_name": interfaceName,
 			"limit":          20,
-		}, nil
+		}
+		// IT-06c: Extract package context for disambiguation
+		if pkgHint := extractPackageContextFromQuery(query); pkgHint != "" {
+			params["package_hint"] = pkgHint
+		}
+		return params, nil
 
 	case "find_references":
 		// Extract symbol name from query
@@ -1359,10 +1377,15 @@ func (p *ExecutePhase) extractToolParameters(
 		if symbolName == "" {
 			return nil, fmt.Errorf("could not extract symbol name from query")
 		}
-		return map[string]interface{}{
+		params := map[string]interface{}{
 			"symbol_name": symbolName,
 			"limit":       20,
-		}, nil
+		}
+		// IT-06c: Extract package context for disambiguation
+		if pkgHint := extractPackageContextFromQuery(query); pkgHint != "" {
+			params["package_hint"] = pkgHint
+		}
+		return params, nil
 
 	// GR-Phase1: Parameter extraction for graph analytics tools
 	case "find_hotspots":
@@ -2182,6 +2205,11 @@ func (p *ExecutePhase) extractToolParameters(
 					slog.Float64("confidence", destConf),
 				)
 			}
+		}
+
+		// IT-06c: Extract package context for disambiguation
+		if pkgHint := extractPackageContextFromQuery(query); pkgHint != "" {
+			params["package_hint"] = pkgHint
 		}
 
 		slog.Debug("CB-31d: extracted get_call_chain params",

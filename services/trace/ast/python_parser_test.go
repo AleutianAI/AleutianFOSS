@@ -2067,6 +2067,23 @@ func TestPythonParser_ExtractCallSites_OverloadAndDelegation(t *testing.T) {
 		}
 	})
 
+	t.Run("overload_stubs_have_IsOverload_metadata", func(t *testing.T) {
+		// IT-06c H-3: Parser must mark @overload stubs so symbol resolution
+		// can prefer the real implementation.
+		for i, stub := range overloadStubs {
+			if stub.Metadata == nil || !stub.Metadata.IsOverload {
+				t.Errorf("overload stub %d at line %d should have IsOverload=true",
+					i, stub.StartLine)
+			}
+		}
+		// The real implementation must NOT have IsOverload set
+		if realToCsv != nil {
+			if realToCsv.Metadata != nil && realToCsv.Metadata.IsOverload {
+				t.Error("real to_csv implementation should NOT have IsOverload=true")
+			}
+		}
+	})
+
 	t.Run("real_to_csv_extracts_all_calls", func(t *testing.T) {
 		if realToCsv == nil {
 			t.Fatal("real to_csv implementation not found (expected method with calls)")
@@ -2668,5 +2685,72 @@ class TypedDict(total=False):
 				t.Errorf("expected %s kind Class (non-metaclass keyword args), got %v", sym.Name, sym.Kind)
 			}
 		}
+	}
+}
+
+// TestPythonParser_QualifiedBaseClassName verifies IT-06b Issue 4:
+// When a class extends a qualified name (e.g., "generic.NDFrame"),
+// the Extends metadata stores only the bare name "NDFrame" for
+// index lookup compatibility.
+func TestPythonParser_QualifiedBaseClassName(t *testing.T) {
+	tests := []struct {
+		name           string
+		source         string
+		expectedExtend string
+	}{
+		{
+			name: "bare base class name",
+			source: `class Series(NDFrame):
+    def apply(self):
+        pass
+`,
+			expectedExtend: "NDFrame",
+		},
+		{
+			name: "qualified base class name (dotted)",
+			source: `class Series(generic.NDFrame):
+    def apply(self):
+        pass
+`,
+			expectedExtend: "NDFrame",
+		},
+		{
+			name: "deeply qualified base class name",
+			source: `class Series(pandas.core.generic.NDFrame):
+    def apply(self):
+        pass
+`,
+			expectedExtend: "NDFrame",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parser := NewPythonParser()
+			result, err := parser.Parse(context.Background(), []byte(tt.source), "test.py")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			var classSym *Symbol
+			for _, sym := range result.Symbols {
+				if sym.Name == "Series" && sym.Kind == SymbolKindClass {
+					classSym = sym
+					break
+				}
+			}
+
+			if classSym == nil {
+				t.Fatal("expected to find class 'Series'")
+			}
+
+			if classSym.Metadata == nil {
+				t.Fatal("expected Metadata to be set")
+			}
+
+			if classSym.Metadata.Extends != tt.expectedExtend {
+				t.Errorf("expected Extends=%q, got %q", tt.expectedExtend, classSym.Metadata.Extends)
+			}
+		})
 	}
 }

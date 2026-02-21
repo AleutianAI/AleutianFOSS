@@ -448,6 +448,13 @@ type Symbol struct {
 	// Used by the graph builder to create EdgeTypeCalls edges.
 	// See GR-41: Call Edge Extraction for find_callers/find_callees.
 	Calls []CallSite `json:"calls,omitempty"`
+
+	// TypeReferences contains type identifiers referenced in this symbol's type annotations.
+	// Populated for functions/methods (parameter types, return types) and variables (type annotations).
+	// Used by the graph builder to create EdgeTypeReferences edges.
+	// IT-06 Bug 9: Enables graph-based discovery of type usage across the codebase.
+	// Primitives and language-specific constructs (e.g., str, int, Optional, List) are excluded.
+	TypeReferences []TypeReference `json:"type_references,omitempty"`
 }
 
 // MethodSignature represents a method's signature for interface implementation detection.
@@ -560,6 +567,33 @@ func (c *CallSite) Validate() error {
 	return nil
 }
 
+// TypeReference represents a type identifier referenced in a symbol's type annotations.
+//
+// Description:
+//
+//	TypeReference captures a type name used in a function parameter annotation,
+//	return type annotation, or variable type annotation. These enable the graph
+//	builder to create EdgeTypeReferences edges for type-usage relationships.
+//
+// IT-06 Bug 9: Without these, the graph only has call edges — type annotations
+// like "def foo(x: Series) -> DataFrame" produce no edges, so types referenced
+// only via annotations are invisible to find_references.
+//
+// Thread Safety: TypeReference is immutable after creation and safe for concurrent read.
+type TypeReference struct {
+	// Name is the type identifier as it appears in source code.
+	// This is the unqualified name (e.g., "Series", not "pandas.Series").
+	// Primitives and language constructs are excluded at extraction time.
+	Name string `json:"name"`
+
+	// Location is where the type reference appears in the source file.
+	Location Location `json:"location"`
+}
+
+// MaxTypeReferencesPerSymbol is the maximum number of type references extracted per symbol.
+// This prevents memory exhaustion from functions with extremely long parameter lists.
+const MaxTypeReferencesPerSymbol = 200
+
 // MaxCallSitesPerSymbol is the maximum number of call sites extracted per symbol.
 // This prevents memory exhaustion from pathologically large functions.
 const MaxCallSitesPerSymbol = 1000
@@ -635,6 +669,12 @@ type SymbolMetadata struct {
 	// IT-03a C-3: Tracks types referenced via instanceof, typeof, and type predicates.
 	// Example: ["Router", "Response"] for code containing `x instanceof Router`.
 	TypeNarrowings []string `json:"type_narrowings,omitempty"`
+
+	// IsOverload indicates the symbol is a Python @overload stub (type-checking only).
+	// IT-06c H-3: Overload stubs have no function body (just `...`) and zero callees.
+	// The actual implementation is the same-name function WITHOUT @overload.
+	// Symbol resolution should prefer non-overload symbols over overload stubs.
+	IsOverload bool `json:"is_overload,omitempty"`
 
 	// PrototypeOf indicates this symbol was assigned via Foo.prototype.method = ...
 	// IT-03a B-2: Links prototype method assignments to their constructor function.

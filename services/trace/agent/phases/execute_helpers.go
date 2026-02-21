@@ -221,6 +221,89 @@ func extractPackageNameFromQuery(query string) string {
 	return ""
 }
 
+// extractPackageContextFromQuery extracts a package/module context hint from
+// a natural language query. Used to disambiguate symbol resolution when multiple
+// symbols share the same name across different packages.
+//
+// Description:
+//
+//	IT-06c Bug C: Queries like "What functions does the Build method call in hugolib?"
+//	contain package context ("in hugolib") that should be used to disambiguate
+//	when multiple symbols match "Build". This function extracts such hints.
+//
+//	Recognized patterns:
+//	  - "in <package>" (most common): "in hugolib", "in flask", "in gin"
+//	  - "from <package>": "from the hugolib package"
+//	  - "of <package>": "of the express module"
+//
+// Inputs:
+//
+//	query - The user's query string.
+//
+// Outputs:
+//
+//	string - The extracted package/module context, or empty if not found.
+//
+// Thread Safety: Safe for concurrent use (stateless function).
+func extractPackageContextFromQuery(query string) string {
+	lowerQuery := strings.ToLower(query)
+	words := strings.Fields(lowerQuery)
+
+	// Pattern 1: "in <package>" at end of query or before punctuation.
+	// Match the LAST "in <word>" that looks like a package name.
+	// Skip "in the codebase", "in the graph", etc.
+	skipAfterIn := map[string]bool{
+		"the": true, "a": true, "an": true, "this": true, "that": true,
+		"codebase": true, "code": true, "graph": true, "project": true,
+		"repo": true, "repository": true, "system": true, "source": true,
+	}
+
+	for i := len(words) - 2; i >= 0; i-- {
+		if words[i] == "in" {
+			candidate := strings.Trim(words[i+1], "?,.()")
+			if candidate == "" || skipAfterIn[candidate] {
+				continue
+			}
+			// Must look like a package name: lowercase, alphanumeric, no spaces
+			if isPackageLikeName(candidate) {
+				return candidate
+			}
+		}
+	}
+
+	// Pattern 2: "<package> package/module/library" — "the hugolib package"
+	packageKeywords := map[string]bool{
+		"package": true, "module": true, "library": true, "lib": true,
+	}
+	for i := 0; i < len(words)-1; i++ {
+		if packageKeywords[words[i+1]] {
+			candidate := strings.Trim(words[i], "?,.()")
+			if candidate == "the" || candidate == "a" || candidate == "an" {
+				continue
+			}
+			if isPackageLikeName(candidate) {
+				return candidate
+			}
+		}
+	}
+
+	return ""
+}
+
+// isPackageLikeName returns true if the string looks like a package or module name.
+// Package names are typically lowercase, alphanumeric, and may contain underscores or hyphens.
+func isPackageLikeName(s string) bool {
+	if len(s) == 0 || len(s) > 50 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
 // extractFunctionNameFromQuery extracts a function name from a natural language query.
 //
 // Description:
@@ -345,14 +428,25 @@ func extractFunctionNameCandidates(query string) []string {
 	}
 
 	// Pattern 1: "what does X call" or "what functions does X call"
+	// IT-06c: Skip articles ("the", "a", "an") between "does"/"do" and the function name.
+	// "What functions does the Build method call" → skip "the" → extract "Build".
 	if strings.Contains(lowerQuery, "call") {
 		words := strings.Fields(query) // Keep original case
 		for i, word := range words {
 			lowerWord := strings.ToLower(word)
 			if lowerWord == "does" || lowerWord == "do" {
-				// Next word is likely the function name
-				if i+1 < len(words) {
-					candidate := strings.Trim(words[i+1], "?,.()")
+				// Skip articles between "does"/"do" and the function name
+				j := i + 1
+				for j < len(words) {
+					article := strings.ToLower(words[j])
+					if article == "the" || article == "a" || article == "an" {
+						j++
+						continue
+					}
+					break
+				}
+				if j < len(words) {
+					candidate := strings.Trim(words[j], "?,.()")
 					if isValidFunctionName(candidate) {
 						addCandidate(candidate)
 					}
@@ -400,9 +494,26 @@ func extractFunctionNameCandidates(query string) []string {
 		}
 	}
 
+	// IT-06 Pattern 4b: "from X" — extract function name after "from"
+	// Handles: "Show call chain from main", "upstream from parseConfig"
+	// This is a context-aware pattern that uses isValidFunctionName (not isFunctionLikeName),
+	// allowing lowercase single-word names like "main" that would be rejected by Pattern 7.
+	if idx := strings.Index(lowerQuery, " from "); idx >= 0 {
+		after := query[idx+6:] // Keep original case
+		fromWords := strings.Fields(after)
+		if len(fromWords) > 0 {
+			candidate := strings.Trim(fromWords[0], "?,.()")
+			if isValidFunctionName(candidate) {
+				addCandidate(candidate)
+			}
+		}
+	}
+
 	// P0 Fix (Feb 14, 2026): Pattern 5: "for X function/method" or "of X function/method"
 	// Handles queries like "control dependencies for Process function"
 	// CR-R2-1: Apply fallbackBoundary — skip matches in the destination zone of "from X to Y".
+	// IT-06: Use isValidSymbolNameBeforeKindKeyword for Pattern 5 as well,
+	// matching the fix applied to Pattern 6.
 	for _, pattern := range []string{" for ", " of "} {
 		if idx := strings.Index(lowerQuery, pattern); idx >= 0 {
 			// CR-R2-1: If this "for"/"of" match starts at or past the "to" boundary,
@@ -417,7 +528,7 @@ func extractFunctionNameCandidates(query string) []string {
 				nextWordLower := strings.ToLower(words[i+1])
 				if isSymbolKindKeyword(nextWordLower) {
 					candidate := strings.Trim(words[i], "?,.()")
-					if isValidFunctionName(candidate) && isFunctionLikeName(candidate) {
+					if isValidSymbolNameBeforeKindKeyword(candidate) {
 						addCandidate(candidate)
 					}
 				}
@@ -440,11 +551,14 @@ func extractFunctionNameCandidates(query string) []string {
 	}
 	// CR-R2-5: The -1 is intentional: Pattern 6 peeks at words[i+1] for the kind keyword,
 	// so we need the peeked word to also be before the boundary.
+	// IT-06: Use isValidSymbolNameBeforeKindKeyword instead of isValidFunctionName
+	// because when a word is immediately followed by a kind keyword ("Component type"),
+	// it IS the symbol name even if it's also a programming term.
 	for i := 0; i < fallbackWordLimit-1 && i < len(words)-1; i++ {
 		nextWordLower := strings.ToLower(words[i+1])
 		if isSymbolKindKeyword(nextWordLower) {
-			candidate := strings.Trim(words[i], "?,.()")
-			if isValidFunctionName(candidate) && isFunctionLikeName(candidate) {
+			candidate := strings.Trim(words[i], "?,.()[]{}\"'")
+			if isValidSymbolNameBeforeKindKeyword(candidate) {
 				addCandidate(candidate)
 			}
 		}
@@ -460,14 +574,14 @@ func extractFunctionNameCandidates(query string) []string {
 	if fallbackBoundary < len(query) {
 		// Scan before boundary: all valid function-like names
 		for _, word := range strings.Fields(query[:fallbackBoundary]) {
-			candidate := strings.Trim(word, "?,.()")
+			candidate := strings.Trim(word, "?,.()[]{}\"'")
 			if isValidFunctionName(candidate) && isFunctionLikeName(candidate) {
 				addCandidate(candidate)
 			}
 		}
 		// Scan after boundary: CamelCase-only (IT-05 R3-3)
 		for _, word := range strings.Fields(query[fallbackBoundary:]) {
-			candidate := strings.Trim(word, "?,.()")
+			candidate := strings.Trim(word, "?,.()[]{}\"'")
 			if isValidFunctionName(candidate) && isFunctionLikeName(candidate) && isStrictCamelCase(candidate) {
 				addCandidate(candidate)
 			}
@@ -475,7 +589,7 @@ func extractFunctionNameCandidates(query string) []string {
 	} else {
 		// No boundary: scan full query (original behavior)
 		for _, word := range strings.Fields(query) {
-			candidate := strings.Trim(word, "?,.()")
+			candidate := strings.Trim(word, "?,.()[]{}\"'")
 			if isValidFunctionName(candidate) && isFunctionLikeName(candidate) {
 				addCandidate(candidate)
 			}
@@ -528,6 +642,12 @@ func isValidFunctionName(s string) bool {
 	if !((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z')) {
 		return false
 	}
+	// IT-06b Issue 2: Reject names containing brackets, braces, or angle brackets.
+	// These characters are never valid in function/symbol names across any language.
+	// Prevents ConversationHistory contamination like "[Tool calls: Grep]" → "Grep]".
+	if strings.ContainsAny(s, "[]{}()<>") {
+		return false
+	}
 	// Skip common non-function words (GR-Phase1: expanded for path extraction)
 	// P0 Fix (Feb 14, 2026): Added "control", "dependencies", "dependency", "common"
 	// to prevent extracting query keywords instead of symbol names
@@ -539,6 +659,8 @@ func isValidFunctionName(s string) bool {
 		// English articles, pronouns, prepositions (aligned with genericWords)
 		"the", "a", "an", "this", "that", "what", "who", "how", "which", "where", "when",
 		"it", "them", "some", "every", "each", "into", "given",
+		// IT-06: Additional prepositions that appear in queries
+		"across", "about", "through", "around", "over", "under", "within",
 		// Query verbs and adjectives
 		"function", "method", "all", "any", "find", "show", "list", "get",
 		"path", "from", "to", "between", "and", "or", "with", "for", "in",
@@ -575,6 +697,63 @@ func isValidFunctionName(s string) bool {
 		"compilation", "initialization", "processing", "assembly",
 		"assigning", "parsing", "dispatch", "handling",
 		"update", "validation", "construction", "aggregation",
+	}
+	for _, skip := range skipWords {
+		if lower == skip {
+			return false
+		}
+	}
+	return true
+}
+
+// isValidSymbolNameBeforeKindKeyword checks if a name is a valid symbol name in the
+// context of Pattern 6, where the word is immediately followed by a kind keyword
+// (e.g., "Component type", "Request object", "Entry struct").
+//
+// Description:
+//
+//	IT-06: This uses a SMALLER skipWords list than isValidFunctionName. When a word
+//	is followed by a kind keyword, it's strong evidence that the word IS the symbol name,
+//	even if it's also a programming construct noun (e.g., "component", "object", "property").
+//	We only skip articles, pronouns, prepositions, and query verbs — NOT programming terms.
+//
+// Inputs:
+//   - s: The candidate word to check.
+//
+// Outputs:
+//   - bool: True if the name is valid as a symbol name before a kind keyword.
+func isValidSymbolNameBeforeKindKeyword(s string) bool {
+	if len(s) == 0 || len(s) > 100 {
+		return false
+	}
+	// Must start with letter
+	if !((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z')) {
+		return false
+	}
+	// IT-06b Issue 2: Reject names containing brackets, braces, or angle brackets.
+	if strings.ContainsAny(s, "[]{}()<>") {
+		return false
+	}
+	lower := strings.ToLower(s)
+	// Only skip articles, pronouns, prepositions, and query verbs.
+	// Do NOT skip programming construct nouns — they are valid symbol names
+	// when qualified by a kind keyword ("Component type" = Component is the symbol).
+	skipWords := []string{
+		// Articles, pronouns, prepositions
+		"the", "a", "an", "this", "that", "what", "who", "how", "which", "where", "when",
+		"it", "them", "some", "every", "each", "into", "given",
+		// Query verbs and adjectives
+		"all", "any", "find", "show", "list", "get",
+		"from", "to", "between", "and", "or", "with", "for", "in",
+		"most", "important", "top", "are", "is", "does", "do", "has", "have",
+		"defined", "codebase", "located", "location", "used", "called",
+		// IT-06c: Removed "build" from skipWords. When followed by a kind keyword
+		// ("Build method", "Build function"), "Build" is clearly a symbol name.
+		// The kind keyword disambiguates it from the verb "build".
+		"upstream", "downstream", "trace", "analyze", "display",
+		"these", "those",
+		// Prepositions that show up in queries
+		"across", "about", "through", "around", "over", "under",
 	}
 	for _, skip := range skipWords {
 		if lower == skip {
@@ -742,8 +921,16 @@ func isSymbolKindKeyword(word string) bool {
 	return false
 }
 
-// isFunctionLikeName checks if a name looks like a function (CamelCase or contains underscore).
+// isFunctionLikeName checks if a name looks like a function (CamelCase, snake_case,
+// contains digits, or starts with uppercase).
+//
+// IT-06: Removed `|| len(s) <= 15` which made ANY short word pass (e.g., "across",
+// "entry", "route"). Now requires at least one structural signal: CamelCase, snake_case,
+// digits, or starts with uppercase (PascalCase single-word names like "Entry", "Config").
 func isFunctionLikeName(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
 	// CamelCase: has uppercase in middle
 	hasUpperInMiddle := false
 	for i := 1; i < len(s); i++ {
@@ -756,7 +943,11 @@ func isFunctionLikeName(s string) bool {
 	hasUnderscore := strings.Contains(s, "_")
 	hasDigit := strings.ContainsAny(s, "0123456789")
 
-	return hasUpperInMiddle || hasUnderscore || hasDigit || len(s) <= 15
+	// IT-06: PascalCase single-word names (starts with uppercase, e.g., "Entry", "Config",
+	// "Series", "Flask") are strong symbol signals.
+	startsWithUpper := s[0] >= 'A' && s[0] <= 'Z'
+
+	return hasUpperInMiddle || hasUnderscore || hasDigit || startsWithUpper
 }
 
 // isStrictCamelCase returns true if the name has an uppercase letter after position 0
@@ -962,13 +1153,10 @@ func extractFunctionNameFromContext(ctx *agent.AssembledContext) string {
 		}
 	}
 
-	// Check conversation history for recent function mentions
-	for i := len(ctx.ConversationHistory) - 1; i >= 0 && i >= len(ctx.ConversationHistory)-3; i-- {
-		msg := ctx.ConversationHistory[i]
-		if funcName := extractFunctionNameFromQuery(msg.Content); funcName != "" {
-			return funcName
-		}
-	}
+	// IT-06b Issue 2: ConversationHistory is NOT a valid source for symbol names.
+	// It contains tool placeholder messages like "[Tool calls: Grep]" that pollute
+	// symbol extraction (e.g., "Grep]" extracted as a valid symbol name).
+	// Only ToolResults (checked above) should be used for context-based extraction.
 
 	return ""
 }
@@ -1252,17 +1440,18 @@ func extractKindFromQuery(query string) string {
 //   - Query is valid UTF-8 string.
 func extractPathSymbolsFromQuery(query string) (from, to string, ok bool) {
 	// Pattern 1: "from X to Y"
+	// IT-06: Use isValidFunctionName only (not isFunctionLikeName) because
+	// "from X to Y" provides strong context — the words after "from"/"to" are
+	// symbol names even if lowercase (e.g., "main", "init").
 	if fromMatches := pathFromRegex.FindStringSubmatch(query); len(fromMatches) > 1 {
 		candidate := fromMatches[1]
-		// Validate it's a function-like name, not a common word
-		if isValidFunctionName(candidate) && isFunctionLikeName(candidate) {
+		if isValidFunctionName(candidate) {
 			from = candidate
 		}
 	}
 	if toMatches := pathToRegex.FindStringSubmatch(query); len(toMatches) > 1 {
 		candidate := toMatches[1]
-		// Validate it's a function-like name, not a common word
-		if isValidFunctionName(candidate) && isFunctionLikeName(candidate) {
+		if isValidFunctionName(candidate) {
 			to = candidate
 		}
 	}

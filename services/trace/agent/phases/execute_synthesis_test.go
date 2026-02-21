@@ -198,6 +198,69 @@ func TestGetSingleFormattedResult_NotFoundPassThrough(t *testing.T) {
 	}
 }
 
+// IT-06c: find_references positive results should NOT pass through — LLM synthesis
+// transforms bare file:line lists into semantic explanations that match gold standard
+// expectations (e.g., "used in route registration, middleware chains, ...").
+func TestGetSingleFormattedResult_FindReferencesPositiveNoPassThrough(t *testing.T) {
+	results := []agent.ToolResult{
+		{
+			Success: true,
+			Output: "Found 20 references to 'HandlerFunc':\n" +
+				"Defined at: gin.go:51 (kind: type, package: )\n\n" +
+				"• auth.go:48:1\n• auth.go:72:1\n• context.go:167:1\n• gin.go:60:1\n" +
+				"\n---\nThe graph has been fully indexed — these results are exhaustive.\n" +
+				"**Do NOT use Grep or Read to verify** — the graph already analyzed all source files.\n",
+		},
+	}
+
+	_, ok := getSingleFormattedResult(results)
+	if ok {
+		t.Fatal("expected NO pass-through for find_references positive results — " +
+			"LLM synthesis needed to provide semantic context for file:line lists")
+	}
+}
+
+// IT-06c: find_references "not found" results should still pass through to prevent
+// the LLM from hallucinating details about a symbol that doesn't exist.
+func TestGetSingleFormattedResult_FindReferencesNotFoundPassThrough(t *testing.T) {
+	results := []agent.ToolResult{
+		{
+			Success: true,
+			Output: "## GRAPH RESULT: References to 'NonExistent' not found\n\n" +
+				"Symbol defined at: foo.go:10 (kind: function, package: bar)\n\n" +
+				"The symbol exists in the codebase but has no incoming reference edges.\n",
+		},
+	}
+
+	output, ok := getSingleFormattedResult(results)
+	if !ok {
+		t.Fatal("expected pass-through for find_references 'not found' result — " +
+			"skipping synthesis prevents hallucination about nonexistent references")
+	}
+	if output != results[0].Output {
+		t.Errorf("expected verbatim output, got %q", output)
+	}
+}
+
+// IT-06c: find_references with fuzzy-resolved name should also NOT pass through.
+func TestGetSingleFormattedResult_FindReferencesFuzzyNoPassThrough(t *testing.T) {
+	results := []agent.ToolResult{
+		{
+			Success: true,
+			Output: "Found 5 references to 'Entry' (resolved from 'entry'):\n" +
+				"Defined at: entry.go:25 (kind: struct, package: badger)\n\n" +
+				"• txn.go:142:5    (package: badger)\n• batch.go:88:12  (package: badger)\n" +
+				"\n---\nThe graph has been fully indexed — these results are exhaustive.\n",
+		},
+	}
+
+	_, ok := getSingleFormattedResult(results)
+	if ok {
+		t.Fatal("expected NO pass-through for fuzzy-resolved find_references — " +
+			"LLM synthesis still needed for semantic context")
+	}
+}
+
 func TestGetSingleFormattedResult_FoundImplementationsPassThrough(t *testing.T) {
 	// A successful find_implementations result should pass through verbatim.
 	results := []agent.ToolResult{
