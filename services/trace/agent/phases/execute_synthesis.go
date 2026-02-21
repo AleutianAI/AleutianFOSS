@@ -306,6 +306,14 @@ func getSingleFormattedResult(results []agent.ToolResult) (string, bool) {
 		return "", false
 	}
 
+	// IT-09: Do NOT pass through find_cycles results. Unlike other graph tools
+	// that return definitive lists (find_callers, find_implementations), find_cycles
+	// returns global unscoped results that LLM synthesis must narrate in context
+	// of the user's query (package scoping, sorting, relevance filtering).
+	if strings.Contains(trimmed, "circular dependencies") {
+		return "", false
+	}
+
 	if strings.Contains(trimmed, "## GRAPH RESULT") ||
 		strings.HasPrefix(trimmed, "Found ") ||
 		strings.Contains(trimmed, "these results are exhaustive") {

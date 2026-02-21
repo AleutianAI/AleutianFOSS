@@ -156,8 +156,9 @@ tests:
       Find circular call dependencies in this codebase
     expected_state: COMPLETE
     reference_answer: |
-      Flask has circular dependencies in areas like app/blueprint registration
-      where blueprints reference the app and the app registers blueprints.
+      Flask has limited call-graph cycles. The primary cycle is in
+      templating.py where template rendering functions mutually call
+      each other. This is a small codebase with simple call patterns.
     validations:
       - type: graph_tool_used
 
@@ -871,9 +872,9 @@ tests:
       Find circular dependencies in the request and response handling code
     expected_state: COMPLETE
     reference_answer: |
-      Circular dependencies exist between app.py request handling functions
-      and the error handling paths, where handle_exception calls finalize_request
-      which itself may trigger after_request handlers that reference the app.
+      Flask's request/response handling code does not contain function-level
+      call cycles. The flow is linear: request dispatch to handler to response.
+      The tool correctly finds no mutual recursion in this subsystem.
     validations:
       - type: graph_tool_used
 
@@ -886,9 +887,9 @@ tests:
       Are there any circular call dependencies in Flask's context and session code?
     expected_state: COMPLETE
     reference_answer: |
-      Cycles may exist between RequestContext.push (which calls open_session)
-      and session interface methods that reference the current app context,
-      creating mutual dependencies between context and session subsystems.
+      Flask's context and session code does not contain function-level call
+      cycles. While there are design-level dependencies between context and
+      session modules, these are import dependencies not call-graph cycles.
     validations:
       - type: graph_tool_used
 

@@ -86,6 +86,10 @@ type ExecutePhase struct {
 	// Key: "sessionID:symbolName", Value: SymbolResolution
 	// Thread Safety: sync.Map is safe for concurrent use.
 	symbolCache sync.Map
+
+	// prefilter narrows tool candidates before the LLM router classifies (CB-38).
+	// nil = disabled (backward compatible, no behavior change).
+	prefilter *routing.PreFilter
 }
 
 // ExecutePhaseOption configures an ExecutePhase.
@@ -231,6 +235,27 @@ func WithQueryClassifier(c classifier.QueryClassifier) ExecutePhaseOption {
 		// Update both components to use the same classifier
 		p.forcingPolicy = NewDefaultForcingPolicyWithClassifier(c)
 		p.toolChoiceSelector = classifier.NewToolChoiceSelector(c, nil)
+	}
+}
+
+// WithPreFilter sets the pre-filter for narrowing tool candidates (CB-38).
+//
+// Description:
+//
+//	When set, the pre-filter runs before the LLM router to narrow
+//	55+ tools to 5-10 candidates (or force a selection outright).
+//	nil = disabled (backward compatible).
+//
+// Inputs:
+//
+//	pf - The pre-filter instance. May be nil to disable.
+//
+// Outputs:
+//
+//	ExecutePhaseOption - The configuration function.
+func WithPreFilter(pf *routing.PreFilter) ExecutePhaseOption {
+	return func(p *ExecutePhase) {
+		p.prefilter = pf
 	}
 }
 
@@ -907,6 +932,76 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 
 	// Convert tool definitions to ToolSpecs for the router
 	toolSpecs := toolDefsToSpecs(toolDefs)
+
+	// CB-38: Pre-filter narrows candidate set before LLM router
+	if p.prefilter != nil {
+		pfResult := p.prefilter.FilterAgentSpecs(ctx, deps.Query, toolSpecs)
+		if pfResult.ForcedTool != "" {
+			// CB-38: Check circuit breaker before accepting forced selection.
+			// A forced tool that has been called too many times should not bypass
+			// the circuit breaker — fall through to normal routing instead.
+			cbBlocked := false
+			if deps.Session != nil && deps.Session.HasCRS() {
+				cbResult := deps.Session.GetCRS().CheckCircuitBreaker(deps.Session.ID, pfResult.ForcedTool)
+				if cbResult.ShouldFire {
+					cbBlocked = true
+					slog.Warn("CB-38 prefilter forced tool blocked by circuit breaker",
+						slog.String("session_id", deps.Session.ID),
+						slog.String("tool", pfResult.ForcedTool),
+						slog.String("cb_reason", cbResult.Reason),
+					)
+				}
+			} else if deps.Session != nil {
+				toolCounts := buildToolCountMapFromSession(deps.Session)
+				if toolCounts[pfResult.ForcedTool] >= maxRepeatedToolCalls {
+					cbBlocked = true
+					slog.Warn("CB-38 prefilter forced tool blocked by circuit breaker (legacy)",
+						slog.String("session_id", deps.Session.ID),
+						slog.String("tool", pfResult.ForcedTool),
+						slog.Int("call_count", toolCounts[pfResult.ForcedTool]),
+					)
+				}
+			}
+
+			if !cbBlocked {
+				slog.Info("CB-38 prefilter forced tool selection",
+					slog.String("session_id", deps.Session.ID),
+					slog.String("tool", pfResult.ForcedTool),
+					slog.String("reason", pfResult.ForcedReason),
+				)
+				span.SetAttributes(
+					attribute.String("prefilter_forced_tool", pfResult.ForcedTool),
+					attribute.String("prefilter_forced_reason", pfResult.ForcedReason),
+				)
+
+				// CB-38: Record forced selection as CRS TraceStep
+				deps.Session.RecordTraceStep(crs.TraceStep{
+					Timestamp: time.Now().UnixMilli(),
+					Action:    "prefilter_forced",
+					Target:    pfResult.ForcedTool,
+					Tool:      "prefilter",
+					Duration:  pfResult.Duration,
+					Metadata: map[string]string{
+						"reason":         pfResult.ForcedReason,
+						"original_count": fmt.Sprintf("%d", pfResult.OriginalCount),
+					},
+				})
+
+				return &agent.ToolRouterSelection{
+					Tool:       pfResult.ForcedTool,
+					Confidence: 1.0,
+					Reasoning:  fmt.Sprintf("Prefilter forced: %s", pfResult.ForcedReason),
+					Duration:   pfResult.Duration,
+				}, nil
+			}
+			// Circuit breaker fired — fall through to normal routing with narrowed specs
+		}
+		toolSpecs = pfResult.NarrowedSpecs // 5-10 instead of 55
+		span.SetAttributes(
+			attribute.Int("prefilter_original", pfResult.OriginalCount),
+			attribute.Int("prefilter_narrowed", pfResult.NarrowedCount),
+		)
+	}
 
 	// Build code context for the router
 	codeContext := p.buildCodeContext(deps)

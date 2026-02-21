@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -40,6 +41,16 @@ type FindCyclesParams struct {
 	// Limit is the maximum number of cycles to return.
 	// Default: 20, Max: 100
 	Limit int
+
+	// PackageFilter filters cycles to those involving a matching package/directory.
+	// Case-insensitive substring match against cycle.Packages entries.
+	// Empty string means no filter (all cycles returned).
+	PackageFilter string
+
+	// SortBy controls the sort order for cycles.
+	// "length_desc" (default): largest cycles first.
+	// "length_asc": smallest cycles first.
+	SortBy string
 }
 
 // ToolName returns the tool name for TypedParams interface.
@@ -47,10 +58,15 @@ func (p FindCyclesParams) ToolName() string { return "find_cycles" }
 
 // ToMap converts typed parameters to the map consumed by Tool.Execute().
 func (p FindCyclesParams) ToMap() map[string]any {
-	return map[string]any{
+	m := map[string]any{
 		"min_size": p.MinSize,
 		"limit":    p.Limit,
+		"sort_by":  p.SortBy,
 	}
+	if p.PackageFilter != "" {
+		m["package_filter"] = p.PackageFilter
+	}
+	return m
 }
 
 // FindCyclesOutput contains the structured result.
@@ -161,6 +177,18 @@ func (t *findCyclesTool) Definition() ToolDefinition {
 				Required:    false,
 				Default:     20,
 			},
+			"package_filter": {
+				Type:        ParamTypeString,
+				Description: "Filter cycles to those involving this package or directory (case-insensitive substring match)",
+				Required:    false,
+				Default:     "",
+			},
+			"sort_by": {
+				Type:        ParamTypeString,
+				Description: "Sort order: 'length_desc' (default, largest first) or 'length_asc' (smallest first)",
+				Required:    false,
+				Default:     "length_desc",
+			},
 		},
 		Category:    CategoryExploration,
 		Priority:    82,
@@ -197,6 +225,8 @@ func (t *findCyclesTool) Execute(ctx context.Context, params TypedParams) (*Resu
 			attribute.String("tool", "find_cycles"),
 			attribute.Int("min_size", p.MinSize),
 			attribute.Int("limit", p.Limit),
+			attribute.String("package_filter", p.PackageFilter),
+			attribute.String("sort_by", p.SortBy),
 		),
 	)
 	defer span.End()
@@ -215,12 +245,34 @@ func (t *findCyclesTool) Execute(ctx context.Context, params TypedParams) (*Resu
 		attribute.String("trace_action", traceStep.Action),
 	)
 
-	// Filter by min_size and apply limit
+	// IT-09 Fix 3: Re-sort if sort_by differs from default (length_desc)
+	if p.SortBy == "length_asc" {
+		sort.Slice(cycles, func(i, j int) bool {
+			return cycles[i].Length < cycles[j].Length
+		})
+	}
+
+	// Filter by min_size, package_filter, and apply limit
 	var filtered []graph.CyclicDependency
+	lowerPkgFilter := strings.ToLower(p.PackageFilter)
 	for _, cycle := range cycles {
-		if cycle.Length >= p.MinSize {
-			filtered = append(filtered, cycle)
+		if cycle.Length < p.MinSize {
+			continue
 		}
+		// IT-09 Fix 2: Filter by package if specified
+		if lowerPkgFilter != "" {
+			matchesPkg := false
+			for _, pkg := range cycle.Packages {
+				if strings.Contains(strings.ToLower(pkg), lowerPkgFilter) {
+					matchesPkg = true
+					break
+				}
+			}
+			if !matchesPkg {
+				continue
+			}
+		}
+		filtered = append(filtered, cycle)
 		if len(filtered) >= p.Limit {
 			break
 		}
@@ -265,6 +317,7 @@ func (t *findCyclesTool) parseParams(params map[string]any) (FindCyclesParams, e
 	p := FindCyclesParams{
 		MinSize: 2,
 		Limit:   20,
+		SortBy:  "length_desc",
 	}
 
 	// Extract min_size (optional)
@@ -298,6 +351,29 @@ func (t *findCyclesTool) parseParams(params map[string]any) (FindCyclesParams, e
 				limit = 100
 			}
 			p.Limit = limit
+		}
+	}
+
+	// Extract package_filter (optional)
+	if filterRaw, ok := params["package_filter"]; ok {
+		if filter, ok := filterRaw.(string); ok {
+			p.PackageFilter = strings.TrimSpace(filter)
+		}
+	}
+
+	// Extract sort_by (optional)
+	if sortRaw, ok := params["sort_by"]; ok {
+		if sortBy, ok := sortRaw.(string); ok {
+			sortBy = strings.TrimSpace(strings.ToLower(sortBy))
+			switch sortBy {
+			case "length_asc", "length_desc":
+				p.SortBy = sortBy
+			default:
+				t.logger.Debug("unknown sort_by value, using default length_desc",
+					slog.String("tool", "find_cycles"),
+					slog.String("requested", sortBy),
+				)
+			}
 		}
 	}
 

@@ -279,6 +279,36 @@ func TestGetSingleFormattedResult_FoundImplementationsPassThrough(t *testing.T) 
 	}
 }
 
+// IT-09: find_cycles output should NOT pass through — LLM synthesis required.
+func TestGetSingleFormattedResult_FindCyclesNoPassThrough(t *testing.T) {
+	results := []agent.ToolResult{
+		{
+			Success: true,
+			Output:  "Found 3 circular dependencies:\n\nCycle 1 (4 nodes):\n  funcA() [core/a.go:10]\n  -> funcB() [core/b.go:10]\n  -> funcA() (cycle back)\n\n",
+		},
+	}
+
+	_, ok := getSingleFormattedResult(results)
+	if ok {
+		t.Fatal("expected NO pass-through for find_cycles — output contains 'circular dependencies'")
+	}
+}
+
+// IT-09: find_cycles zero-result should also NOT pass through.
+func TestGetSingleFormattedResult_FindCyclesZeroNoPassThrough(t *testing.T) {
+	results := []agent.ToolResult{
+		{
+			Success: true,
+			Output:  "No circular dependencies found.\nThis is good news! The codebase has no detectable cycles.\n",
+		},
+	}
+
+	_, ok := getSingleFormattedResult(results)
+	if ok {
+		t.Fatal("expected NO pass-through for find_cycles zero result — output contains 'circular dependencies'")
+	}
+}
+
 // IT-06c I-11: Verify find_similar_code is in graphToolsWithSubstantiveResults.
 func TestGraphToolsWithSubstantiveResults_ContainsFindSimilarCode(t *testing.T) {
 	requiredTools := []string{

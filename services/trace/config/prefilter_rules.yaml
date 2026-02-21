@@ -1,0 +1,95 @@
+# Pre-filter rules for tool routing (CB-38).
+# Narrows 55+ tools to 5-10 candidates before the LLM router classifies.
+# See tickets/planned/cb_38_prefilter_tool_routing.md for design.
+
+enabled: true
+min_candidates: 3
+max_candidates: 10
+negation_proximity: 3
+always_include:
+  - answer
+
+forced_mappings:
+  - patterns:
+      - "call chain from"
+      - "call chain of"
+      - "full call hierarchy"
+      - "transitive callers"
+      - "transitive callees"
+    tool: get_call_chain
+    reason: "Explicit call chain request"
+
+  - patterns:
+      - "shortest path between"
+      - "path from .* to"
+    tool: find_path
+    reason: "Path query is unambiguous"
+
+negation_rules:
+  - negation_words: ["no", "not", "never", "zero", "without"]
+    trigger_keywords: ["callers", "incoming calls", "called", "referenced"]
+    wrong_tool: find_callers
+    correct_tool: find_dead_code
+    action: force
+    reason: "Negated caller = dead code"
+
+  - negation_words: ["no", "not", "never", "zero"]
+    trigger_keywords: ["references", "usages", "uses"]
+    wrong_tool: find_references
+    correct_tool: find_dead_code
+    action: force
+    reason: "Negated reference = unreferenced code"
+
+confusion_pairs:
+  - tool_a: find_callers
+    tool_b: find_callees
+    tool_a_patterns:
+      - "who calls"
+      - "what calls"
+      - "callers of"
+      - "call sites for"
+    tool_b_patterns:
+      - "what does .* call"
+      - "what functions does"
+      - "dependencies of"
+    boost_amount: 3.0
+
+  - tool_a: find_callers
+    tool_b: find_references
+    tool_a_patterns:
+      - "who calls"
+      - "what calls"
+      - "call sites"
+    tool_b_patterns:
+      - "where is .* used"
+      - "references to"
+      - "usages of"
+      - "find all uses"
+    boost_amount: 3.0
+
+  - tool_a: find_hotspots
+    tool_b: find_weighted_criticality
+    tool_a_patterns:
+      - "most connected"
+      - "coupling"
+      - "fan-in"
+      - "fan-out"
+      - "hotspot"
+    tool_b_patterns:
+      - "most critical"
+      - "highest risk"
+      - "would break"
+      - "stability"
+    boost_amount: 3.0
+
+  - tool_a: find_cycles
+    tool_b: find_circular_deps
+    tool_a_patterns:
+      - "function cycles"
+      - "call cycles"
+      - "mutual recursion"
+    tool_b_patterns:
+      - "circular dependencies"
+      - "package cycles"
+      - "dependency cycle"
+    boost_amount: 2.0

@@ -1312,6 +1312,18 @@ func StaticToolDefinitions() []ToolDefinition {
 					Required:    false,
 					Default:     20,
 				},
+				"package_filter": {
+					Type:        ParamTypeString,
+					Description: "Filter cycles to those involving this package or directory (case-insensitive substring match)",
+					Required:    false,
+					Default:     "",
+				},
+				"sort_by": {
+					Type:        ParamTypeString,
+					Description: "Sort order: 'length_desc' (default, largest first) or 'length_asc' (smallest first)",
+					Required:    false,
+					Default:     "length_desc",
+				},
 			},
 			Category:    CategoryExploration,
 			Priority:    82,
