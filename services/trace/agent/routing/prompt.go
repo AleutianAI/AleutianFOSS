@@ -128,6 +128,39 @@ Understanding the difference between CALLERS, CALLEES, and REFERENCES is crucial
 - "from X" / "starting at X" → find_callees (traverse down from X)
 - "to X" / "reaching X" → find_callers (traverse up to X)
 
+**CRITICAL: NEGATED CALLER QUERIES → find_dead_code (NOT find_callers)**
+- "functions with no callers" → find_dead_code (zero incoming edges = dead code)
+- "no incoming calls" → find_dead_code
+- "never called" / "not called" → find_dead_code
+- "no internal callers" → find_dead_code
+- "zero callers" / "unreferenced" → find_dead_code
+The word "callers" alone triggers find_callers, but when NEGATED ("no callers", "no incoming calls") it means dead code detection.
+
+**HOTSPOTS vs WEIGHTED_CRITICALITY:**
+
+HOTSPOTS (connectivity/degree ranking):
+- "Find the most connected functions"
+- "What are the hotspot functions in the rendering code?"
+- "Which functions have the highest fan-in or fan-out?"
+- "Find hub functions with high coupling"
+- "Show me the most called functions"
+→ Tool: find_hotspots
+→ Measures: inDegree + outDegree (how many edges does a node have?)
+
+WEIGHTED_CRITICALITY (risk/impact ranking):
+- "Find the most critical functions for stability"
+- "Which functions would cause the most damage if broken?"
+- "What is the risk profile of key services?"
+- "Find mandatory dependencies that are architecturally important"
+→ Tool: find_weighted_criticality
+→ Measures: DominatorScore × PageRank (how critical is a node if changed?)
+
+KEY DIFFERENCE:
+- "most connected" / "hotspot" / "coupling" / "fan-in" / "fan-out" → find_hotspots
+- "most critical" / "highest risk" / "would break" / "mandatory" → find_weighted_criticality
+- A function can be highly connected but LOW risk (peripheral hub)
+- A function can be low-degree but CRITICAL (hidden gatekeeper)
+
 ## Current Context
 {{- if .Context}}
 {{- if .Context.Language}}

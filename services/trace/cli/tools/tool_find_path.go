@@ -42,6 +42,17 @@ type FindPathParams struct {
 	To string
 }
 
+// ToolName returns the tool name for TypedParams interface.
+func (p FindPathParams) ToolName() string { return "find_path" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p FindPathParams) ToMap() map[string]any {
+	return map[string]any{
+		"from": p.From,
+		"to":   p.To,
+	}
+}
+
 // FindPathOutput contains the structured result.
 type FindPathOutput struct {
 	// From is the starting symbol name.
@@ -162,11 +173,11 @@ func (t *findPathTool) Definition() ToolDefinition {
 }
 
 // Execute runs the find_path tool.
-func (t *findPathTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findPathTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	start := time.Now()
 
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
 		return &Result{
 			Success: false,

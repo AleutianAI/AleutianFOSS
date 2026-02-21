@@ -96,18 +96,19 @@ func (t *ReadTool) Definition() tools.ToolDefinition {
 }
 
 // Execute reads a file and returns its contents with line numbers.
-func (t *ReadTool) Execute(ctx context.Context, params map[string]any) (*tools.Result, error) {
+func (t *ReadTool) Execute(ctx context.Context, params tools.TypedParams) (*tools.Result, error) {
 	start := time.Now()
 
 	// Parse parameters
+	m := params.ToMap()
 	p := &ReadParams{}
-	if filePath, ok := params["file_path"].(string); ok {
+	if filePath, ok := m["file_path"].(string); ok {
 		p.FilePath = filePath
 	}
-	if offset, ok := getIntParam(params, "offset"); ok {
+	if offset, ok := getIntParam(m, "offset"); ok {
 		p.Offset = offset
 	}
-	if limit, ok := getIntParam(params, "limit"); ok {
+	if limit, ok := getIntParam(m, "limit"); ok {
 		p.Limit = limit
 	}
 

@@ -816,7 +816,7 @@ tests:
     description: >
       find_hotspots tool against Badger (test C). Focus on write path hotspots.
     query: |
-      Which functions in the write path have the most connections?
+      What are the hotspot functions in the Badger write path subsystem?
     expected_state: COMPLETE
     reference_answer: |
       Write path hotspots include writeRequests, sendToWriteCh,

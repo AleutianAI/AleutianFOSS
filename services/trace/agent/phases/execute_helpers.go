@@ -223,7 +223,8 @@ func extractPackageNameFromQuery(query string) string {
 
 // extractPackageContextFromQuery extracts a package/module context hint from
 // a natural language query. Used to disambiguate symbol resolution when multiple
-// symbols share the same name across different packages.
+// symbols share the same name across different packages, and to scope
+// find_hotspots results to a specific subsystem.
 //
 // Description:
 //
@@ -231,10 +232,14 @@ func extractPackageNameFromQuery(query string) string {
 //	contain package context ("in hugolib") that should be used to disambiguate
 //	when multiple symbols match "Build". This function extracts such hints.
 //
+//	IT-07 Phase 2: Extended to handle subsystem-scoped queries for find_hotspots:
+//	"hotspots in the binding subsystem", "hotspots within the materials subsystem".
+//
 //	Recognized patterns:
-//	  - "in <package>" (most common): "in hugolib", "in flask", "in gin"
-//	  - "from <package>": "from the hugolib package"
-//	  - "of <package>": "of the express module"
+//	  - "in/within <package>" (most common): "in hugolib", "within flask"
+//	  - "in/within the <package> <scope_kw>": "in the binding subsystem"
+//	  - "<package> package/module/subsystem/...": "the hugolib package"
+//	  - "in/within the <path>" (file paths): "within the lib/router directory"
 //
 // Inputs:
 //
@@ -249,39 +254,104 @@ func extractPackageContextFromQuery(query string) string {
 	lowerQuery := strings.ToLower(query)
 	words := strings.Fields(lowerQuery)
 
-	// Pattern 1: "in <package>" at end of query or before punctuation.
-	// Match the LAST "in <word>" that looks like a package name.
-	// Skip "in the codebase", "in the graph", etc.
-	skipAfterIn := map[string]bool{
-		"the": true, "a": true, "an": true, "this": true, "that": true,
-		"codebase": true, "code": true, "graph": true, "project": true,
-		"repo": true, "repository": true, "system": true, "source": true,
+	// Prepositions that introduce a package/scope context.
+	isPrep := func(w string) bool {
+		return w == "in" || w == "within"
 	}
 
+	// Articles to skip after prepositions.
+	articles := map[string]bool{
+		"the": true, "a": true, "an": true, "this": true, "that": true,
+	}
+
+	// Words that are generic location context, not package names.
+	// Note: "system" and "code" appear here AND in scopeKeywords. This is intentional:
+	// in skipGeneric they prevent "in system" or "in code" from matching as package names,
+	// in scopeKeywords they act as scope confirmers for a preceding word ("auth system").
+	skipGeneric := map[string]bool{
+		"codebase": true, "code": true, "graph": true, "project": true,
+		"repo": true, "repository": true, "source": true, "system": true,
+		// IT-08: Dead code adjectives — "dead code", "unused code", "orphan code"
+		// must not match as package names in any pattern.
+		"dead": true, "unused": true, "orphan": true, "unreferenced": true,
+	}
+
+	// IT-07 Phase 2: Keywords that confirm the preceding word is a scope/package name.
+	scopeKeywords := map[string]bool{
+		"package": true, "module": true, "library": true, "lib": true,
+		"subsystem": true, "directory": true, "dir": true,
+		"components": true, "component": true, "pipeline": true,
+		"system": true, "path": true, "code": true,
+		// IT-08: "class" is a scope keyword for queries like "in the Engine class".
+		"class": true,
+	}
+
+	// Pattern 1: "in/within <package>" — direct package name after preposition.
+	// Match the LAST occurrence, scanning right to left.
+	// Skip articles and generic words.
 	for i := len(words) - 2; i >= 0; i-- {
-		if words[i] == "in" {
-			candidate := strings.Trim(words[i+1], "?,.()")
-			if candidate == "" || skipAfterIn[candidate] {
-				continue
-			}
-			// Must look like a package name: lowercase, alphanumeric, no spaces
-			if isPackageLikeName(candidate) {
-				return candidate
-			}
+		if !isPrep(words[i]) {
+			continue
+		}
+		candidate := strings.Trim(words[i+1], "?,.()")
+		if candidate == "" || articles[candidate] || skipGeneric[candidate] {
+			continue
+		}
+		// Check for file path pattern: "in lib/router" or "within src/plots"
+		if strings.Contains(candidate, "/") {
+			return candidate
+		}
+		// Must look like a package name: lowercase, alphanumeric, no spaces
+		if isPackageLikeName(candidate) {
+			return candidate
 		}
 	}
 
-	// Pattern 2: "<package> package/module/library" — "the hugolib package"
-	packageKeywords := map[string]bool{
-		"package": true, "module": true, "library": true, "lib": true,
+	// Pattern 2: "in/within the <package> [<extra_words>...] <scope_keyword>"
+	// Article-mediated. Handles single-word ("in the render package") and
+	// multi-word ("in the value log subsystem", "in the Engine class").
+	//
+	// IT-08: Scan forward from the word after the article to find the scope
+	// keyword. Return the FIRST package-like word after the article, not the
+	// last — the first word in a multi-word subsystem description is typically
+	// the actual domain name (value, math, blueprint), while subsequent words
+	// are qualifiers (log, utilities, registration).
+	for i := 0; i < len(words)-2; i++ {
+		if !isPrep(words[i]) {
+			continue
+		}
+		next := strings.Trim(words[i+1], "?,.()")
+		if !articles[next] {
+			continue
+		}
+		// Scan forward from i+3 to find the scope keyword.
+		for j := i + 3; j < len(words); j++ {
+			scopeWord := strings.Trim(words[j], "?,.()")
+			if scopeKeywords[scopeWord] {
+				// Found scope keyword at j. Return first package-like word after article.
+				pkgCandidate := strings.Trim(words[i+2], "?,.()")
+				if isPackageLikeName(pkgCandidate) && !skipGeneric[pkgCandidate] {
+					return pkgCandidate
+				}
+				break
+			}
+		}
+		// Also check: "in the lib/router directory" — path after article.
+		pathCandidate := strings.Trim(words[i+2], "?,.()")
+		if strings.Contains(pathCandidate, "/") {
+			return pathCandidate
+		}
 	}
+
+	// Pattern 3: "<package> package/module/subsystem/..." — "the hugolib package"
 	for i := 0; i < len(words)-1; i++ {
-		if packageKeywords[words[i+1]] {
+		nextWord := strings.Trim(words[i+1], "?,.()")
+		if scopeKeywords[nextWord] {
 			candidate := strings.Trim(words[i], "?,.()")
-			if candidate == "the" || candidate == "a" || candidate == "an" {
+			if articles[candidate] {
 				continue
 			}
-			if isPackageLikeName(candidate) {
+			if isPackageLikeName(candidate) && !skipGeneric[candidate] {
 				return candidate
 			}
 		}
@@ -451,6 +521,40 @@ func extractFunctionNameCandidates(query string) []string {
 						addCandidate(candidate)
 					}
 				}
+			}
+		}
+	}
+
+	// Pattern 1b (IT-06c H-4): "Where is X used/referenced/defined"
+	// Handles find_references queries like:
+	//   "Where is the request proxy used across the codebase?" → "request"
+	//   "Where is the db session used?" → "db"
+	//   "Where is Config referenced?" → "Config"
+	// The word immediately after "is the" (skipping articles) that passes
+	// isValidFunctionName is the symbol name. "used", "referenced", "defined"
+	// are in skipWords so they won't be extracted.
+	if strings.Contains(lowerQuery, "where is") {
+		words := strings.Fields(query)
+		for i, word := range words {
+			lw := strings.ToLower(word)
+			if lw == "is" && i > 0 && strings.ToLower(words[i-1]) == "where" {
+				// Skip articles after "is"
+				j := i + 1
+				for j < len(words) {
+					article := strings.ToLower(words[j])
+					if article == "the" || article == "a" || article == "an" {
+						j++
+						continue
+					}
+					break
+				}
+				if j < len(words) {
+					candidate := strings.Trim(words[j], "?,.()")
+					if isValidFunctionName(candidate) {
+						addCandidate(candidate)
+					}
+				}
+				break
 			}
 		}
 	}
@@ -1405,6 +1509,60 @@ func extractKindFromQuery(query string) string {
 	}
 
 	return "all"
+}
+
+// extractSortByFromQuery detects sort dimension hints in find_hotspots queries.
+//
+// IT-07 Phase 3: Queries like "highest fan-in" or "highest fan-out" imply
+// dimension-specific sorting rather than composite score ranking.
+//
+// Inputs:
+//
+//	query - The user's query string.
+//
+// Outputs:
+//
+//	string - "in" for fan-in/InDegree queries, "out" for fan-out/OutDegree queries,
+//	         "score" (default) for composite score.
+//
+// Thread Safety: Safe for concurrent use (stateless function).
+func extractSortByFromQuery(query string) string {
+	lowerQuery := strings.ToLower(query)
+	if strings.Contains(lowerQuery, "fan-out") || strings.Contains(lowerQuery, "fanout") ||
+		strings.Contains(lowerQuery, "outgoing") || strings.Contains(lowerQuery, "outdegree") {
+		return "out"
+	}
+	if strings.Contains(lowerQuery, "fan-in") || strings.Contains(lowerQuery, "fanin") ||
+		strings.Contains(lowerQuery, "incoming") || strings.Contains(lowerQuery, "indegree") ||
+		strings.Contains(lowerQuery, "most called") || strings.Contains(lowerQuery, "called by") {
+		return "in"
+	}
+	return "score"
+}
+
+// extractExcludeTestsFromQuery determines whether to include test files in results.
+//
+// IT-07 Phase 3: By default, test files are excluded. Only include them when
+// the query explicitly asks about test code.
+//
+// Inputs:
+//
+//	query - The user's query string.
+//
+// Outputs:
+//
+//	bool - true to exclude test files (default), false to include them.
+//
+// Thread Safety: Safe for concurrent use (stateless function).
+func extractExcludeTestsFromQuery(query string) bool {
+	lowerQuery := strings.ToLower(query)
+	// If the user explicitly mentions test code, include test files.
+	if strings.Contains(lowerQuery, "test file") || strings.Contains(lowerQuery, "test code") ||
+		strings.Contains(lowerQuery, "in tests") || strings.Contains(lowerQuery, "including tests") ||
+		strings.Contains(lowerQuery, "test functions") {
+		return false
+	}
+	return true
 }
 
 // extractPathSymbolsFromQuery extracts "from" and "to" symbols for find_path.

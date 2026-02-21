@@ -808,7 +808,7 @@ tests:
     description: >
       find_hotspots tool against NestJS (test B). Target: microservices package subsystem.
     query: |
-      What are the most connected functions in the microservices package?
+      What are the hotspot functions in the microservices package?
     expected_state: COMPLETE
     reference_answer: |
       Top hotspots in the microservices package include ServerFactory methods,
@@ -823,7 +823,7 @@ tests:
     description: >
       find_hotspots tool against NestJS (test C). Target: functions with highest fan-out.
     query: |
-      Which functions have the highest fan-out (call the most other functions)?
+      Which hotspot functions have the highest fan-out in the NestJS codebase?
     expected_state: COMPLETE
     reference_answer: |
       Highest fan-out functions include NestFactory.create which orchestrates

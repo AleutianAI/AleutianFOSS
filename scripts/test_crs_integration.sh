@@ -839,10 +839,23 @@ run_crs_test() {
 
     # Use REMOTE_PROJECT_PATH (set by setup_remote/sync_project_to_remote)
     local remote_project="${REMOTE_PROJECT_PATH:-/home/$REMOTE_USER/trace_test/$(basename "$PROJECT_TO_ANALYZE")}"
+
+    # Build JSON payload safely using jq to handle special characters (apostrophes, quotes, etc.)
+    local json_payload
+    json_payload=$(jq -n \
+        --arg project_root "$remote_project" \
+        --arg query "$query" \
+        --arg model "$OLLAMA_MODEL" \
+        --arg router_model "$ROUTER_MODEL" \
+        '{project_root: $project_root, query: $query, model: $model, router_model: $router_model}')
+
+    # Escape the JSON payload for safe embedding in the remote shell command.
+    # Single quotes in the payload are replaced with '\'' (end-quote, escaped-quote, start-quote).
+    local escaped_payload="${json_payload//\'/\'\\\'\'}"
     local response=$(ssh_cmd "curl -s -X POST 'http://localhost:8080/v1/codebuddy/agent/run' \
         -H 'Content-Type: application/json' \
         -H 'X-Session-ID: crs_test_${session_id}' \
-        -d '{\"project_root\": \"$remote_project\", \"query\": \"$query\", \"model\": \"$OLLAMA_MODEL\", \"router_model\": \"$ROUTER_MODEL\"}' \
+        -d '${escaped_payload}' \
         --max-time 300")
 
     local end_time=$(get_time_ms)

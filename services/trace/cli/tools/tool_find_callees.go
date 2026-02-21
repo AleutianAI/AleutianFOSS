@@ -49,6 +49,21 @@ type FindCalleesParams struct {
 	PackageHint string
 }
 
+// ToolName returns the tool name for TypedParams interface.
+func (p FindCalleesParams) ToolName() string { return "find_callees" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p FindCalleesParams) ToMap() map[string]any {
+	m := map[string]any{
+		"function_name": p.FunctionName,
+		"limit":         p.Limit,
+	}
+	if p.PackageHint != "" {
+		m["package_hint"] = p.PackageHint
+	}
+	return m
+}
+
 // FindCalleesOutput contains the structured result.
 type FindCalleesOutput struct {
 	// FunctionName is the function that was searched for.
@@ -205,11 +220,11 @@ func (t *findCalleesTool) Definition() ToolDefinition {
 }
 
 // Execute runs the find_callees tool.
-func (t *findCalleesTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findCalleesTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	start := time.Now()
 
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
 		errStep := crs.NewTraceStepBuilder().
 			WithAction("tool_find_callees").

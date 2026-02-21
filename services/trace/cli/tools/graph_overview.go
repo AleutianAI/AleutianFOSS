@@ -131,7 +131,8 @@ type PackageDependency struct {
 	Type string `json:"type"` // "import"
 }
 
-func (t *graphOverviewTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *graphOverviewTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	m := params.ToMap()
 	// Validate inputs
 	if ctx == nil {
 		return nil, errors.New("ctx must not be nil")
@@ -147,24 +148,24 @@ func (t *graphOverviewTool) Execute(ctx context.Context, params map[string]any) 
 
 	// Parse parameters
 	depth := 2
-	if v, ok := params["depth"].(float64); ok {
+	if v, ok := m["depth"].(float64); ok {
 		depth = int(v)
-	} else if v, ok := params["depth"].(int); ok {
+	} else if v, ok := m["depth"].(int); ok {
 		depth = v
 	}
 
 	includeDeps := true
-	if v, ok := params["include_dependencies"].(bool); ok {
+	if v, ok := m["include_dependencies"].(bool); ok {
 		includeDeps = v
 	}
 
 	includeMetrics := true
-	if v, ok := params["include_metrics"].(bool); ok {
+	if v, ok := m["include_metrics"].(bool); ok {
 		includeMetrics = v
 	}
 
 	filter := ""
-	if v, ok := params["filter"].(string); ok {
+	if v, ok := m["filter"].(string); ok {
 		filter = v
 	}
 

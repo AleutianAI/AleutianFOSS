@@ -94,9 +94,9 @@ func TestFindCommonDependencyTool_Execute(t *testing.T) {
 	tool := NewFindCommonDependencyTool(analytics, idx)
 
 	t.Run("finds common dependency of two targets", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"targets": []string{"C", "D"},
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -117,9 +117,9 @@ func TestFindCommonDependencyTool_Execute(t *testing.T) {
 	})
 
 	t.Run("finds common dependency across branches", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"targets": []string{"C", "E"},
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -140,9 +140,9 @@ func TestFindCommonDependencyTool_Execute(t *testing.T) {
 	})
 
 	t.Run("finds common dependency of multiple targets", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"targets": []string{"C", "D", "E", "F"},
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -175,7 +175,7 @@ func TestFindCommonDependencyTool_MissingTargets(t *testing.T) {
 	tool := NewFindCommonDependencyTool(analytics, idx)
 
 	t.Run("returns error when targets missing", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{})
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{}})
 
 		if err != nil {
 			t.Fatalf("Execute() returned error: %v", err)
@@ -189,9 +189,9 @@ func TestFindCommonDependencyTool_MissingTargets(t *testing.T) {
 	})
 
 	t.Run("returns error when targets empty", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"targets": []string{},
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() returned error: %v", err)
@@ -205,9 +205,9 @@ func TestFindCommonDependencyTool_MissingTargets(t *testing.T) {
 	})
 
 	t.Run("returns error when only one target", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"targets": []string{"C"},
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() returned error: %v", err)
@@ -233,9 +233,9 @@ func TestFindCommonDependencyTool_NonExistentTarget(t *testing.T) {
 	tool := NewFindCommonDependencyTool(analytics, idx)
 
 	t.Run("handles non-existent target gracefully", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"targets": []string{"C", "NonExistent"},
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() returned error: %v", err)
@@ -263,10 +263,10 @@ func TestFindCommonDependencyTool_WithEntry(t *testing.T) {
 	tool := NewFindCommonDependencyTool(analytics, idx)
 
 	t.Run("uses specified entry point", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"targets": []string{"C", "D"},
 			"entry":   "main",
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -290,9 +290,9 @@ func TestFindCommonDependencyTool_WithEntry(t *testing.T) {
 func TestFindCommonDependencyTool_NilAnalytics(t *testing.T) {
 	tool := NewFindCommonDependencyTool(nil, nil)
 
-	result, err := tool.Execute(context.Background(), map[string]any{
+	result, err := tool.Execute(context.Background(), MapParams{Params: map[string]any{
 		"targets": []string{"A", "B"},
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("Execute() returned error: %v", err)
@@ -319,9 +319,9 @@ func TestFindCommonDependencyTool_ContextCancellation(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel() // Cancel immediately
 
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"targets": []string{"C", "D"},
-		})
+		}})
 
 		// Should handle cancellation gracefully
 		if err != nil {
@@ -346,9 +346,9 @@ func TestFindCommonDependencyTool_TraceStep(t *testing.T) {
 	analytics := graph.NewGraphAnalytics(hg)
 	tool := NewFindCommonDependencyTool(analytics, idx)
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 		"targets": []string{"C", "D"},
-	})
+	}})
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -380,9 +380,9 @@ func TestFindCommonDependencyTool_OutputFormat(t *testing.T) {
 	tool := NewFindCommonDependencyTool(analytics, idx)
 
 	t.Run("output has expected fields", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"targets": []string{"C", "D"},
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)

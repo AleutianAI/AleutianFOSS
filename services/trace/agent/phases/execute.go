@@ -606,6 +606,18 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 	// Handle safety block
 	if blocked {
 		p.emitError(deps, fmt.Errorf("execution blocked by safety check"), true)
+
+		// IT-06c I-13: Early-exit when all tool calls in this batch were blocked.
+		// Without this, the loop continues futilely (steps 1-9 can loop with zero
+		// progress before reflection threshold at step 10). Force synthesis from
+		// any accumulated results instead of wasting time on blocked tool calls.
+		if deps.Session.IsCircuitBreakerActive() {
+			slog.Info("IT-06c I-13: All tool calls blocked, forcing synthesis",
+				slog.String("session_id", deps.Session.ID),
+				slog.Int("step_number", stepNumber),
+			)
+			return p.forceLLMSynthesis(ctx, deps, request, stepStart, stepNumber)
+		}
 	}
 
 	// Emit step complete event
@@ -2067,6 +2079,7 @@ var graphToolsWithSubstantiveResults = map[string]bool{
 	"find_extractable_regions":  true,
 	"find_module_api":           true,
 	"check_reducibility":        true,
+	"find_similar_code":         true, // IT-06c I-11: Was missing, preventing forced synthesis
 }
 
 // shouldForceSynthesisAfterGraphTools determines if we should force synthesis

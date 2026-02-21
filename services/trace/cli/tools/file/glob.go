@@ -91,18 +91,19 @@ func (t *GlobTool) Definition() tools.ToolDefinition {
 }
 
 // Execute finds files matching the glob pattern.
-func (t *GlobTool) Execute(ctx context.Context, params map[string]any) (*tools.Result, error) {
+func (t *GlobTool) Execute(ctx context.Context, params tools.TypedParams) (*tools.Result, error) {
 	start := time.Now()
 
 	// Parse parameters
+	m := params.ToMap()
 	p := &GlobParams{}
-	if pattern, ok := params["pattern"].(string); ok {
+	if pattern, ok := m["pattern"].(string); ok {
 		p.Pattern = pattern
 	}
-	if path, ok := params["path"].(string); ok {
+	if path, ok := m["path"].(string); ok {
 		p.Path = path
 	}
-	if limit, ok := getIntParam(params, "limit"); ok {
+	if limit, ok := getIntParam(m, "limit"); ok {
 		p.Limit = limit
 	}
 

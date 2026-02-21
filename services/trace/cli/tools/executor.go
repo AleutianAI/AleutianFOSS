@@ -258,7 +258,7 @@ func (e *Executor) Execute(ctx context.Context, invocation *Invocation) (*Result
 	invocation.StartedAt = time.Now().UnixMilli()
 	logger.Debug("Executing tool")
 
-	result, err := tool.Execute(ctx, invocation.Parameters)
+	result, err := tool.Execute(ctx, MapParams{Tool: invocation.ToolName, Params: invocation.Parameters})
 	invocation.CompletedAt = time.Now().UnixMilli()
 
 	// Handle transaction commit/rollback

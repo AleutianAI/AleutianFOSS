@@ -97,21 +97,22 @@ func (t *TreeTool) Definition() tools.ToolDefinition {
 }
 
 // Execute generates a tree visualization of a directory.
-func (t *TreeTool) Execute(ctx context.Context, params map[string]any) (*tools.Result, error) {
+func (t *TreeTool) Execute(ctx context.Context, params tools.TypedParams) (*tools.Result, error) {
 	start := time.Now()
 
 	// Parse parameters
+	m := params.ToMap()
 	p := &TreeParams{}
-	if path, ok := params["path"].(string); ok {
+	if path, ok := m["path"].(string); ok {
 		p.Path = path
 	}
-	if depth, ok := getIntParam(params, "depth"); ok {
+	if depth, ok := getIntParam(m, "depth"); ok {
 		p.Depth = depth
 	}
-	if showHidden, ok := params["show_hidden"].(bool); ok {
+	if showHidden, ok := m["show_hidden"].(bool); ok {
 		p.ShowHidden = showHidden
 	}
-	if dirsOnly, ok := params["dirs_only"].(bool); ok {
+	if dirsOnly, ok := m["dirs_only"].(bool); ok {
 		p.DirsOnly = dirsOnly
 	}
 

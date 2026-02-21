@@ -806,7 +806,7 @@ tests:
     description: >
       find_hotspots tool against Hugo (test B). Focus on the tpl package.
     query: |
-      What are the hotspot functions in the tpl template package?
+      What are the hotspot functions in the tpl package?
     expected_state: COMPLETE
     reference_answer: |
       Top hotspots in tpl include the template execution functions,
@@ -821,7 +821,7 @@ tests:
     description: >
       find_hotspots tool against Hugo (test C). Focus on incoming vs outgoing edges.
     query: |
-      Which functions have the highest ratio of incoming to outgoing calls?
+      What are the hotspot functions with the highest connectivity ratio in Hugo?
     expected_state: COMPLETE
     reference_answer: |
       Functions with high incoming-to-outgoing ratios include utility

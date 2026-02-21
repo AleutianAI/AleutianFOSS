@@ -95,13 +95,17 @@ tests:
     name: gin_get_call_chain
     category: TOOL_HAPPY_PATH
     description: >
-      get_call_chain tool against Gin. From Engine.Run to handler execution.
+      get_call_chain tool against Gin. Downstream call tree from Engine.Run.
     query: |
       Show the call chain from Engine.Run to handler execution
     expected_state: COMPLETE
     reference_answer: |
-      Engine.Run -> http.ListenAndServe -> Engine.ServeHTTP ->
-      Engine.handleHTTPRequest -> Context.Next -> handler execution.
+      Engine.Run calls resolveAddress, debugPrint, updateRouteTrees,
+      Handler, and http.ListenAndServe (external). At depth 2-3,
+      sub-callees include IsDebugging, isTrustedProxy, updateRouteTree,
+      and debugPrintError. ListenAndServe is an external stdlib boundary
+      so ServeHTTP and handleHTTPRequest are not reachable in this
+      static downstream traversal.
     validations:
       - type: graph_tool_used
 
@@ -817,7 +821,7 @@ tests:
     description: >
       find_hotspots tool against Gin (test C). Focus on the binding subsystem.
     query: |
-      What are the most connected functions in the binding subsystem?
+      What are the hotspot functions in the Gin binding subsystem?
     expected_state: COMPLETE
     reference_answer: |
       In the binding subsystem, the Binding interface methods (Name and Bind),

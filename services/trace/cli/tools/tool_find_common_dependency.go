@@ -43,6 +43,20 @@ type FindCommonDependencyParams struct {
 	Entry string
 }
 
+// ToolName returns the tool name for TypedParams interface.
+func (p FindCommonDependencyParams) ToolName() string { return "find_common_dependency" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p FindCommonDependencyParams) ToMap() map[string]any {
+	m := map[string]any{
+		"targets": p.Targets,
+	}
+	if p.Entry != "" {
+		m["entry"] = p.Entry
+	}
+	return m
+}
+
 // FindCommonDependencyOutput contains the structured result.
 type FindCommonDependencyOutput struct {
 	// LCD contains information about the lowest common dominator.
@@ -166,7 +180,7 @@ func (t *findCommonDependencyTool) Definition() ToolDefinition {
 }
 
 // Execute runs the find_common_dependency tool.
-func (t *findCommonDependencyTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findCommonDependencyTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	start := time.Now()
 	logger := telemetry.LoggerWithTrace(ctx, t.logger)
 
@@ -175,7 +189,7 @@ func (t *findCommonDependencyTool) Execute(ctx context.Context, params map[strin
 	defer span.End()
 
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
 		span.AddEvent("invalid_params", trace.WithAttributes(
 			attribute.String("error", err.Error()),

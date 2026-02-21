@@ -50,6 +50,21 @@ type FindReferencesParams struct {
 	PackageHint string
 }
 
+// ToolName returns the tool name for TypedParams interface.
+func (p FindReferencesParams) ToolName() string { return "find_references" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p FindReferencesParams) ToMap() map[string]any {
+	m := map[string]any{
+		"symbol_name": p.SymbolName,
+		"limit":       p.Limit,
+	}
+	if p.PackageHint != "" {
+		m["package_hint"] = p.PackageHint
+	}
+	return m
+}
+
 // FindReferencesOutput contains the structured result.
 type FindReferencesOutput struct {
 	// SymbolName is the symbol that was searched for.
@@ -198,11 +213,11 @@ func (t *findReferencesTool) Definition() ToolDefinition {
 //   - error: Non-nil only for infrastructure failures (context cancellation, graph errors).
 //
 // Thread Safety: This method is safe for concurrent use.
-func (t *findReferencesTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findReferencesTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	start := time.Now()
 
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
 		errStep := crs.NewTraceStepBuilder().
 			WithAction("tool_find_references").

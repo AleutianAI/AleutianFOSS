@@ -147,7 +147,8 @@ type SymbolSummary struct {
 	Exported  bool   `json:"exported"`
 }
 
-func (t *explorePackageTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *explorePackageTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	m := params.ToMap()
 	// Validate inputs
 	if ctx == nil {
 		return nil, errors.New("ctx must not be nil")
@@ -162,7 +163,7 @@ func (t *explorePackageTool) Execute(ctx context.Context, params map[string]any)
 	start := time.Now()
 
 	// Parse parameters
-	pkgName, ok := params["package"].(string)
+	pkgName, ok := m["package"].(string)
 	if !ok || pkgName == "" {
 		// Record failed attempt in CRS
 		stepBuilder := crs.NewTraceStepBuilder().
@@ -181,24 +182,24 @@ func (t *explorePackageTool) Execute(ctx context.Context, params map[string]any)
 	}
 
 	includePrivate := false
-	if v, ok := params["include_private"].(bool); ok {
+	if v, ok := m["include_private"].(bool); ok {
 		includePrivate = v
 	}
 
 	includeDeps := true
-	if v, ok := params["include_dependencies"].(bool); ok {
+	if v, ok := m["include_dependencies"].(bool); ok {
 		includeDeps = v
 	}
 
 	includeDependents := true
-	if v, ok := params["include_dependents"].(bool); ok {
+	if v, ok := m["include_dependents"].(bool); ok {
 		includeDependents = v
 	}
 
 	maxSymbols := 20
-	if v, ok := params["max_symbols"].(float64); ok {
+	if v, ok := m["max_symbols"].(float64); ok {
 		maxSymbols = int(v)
-	} else if v, ok := params["max_symbols"].(int); ok {
+	} else if v, ok := m["max_symbols"].(int); ok {
 		maxSymbols = v
 	}
 

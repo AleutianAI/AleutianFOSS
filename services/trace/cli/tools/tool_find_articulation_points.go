@@ -42,6 +42,17 @@ type FindArticulationPointsParams struct {
 	IncludeBridges bool
 }
 
+// ToolName returns the tool name for TypedParams interface.
+func (p FindArticulationPointsParams) ToolName() string { return "find_articulation_points" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p FindArticulationPointsParams) ToMap() map[string]any {
+	return map[string]any{
+		"top":             p.Top,
+		"include_bridges": p.IncludeBridges,
+	}
+}
+
 // FindArticulationPointsOutput contains the structured result.
 type FindArticulationPointsOutput struct {
 	// ArticulationPoints is the list of detected articulation points.
@@ -189,11 +200,11 @@ func (t *findArticulationPointsTool) Definition() ToolDefinition {
 }
 
 // Execute runs the find_articulation_points tool.
-func (t *findArticulationPointsTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findArticulationPointsTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	start := time.Now()
 
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
 		return &Result{
 			Success: false,

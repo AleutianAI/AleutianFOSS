@@ -78,15 +78,16 @@ func (t *WriteTool) Definition() tools.ToolDefinition {
 }
 
 // Execute writes content to a file using atomic write.
-func (t *WriteTool) Execute(ctx context.Context, params map[string]any) (*tools.Result, error) {
+func (t *WriteTool) Execute(ctx context.Context, params tools.TypedParams) (*tools.Result, error) {
 	start := time.Now()
 
 	// Parse parameters
+	m := params.ToMap()
 	p := &WriteParams{}
-	if filePath, ok := params["file_path"].(string); ok {
+	if filePath, ok := m["file_path"].(string); ok {
 		p.FilePath = filePath
 	}
-	if content, ok := params["content"].(string); ok {
+	if content, ok := m["content"].(string); ok {
 		p.Content = content
 	}
 

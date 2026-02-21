@@ -42,6 +42,17 @@ type FindCyclesParams struct {
 	Limit int
 }
 
+// ToolName returns the tool name for TypedParams interface.
+func (p FindCyclesParams) ToolName() string { return "find_cycles" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p FindCyclesParams) ToMap() map[string]any {
+	return map[string]any{
+		"min_size": p.MinSize,
+		"limit":    p.Limit,
+	}
+}
+
 // FindCyclesOutput contains the structured result.
 type FindCyclesOutput struct {
 	// CycleCount is the number of cycles returned.
@@ -160,11 +171,11 @@ func (t *findCyclesTool) Definition() ToolDefinition {
 }
 
 // Execute runs the find_cycles tool.
-func (t *findCyclesTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findCyclesTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	start := time.Now()
 
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
 		return &Result{
 			Success: false,

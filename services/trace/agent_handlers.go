@@ -1067,6 +1067,26 @@ func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent
 
 	warmupDuration := time.Since(warmupStart)
 
+	// IT-06c I-14: Re-warm the main agent model after loading the router model.
+	// Loading granite4:micro-h into VRAM may evict the main model (gpt-oss:20b)
+	// on resource-constrained systems. Re-warming ensures the first llm_call
+	// doesn't pay a ~14s cold-load penalty.
+	mainModel := os.Getenv("OLLAMA_MODEL")
+	if mainModel != "" && mainModel != routerConfig.Model && h.modelManager != nil {
+		mainWarmStart := time.Now()
+		if warmErr := h.modelManager.WarmModel(warmupCtx, mainModel, "24h", 65536); warmErr != nil {
+			logger.Warn("initializeToolRouter: Main model re-warm failed (non-fatal)",
+				"session_id", session.ID,
+				"model", mainModel,
+				"error", warmErr)
+		} else {
+			logger.Info("initializeToolRouter: Main model re-warmed",
+				"session_id", session.ID,
+				"model", mainModel,
+				"duration", time.Since(mainWarmStart))
+		}
+	}
+
 	logger.Info("initializeToolRouter: Complete - Router fully initialized",
 		"session_id", session.ID,
 		"model", routerConfig.Model,

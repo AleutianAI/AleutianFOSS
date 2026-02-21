@@ -47,6 +47,18 @@ type FindLoopsParams struct {
 	ShowNesting bool
 }
 
+// ToolName returns the tool name for TypedParams interface.
+func (p FindLoopsParams) ToolName() string { return "find_loops" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p FindLoopsParams) ToMap() map[string]any {
+	return map[string]any{
+		"top":          p.Top,
+		"min_size":     p.MinSize,
+		"show_nesting": p.ShowNesting,
+	}
+}
+
 // FindLoopsOutput contains the structured result.
 type FindLoopsOutput struct {
 	// Loops is the list of detected natural loops.
@@ -207,9 +219,9 @@ func (t *findLoopsTool) Definition() ToolDefinition {
 }
 
 // Execute runs the find_loops tool.
-func (t *findLoopsTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findLoopsTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
 		return &Result{
 			Success: false,

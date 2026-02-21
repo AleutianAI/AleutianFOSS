@@ -88,8 +88,12 @@ tests:
       Where is the Request object used across the codebase?
     expected_state: COMPLETE
     reference_answer: |
-      The Request object from lib/request.js is used throughout the middleware
-      pipeline, router, and application modules for handling HTTP request data.
+      The Request class is defined at lib/request.js:31 with 8 references,
+      all within lib/request.js itself (lines 64, 132, 145, 162, 179, 212,
+      235, 278). No cross-file references exist because Express uses
+      prototype-based patterns — other modules access req properties through
+      the http.IncomingMessage prototype chain, not direct Request symbol
+      references.
     validations:
       - type: graph_tool_used
 
@@ -817,7 +821,7 @@ tests:
     description: >
       find_hotspots tool against Express (test C). Target: response subsystem.
     query: |
-      What are the most connected functions in lib/response.js?
+      What are the hotspot functions with the highest connectivity in lib/response.js?
     expected_state: COMPLETE
     reference_answer: |
       In lib/response.js, res.send is the primary hotspot due to high fan-in

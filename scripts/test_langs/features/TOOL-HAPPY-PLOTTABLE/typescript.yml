@@ -810,7 +810,7 @@ tests:
     description: >
       find_hotspots tool against Plottable (test B). Target: src/plots/ subsystem.
     query: |
-      What are the most connected functions in the plots subsystem?
+      What are the hotspot functions in the plots subsystem?
     expected_state: COMPLETE
     reference_answer: |
       Top hotspots in src/plots/ include Plot.renderImmediately,
@@ -825,7 +825,7 @@ tests:
     description: >
       find_hotspots tool against Plottable (test C). Target: functions with highest fan-in.
     query: |
-      Which functions have the highest fan-in (are called by the most other functions)?
+      Which hotspot functions have the highest fan-in in the Plottable codebase?
     expected_state: COMPLETE
     reference_answer: |
       Highest fan-in functions include Component.render (triggered by many
@@ -2062,7 +2062,7 @@ tests:
     description: >
       GR-58/IT-07: Verify find_hotspots produces CRS TraceStep against Plottable.
     query: |
-      Find hotspot functions in Plottable's rendering code.
+      What are the most connected hotspot functions in the Plottable codebase?
     expected_state: COMPLETE
     reference_answer: |
       find_hotspots tool was used and produced a CRS TraceStep with appropriate metadata.

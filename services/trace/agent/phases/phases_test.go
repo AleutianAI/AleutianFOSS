@@ -305,7 +305,7 @@ func TestExecutePhase_Execute_WithToolCalls(t *testing.T) {
 
 	// Register a mock tool
 	mockTool := tools.NewMockTool("test_tool", tools.CategoryExploration)
-	mockTool.ExecuteFunc = func(ctx context.Context, params map[string]any) (*tools.Result, error) {
+	mockTool.ExecuteFunc = func(ctx context.Context, params tools.TypedParams) (*tools.Result, error) {
 		return &tools.Result{
 			Success:    true,
 			OutputText: "Tool executed successfully",
@@ -1081,7 +1081,7 @@ func TestExecutePhase_ToolFailed_WithNilCoordinator_NoError(t *testing.T) {
 
 	// Register a tool that fails
 	failingTool := tools.NewMockTool("failing_tool", tools.CategoryExploration)
-	failingTool.ExecuteFunc = func(ctx context.Context, params map[string]any) (*tools.Result, error) {
+	failingTool.ExecuteFunc = func(ctx context.Context, params tools.TypedParams) (*tools.Result, error) {
 		return &tools.Result{
 			Success: false,
 			Error:   "tool failed deliberately",

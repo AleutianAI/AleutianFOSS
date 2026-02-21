@@ -278,3 +278,23 @@ func TestGetSingleFormattedResult_FoundImplementationsPassThrough(t *testing.T) 
 		t.Errorf("expected verbatim output, got %q", output)
 	}
 }
+
+// IT-06c I-11: Verify find_similar_code is in graphToolsWithSubstantiveResults.
+func TestGraphToolsWithSubstantiveResults_ContainsFindSimilarCode(t *testing.T) {
+	requiredTools := []string{
+		"find_callers",
+		"find_callees",
+		"find_implementations",
+		"find_references",
+		"find_symbol",
+		"find_path",
+		"get_call_chain",
+		"find_similar_code", // IT-06c I-11: Was missing, now required
+	}
+
+	for _, tool := range requiredTools {
+		if !graphToolsWithSubstantiveResults[tool] {
+			t.Errorf("graphToolsWithSubstantiveResults missing %q — agent won't force synthesis after this tool", tool)
+		}
+	}
+}

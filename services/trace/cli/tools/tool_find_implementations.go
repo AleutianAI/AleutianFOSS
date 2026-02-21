@@ -47,6 +47,21 @@ type FindImplementationsParams struct {
 	PackageHint string
 }
 
+// ToolName returns the tool name for TypedParams interface.
+func (p FindImplementationsParams) ToolName() string { return "find_implementations" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p FindImplementationsParams) ToMap() map[string]any {
+	m := map[string]any{
+		"interface_name": p.InterfaceName,
+		"limit":          p.Limit,
+	}
+	if p.PackageHint != "" {
+		m["package_hint"] = p.PackageHint
+	}
+	return m
+}
+
 // FindImplementationsOutput contains the structured result.
 type FindImplementationsOutput struct {
 	// InterfaceName is the interface that was searched for.
@@ -185,11 +200,11 @@ func (t *findImplementationsTool) Definition() ToolDefinition {
 }
 
 // Execute runs the find_implementations tool.
-func (t *findImplementationsTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findImplementationsTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	start := time.Now()
 
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
 		errStep := crs.NewTraceStepBuilder().
 			WithAction("tool_find_implementations").

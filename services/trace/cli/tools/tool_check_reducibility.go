@@ -38,6 +38,16 @@ type CheckReducibilityParams struct {
 	ShowIrreducible bool
 }
 
+// ToolName returns the tool name for TypedParams interface.
+func (p CheckReducibilityParams) ToolName() string { return "check_reducibility" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p CheckReducibilityParams) ToMap() map[string]any {
+	return map[string]any{
+		"show_irreducible": p.ShowIrreducible,
+	}
+}
+
 // CheckReducibilityOutput contains the structured result.
 type CheckReducibilityOutput struct {
 	// IsReducible is true if the entire graph is reducible.
@@ -178,9 +188,9 @@ func (t *checkReducibilityTool) Definition() ToolDefinition {
 }
 
 // Execute runs the check_reducibility tool.
-func (t *checkReducibilityTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *checkReducibilityTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
 		return &Result{
 			Success: false,

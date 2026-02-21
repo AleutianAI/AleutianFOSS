@@ -160,22 +160,23 @@ func (t *findEntryPointsTool) Definition() ToolDefinition {
 	}
 }
 
-func (t *findEntryPointsTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findEntryPointsTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	m := params.ToMap()
 	opts := explore.DefaultEntryPointOptions()
 
-	if typeStr, ok := params["type"].(string); ok && typeStr != "" {
+	if typeStr, ok := m["type"].(string); ok && typeStr != "" {
 		opts.Type = explore.EntryPointType(typeStr)
 	}
 
-	if pkg, ok := params["package"].(string); ok {
+	if pkg, ok := m["package"].(string); ok {
 		opts.Package = pkg
 	}
 
-	if limit, ok := getIntParam(params, "limit"); ok {
+	if limit, ok := getIntParam(m, "limit"); ok {
 		opts.Limit = limit
 	}
 
-	if includeTests, ok := params["include_tests"].(bool); ok {
+	if includeTests, ok := m["include_tests"].(bool); ok {
 		opts.IncludeTests = includeTests
 	}
 
@@ -242,14 +243,15 @@ func (t *traceDataFlowTool) Definition() ToolDefinition {
 	}
 }
 
-func (t *traceDataFlowTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
-	symbolID, ok := params["symbol_id"].(string)
+func (t *traceDataFlowTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	m := params.ToMap()
+	symbolID, ok := m["symbol_id"].(string)
 	if !ok || symbolID == "" {
 		return &Result{Success: false, Error: "symbol_id is required"}, nil
 	}
 
 	var opts []explore.ExploreOption
-	if maxHops, ok := getIntParam(params, "max_hops"); ok {
+	if maxHops, ok := getIntParam(m, "max_hops"); ok {
 		opts = append(opts, explore.WithMaxHops(maxHops))
 	}
 
@@ -316,14 +318,15 @@ func (t *traceErrorFlowTool) Definition() ToolDefinition {
 	}
 }
 
-func (t *traceErrorFlowTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
-	symbolID, ok := params["symbol_id"].(string)
+func (t *traceErrorFlowTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	m := params.ToMap()
+	symbolID, ok := m["symbol_id"].(string)
 	if !ok || symbolID == "" {
 		return &Result{Success: false, Error: "symbol_id is required"}, nil
 	}
 
 	var opts []explore.ExploreOption
-	if maxHops, ok := getIntParam(params, "max_hops"); ok {
+	if maxHops, ok := getIntParam(m, "max_hops"); ok {
 		opts = append(opts, explore.WithMaxHops(maxHops))
 	}
 
@@ -392,14 +395,15 @@ func (t *buildMinimalContextTool) Definition() ToolDefinition {
 	}
 }
 
-func (t *buildMinimalContextTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
-	symbolID, ok := params["symbol_id"].(string)
+func (t *buildMinimalContextTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	m := params.ToMap()
+	symbolID, ok := m["symbol_id"].(string)
 	if !ok || symbolID == "" {
 		return &Result{Success: false, Error: "symbol_id is required"}, nil
 	}
 
 	var opts []explore.ExploreOption
-	if tokenBudget, ok := getIntParam(params, "token_budget"); ok {
+	if tokenBudget, ok := getIntParam(m, "token_budget"); ok {
 		opts = append(opts, explore.WithTokenBudget(tokenBudget))
 	}
 
@@ -516,14 +520,24 @@ func (t *findSimilarCodeTool) Definition() ToolDefinition {
 	}
 }
 
-func (t *findSimilarCodeTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
-	symbolID, ok := params["symbol_id"].(string)
+func (t *findSimilarCodeTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	m := params.ToMap()
+	symbolID, ok := m["symbol_id"].(string)
 	if !ok || symbolID == "" {
 		return &Result{Success: false, Error: "symbol_id is required"}, nil
 	}
 
+	// IT-06c I-11: Lazy-build the similarity index on first use.
+	// The constructor (NewFindSimilarCodeTool) cannot call Build() because it has
+	// no context. Build() is O(n) on the number of functions/methods (~1ms per 100).
+	if !t.engine.IsBuilt() {
+		if err := t.engine.Build(ctx); err != nil {
+			return &Result{Success: false, Error: fmt.Sprintf("similarity index build failed: %s", err.Error())}, nil
+		}
+	}
+
 	var opts []explore.ExploreOption
-	if limit, ok := getIntParam(params, "limit"); ok {
+	if limit, ok := getIntParam(m, "limit"); ok {
 		opts = append(opts, explore.WithMaxNodes(limit))
 	}
 
@@ -533,7 +547,7 @@ func (t *findSimilarCodeTool) Execute(ctx context.Context, params map[string]any
 	}
 
 	// Filter by minimum similarity if specified
-	if minSim, ok := params["min_similarity"].(float64); ok && minSim > 0 {
+	if minSim, ok := m["min_similarity"].(float64); ok && minSim > 0 {
 		filtered := make([]explore.SimilarResult, 0)
 		for _, r := range result.Results {
 			if r.Similarity >= minSim {
@@ -595,8 +609,9 @@ func (t *summarizeFileTool) Definition() ToolDefinition {
 	}
 }
 
-func (t *summarizeFileTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
-	filePath, ok := params["file_path"].(string)
+func (t *summarizeFileTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	m := params.ToMap()
+	filePath, ok := m["file_path"].(string)
 	if !ok || filePath == "" {
 		return &Result{Success: false, Error: "file_path is required"}, nil
 	}
@@ -658,8 +673,9 @@ func (t *findConfigUsageTool) Definition() ToolDefinition {
 	}
 }
 
-func (t *findConfigUsageTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
-	configKey, _ := params["config_key"].(string)
+func (t *findConfigUsageTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	m := params.ToMap()
+	configKey, _ := m["config_key"].(string)
 
 	var result *explore.ConfigUsage
 	var err error
@@ -796,16 +812,17 @@ type ListPackagesResult struct {
 	TotalCount int           `json:"total_count"`
 }
 
-func (t *listPackagesTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *listPackagesTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	m := params.ToMap()
 	start := time.Now()
 
 	includeTests := false
-	if v, ok := params["include_tests"].(bool); ok {
+	if v, ok := m["include_tests"].(bool); ok {
 		includeTests = v
 	}
 
 	filter := ""
-	if v, ok := params["filter"].(string); ok {
+	if v, ok := m["filter"].(string); ok {
 		filter = v
 	}
 
@@ -956,7 +973,7 @@ type MockTool struct {
 	name        string
 	category    ToolCategory
 	definition  ToolDefinition
-	ExecuteFunc func(ctx context.Context, params map[string]any) (*Result, error)
+	ExecuteFunc func(ctx context.Context, params TypedParams) (*Result, error)
 }
 
 // NewMockTool creates a mock tool for testing.
@@ -970,7 +987,7 @@ func NewMockTool(name string, category ToolCategory) *MockTool {
 			Category:    category,
 			Parameters:  make(map[string]ParamDef),
 		},
-		ExecuteFunc: func(ctx context.Context, params map[string]any) (*Result, error) {
+		ExecuteFunc: func(ctx context.Context, params TypedParams) (*Result, error) {
 			return &Result{
 				Success:    true,
 				OutputText: fmt.Sprintf("Mock result from %s", name),
@@ -987,7 +1004,7 @@ func (t *MockTool) WithDefinition(d ToolDefinition) *MockTool {
 	return t
 }
 
-func (t *MockTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *MockTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	return t.ExecuteFunc(ctx, params)
 }
 
@@ -1248,12 +1265,34 @@ func StaticToolDefinitions() []ToolDefinition {
 					Required:    false,
 					Default:     50,
 				},
+				"exclude_tests": {
+					Type:        ParamTypeBool,
+					Description: "Exclude symbols from test files (default: true)",
+					Required:    false,
+					Default:     true,
+				},
 			},
 			Category:    CategoryExploration,
 			Priority:    84,
 			Requires:    []string{"graph_initialized"},
 			SideEffects: false,
 			Timeout:     10 * time.Second,
+			WhenToUse: WhenToUse{
+				Keywords: []string{
+					"dead code", "unused code", "unreferenced", "orphan code",
+					"unused functions", "not called", "no callers", "no references",
+					"no incoming calls", "no internal callers", "never called",
+					"zero callers", "not referenced",
+				},
+				UseWhen: "User asks about dead code, unused functions, unreferenced symbols, " +
+					"or wants to find code that is never called. IMPORTANT: Negated caller queries " +
+					"like 'functions with no callers', 'no incoming calls', or 'never called' mean " +
+					"dead code — use this tool, NOT find_callers.",
+				AvoidWhen: "User asks about most connected or heavily used functions " +
+					"(use find_hotspots). User asks about code complexity or structure " +
+					"(use find_communities). User asks WHO calls a specific function " +
+					"(use find_callers — but 'no callers' means dead code, not find_callers).",
+			},
 		},
 		{
 			Name: "find_cycles",

@@ -45,6 +45,21 @@ type FindSymbolParams struct {
 	Package string
 }
 
+// ToolName returns the tool name for TypedParams interface.
+func (p FindSymbolParams) ToolName() string { return "find_symbol" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p FindSymbolParams) ToMap() map[string]any {
+	m := map[string]any{
+		"name": p.Name,
+		"kind": p.Kind,
+	}
+	if p.Package != "" {
+		m["package"] = p.Package
+	}
+	return m
+}
+
 // FindSymbolOutput contains the structured result.
 type FindSymbolOutput struct {
 	// SearchName is the name that was searched for.
@@ -173,11 +188,11 @@ func (t *findSymbolTool) Definition() ToolDefinition {
 }
 
 // Execute runs the find_symbol tool.
-func (t *findSymbolTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findSymbolTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	start := time.Now()
 
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
 		errStep := crs.NewTraceStepBuilder().
 			WithAction("tool_find_symbol").

@@ -820,7 +820,7 @@ tests:
     description: >
       find_hotspots tool against BabylonJS (test C). Target: scene graph node hierarchy.
     query: |
-      What are the most connected functions in the Node class hierarchy?
+      What are the hotspot functions in the BabylonJS Node class hierarchy?
     expected_state: COMPLETE
     reference_answer: |
       In the Node hierarchy, computeWorldMatrix is a top hotspot due to calls

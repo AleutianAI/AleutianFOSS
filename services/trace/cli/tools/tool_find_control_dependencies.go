@@ -43,6 +43,17 @@ type FindControlDependenciesParams struct {
 	Depth int
 }
 
+// ToolName returns the tool name for TypedParams interface.
+func (p FindControlDependenciesParams) ToolName() string { return "find_control_dependencies" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p FindControlDependenciesParams) ToMap() map[string]any {
+	return map[string]any{
+		"target": p.Target,
+		"depth":  p.Depth,
+	}
+}
+
 // FindControlDependenciesOutput contains the structured result.
 type FindControlDependenciesOutput struct {
 	// Target is the function that was analyzed.
@@ -184,9 +195,9 @@ func (t *findControlDependenciesTool) Definition() ToolDefinition {
 }
 
 // Execute runs the find_control_dependencies tool.
-func (t *findControlDependenciesTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findControlDependenciesTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
 		return &Result{
 			Success: false,

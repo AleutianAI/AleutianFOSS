@@ -30,8 +30,9 @@ tools:
       - invocations of
       - called by
       - where is it called
+    # NOTE: "no callers", "no incoming calls", "never called" → find_dead_code, NOT find_callers
     use_when: "User asks who or what CALLS a specific function. The query is about CALL relationships, not general usage. Examples: 'who calls parseConfig?', 'what calls the validate function?', 'where is Open called from?'. NEVER use for 'where is X used?' or 'find references to X' — those are find_references queries. NEVER use for 'what does X call?' — those are find_callees queries."
-    avoid_when: "NEVER use find_callers when the query asks 'where is X used?', 'references to X', 'usages of X', or 'find all uses of X' — use find_references instead. NEVER use find_callers when the query contains 'call chain', 'call graph', 'call hierarchy', 'call tree', 'transitive', or 'recursive' — use get_call_chain instead. NEVER use find_callers when user asks what a function calls or depends on — use find_callees instead."
+    avoid_when: "NEVER use find_callers when the query asks 'where is X used?', 'references to X', 'usages of X', or 'find all uses of X' — use find_references instead. NEVER use find_callers when the query contains 'call chain', 'call graph', 'call hierarchy', 'call tree', 'transitive', or 'recursive' — use get_call_chain instead. NEVER use find_callers when user asks what a function calls or depends on — use find_callees instead. NEVER use find_callers when the query contains NEGATION like 'no callers', 'no incoming calls', 'never called', 'zero callers' — these are dead code queries, use find_dead_code instead."
     instead_of:
       - tool: Grep
         when: "Searching for function call patterns in code"
@@ -568,7 +569,15 @@ tools:
       - unused code
       - unreferenced
       - orphan code
-    use_when: "User wants to find unreferenced code"
+      - unused functions
+      - no callers
+      - no incoming calls
+      - no internal callers
+      - never called
+      - zero callers
+      - not referenced
+    use_when: "User wants to find unreferenced code, dead code, unused functions, or symbols with no callers/no incoming calls. Negated caller queries like 'functions with no callers' or 'no incoming calls' mean dead code."
+    avoid_when: "User asks about most connected functions (use find_hotspots) or code structure (use find_communities). User asks WHO calls a specific function (use find_callers) — but 'no callers' or 'no incoming calls' means dead code, not find_callers."
     requires:
       - graph_initialized
 

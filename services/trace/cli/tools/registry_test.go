@@ -229,7 +229,7 @@ func TestExecutor_Execute(t *testing.T) {
 			Required: false,
 		},
 	}
-	mockTool.ExecuteFunc = func(ctx context.Context, params map[string]any) (*Result, error) {
+	mockTool.ExecuteFunc = func(ctx context.Context, params TypedParams) (*Result, error) {
 		return &Result{
 			Success:    true,
 			OutputText: "execution succeeded",
@@ -334,7 +334,7 @@ func TestExecutor_Caching(t *testing.T) {
 	callCount := 0
 	tool := NewMockTool("cacheable", CategoryExploration)
 	tool.definition.SideEffects = false
-	tool.ExecuteFunc = func(ctx context.Context, params map[string]any) (*Result, error) {
+	tool.ExecuteFunc = func(ctx context.Context, params TypedParams) (*Result, error) {
 		callCount++
 		return &Result{
 			Success:    true,

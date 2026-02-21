@@ -44,6 +44,17 @@ type FindImportantParams struct {
 	Kind string
 }
 
+// ToolName returns the tool name for TypedParams interface.
+func (p FindImportantParams) ToolName() string { return "find_important" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p FindImportantParams) ToMap() map[string]any {
+	return map[string]any{
+		"top":  p.Top,
+		"kind": p.Kind,
+	}
+}
+
 // FindImportantOutput contains the structured result.
 type FindImportantOutput struct {
 	// ResultCount is the number of results returned.
@@ -164,11 +175,11 @@ func (t *findImportantTool) Definition() ToolDefinition {
 }
 
 // Execute runs the find_important tool.
-func (t *findImportantTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	start := time.Now()
 
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
 		return &Result{
 			Success: false,

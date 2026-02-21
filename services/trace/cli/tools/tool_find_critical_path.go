@@ -43,6 +43,20 @@ type FindCriticalPathParams struct {
 	Entry string
 }
 
+// ToolName returns the tool name for TypedParams interface.
+func (p FindCriticalPathParams) ToolName() string { return "find_critical_path" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p FindCriticalPathParams) ToMap() map[string]any {
+	m := map[string]any{
+		"target": p.Target,
+	}
+	if p.Entry != "" {
+		m["entry"] = p.Entry
+	}
+	return m
+}
+
 // FindCriticalPathOutput contains the structured result.
 type FindCriticalPathOutput struct {
 	// Target is the target function.
@@ -163,9 +177,9 @@ func (t *findCriticalPathTool) Definition() ToolDefinition {
 }
 
 // Execute runs the find_critical_path tool.
-func (t *findCriticalPathTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findCriticalPathTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
 		return &Result{
 			Success: false,

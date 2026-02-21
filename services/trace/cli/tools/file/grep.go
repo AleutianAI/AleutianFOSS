@@ -138,38 +138,39 @@ func (t *GrepTool) Definition() tools.ToolDefinition {
 }
 
 // Execute searches for content matching the pattern.
-func (t *GrepTool) Execute(ctx context.Context, params map[string]any) (*tools.Result, error) {
+func (t *GrepTool) Execute(ctx context.Context, params tools.TypedParams) (*tools.Result, error) {
 	start := time.Now()
 
 	// Parse parameters
+	m := params.ToMap()
 	p := &GrepParams{}
-	if pattern, ok := params["pattern"].(string); ok {
+	if pattern, ok := m["pattern"].(string); ok {
 		p.Pattern = pattern
 	}
-	if path, ok := params["path"].(string); ok {
+	if path, ok := m["path"].(string); ok {
 		p.Path = path
 	}
-	if glob, ok := params["glob"].(string); ok {
+	if glob, ok := m["glob"].(string); ok {
 		p.Glob = glob
 	}
-	if contextLines, ok := getIntParam(params, "context_lines"); ok {
+	if contextLines, ok := getIntParam(m, "context_lines"); ok {
 		p.ContextLines = contextLines
 	}
-	if caseInsensitive, ok := params["case_insensitive"].(bool); ok {
+	if caseInsensitive, ok := m["case_insensitive"].(bool); ok {
 		p.CaseInsensitive = caseInsensitive
 	}
-	if limit, ok := getIntParam(params, "limit"); ok {
+	if limit, ok := getIntParam(m, "limit"); ok {
 		p.Limit = limit
 	}
-	if fuzzy, ok := params["fuzzy"].(bool); ok {
+	if fuzzy, ok := m["fuzzy"].(bool); ok {
 		p.Fuzzy = fuzzy
 	}
-	if approximate, ok := params["approximate"].(bool); ok {
+	if approximate, ok := m["approximate"].(bool); ok {
 		p.Approximate = approximate
 	}
 	// Track if max_errors was explicitly provided
 	maxErrorsProvided := false
-	if maxErrors, ok := getIntParam(params, "max_errors"); ok {
+	if maxErrors, ok := getIntParam(m, "max_errors"); ok {
 		p.MaxErrors = maxErrors
 		maxErrorsProvided = true
 	}

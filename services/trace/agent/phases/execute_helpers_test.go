@@ -1926,6 +1926,165 @@ func TestExtractPackageContextFromQuery(t *testing.T) {
 			query: "What does read_csv call in pandas_core?",
 			want:  "pandas_core",
 		},
+		// IT-07 Phase 2: Subsystem and within patterns
+		{
+			name:  "within keyword",
+			query: "What are the hotspot functions within the lib/router directory?",
+			want:  "lib/router",
+		},
+		{
+			name:  "in the X subsystem",
+			query: "What are the hotspot functions in the binding subsystem?",
+			want:  "binding",
+		},
+		{
+			name:  "within the X subsystem",
+			query: "What are the hotspot functions within the materials subsystem?",
+			want:  "materials",
+		},
+		{
+			name:  "in the X package",
+			query: "What are the hotspot functions in the render package?",
+			want:  "render",
+		},
+		{
+			name:  "multi-word subsystem extracts first qualifier",
+			query: "Find hotspots in the blueprint registration subsystem",
+			want:  "blueprint",
+		},
+		{
+			name:  "single-word subsystem after the",
+			query: "Find hotspots in the blueprint subsystem",
+			want:  "blueprint",
+		},
+		{
+			name:  "in the X path",
+			query: "What are the hotspot functions in the write path?",
+			want:  "write",
+		},
+		{
+			name:  "X directory pattern",
+			query: "Find hotspots within the lib/router directory",
+			want:  "lib/router",
+		},
+		{
+			name:  "in the system should not match",
+			query: "Find hotspots in the system",
+			want:  "",
+		},
+		{
+			name:  "in the system code should not match",
+			query: "Find hotspots in the system code",
+			want:  "",
+		},
+		{
+			name:  "in the code should not match",
+			query: "Find hotspots in the code",
+			want:  "",
+		},
+		// IT-07 Phase 2: Actual _b test queries
+		{
+			name:  "b_hugo tpl package",
+			query: "What are the hotspot functions in the tpl package?",
+			want:  "tpl",
+		},
+		{
+			name:  "b_badger table package",
+			query: "What are the hotspot functions in the table package?",
+			want:  "table",
+		},
+		{
+			name:  "b_gin render package",
+			query: "What are the hotspot functions in the render package?",
+			want:  "render",
+		},
+		{
+			name:  "b_flask blueprint subsystem",
+			query: "What are the hotspots in the blueprint subsystem?",
+			want:  "blueprint",
+		},
+		{
+			name:  "b_pandas io subsystem",
+			query: "What are the hotspot functions in the io subsystem?",
+			want:  "io",
+		},
+		{
+			name:  "b_express lib/router directory",
+			query: "What are the hotspot functions within the lib/router directory?",
+			want:  "lib/router",
+		},
+		{
+			name:  "b_babylonjs materials subsystem",
+			query: "What are the hotspot functions within the materials subsystem?",
+			want:  "materials",
+		},
+		{
+			name:  "b_nestjs microservices package",
+			query: "What are the hotspot functions in the microservices package?",
+			want:  "microservices",
+		},
+		{
+			name:  "b_plottable plots subsystem",
+			query: "What are the hotspot functions in the plots subsystem?",
+			want:  "plots",
+		},
+		// IT-08: Dead code queries with package context (Problem A fixes)
+		{
+			name:  "dead_code render package",
+			query: "Find dead code in the render package",
+			want:  "render",
+		},
+		{
+			name:  "dead_code render module",
+			query: "What dead code exists in the render module?",
+			want:  "render",
+		},
+		{
+			name:  "dead_code value log subsystem",
+			query: "Find dead code in the value log subsystem",
+			want:  "value",
+		},
+		{
+			name:  "dead_code math utilities module",
+			query: "What unused code is in the math utilities module?",
+			want:  "math",
+		},
+		{
+			name:  "dead_code auth module",
+			query: "What dead code exists in the auth module?",
+			want:  "auth",
+		},
+		{
+			name:  "dead_code plot module",
+			query: "What dead code exists in the plot module?",
+			want:  "plot",
+		},
+		{
+			name:  "dead_code page package",
+			query: "Find dead code in the page package",
+			want:  "page",
+		},
+		{
+			name:  "dead_code router module",
+			query: "Find dead code in the router module",
+			want:  "router",
+		},
+		{
+			name:  "dead_code materials subsystem",
+			query: "Find unused code within the materials subsystem",
+			want:  "materials",
+		},
+		// IT-08: Class-name scoping ("class" as scope keyword)
+		{
+			name:  "dead_code Engine class",
+			query: "Are there any dead code functions in the Engine class?",
+			want:  "engine",
+		},
+		{
+			name:  "dead_code Router class",
+			query: "Find dead code in the Router class",
+			want:  "router",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1933,6 +2092,114 @@ func TestExtractPackageContextFromQuery(t *testing.T) {
 			got := extractPackageContextFromQuery(tt.query)
 			if got != tt.want {
 				t.Errorf("extractPackageContextFromQuery(%q) = %q, want %q", tt.query, got, tt.want)
+			}
+		})
+	}
+}
+
+// IT-07 Phase 3: Test extractSortByFromQuery.
+func TestExtractSortByFromQuery(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{name: "default", query: "Find hotspot functions", want: "score"},
+		{name: "fan-in", query: "Which hotspot functions have the highest fan-in?", want: "in"},
+		{name: "fan-out", query: "Which hotspot functions have the highest fan-out?", want: "out"},
+		{name: "fanin no hyphen", query: "Sort by fanin", want: "in"},
+		{name: "fanout no hyphen", query: "Sort by fanout", want: "out"},
+		{name: "incoming", query: "Functions with most incoming calls", want: "in"},
+		{name: "outgoing", query: "Functions with most outgoing calls", want: "out"},
+		{name: "most called", query: "Show the most called functions", want: "in"},
+		{name: "called by", query: "Functions called by the most other functions", want: "in"},
+		{name: "indegree", query: "Sort hotspots by indegree", want: "in"},
+		{name: "outdegree", query: "Sort hotspots by outdegree", want: "out"},
+		{name: "connectivity no hint", query: "Most connected hotspots", want: "score"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractSortByFromQuery(tt.query)
+			if got != tt.want {
+				t.Errorf("extractSortByFromQuery(%q) = %q, want %q", tt.query, got, tt.want)
+			}
+		})
+	}
+}
+
+// IT-07 Phase 3: Test extractExcludeTestsFromQuery.
+func TestExtractExcludeTestsFromQuery(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		want  bool
+	}{
+		{name: "default excludes tests", query: "Find hotspot functions", want: true},
+		{name: "test file query includes", query: "Find hotspots in test files", want: false},
+		{name: "test code query includes", query: "Hotspots in the test code", want: false},
+		{name: "including tests", query: "Find hotspots including tests", want: false},
+		{name: "test functions", query: "What are the test functions with highest degree?", want: false},
+		{name: "no test mention excludes", query: "Most connected functions in the render package", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractExcludeTestsFromQuery(tt.query)
+			if got != tt.want {
+				t.Errorf("extractExcludeTestsFromQuery(%q) = %v, want %v", tt.query, got, tt.want)
+			}
+		})
+	}
+}
+
+// IT-06c H-4: Test Pattern 1b — "Where is X used/referenced/defined" extraction.
+// These queries are natural find_references patterns where the symbol name is
+// often lowercase (request, app, db, session) and wouldn't pass isFunctionLikeName.
+func TestExtractFunctionNameFromQuery_WhereIsUsed(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{
+			name:  "flask request proxy",
+			query: "Where is the request proxy used across the codebase?",
+			want:  "request",
+		},
+		{
+			name:  "no article",
+			query: "Where is Config used?",
+			want:  "Config",
+		},
+		{
+			name:  "db session",
+			query: "Where is the db session referenced in the project?",
+			want:  "db",
+		},
+		{
+			name:  "PascalCase symbol",
+			query: "Where is the HandlerFunc type used?",
+			want:  "HandlerFunc",
+		},
+		{
+			name:  "snake_case symbol",
+			query: "Where is read_csv defined?",
+			want:  "read_csv",
+		},
+		{
+			name:  "where is without symbol (should return empty)",
+			query: "Where is the codebase located?",
+			// "codebase" is in skipWords for isValidFunctionName → next word "located" also in skipWords
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractFunctionNameFromQuery(tt.query)
+			if got != tt.want {
+				t.Errorf("extractFunctionNameFromQuery(%q) = %q, want %q", tt.query, got, tt.want)
 			}
 		})
 	}

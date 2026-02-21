@@ -52,6 +52,19 @@ type FindCommunitiesParams struct {
 	ShowCrossEdges bool
 }
 
+// ToolName returns the tool name for TypedParams interface.
+func (p FindCommunitiesParams) ToolName() string { return "find_communities" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p FindCommunitiesParams) ToMap() map[string]any {
+	return map[string]any{
+		"min_size":         p.MinSize,
+		"resolution":       p.Resolution,
+		"top":              p.Top,
+		"show_cross_edges": p.ShowCrossEdges,
+	}
+}
+
 // FindCommunitiesOutput contains the structured result.
 type FindCommunitiesOutput struct {
 	// Modularity is the modularity score (0-1, higher = better separation).
@@ -225,11 +238,11 @@ func (t *findCommunitiesTool) Definition() ToolDefinition {
 }
 
 // Execute runs the find_communities tool.
-func (t *findCommunitiesTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findCommunitiesTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	start := time.Now()
 
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
 		return &Result{
 			Success: false,

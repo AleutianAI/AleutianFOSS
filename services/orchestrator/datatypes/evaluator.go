@@ -124,6 +124,57 @@ type EvaluationResult struct {
 	ModelFamily     string // Model family: "chronos", "timesfm", etc. (empty in legacy mode)
 }
 
+// ForecastRecord represents a forecast to persist in the "forecasts" InfluxDB measurement.
+// Stores the full forecast context for auditability and multi-horizon analysis.
+type ForecastRecord struct {
+	Ticker          string
+	Model           string
+	ModelFamily     string
+	ForecastPrice   float64
+	CurrentPrice    float64
+	Horizon         int
+	InferenceTimeMs int
+	ForecastDate    string // ISO date string (YYYYMMDD)
+	ConfidenceLower float64
+	ConfidenceUpper float64
+	Timestamp       time.Time // Evaluation date (used as InfluxDB point timestamp)
+}
+
+// TradingSignalRecord represents a trading signal to persist in the "trading_signals" measurement.
+// Captures both before and after state for each trade decision.
+type TradingSignalRecord struct {
+	Ticker         string
+	StrategyType   string
+	Action         string
+	ForecastPrice  float64
+	CurrentPrice   float64
+	PositionBefore float64
+	PositionAfter  float64
+	TradeSize      float64
+	TradeValue     float64
+	CashBefore     float64
+	CashAfter      float64
+	Reason         string
+	SignalDate     string    // ISO date string (YYYYMMDD)
+	Timestamp      time.Time // Evaluation date (used as InfluxDB point timestamp)
+}
+
+// PortfolioStateRecord represents a portfolio snapshot to persist in the "portfolio_state" measurement.
+// Pre-computed equity curve point with risk metrics for visualization.
+type PortfolioStateRecord struct {
+	Ticker           string
+	PortfolioValue   float64
+	Cash             float64
+	Position         float64
+	PositionValue    float64
+	CurrentPrice     float64
+	CumulativeReturn float64
+	Drawdown         float64
+	StepIndex        int
+	SnapshotDate     string    // ISO date string (YYYYMMDD)
+	Timestamp        time.Time // Evaluation date (used as InfluxDB point timestamp)
+}
+
 // ScenarioMetadata tracks the identity of the strategy being tested
 type ScenarioMetadata struct {
 	ID          string `yaml:"id" json:"id"`

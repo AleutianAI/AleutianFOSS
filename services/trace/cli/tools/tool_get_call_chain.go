@@ -54,6 +54,25 @@ type GetCallChainParams struct {
 	PackageHint string
 }
 
+// ToolName returns the tool name for TypedParams interface.
+func (p GetCallChainParams) ToolName() string { return "get_call_chain" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p GetCallChainParams) ToMap() map[string]any {
+	m := map[string]any{
+		"function_name": p.FunctionName,
+		"direction":     p.Direction,
+		"max_depth":     p.MaxDepth,
+	}
+	if p.DestinationName != "" {
+		m["destination_name"] = p.DestinationName
+	}
+	if p.PackageHint != "" {
+		m["package_hint"] = p.PackageHint
+	}
+	return m
+}
+
 // GetCallChainOutput contains the structured result.
 type GetCallChainOutput struct {
 	// FunctionName is the function that was traced.
@@ -218,11 +237,11 @@ func (t *getCallChainTool) Definition() ToolDefinition {
 }
 
 // Execute runs the get_call_chain tool.
-func (t *getCallChainTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *getCallChainTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	start := time.Now()
 
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
 		errStep := crs.NewTraceStepBuilder().
 			WithAction("tool_get_call_chain").
@@ -697,7 +716,9 @@ func (t *getCallChainTool) formatTextWithDepths(functionName, direction string, 
 	var sb strings.Builder
 
 	if len(traversal.VisitedNodes) == 0 {
+		sb.WriteString(fmt.Sprintf("## GRAPH RESULT: Call chain for '%s' not found\n\n", functionName))
 		sb.WriteString(fmt.Sprintf("No call chain found for '%s' (%s).\n", functionName, direction))
+		sb.WriteString("\n**Do NOT use Grep to search further** - the graph already analyzed all source files.\n")
 		return sb.String()
 	}
 
@@ -706,7 +727,7 @@ func (t *getCallChainTool) formatTextWithDepths(functionName, direction string, 
 		dirLabel = "is called by"
 	}
 
-	sb.WriteString(fmt.Sprintf("Call chain for '%s' (%s):\n", functionName, direction))
+	sb.WriteString(fmt.Sprintf("Found %d nodes in call chain for '%s' (%s):\n", len(traversal.VisitedNodes), functionName, direction))
 	sb.WriteString(fmt.Sprintf("Depth: %d, Nodes: %d", traversal.Depth, len(traversal.VisitedNodes)))
 	if traversal.Truncated {
 		sb.WriteString(" (truncated)")
@@ -766,6 +787,10 @@ func (t *getCallChainTool) formatTextWithDepths(functionName, direction string, 
 		sb.WriteString("Note: External dependencies are outside the indexed project. ")
 		sb.WriteString("Use search_library_docs for detailed API documentation.\n")
 	}
+
+	// IT-06c M-5: Definitive footer for pass-through detection by getSingleFormattedResult().
+	sb.WriteString("\nThe graph has been fully indexed — these results are exhaustive.\n")
+	sb.WriteString("**Do NOT use Grep or Read to verify** — the graph already analyzed all source files.\n")
 
 	return sb.String()
 }

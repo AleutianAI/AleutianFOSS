@@ -14,12 +14,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
+	"github.com/influxdata/influxdb-client-go/v2/api/write"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1107,4 +1109,298 @@ func BenchmarkFetchMissingData(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		evaluator.FetchMissingData(ctx, "SPY", start, end)
 	}
+}
+
+// =============================================================================
+// MOCK INFLUXDB WRITE API
+// =============================================================================
+
+// mockWriteAPI implements api.WriteAPIBlocking for testing Store methods.
+type mockWriteAPI struct {
+	points []*write.Point
+	err    error // If set, WritePoint returns this error
+}
+
+func (m *mockWriteAPI) WriteRecord(_ context.Context, _ ...string) error {
+	return m.err
+}
+
+func (m *mockWriteAPI) WritePoint(_ context.Context, point ...*write.Point) error {
+	if m.err != nil {
+		return m.err
+	}
+	m.points = append(m.points, point...)
+	return nil
+}
+
+func (m *mockWriteAPI) EnableBatching() {}
+
+func (m *mockWriteAPI) Flush(_ context.Context) error {
+	return m.err
+}
+
+func createMockStorage() (*InfluxDBStorage, *mockWriteAPI) {
+	mock := &mockWriteAPI{}
+	storage := &InfluxDBStorage{
+		writeAPI: mock,
+		bucket:   "test-bucket",
+		org:      "test-org",
+	}
+	return storage, mock
+}
+
+// =============================================================================
+// sanitizeFloat TESTS
+// =============================================================================
+
+func TestSanitizeFloat(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    float64
+		expected float64
+	}{
+		{"normal value", 123.45, 123.45},
+		{"zero", 0.0, 0.0},
+		{"negative", -42.5, -42.5},
+		{"NaN", math.NaN(), 0.0},
+		{"positive Inf", math.Inf(1), 0.0},
+		{"negative Inf", math.Inf(-1), 0.0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := sanitizeFloat(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// =============================================================================
+// StoreForecast TESTS
+// =============================================================================
+
+func TestStoreForecast_Success(t *testing.T) {
+	storage, mock := createMockStorage()
+	ctx := context.Background()
+
+	record := &datatypes.ForecastRecord{
+		Ticker:          "SPY",
+		Model:           "chronos-t5-tiny",
+		ModelFamily:     "chronos",
+		ForecastPrice:   150.25,
+		CurrentPrice:    148.50,
+		Horizon:         20,
+		InferenceTimeMs: 245,
+		ForecastDate:    "20260220",
+		Timestamp:       time.Date(2026, 2, 20, 0, 0, 0, 0, time.UTC),
+	}
+
+	err := storage.StoreForecast(ctx, "test-run-1", record)
+	require.NoError(t, err)
+	assert.Len(t, mock.points, 1)
+}
+
+func TestStoreForecast_WithConfidenceBounds(t *testing.T) {
+	storage, mock := createMockStorage()
+	ctx := context.Background()
+
+	record := &datatypes.ForecastRecord{
+		Ticker:          "SPY",
+		Model:           "chronos-t5-tiny",
+		ModelFamily:     "chronos",
+		ForecastPrice:   150.25,
+		CurrentPrice:    148.50,
+		Horizon:         20,
+		InferenceTimeMs: 245,
+		ForecastDate:    "20260220",
+		ConfidenceLower: 145.0,
+		ConfidenceUpper: 155.0,
+		Timestamp:       time.Date(2026, 2, 20, 0, 0, 0, 0, time.UTC),
+	}
+
+	err := storage.StoreForecast(ctx, "test-run-1", record)
+	require.NoError(t, err)
+	assert.Len(t, mock.points, 1)
+}
+
+func TestStoreForecast_WriteError(t *testing.T) {
+	storage, mock := createMockStorage()
+	mock.err = errors.New("connection refused")
+	ctx := context.Background()
+
+	record := &datatypes.ForecastRecord{
+		Ticker:        "SPY",
+		Model:         "chronos-t5-tiny",
+		ForecastPrice: 150.25,
+		CurrentPrice:  148.50,
+	}
+
+	err := storage.StoreForecast(ctx, "test-run-1", record)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to write forecast")
+}
+
+func TestStoreForecast_SanitizesNaN(t *testing.T) {
+	storage, mock := createMockStorage()
+	ctx := context.Background()
+
+	record := &datatypes.ForecastRecord{
+		Ticker:        "SPY",
+		Model:         "chronos-t5-tiny",
+		ForecastPrice: math.NaN(),
+		CurrentPrice:  math.Inf(1),
+	}
+
+	err := storage.StoreForecast(ctx, "test-run-1", record)
+	require.NoError(t, err)
+	assert.Len(t, mock.points, 1)
+	// Values should be sanitized to 0.0, not NaN/Inf
+}
+
+// =============================================================================
+// StoreTradingSignal TESTS
+// =============================================================================
+
+func TestStoreTradingSignal_Success(t *testing.T) {
+	storage, mock := createMockStorage()
+	ctx := context.Background()
+
+	record := &datatypes.TradingSignalRecord{
+		Ticker:         "SPY",
+		StrategyType:   "threshold",
+		Action:         "buy",
+		ForecastPrice:  150.25,
+		CurrentPrice:   148.50,
+		PositionBefore: 0.0,
+		PositionAfter:  10.0,
+		TradeSize:      10.0,
+		TradeValue:     1485.0,
+		CashBefore:     10000.0,
+		CashAfter:      8515.0,
+		Reason:         "Forecast exceeds threshold",
+		SignalDate:     "20260220",
+	}
+
+	err := storage.StoreTradingSignal(ctx, "test-run-1", record)
+	require.NoError(t, err)
+	assert.Len(t, mock.points, 1)
+}
+
+func TestStoreTradingSignal_HoldAction(t *testing.T) {
+	storage, mock := createMockStorage()
+	ctx := context.Background()
+
+	record := &datatypes.TradingSignalRecord{
+		Ticker:         "SPY",
+		StrategyType:   "threshold",
+		Action:         "hold",
+		ForecastPrice:  148.80,
+		CurrentPrice:   148.50,
+		PositionBefore: 10.0,
+		PositionAfter:  10.0,
+		TradeSize:      0.0,
+		TradeValue:     0.0,
+		CashBefore:     8515.0,
+		CashAfter:      8515.0,
+		Reason:         "Below threshold",
+		SignalDate:     "20260220",
+	}
+
+	err := storage.StoreTradingSignal(ctx, "test-run-1", record)
+	require.NoError(t, err)
+	assert.Len(t, mock.points, 1)
+}
+
+func TestStoreTradingSignal_WriteError(t *testing.T) {
+	storage, mock := createMockStorage()
+	mock.err = errors.New("timeout")
+	ctx := context.Background()
+
+	record := &datatypes.TradingSignalRecord{
+		Ticker: "SPY",
+		Action: "buy",
+	}
+
+	err := storage.StoreTradingSignal(ctx, "test-run-1", record)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to write trading signal")
+}
+
+// =============================================================================
+// StorePortfolioState TESTS
+// =============================================================================
+
+func TestStorePortfolioState_Success(t *testing.T) {
+	storage, mock := createMockStorage()
+	ctx := context.Background()
+
+	record := &datatypes.PortfolioStateRecord{
+		Ticker:           "SPY",
+		PortfolioValue:   10150.0,
+		Cash:             8515.0,
+		Position:         10.0,
+		PositionValue:    1635.0,
+		CurrentPrice:     163.50,
+		CumulativeReturn: 0.015,
+		Drawdown:         0.0,
+		StepIndex:        5,
+		SnapshotDate:     "20260220",
+	}
+
+	err := storage.StorePortfolioState(ctx, "test-run-1", record)
+	require.NoError(t, err)
+	assert.Len(t, mock.points, 1)
+}
+
+func TestStorePortfolioState_WithDrawdown(t *testing.T) {
+	storage, mock := createMockStorage()
+	ctx := context.Background()
+
+	record := &datatypes.PortfolioStateRecord{
+		Ticker:           "SPY",
+		PortfolioValue:   9500.0,
+		Cash:             8515.0,
+		Position:         10.0,
+		PositionValue:    985.0,
+		CurrentPrice:     98.50,
+		CumulativeReturn: -0.05,
+		Drawdown:         -0.064,
+		StepIndex:        25,
+		SnapshotDate:     "20260220",
+	}
+
+	err := storage.StorePortfolioState(ctx, "test-run-1", record)
+	require.NoError(t, err)
+	assert.Len(t, mock.points, 1)
+}
+
+func TestStorePortfolioState_WriteError(t *testing.T) {
+	storage, mock := createMockStorage()
+	mock.err = errors.New("disk full")
+	ctx := context.Background()
+
+	record := &datatypes.PortfolioStateRecord{
+		Ticker:         "SPY",
+		PortfolioValue: 10000.0,
+	}
+
+	err := storage.StorePortfolioState(ctx, "test-run-1", record)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to write portfolio state")
+}
+
+func TestStorePortfolioState_SanitizesInfValues(t *testing.T) {
+	storage, mock := createMockStorage()
+	ctx := context.Background()
+
+	record := &datatypes.PortfolioStateRecord{
+		Ticker:           "SPY",
+		PortfolioValue:   10000.0,
+		CumulativeReturn: math.Inf(1),
+		Drawdown:         math.NaN(),
+	}
+
+	err := storage.StorePortfolioState(ctx, "test-run-1", record)
+	require.NoError(t, err)
+	assert.Len(t, mock.points, 1)
 }

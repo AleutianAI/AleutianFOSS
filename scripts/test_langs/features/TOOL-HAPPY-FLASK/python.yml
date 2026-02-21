@@ -803,7 +803,7 @@ tests:
     description: >
       find_hotspots tool against Flask (test B). Target: blueprint subsystem.
     query: |
-      What are the hotspots in the blueprint registration subsystem?
+      What are the hotspots in the blueprint subsystem?
     expected_state: COMPLETE
     reference_answer: |
       In the blueprint subsystem, the most connected functions include
@@ -818,12 +818,13 @@ tests:
     description: >
       find_hotspots tool against Flask (test C). Target: session and context modules.
     query: |
-      What are the hotspot functions in Flask's session and context management?
+      What are the hotspot functions in the Flask session and context management?
     expected_state: COMPLETE
     reference_answer: |
-      Hotspots in context management include RequestContext.push,
-      RequestContext.pop, AppContext.push, and open_session/save_session
-      which are called on every request lifecycle.
+      Top hotspots by connectivity score include route (scaffold.py, high InDegree
+      from decorator usage), register_blueprint (app.py), url_for (app.py),
+      and test_client (app.py). These are the most connected functions
+      across the Flask codebase.
     validations:
       - type: graph_tool_used
 
