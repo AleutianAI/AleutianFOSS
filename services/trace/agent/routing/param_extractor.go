@@ -1,0 +1,396 @@
+// Copyright (C) 2025 Aleutian AI (jinterlante@aleutian.ai)
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// See the LICENSE.txt file for the full license text.
+//
+// NOTE: This work is subject to additional terms under AGPL v3 Section 7.
+// See the NOTICE.txt file for details regarding AI system attribution.
+
+package routing
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/providers"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+)
+
+// =============================================================================
+// ParamExtractor - LLM-Enhanced Parameter Extraction (IT-08b)
+// =============================================================================
+
+// ParamExtractor uses a fast LLM to extract tool parameters from natural
+// language queries. It corrects errors using semantic understanding of
+// hierarchical scoping (e.g., project vs. module names).
+//
+// # Description
+//
+// The regex-based parameter extraction in extractToolParameters() fails on
+// queries with hierarchical scope references (e.g., "in the Flask helpers
+// module" extracts "flask" instead of "helpers"). ParamExtractor uses a
+// dedicated small model (ministral-3:3b by default) that runs in parallel
+// with the tool router (granite4:micro-h) on a separate Ollama instance.
+//
+// IT-08e: The extractor runs speculatively on the pre-filter's top candidate
+// BEFORE routing completes. If the router confirms the prediction, LLM params
+// are used; otherwise regex fallback kicks in.
+//
+// CB-60: Refactored to use providers.ChatClient instead of direct
+// MultiModelManager dependency, enabling any LLM provider.
+//
+// # Thread Safety
+//
+// ParamExtractor is safe for concurrent use.
+type ParamExtractor struct {
+	chatClient providers.ChatClient
+	config     ParamExtractorConfig
+	logger     *slog.Logger
+}
+
+// ParamExtractorConfig configures the parameter extractor.
+//
+// # Description
+//
+// Controls the model, timeout, and feature flag for LLM parameter extraction.
+// IT-08e: Uses a dedicated small model (ministral-3:3b) separate from the
+// tool router to enable parallel execution without Ollama serialization.
+type ParamExtractorConfig struct {
+	// Model is the Ollama model to use for parameter extraction.
+	// IT-08e: Dedicated small model, separate from the router.
+	// Default: "ministral-3:3b"
+	Model string `json:"model"`
+
+	// Timeout is the maximum time for a parameter extraction call.
+	// IT-08e: Increased from 500ms to 2s (dedicated model, no serialization).
+	// Default: 2s
+	Timeout time.Duration `json:"timeout"`
+
+	// Temperature controls randomness. Lower = more deterministic.
+	// Default: 0.1
+	Temperature float64 `json:"temperature"`
+
+	// MaxTokens limits the response length.
+	// Default: 512
+	MaxTokens int `json:"max_tokens"`
+
+	// NumCtx is the context window size.
+	// IT-08e: Reduced from 8192 to 4096 (12x headroom for ~300 token budget).
+	// Default: 4096
+	NumCtx int `json:"num_ctx"`
+
+	// KeepAlive controls how long the model stays in VRAM.
+	// Default: "24h"
+	KeepAlive string `json:"keep_alive"`
+
+	// Enabled is the feature flag. When false, ExtractParams is a no-op.
+	// Default: true
+	Enabled bool `json:"enabled"`
+}
+
+// DefaultParamExtractorConfig returns sensible defaults.
+//
+// # Outputs
+//
+//   - ParamExtractorConfig: Default configuration.
+func DefaultParamExtractorConfig() ParamExtractorConfig {
+	return ParamExtractorConfig{
+		Model:       "ministral-3:3b", // IT-08e: Dedicated small model (not the router model)
+		Timeout:     2 * time.Second,  // IT-08e: Longer timeout on dedicated model (no serialization)
+		Temperature: 0.1,
+		MaxTokens:   512,
+		NumCtx:      4096, // IT-08e: 12x headroom for ~300 token budget
+		KeepAlive:   "24h",
+		Enabled:     true,
+	}
+}
+
+// NewParamExtractor creates a new LLM-based parameter extractor.
+//
+// # Description
+//
+// Creates a ParamExtractor that uses the specified model for semantic
+// parameter extraction. The ChatClient interface allows any provider
+// (Ollama, Anthropic, OpenAI, Gemini) to be used.
+//
+// CB-60: Accepts providers.ChatClient instead of *llm.MultiModelManager.
+//
+// # Inputs
+//
+//   - chatClient: ChatClient for sending extraction queries. Must not be nil.
+//   - config: Extractor configuration.
+//
+// # Outputs
+//
+//   - *ParamExtractor: Configured extractor.
+//   - error: Non-nil if chatClient is nil.
+func NewParamExtractor(chatClient providers.ChatClient, config ParamExtractorConfig) (*ParamExtractor, error) {
+	if chatClient == nil {
+		return nil, fmt.Errorf("chatClient must not be nil")
+	}
+
+	return &ParamExtractor{
+		chatClient: chatClient,
+		config:     config,
+		logger:     slog.Default(),
+	}, nil
+}
+
+// IsEnabled returns true if the extractor is enabled.
+//
+// # Outputs
+//
+//   - bool: True if the feature flag is set.
+//
+// # Thread Safety
+//
+// Safe for concurrent use (reads immutable config).
+func (e *ParamExtractor) IsEnabled() bool {
+	return e.config.Enabled
+}
+
+// ParamSchema describes a single parameter for the LLM prompt.
+// This is an alias for the agent-level interface type.
+type ParamSchema = agent.ParamExtractorSchema
+
+// ExtractParams uses the LLM to extract or correct tool parameters.
+//
+// # Description
+//
+// Takes the user query, tool name, parameter schema, and the regex-based
+// extraction result. Sends these to the LLM which acts as a semantic parser
+// to correct hierarchical scoping errors. Returns the corrected parameters
+// or an error (caller should fall back to regex result).
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation/timeout.
+//   - query: The user's natural language query.
+//   - toolName: The name of the selected tool.
+//   - paramSchemas: Parameter definitions for the tool.
+//   - regexHint: The regex extractor's output (used as a hint).
+//
+// # Outputs
+//
+//   - map[string]any: Corrected parameter values.
+//   - error: Non-nil if extraction fails (caller should use regexHint).
+//
+// # Thread Safety
+//
+// Safe for concurrent use.
+func (e *ParamExtractor) ExtractParams(
+	ctx context.Context,
+	query string,
+	toolName string,
+	paramSchemas []ParamSchema,
+	regexHint map[string]any,
+) (map[string]any, error) {
+	if !e.config.Enabled {
+		return nil, fmt.Errorf("param extractor is disabled")
+	}
+
+	ctx, span := tracer.Start(ctx, "ParamExtractor.ExtractParams")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("extractor.model", e.config.Model),
+		attribute.String("extractor.tool", toolName),
+		attribute.String("query_preview", truncate(query, 100)),
+	)
+
+	startTime := time.Now()
+
+	// Apply timeout
+	if e.config.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, e.config.Timeout)
+		defer cancel()
+	}
+
+	// Build the prompt
+	systemPrompt := e.buildSystemPrompt(toolName, paramSchemas, regexHint)
+	userPrompt := fmt.Sprintf("User query: %s", query)
+
+	messages := []datatypes.Message{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: userPrompt},
+	}
+
+	opts := providers.ChatOptions{
+		Temperature: e.config.Temperature,
+		MaxTokens:   e.config.MaxTokens,
+		NumCtx:      e.config.NumCtx,
+		KeepAlive:   e.config.KeepAlive,
+		Model:       e.config.Model,
+	}
+
+	// Call the model
+	response, err := e.chatClient.Chat(ctx, messages, opts)
+	if err != nil {
+		duration := time.Since(startTime)
+		if ctx.Err() == context.DeadlineExceeded {
+			span.SetStatus(codes.Error, "timeout")
+			RecordParamExtractionLatency(e.config.Model, "timeout", duration.Seconds())
+			RecordParamExtractionTotal(e.config.Model, "timeout")
+			return nil, fmt.Errorf("param extraction timed out: %w", err)
+		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "chat failed")
+		RecordParamExtractionLatency(e.config.Model, "error", duration.Seconds())
+		RecordParamExtractionTotal(e.config.Model, "error")
+		return nil, fmt.Errorf("param extraction chat failed: %w", err)
+	}
+
+	// Parse the response
+	result, err := e.parseResponse(response)
+	if err != nil {
+		duration := time.Since(startTime)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "parse failed")
+		RecordParamExtractionLatency(e.config.Model, "parse_error", duration.Seconds())
+		RecordParamExtractionTotal(e.config.Model, "parse_error")
+		return nil, fmt.Errorf("param extraction parse failed: %w", err)
+	}
+
+	duration := time.Since(startTime)
+
+	// Log diff between regex and LLM when they disagree
+	e.logParamDiff(toolName, regexHint, result)
+
+	// Record success metrics
+	RecordParamExtractionLatency(e.config.Model, "success", duration.Seconds())
+	RecordParamExtractionTotal(e.config.Model, "success")
+
+	span.SetAttributes(
+		attribute.Int64("extractor.duration_ms", duration.Milliseconds()),
+	)
+
+	e.logger.Info("IT-08b: LLM param extraction succeeded",
+		slog.String("tool", toolName),
+		slog.Duration("duration", duration),
+	)
+
+	return result, nil
+}
+
+// buildSystemPrompt constructs the system prompt for parameter extraction.
+func (e *ParamExtractor) buildSystemPrompt(toolName string, paramSchemas []ParamSchema, regexHint map[string]any) string {
+	var sb strings.Builder
+
+	sb.WriteString(`You are a parameter extraction assistant for code analysis tools.
+
+Given a user's query about a codebase, extract the correct parameter values
+for the selected tool. Pay attention to hierarchical scoping:
+- Project names (flask, pandas, express, hugo, gin, nestjs) are NOT package/module names
+- Module/package names refer to specific subsystems WITHIN a project
+- "in the Flask helpers module" -> package is "helpers", not "flask"
+- "in the Pandas reshape module" -> package is "reshape", not "pandas"
+- "in the Hugo hugolib package" -> package is "hugolib", not "hugo"
+- If the user mentions ONLY a project name with no specific module, set "package" to "" (empty)
+- "Find dead code in Express" -> package is "" (Express is the project, not a package)
+- "Find dead code in Flask" -> package is "" (Flask is the project, not a package)
+
+`)
+
+	sb.WriteString(fmt.Sprintf("Tool: %s\n", toolName))
+	sb.WriteString("Parameters:\n")
+
+	for _, p := range paramSchemas {
+		required := "optional"
+		if p.Required {
+			required = "required"
+		}
+		defaultStr := ""
+		if p.Default != "" {
+			defaultStr = fmt.Sprintf(", default: %s", p.Default)
+		}
+		sb.WriteString(fmt.Sprintf("  - %s (%s, %s%s): %s\n",
+			p.Name, p.Type, required, defaultStr, p.Description))
+	}
+
+	// IT-08e: Include regex hint only when non-empty.
+	// In parallel mode the hint is empty (extraction happens from scratch).
+	// In serial/fallback mode the hint may contain regex results.
+	if len(regexHint) > 0 {
+		hintJSON, err := json.Marshal(regexHint)
+		if err != nil {
+			hintJSON = []byte("{}")
+		}
+		sb.WriteString(fmt.Sprintf(`
+For reference, a regex-based extractor produced this guess (it frequently
+makes errors — ignore it if it contradicts the query):
+%s
+
+`, string(hintJSON)))
+	}
+
+	sb.WriteString(`
+Respond with ONLY a JSON object containing the parameter values.
+Do not include any explanation or markdown formatting.
+`)
+
+	return sb.String()
+}
+
+// parseResponse extracts JSON parameters from the LLM response.
+func (e *ParamExtractor) parseResponse(response string) (map[string]any, error) {
+	response = strings.TrimSpace(response)
+
+	if len(response) == 0 {
+		return nil, fmt.Errorf("empty response from model")
+	}
+
+	// Clean up markdown code blocks
+	response = strings.TrimPrefix(response, "```json")
+	response = strings.TrimPrefix(response, "```")
+	response = strings.TrimSuffix(response, "```")
+	response = strings.TrimSpace(response)
+
+	// Find JSON in response
+	startIdx := strings.Index(response, "{")
+	endIdx := strings.LastIndex(response, "}")
+	if startIdx == -1 || endIdx == -1 || endIdx <= startIdx {
+		return nil, fmt.Errorf("no JSON object found in response: %s", truncate(response, 100))
+	}
+
+	jsonStr := response[startIdx : endIdx+1]
+
+	var result map[string]any
+	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
+		return nil, fmt.Errorf("failed to parse JSON: %w, response: %s", err, truncate(jsonStr, 100))
+	}
+
+	return result, nil
+}
+
+// logParamDiff logs differences between regex and LLM extraction results.
+func (e *ParamExtractor) logParamDiff(toolName string, regexHint, llmResult map[string]any) {
+	for key, llmVal := range llmResult {
+		regexVal, exists := regexHint[key]
+		if !exists {
+			e.logger.Info("IT-08b: LLM added param not in regex result",
+				slog.String("tool", toolName),
+				slog.String("param", key),
+				slog.Any("llm_value", llmVal),
+			)
+			continue
+		}
+		if fmt.Sprintf("%v", regexVal) != fmt.Sprintf("%v", llmVal) {
+			e.logger.Info("IT-08b: LLM corrected regex extraction",
+				slog.String("tool", toolName),
+				slog.String("param", key),
+				slog.Any("regex_value", regexVal),
+				slog.Any("llm_value", llmVal),
+			)
+		}
+	}
+}

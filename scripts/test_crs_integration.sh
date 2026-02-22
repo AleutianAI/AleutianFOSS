@@ -849,14 +849,12 @@ run_crs_test() {
         --arg router_model "$ROUTER_MODEL" \
         '{project_root: $project_root, query: $query, model: $model, router_model: $router_model}')
 
-    # Escape the JSON payload for safe embedding in the remote shell command.
-    # Single quotes in the payload are replaced with '\'' (end-quote, escaped-quote, start-quote).
-    local escaped_payload="${json_payload//\'/\'\\\'\'}"
-    local response=$(ssh_cmd "curl -s -X POST 'http://localhost:8080/v1/codebuddy/agent/run' \
-        -H 'Content-Type: application/json' \
-        -H 'X-Session-ID: crs_test_${session_id}' \
-        -d '${escaped_payload}' \
-        --max-time 300")
+    # XC-6 fix: Use base64 encoding to avoid all shell quoting issues.
+    # Queries containing apostrophes (Flask's, NestJS's) caused 'unexpected EOF'
+    # errors when embedded via single-quote escaping through SSH.
+    local b64_payload
+    b64_payload=$(printf '%s' "$json_payload" | base64 | tr -d '\n')
+    local response=$(ssh_cmd "printf '%s' '$b64_payload' | base64 -d | curl -s -X POST 'http://localhost:8080/v1/codebuddy/agent/run' -H 'Content-Type: application/json' -H 'X-Session-ID: crs_test_${session_id}' -d @- --max-time 300")
 
     local end_time=$(get_time_ms)
     local duration=$((end_time - start_time))

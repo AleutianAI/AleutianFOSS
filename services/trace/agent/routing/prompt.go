@@ -136,6 +136,26 @@ Understanding the difference between CALLERS, CALLEES, and REFERENCES is crucial
 - "zero callers" / "unreferenced" → find_dead_code
 The word "callers" alone triggers find_callers, but when NEGATED ("no callers", "no incoming calls") it means dead code detection.
 
+**COMMUNITY BRIDGES vs ARTICULATION POINTS:**
+
+COMMUNITY ANALYSIS (bridges between code communities):
+- "Which functions bridge between communities?"
+- "Bridges between the rendering and interaction communities"
+- "Cross-community connections"
+- "What connects different code communities?"
+→ Tool: find_communities (includes cross-community edge analysis)
+
+ARTICULATION POINTS (graph-theoretic single points of failure):
+- "What are the single points of failure?"
+- "Fragile architecture bottlenecks"
+- "Cut vertices in the call graph"
+→ Tool: find_articulation_points
+
+KEY DIFFERENCE:
+- If the query mentions "communities" + "bridges" → find_communities (community bridge analysis)
+- If the query asks about fragility, single points of failure, cut vertices → find_articulation_points
+- The word "bridges" alone is ambiguous — use "communities" as the deciding factor
+
 **HOTSPOTS vs WEIGHTED_CRITICALITY:**
 
 HOTSPOTS (connectivity/degree ranking):

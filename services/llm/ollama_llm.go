@@ -607,18 +607,8 @@ func (o *OllamaClient) Chat(ctx context.Context, messages []datatypes.Message,
 	return ollamaResp.Message.Content, nil
 }
 
-// ChatWithToolsResult contains the response from ChatWithTools.
-type ChatWithToolsResult struct {
-	// Content is the text response (may be empty if tool_use).
-	Content string
-
-	// ToolCalls contains tool calls from the model.
-	ToolCalls []OllamaToolCall
-
-	// StopReason indicates why generation stopped.
-	// Values: "end", "tool_use"
-	StopReason string
-}
+// ChatWithToolsResult is defined in tool_types.go as the generic result type.
+// It uses []ToolCallResponse instead of []OllamaToolCall.
 
 // ChatWithTools sends a chat request with tools and returns both content and tool calls.
 //
@@ -798,9 +788,19 @@ func (o *OllamaClient) ChatWithTools(ctx context.Context, messages []datatypes.M
 		return nil, fmt.Errorf("failed to parse ollama chat response: %w", err)
 	}
 
+	// Convert OllamaToolCall to generic ToolCallResponse
+	var toolCalls []ToolCallResponse
+	for _, tc := range ollamaResp.Message.ToolCalls {
+		toolCalls = append(toolCalls, ToolCallResponse{
+			ID:        tc.ID,
+			Name:      tc.Function.Name,
+			Arguments: tc.Function.Arguments,
+		})
+	}
+
 	result := &ChatWithToolsResult{
 		Content:   ollamaResp.Message.Content,
-		ToolCalls: ollamaResp.Message.ToolCalls,
+		ToolCalls: toolCalls,
 	}
 
 	// Determine stop reason

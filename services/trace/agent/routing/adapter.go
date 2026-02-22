@@ -15,6 +15,7 @@ import (
 	"log/slog"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/providers"
 )
 
 // RouterAdapter adapts a routing.ToolRouter to the agent.ToolRouter interface.
@@ -155,8 +156,10 @@ func (a *RouterAdapter) Close() error {
 //
 // Allows callers to warm the router model. This is not part of the
 // agent.ToolRouter interface but is useful during initialization.
-func (a *RouterAdapter) WarmRouter(ctx context.Context) error {
-	return a.router.WarmRouter(ctx)
+//
+// CB-60: Now accepts a ModelLifecycleManager for provider-agnostic warmup.
+func (a *RouterAdapter) WarmRouter(ctx context.Context, lifecycle providers.ModelLifecycleManager) error {
+	return a.router.WarmRouter(ctx, lifecycle)
 }
 
 // truncateForLog truncates a string for logging purposes.

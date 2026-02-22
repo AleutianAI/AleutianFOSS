@@ -292,6 +292,72 @@ func TestExtractToolParameters_FindDeadCode(t *testing.T) {
 		}
 		assertParamBool(t, params, "include_exported", true)
 	})
+
+	// IT-08d: Negation tests for include_exported
+	t.Run("not public negates include_exported", func(t *testing.T) {
+		params, err := extractParams(t, phase, "Which functions have no incoming calls and are not public entry points?", "find_dead_code", defs)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertParamBool(t, params, "include_exported", false)
+	})
+
+	t.Run("not public API negates include_exported", func(t *testing.T) {
+		params, err := extractParams(t, phase, "Which functions are not public API entry points?", "find_dead_code", defs)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertParamBool(t, params, "include_exported", false)
+	})
+
+	t.Run("affirmative public still sets include_exported", func(t *testing.T) {
+		params, err := extractParams(t, phase, "Find dead code including public/exported functions", "find_dead_code", defs)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertParamBool(t, params, "include_exported", true)
+	})
+
+	// IT-08d Next Steps: Exact queries from failing integration tests
+	t.Run("IT-08d_6157_pandas_not_public_api", func(t *testing.T) {
+		params, err := extractParams(t, phase,
+			"Which Pandas internal functions have no callers and are not public API entry points?",
+			"find_dead_code", defs)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertParamBool(t, params, "include_exported", false)
+	})
+
+	t.Run("IT-08d_8057_nestjs_not_exported", func(t *testing.T) {
+		params, err := extractParams(t, phase,
+			"Find internal functions that have no callers and are not exported",
+			"find_dead_code", defs)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertParamBool(t, params, "include_exported", false)
+	})
+
+	t.Run("IT-08d_5056_hugo_resources_package", func(t *testing.T) {
+		params, err := extractParams(t, phase,
+			"Find unused or dead code in the resources package",
+			"find_dead_code", defs)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertParamString(t, params, "package", "resources")
+	})
+
+	t.Run("IT-08d_8056_nestjs_packages_common_directory", func(t *testing.T) {
+		params, err := extractParams(t, phase,
+			"Find dead code specifically in the packages/common directory",
+			"find_dead_code", defs)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertParamString(t, params, "package", "packages/common")
+	})
 }
 
 // --- Tests for find_cycles ---

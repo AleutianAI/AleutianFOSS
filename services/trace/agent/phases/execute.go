@@ -378,7 +378,65 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 		slog.Int("step", stepNumber),
 	)
 
-	// Build the LLM request
+	// IT-08e: Speculative parallel param extraction.
+	// Run pre-filter FIRST to get top candidate, then launch LLM extraction
+	// on a dedicated model (ministral-3:3b) in parallel with routing
+	// (granite4:micro-h on a separate Ollama model slot).
+	type llmParamResult struct {
+		params map[string]any
+		tool   string
+		err    error
+	}
+	llmCh := make(chan llmParamResult, 1)
+
+	var speculativeTool string
+	if deps.ParamExtractor != nil && deps.ParamExtractor.IsEnabled() && p.prefilter != nil {
+		var pfToolDefs []tools.ToolDefinition
+		if deps.ToolRegistry != nil {
+			pfToolDefs = deps.ToolRegistry.GetDefinitions()
+		}
+		pfSpecs := toolDefsToSpecs(pfToolDefs)
+		pfResult := p.prefilter.FilterAgentSpecs(ctx, deps.Query, pfSpecs)
+
+		if pfResult.ForcedTool != "" {
+			speculativeTool = pfResult.ForcedTool
+		} else if len(pfResult.NarrowedSpecs) > 0 {
+			speculativeTool = pfResult.NarrowedSpecs[0].Name
+		}
+
+		if speculativeTool != "" {
+			go func(tool string) {
+				var toolDef *tools.ToolDefinition
+				for i := range pfToolDefs {
+					if pfToolDefs[i].Name == tool {
+						toolDef = &pfToolDefs[i]
+						break
+					}
+				}
+				if toolDef == nil {
+					llmCh <- llmParamResult{nil, tool, fmt.Errorf("tool def not found: %s", tool)}
+					return
+				}
+				schemas := buildParamSchemas(toolDef)
+				if len(schemas) == 0 {
+					llmCh <- llmParamResult{nil, tool, fmt.Errorf("no schemas for %s", tool)}
+					return
+				}
+				// No regex hint — LLM extracts from scratch (parallel, no bias)
+				result, err := deps.ParamExtractor.ExtractParams(
+					ctx, deps.Query, tool, schemas, map[string]any{},
+				)
+				llmCh <- llmParamResult{result, tool, err}
+			}(speculativeTool)
+		} else {
+			llmCh <- llmParamResult{nil, "", fmt.Errorf("no prefilter candidate")}
+		}
+	} else {
+		llmCh <- llmParamResult{nil, "", fmt.Errorf("param extractor not available")}
+	}
+
+	// Build the LLM request (includes routing — ~570ms on granite4:micro-h).
+	// While this blocks, ministral-3:3b is extracting params in parallel.
 	request, hardForcing, buildErr := p.buildLLMRequest(deps)
 	if buildErr != nil {
 		// GR-44 Rev 2: Router errors are fatal - propagate up
@@ -490,9 +548,35 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 		// CB-31d: Pass deps for symbol resolution
 		params, paramErr := p.extractToolParameters(ctx, deps.Query, hardForcing.Tool, toolDefs, deps.Context, deps)
 
-		// IT-08b: Enhance regex extraction with LLM when available
-		if paramErr == nil && params != nil {
-			params = p.enhanceParamsWithLLM(ctx, deps, hardForcing.Tool, toolDefs, params)
+		// IT-08e: Collect speculative LLM param result (already running in parallel).
+		// The goroutine was launched BEFORE buildLLMRequest, so it has had ~570ms
+		// to complete on ministral-3:3b (~150ms typical). Result is ready.
+		llmResult := <-llmCh
+		if llmResult.err == nil && llmResult.tool == hardForcing.Tool && llmResult.params != nil {
+			// Speculative hit: router confirmed our pre-filter prediction
+			converted, convErr := convertMapToTypedParams(hardForcing.Tool, llmResult.params)
+			if convErr == nil {
+				slog.Info("IT-08e: LLM param extraction succeeded (parallel, speculative hit)",
+					slog.String("tool", hardForcing.Tool),
+				)
+				params = converted
+				paramErr = nil
+			} else {
+				slog.Warn("IT-08e: LLM param conversion failed, using regex",
+					slog.String("tool", hardForcing.Tool),
+					slog.String("error", convErr.Error()),
+				)
+			}
+		} else if llmResult.tool != "" && llmResult.tool != hardForcing.Tool {
+			// Mispredict: router picked a different tool than pre-filter top
+			slog.Info("IT-08e: Speculative mispredict, discarding LLM params",
+				slog.String("speculated", llmResult.tool),
+				slog.String("actual", hardForcing.Tool),
+			)
+		} else if llmResult.err != nil {
+			slog.Debug("IT-08e: LLM param extraction unavailable, using regex",
+				slog.String("reason", llmResult.err.Error()),
+			)
 		}
 
 		if paramErr != nil {
@@ -2562,6 +2646,36 @@ func (p *ExecutePhase) forceLLMSynthesis(
 
 	// Build request without tools — force text-only response.
 	synthRequest := llm.BuildRequest(deps.Context, nil, p.maxTokens)
+
+	// IT-11: Strip code context and system prompt from synthesis request.
+	// BuildRequest includes the full RAG code context (8-25KB) and system prompt
+	// as messages. These are unnecessary for synthesis — the LLM only needs
+	// the user query + tool results + synthesis instruction. Sending the full
+	// context causes glm-4.7-flash to return empty responses non-deterministically
+	// on large codebases (BabylonJS, NestJS, Plottable).
+	stripped := make([]llm.Message, 0, len(synthRequest.Messages))
+	for _, msg := range synthRequest.Messages {
+		// Skip the code context message (injected by BuildRequest from CodeContext)
+		if msg.Role == "user" && strings.HasPrefix(msg.Content, "Here is relevant code from the codebase:") {
+			continue
+		}
+		stripped = append(stripped, msg)
+	}
+	synthRequest.Messages = stripped
+	synthRequest.SystemPrompt = "" // System prompt not needed for synthesis
+
+	totalInputLen := 0
+	for _, msg := range synthRequest.Messages {
+		totalInputLen += len(msg.Content)
+		for _, tr := range msg.ToolResults {
+			totalInputLen += len(tr.Content)
+		}
+	}
+	slog.Info("IT-11: Synthesis request after stripping code context",
+		slog.String("session_id", deps.Session.ID),
+		slog.Int("message_count", len(synthRequest.Messages)),
+		slog.Int("total_input_bytes", totalInputLen),
+	)
 
 	synthesisPrompt := `You have gathered information from tools. Now provide a complete answer.
 

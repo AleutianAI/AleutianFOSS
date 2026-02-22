@@ -93,3 +93,18 @@ confusion_pairs:
       - "package cycles"
       - "dependency cycle"
     boost_amount: 2.0
+
+  # IT-11: "bridges between communities" → find_communities, not find_articulation_points
+  - tool_a: find_communities
+    tool_b: find_articulation_points
+    tool_a_patterns:
+      - "communit"
+      - "code cluster"
+      - "module boundar"
+      - "leiden"
+    tool_b_patterns:
+      - "single point of failure"
+      - "fragil"
+      - "cut vert"
+      - "bus factor"
+    boost_amount: 3.0

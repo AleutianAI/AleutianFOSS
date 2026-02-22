@@ -331,21 +331,23 @@ func (t *findHotspotsTool) Execute(ctx context.Context, params TypedParams) (*Re
 		filtered = pkgFiltered
 	}
 
-	// IT-07 Phase 3: Filter out test-file symbols
+	// IT-07 Phase 3: Filter out test and documentation file symbols
 	if p.ExcludeTests {
 		var nonTestFiltered []graph.HotspotNode
 		for _, hs := range filtered {
 			if hs.Node == nil || hs.Node.Symbol == nil {
 				continue
 			}
-			if !isTestFile(hs.Node.Symbol.FilePath) {
+			filePath := hs.Node.Symbol.FilePath
+			// GR-60: Use graph-based file classification instead of heuristics
+			if t.analytics.IsProductionFile(filePath) {
 				nonTestFiltered = append(nonTestFiltered, hs)
 			}
 		}
 		if len(nonTestFiltered) > 0 {
 			filtered = nonTestFiltered
 		}
-		// If ALL results are from test files, keep them rather than returning empty.
+		// If ALL results are from test/doc files, keep them rather than returning empty.
 	}
 
 	// IT-07 Phase 3: Re-sort by requested dimension

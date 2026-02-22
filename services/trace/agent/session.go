@@ -166,6 +166,13 @@ type SessionConfig struct {
 	// Below this threshold, falls back to main LLM tool selection.
 	// Default: 0.7
 	ToolRouterConfidence float64 `json:"tool_router_confidence"`
+
+	// ParamExtractorModel is the Ollama model for LLM parameter extraction.
+	// IT-08e: Should be a small, fast model optimized for JSON structured output.
+	// Runs in parallel with the tool router on a separate model to avoid
+	// Ollama serialization bottlenecks.
+	// Default: "ministral-3:3b"
+	ParamExtractorModel string `json:"param_extractor_model"`
 }
 
 // DefaultSessionConfig returns production-ready default configuration.
@@ -203,6 +210,8 @@ func DefaultSessionConfig() *SessionConfig {
 		ToolRouterModel:      "granite4:micro-h",
 		ToolRouterTimeout:    20 * time.Second, // GR-44: Increased from 500ms to ensure router completes
 		ToolRouterConfidence: 0.7,
+		// IT-08e: Dedicated small model for parallel param extraction
+		ParamExtractorModel: "ministral-3:3b",
 	}
 }
 

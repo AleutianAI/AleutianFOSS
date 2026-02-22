@@ -42,6 +42,10 @@ type FindImportantParams struct {
 	// Values: "function", "type", "all"
 	// Default: "all"
 	Kind string
+
+	// ExcludeTests filters out symbols from test and documentation files.
+	// Default: true
+	ExcludeTests bool
 }
 
 // ToolName returns the tool name for TypedParams interface.
@@ -50,8 +54,9 @@ func (p FindImportantParams) ToolName() string { return "find_important" }
 // ToMap converts typed parameters to the map consumed by Tool.Execute().
 func (p FindImportantParams) ToMap() map[string]any {
 	return map[string]any{
-		"top":  p.Top,
-		"kind": p.Kind,
+		"top":           p.Top,
+		"kind":          p.Kind,
+		"exclude_tests": p.ExcludeTests,
 	}
 }
 
@@ -165,6 +170,12 @@ func (t *findImportantTool) Definition() ToolDefinition {
 				Default:     "all",
 				Enum:        []any{"function", "type", "all"},
 			},
+			"exclude_tests": {
+				Type:        ParamTypeBool,
+				Description: "Exclude symbols from test and documentation files (default: true)",
+				Required:    false,
+				Default:     true,
+			},
 		},
 		Category:    CategoryExploration,
 		Priority:    89,
@@ -201,6 +212,7 @@ func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*R
 			attribute.String("tool", "find_important"),
 			attribute.Int("top", p.Top),
 			attribute.String("kind", p.Kind),
+			attribute.Bool("exclude_tests", p.ExcludeTests),
 		),
 	)
 	defer span.End()
@@ -211,13 +223,16 @@ func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*R
 		return nil, err
 	}
 
-	// Adaptive request size based on filter
+	// Adaptive request size based on filters.
+	// When filtering by kind or excluding tests/docs, request more to ensure enough results.
+	hasFilters := p.Kind != "all" || p.ExcludeTests
 	requestCount := p.Top
-	if p.Kind != "all" {
-		requestCount = p.Top * 3 // Request 3x when filtering to ensure enough results
+	if hasFilters {
+		requestCount = p.Top * 5 // Request 5x when filtering (test+doc+kind)
 		t.logger.Debug("pagerank request adjusted for filtering",
 			slog.String("tool", "find_important"),
 			slog.String("kind_filter", p.Kind),
+			slog.Bool("exclude_tests", p.ExcludeTests),
 			slog.Int("top_requested", p.Top),
 			slog.Int("request_count", requestCount),
 		)
@@ -231,7 +246,28 @@ func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*R
 		attribute.String("trace_action", traceStep.Action),
 	)
 
-	// Filter by kind if needed
+	// Phase 1: Filter out test and documentation files
+	var sourceOnly []graph.PageRankNode
+	if p.ExcludeTests {
+		for _, prn := range pageRankNodes {
+			if prn.Node == nil || prn.Node.Symbol == nil {
+				continue
+			}
+			filePath := prn.Node.Symbol.FilePath
+			// GR-60: Use graph-based file classification instead of heuristics
+			if !t.analytics.IsProductionFile(filePath) {
+				continue
+			}
+			sourceOnly = append(sourceOnly, prn)
+		}
+		if len(sourceOnly) > 0 {
+			pageRankNodes = sourceOnly
+		}
+		// If ALL results are test/doc files, keep original to avoid empty results.
+		span.SetAttributes(attribute.Int("after_test_doc_filter", len(sourceOnly)))
+	}
+
+	// Phase 2: Filter by kind if needed
 	var filtered []graph.PageRankNode
 	if p.Kind == "all" {
 		filtered = pageRankNodes
@@ -251,21 +287,29 @@ func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*R
 		filtered = filtered[:p.Top]
 	}
 
+	// Phase 3: Re-assign ranks sequentially after filtering (XC-4 fix).
+	// Without this, kind="function" results show ranks 12, 15, 18... instead of 1, 2, 3...
+	for i := range filtered {
+		filtered[i].Rank = i + 1
+	}
+
 	span.SetAttributes(attribute.Int("filtered_results", len(filtered)))
 
 	// Structured logging for edge cases
 	if len(pageRankNodes) > 0 && len(filtered) == 0 {
-		t.logger.Debug("all PageRank results filtered by kind",
+		t.logger.Debug("all PageRank results filtered",
 			slog.String("tool", "find_important"),
 			slog.Int("raw_count", len(pageRankNodes)),
 			slog.String("kind_filter", p.Kind),
+			slog.Bool("exclude_tests", p.ExcludeTests),
 		)
-	} else if len(filtered) < p.Top && p.Kind != "all" {
+	} else if len(filtered) < p.Top && hasFilters {
 		t.logger.Debug("fewer results than requested after filtering",
 			slog.String("tool", "find_important"),
 			slog.Int("requested", p.Top),
 			slog.Int("returned", len(filtered)),
 			slog.String("kind_filter", p.Kind),
+			slog.Bool("exclude_tests", p.ExcludeTests),
 		)
 	}
 
@@ -288,8 +332,9 @@ func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*R
 // parseParams validates and extracts typed parameters from the raw map.
 func (t *findImportantTool) parseParams(params map[string]any) (FindImportantParams, error) {
 	p := FindImportantParams{
-		Top:  10,
-		Kind: "all",
+		Top:          10,
+		Kind:         "all",
+		ExcludeTests: true,
 	}
 
 	// Extract top (optional)
@@ -324,6 +369,13 @@ func (t *findImportantTool) parseParams(params map[string]any) (FindImportantPar
 				kind = "all"
 			}
 			p.Kind = kind
+		}
+	}
+
+	// Extract exclude_tests (optional, default: true)
+	if etRaw, ok := params["exclude_tests"]; ok {
+		if et, ok := etRaw.(bool); ok {
+			p.ExcludeTests = et
 		}
 	}
 

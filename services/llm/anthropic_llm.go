@@ -83,13 +83,83 @@ type toolsDefinition struct {
 
 type anthropicContent struct {
 	Type     string `json:"type"`
-	Text     string `json:"text"`
+	Text     string `json:"text,omitempty"`
 	Thinking string `json:"thinking,omitempty"`
 }
 
 type anthropicError struct {
 	Type    string `json:"type"`
 	Message string `json:"message"`
+}
+
+// anthropicToolMessage is a message with structured content blocks.
+// Used for ChatWithTools where content must be an array of content blocks
+// (e.g., tool_use, tool_result) rather than a plain string.
+type anthropicToolMessage struct {
+	Role    string        `json:"role"`
+	Content []interface{} `json:"content"`
+}
+
+// anthropicToolRequest is the request payload for ChatWithTools.
+// It uses interface{} for messages to support both string and structured content.
+type anthropicToolRequest struct {
+	Model     string        `json:"model"`
+	Messages  []interface{} `json:"messages"`
+	System    []systemBlock `json:"system,omitempty"`
+	MaxTokens int           `json:"max_tokens"`
+	Tools     []interface{} `json:"tools,omitempty"`
+
+	Temperature *float32 `json:"temperature,omitempty"`
+	TopP        *float32 `json:"top_p,omitempty"`
+	TopK        *int     `json:"top_k,omitempty"`
+	StopSeqs    []string `json:"stop_sequences,omitempty"`
+}
+
+// anthropicToolUseBlock is a tool_use content block in the request (assistant message).
+type anthropicToolUseBlock struct {
+	Type  string          `json:"type"`
+	ID    string          `json:"id"`
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input"`
+}
+
+// anthropicToolResultBlock is a tool_result content block in the request (user message).
+type anthropicToolResultBlock struct {
+	Type      string `json:"type"`
+	ToolUseID string `json:"tool_use_id"`
+	Content   string `json:"content"`
+}
+
+// anthropicTextBlock is a text content block.
+type anthropicTextBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// anthropicToolDef is a tool definition for the Anthropic API.
+type anthropicToolDef struct {
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	InputSchema interface{} `json:"input_schema"`
+}
+
+// anthropicToolResponse is used for parsing tool_use blocks from responses.
+type anthropicToolResponse struct {
+	ID         string            `json:"id"`
+	Type       string            `json:"type"`
+	Role       string            `json:"role"`
+	Content    []json.RawMessage `json:"content"`
+	Error      *anthropicError   `json:"error,omitempty"`
+	StopReason string            `json:"stop_reason,omitempty"`
+}
+
+// anthropicContentBlock is used for parsing individual content blocks from response.
+type anthropicContentBlock struct {
+	Type  string          `json:"type"`
+	Text  string          `json:"text,omitempty"`
+	ID    string          `json:"id,omitempty"`
+	Name  string          `json:"name,omitempty"`
+	Input json.RawMessage `json:"input,omitempty"`
 }
 
 // --- Client Implementation ---
@@ -116,7 +186,7 @@ func NewAnthropicClient() (*AnthropicClient, error) {
 	// 2. Graceful Failure
 	if apiKey == "" {
 		slog.Warn("Anthropic API Key is missing.")
-		return nil, fmt.Errorf("ANTHROPIC_API_KEY is missing")
+		return nil, fmt.Errorf("anthropic: API key is missing (ANTHROPIC_API_KEY)")
 	}
 
 	if model == "" {
@@ -186,13 +256,22 @@ func (a *AnthropicClient) Chat(ctx context.Context, messages []datatypes.Message
 
 	if len(params.ToolDefinitions) > 0 {
 		var tools []toolsDefinition
-		bytes, _ := json.Marshal(params.ToolDefinitions)
-		_ = json.Unmarshal(bytes, &tools)
+		toolBytes, marshalErr := json.Marshal(params.ToolDefinitions)
+		if marshalErr != nil {
+			return "", fmt.Errorf("anthropic: marshaling tool definitions: %w", marshalErr)
+		}
+		if unmarshalErr := json.Unmarshal(toolBytes, &tools); unmarshalErr != nil {
+			return "", fmt.Errorf("anthropic: unmarshaling tool definitions: %w", unmarshalErr)
+		}
 		reqPayload.Tools = tools
 	}
 
-	// Enable Thinking if requested
+	// Enable Thinking if requested (must match buildStreamRequest behavior — fix B-5)
 	if params.EnableThinking {
+		reqPayload.Thinking = &thinkingParams{
+			Type:         "enabled",
+			BudgetTokens: params.BudgetTokens,
+		}
 		minRequired := params.BudgetTokens + 2048 // Budget + Room for answer
 		if reqPayload.MaxTokens < minRequired {
 			slog.Info("Adjusting MaxTokens to accommodate Thinking budget", "old", reqPayload.MaxTokens, "new", minRequired)
@@ -202,12 +281,12 @@ func (a *AnthropicClient) Chat(ctx context.Context, messages []datatypes.Message
 
 	reqBodyBytes, err := json.Marshal(reqPayload)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal request: %w", err)
+		return "", fmt.Errorf("anthropic: marshaling request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", defaultBaseURL, bytes.NewBuffer(reqBodyBytes))
 	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
+		return "", fmt.Errorf("anthropic: creating HTTP request: %w", err)
 	}
 
 	req.Header.Set("x-api-key", a.apiKey)
@@ -218,28 +297,39 @@ func (a *AnthropicClient) Chat(ctx context.Context, messages []datatypes.Message
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("HTTP request failed: %w", err)
+		return "", fmt.Errorf("anthropic: HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, _ := io.ReadAll(resp.Body)
-	slog.Info("Raw Anthropic Response", "status", resp.StatusCode, "body_length", len(bodyBytes), "body_snippet", string(bodyBytes))
+	bodyBytes, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return "", fmt.Errorf("anthropic: reading response body (status %d): %w", resp.StatusCode, readErr)
+	}
+
+	slog.Info("Anthropic response received",
+		slog.Int("status", resp.StatusCode),
+		slog.Int("body_length", len(bodyBytes)),
+		slog.String("model", a.model),
+	)
+	slog.Debug("Anthropic response body",
+		slog.String("body", SafeLogString(string(bodyBytes))),
+	)
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("anthropic API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+		return "", fmt.Errorf("anthropic: API returned status %d: %s", resp.StatusCode, SafeLogString(string(bodyBytes)))
 	}
 
 	var apiResp anthropicResponse
 	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
-		return "", fmt.Errorf("failed to parse response JSON: %w", err)
+		return "", fmt.Errorf("anthropic: parsing response JSON: %w", err)
 	}
 
 	if apiResp.Error != nil {
-		return "", fmt.Errorf("anthropic API error: %s - %s", apiResp.Error.Type, apiResp.Error.Message)
+		return "", fmt.Errorf("anthropic: API error: %s - %s", apiResp.Error.Type, SafeLogString(apiResp.Error.Message))
 	}
 
 	if len(apiResp.Content) == 0 {
-		return "", fmt.Errorf("received empty content from Anthropic")
+		return "", fmt.Errorf("anthropic: received empty content")
 	}
 
 	finalText := ""
@@ -249,15 +339,227 @@ func (a *AnthropicClient) Chat(ctx context.Context, messages []datatypes.Message
 			finalText += block.Text
 		}
 		if block.Type == "thinking" {
-			slog.Info("Claude Thoughts", "thinking", block.Thinking)
+			slog.Debug("Claude Thoughts", "thinking", SafeLogString(block.Thinking))
 		}
 	}
 
 	if finalText == "" {
-		return "", fmt.Errorf("received content but no text block found (check logs for thoughts)")
+		return "", fmt.Errorf("anthropic: received content but no text block found (check logs for thoughts)")
 	}
 
 	return finalText, nil
+}
+
+// ChatWithTools sends a chat request with tool definitions and returns tool calls.
+//
+// Description:
+//
+//	Extends Chat to support Anthropic's native function calling API. Converts
+//	generic ToolDef and ChatMessage types to Anthropic wire format, including
+//	structured content blocks for tool_use and tool_result messages.
+//
+// Inputs:
+//   - ctx: Context for cancellation and timeout.
+//   - messages: Conversation history with tool metadata.
+//   - params: Generation parameters.
+//   - tools: Tool definitions for function calling.
+//
+// Outputs:
+//   - *ChatWithToolsResult: Content and/or tool calls.
+//   - error: Non-nil on failure.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (a *AnthropicClient) ChatWithTools(ctx context.Context, messages []ChatMessage,
+	params GenerationParams, tools []ToolDef) (*ChatWithToolsResult, error) {
+
+	slog.Debug("ChatWithTools via Anthropic",
+		slog.String("model", a.model),
+		slog.Int("messages", len(messages)),
+		slog.Int("tools", len(tools)),
+	)
+
+	// Convert ChatMessage to Anthropic format with structured content blocks
+	var apiMessages []interface{}
+	var systemPrompt string
+
+	for _, msg := range messages {
+		if msg.Role == "system" {
+			systemPrompt = msg.Content
+			continue
+		}
+
+		switch {
+		case msg.Role == "tool" && msg.ToolCallID != "":
+			// Tool result → user message with tool_result content block
+			apiMessages = append(apiMessages, anthropicToolMessage{
+				Role: "user",
+				Content: []interface{}{
+					anthropicToolResultBlock{
+						Type:      "tool_result",
+						ToolUseID: msg.ToolCallID,
+						Content:   msg.Content,
+					},
+				},
+			})
+
+		case msg.Role == "assistant" && len(msg.ToolCalls) > 0:
+			// Assistant message with tool calls → content blocks
+			var blocks []interface{}
+			if msg.Content != "" {
+				blocks = append(blocks, anthropicTextBlock{
+					Type: "text",
+					Text: msg.Content,
+				})
+			}
+			for _, tc := range msg.ToolCalls {
+				input := tc.Arguments
+				if len(input) == 0 {
+					input = json.RawMessage(`{}`)
+				}
+				blocks = append(blocks, anthropicToolUseBlock{
+					Type:  "tool_use",
+					ID:    tc.ID,
+					Name:  tc.Name,
+					Input: input,
+				})
+			}
+			apiMessages = append(apiMessages, anthropicToolMessage{
+				Role:    "assistant",
+				Content: blocks,
+			})
+
+		default:
+			// Regular message (string content)
+			apiMessages = append(apiMessages, anthropicMessage{
+				Role:    msg.Role,
+				Content: msg.Content,
+			})
+		}
+	}
+
+	// Build system blocks
+	var systemBlocks []systemBlock
+	if systemPrompt != "" {
+		block := systemBlock{
+			Type: "text",
+			Text: systemPrompt,
+		}
+		if len(systemPrompt) > 1024 {
+			block.CacheControl = &cacheControl{Type: "ephemeral"}
+		}
+		systemBlocks = append(systemBlocks, block)
+	}
+
+	// Convert tools
+	var apiTools []interface{}
+	for _, td := range tools {
+		apiTools = append(apiTools, anthropicToolDef{
+			Name:        td.Function.Name,
+			Description: td.Function.Description,
+			InputSchema: td.Function.Parameters,
+		})
+	}
+
+	// Build request
+	reqPayload := anthropicToolRequest{
+		Model:     a.model,
+		Messages:  apiMessages,
+		System:    systemBlocks,
+		MaxTokens: 4096,
+		Tools:     apiTools,
+	}
+
+	if params.Temperature != nil {
+		reqPayload.Temperature = params.Temperature
+	}
+	if params.TopP != nil {
+		reqPayload.TopP = params.TopP
+	}
+	if params.TopK != nil {
+		reqPayload.TopK = params.TopK
+	}
+	if len(params.Stop) > 0 {
+		reqPayload.StopSeqs = params.Stop
+	}
+	if params.MaxTokens != nil {
+		reqPayload.MaxTokens = *params.MaxTokens
+	}
+
+	reqBodyBytes, err := json.Marshal(reqPayload)
+	if err != nil {
+		return nil, fmt.Errorf("anthropic: marshaling request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", defaultBaseURL, bytes.NewBuffer(reqBodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("anthropic: creating HTTP request: %w", err)
+	}
+
+	req.Header.Set("x-api-key", a.apiKey)
+	req.Header.Set("anthropic-version", anthropicAPIVersion)
+	req.Header.Set("content-type", "application/json")
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("anthropic: HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("anthropic: reading response body: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("anthropic: API returned status %d: %s", resp.StatusCode, SafeLogString(string(bodyBytes)))
+	}
+
+	// Parse response with tool_use support
+	var apiResp anthropicToolResponse
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return nil, fmt.Errorf("anthropic: parsing response JSON: %w", err)
+	}
+
+	if apiResp.Error != nil {
+		return nil, fmt.Errorf("anthropic: API error: %s - %s", apiResp.Error.Type, SafeLogString(apiResp.Error.Message))
+	}
+
+	// Parse content blocks
+	result := &ChatWithToolsResult{}
+	var textParts []string
+
+	for _, raw := range apiResp.Content {
+		var block anthropicContentBlock
+		if err := json.Unmarshal(raw, &block); err != nil {
+			slog.Warn("Failed to parse content block", "error", err)
+			continue
+		}
+
+		switch block.Type {
+		case "text":
+			textParts = append(textParts, block.Text)
+		case "tool_use":
+			input := block.Input
+			if len(input) == 0 {
+				input = json.RawMessage(`{}`)
+			}
+			result.ToolCalls = append(result.ToolCalls, ToolCallResponse{
+				ID:        block.ID,
+				Name:      block.Name,
+				Arguments: input,
+			})
+		}
+	}
+
+	result.Content = strings.Join(textParts, "")
+
+	if len(result.ToolCalls) > 0 {
+		result.StopReason = "tool_use"
+	} else {
+		result.StopReason = "end"
+	}
+
+	return result, nil
 }
 
 // =============================================================================
@@ -350,18 +652,18 @@ func (a *AnthropicClient) ChatStream(
 	// Build the streaming request (reuse logic from Chat)
 	reqPayload, err := a.buildStreamRequest(messages, params)
 	if err != nil {
-		return err
+		return fmt.Errorf("anthropic: building stream request: %w", err)
 	}
 
 	// Create HTTP request
 	reqBodyBytes, err := json.Marshal(reqPayload)
 	if err != nil {
-		return fmt.Errorf("failed to marshal request: %w", err)
+		return fmt.Errorf("anthropic: marshaling stream request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", defaultBaseURL, bytes.NewBuffer(reqBodyBytes))
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return fmt.Errorf("anthropic: creating stream HTTP request: %w", err)
 	}
 
 	req.Header.Set("x-api-key", a.apiKey)
@@ -377,15 +679,18 @@ func (a *AnthropicClient) ChatStream(
 	if err != nil {
 		// Send error event to callback
 		_ = callback(StreamEvent{Type: StreamEventError, Error: err.Error()})
-		return fmt.Errorf("HTTP request failed: %w", err)
+		return fmt.Errorf("anthropic: stream HTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		errMsg := fmt.Sprintf("Anthropic API returned status %d", resp.StatusCode)
+		bodyBytes, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return fmt.Errorf("anthropic: reading stream error body (status %d): %w", resp.StatusCode, readErr)
+		}
+		errMsg := fmt.Sprintf("anthropic: stream API returned status %d", resp.StatusCode)
 		_ = callback(StreamEvent{Type: StreamEventError, Error: errMsg})
-		return fmt.Errorf("%s: %s", errMsg, string(bodyBytes))
+		return fmt.Errorf("%s: %s", errMsg, SafeLogString(string(bodyBytes)))
 	}
 
 	// Process SSE stream
@@ -466,8 +771,13 @@ func (a *AnthropicClient) buildStreamRequest(
 	// Handle tools
 	if len(params.ToolDefinitions) > 0 {
 		var tools []toolsDefinition
-		toolBytes, _ := json.Marshal(params.ToolDefinitions)
-		_ = json.Unmarshal(toolBytes, &tools)
+		toolBytes, marshalErr := json.Marshal(params.ToolDefinitions)
+		if marshalErr != nil {
+			return anthropicRequest{}, fmt.Errorf("anthropic: marshaling tool definitions: %w", marshalErr)
+		}
+		if unmarshalErr := json.Unmarshal(toolBytes, &tools); unmarshalErr != nil {
+			return anthropicRequest{}, fmt.Errorf("anthropic: unmarshaling tool definitions: %w", unmarshalErr)
+		}
 		reqPayload.Tools = tools
 	}
 
@@ -545,7 +855,7 @@ func (a *AnthropicClient) processSSEStream(
 
 	if err := scanner.Err(); err != nil {
 		_ = callback(StreamEvent{Type: StreamEventError, Error: err.Error()})
-		return fmt.Errorf("stream read error: %w", err)
+		return fmt.Errorf("anthropic: stream read error: %w", err)
 	}
 
 	return nil
@@ -610,9 +920,9 @@ func (a *AnthropicClient) handleSSEEvent(
 			_ = callback(StreamEvent{Type: StreamEventError, Error: "stream error"})
 			return fmt.Errorf("stream error: %s", data)
 		}
-		errMsg := fmt.Sprintf("%s: %s", streamErr.Error.Type, streamErr.Error.Message)
+		errMsg := fmt.Sprintf("%s: %s", streamErr.Error.Type, SafeLogString(streamErr.Error.Message))
 		_ = callback(StreamEvent{Type: StreamEventError, Error: errMsg})
-		return fmt.Errorf("Anthropic stream error: %s", errMsg)
+		return fmt.Errorf("anthropic: stream error: %s", errMsg)
 
 	case "message_start", "content_block_start", "content_block_stop", "message_delta", "message_stop", "ping":
 		// These are informational events, ignore them

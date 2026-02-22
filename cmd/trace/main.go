@@ -64,6 +64,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -73,8 +74,8 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/events"
-	agentllm "github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/phases"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/providers"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/routing"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/safety"
 	traceconfig "github.com/AleutianAI/AleutianFOSS/services/trace/config"
@@ -242,60 +243,127 @@ func main() {
 //
 // Returns true if the agent is fully enabled with LLM support.
 func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTools bool) bool {
-	ollamaClient, err := llm.NewOllamaClient()
+	// CB-60: Load per-role provider configuration from environment variables.
+	// Falls back to Ollama with existing env vars for backward compatibility.
+	mainModelFallback := os.Getenv("OLLAMA_MODEL")
+	if mainModelFallback == "" {
+		mainModelFallback = "glm-4.7-flash"
+	}
+
+	roleConfig, err := providers.LoadRoleConfig(mainModelFallback, "", "")
 	if err != nil {
-		slog.Warn("Ollama not available", slog.String("error", err.Error()))
-		slog.Info("Agent endpoints will use mock mode (default state transitions only)")
-		slog.Info("Set OLLAMA_BASE_URL and OLLAMA_MODEL to enable LLM-powered agent")
-
-		// Mark warmup complete immediately for mock mode (no model to warm)
+		slog.Error("Failed to load role config", slog.String("error", err.Error()))
 		markWarmupComplete()
-
-		// Create agent loop without LLM (uses default phase execution)
 		agentLoop := agent.NewDefaultAgentLoop()
 		agentHandlers := trace.NewAgentHandlers(agentLoop, svc)
-		// No warmup guard needed for mock mode since warmup is already complete
 		trace.RegisterAgentRoutesWithMiddleware(v1, agentHandlers, nil)
 		return false
 	}
 
-	model := os.Getenv("OLLAMA_MODEL")
-	if model == "" {
-		model = "glm-4.7-flash"
+	// CB-60b: Create provider factory. For Ollama roles, create the shared model manager.
+	// Uses ResolveOllamaURL for consistent URL resolution across all components.
+	var ollamaModelManager *llm.MultiModelManager
+	if roleConfig.Main.Provider == providers.ProviderOllama ||
+		roleConfig.Router.Provider == providers.ProviderOllama ||
+		roleConfig.ParamExtractor.Provider == providers.ProviderOllama {
+
+		ollamaURL := providers.ResolveOllamaURL()
+		ollamaModelManager = llm.NewMultiModelManager(ollamaURL)
 	}
-	slog.Info("Ollama connected", slog.String("model", model))
 
-	// Create LLM adapter
-	llmClient := agentllm.NewOllamaAdapter(ollamaClient, model)
+	factory := providers.NewProviderFactory(ollamaModelManager)
 
-	// S-1: Move warmup to background goroutine for non-blocking startup.
-	// Server starts immediately and responds with 503 if warmup not complete.
-	// The WarmupGuardMiddleware protects agent endpoints during warmup.
-	slog.Info("Server starting, model warmup in progress...",
+	// CB-60: Create main agent client using the factory.
+	llmClient, err := factory.CreateAgentClient(roleConfig.Main)
+	if err != nil {
+		slog.Warn("Main LLM provider not available",
+			slog.String("provider", roleConfig.Main.Provider),
+			slog.String("error", err.Error()))
+		slog.Info("Agent endpoints will use mock mode (default state transitions only)")
+
+		markWarmupComplete()
+		agentLoop := agent.NewDefaultAgentLoop()
+		agentHandlers := trace.NewAgentHandlers(agentLoop, svc)
+		trace.RegisterAgentRoutesWithMiddleware(v1, agentHandlers, nil)
+		return false
+	}
+
+	model := roleConfig.Main.Model
+	slog.Info("Main LLM provider connected",
+		slog.String("provider", roleConfig.Main.Provider),
 		slog.String("model", model))
 
-	go func() {
-		warmupCtx, warmupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer warmupCancel()
-
-		startTime := time.Now()
-		if warmErr := warmMainModel(warmupCtx, ollamaClient, model); warmErr != nil {
-			slog.Warn("Main model warmup failed, LLM classifier may fall back to regex",
-				slog.String("model", model),
-				slog.String("error", warmErr.Error()),
-				slog.Duration("duration", time.Since(startTime)))
-		} else {
-			slog.Info("Model warmup completed successfully",
-				slog.String("model", model),
-				slog.Duration("duration", time.Since(startTime)))
-		}
-
-		// Mark warmup complete regardless of success/failure.
-		// If warmup failed, the LLM classifier will fall back to regex on first call.
+	// CB-60: Create lifecycle manager for main model warmup.
+	mainLifecycle, err := factory.CreateLifecycleManager(roleConfig.Main)
+	if err != nil {
+		slog.Warn("Could not create lifecycle manager, skipping warmup",
+			slog.String("error", err.Error()))
 		markWarmupComplete()
-		slog.Info("Server ready to accept agent requests",
+	} else {
+		// S-1: Move warmup to background goroutine for non-blocking startup.
+		slog.Info("Server starting, model warmup in progress...",
+			slog.String("provider", roleConfig.Main.Provider),
 			slog.String("model", model))
-	}()
+
+		go func() {
+			// CB-60a H-6: Panic recovery ensures markWarmupComplete is always called.
+			// Without this, a panic in warmup (from Ollama client, HTTP transport, etc.)
+			// would leave the server permanently in "warming up" state.
+			defer func() {
+				if r := recover(); r != nil {
+					buf := make([]byte, 4096)
+					n := runtime.Stack(buf, false)
+					slog.Error("Panic in warmup goroutine recovered",
+						slog.Any("panic", r),
+						slog.String("stack", string(buf[:n])),
+					)
+					markWarmupComplete()
+				}
+			}()
+
+			warmupCtx, warmupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer warmupCancel()
+
+			startTime := time.Now()
+
+			if mainLifecycle.IsLocal() {
+				// Ollama: warm model into VRAM with full warmup procedure
+				ollamaClient, ollamaErr := llm.NewOllamaClient()
+				if ollamaErr != nil {
+					slog.Warn("Could not create Ollama client for warmup",
+						slog.String("error", ollamaErr.Error()))
+					markWarmupComplete()
+					return
+				}
+				if warmErr := warmMainModel(warmupCtx, ollamaClient, model); warmErr != nil {
+					slog.Warn("Main model warmup failed, LLM classifier may fall back to regex",
+						slog.String("model", model),
+						slog.String("error", warmErr.Error()),
+						slog.Duration("duration", time.Since(startTime)))
+				} else {
+					slog.Info("Model warmup completed successfully",
+						slog.String("model", model),
+						slog.Duration("duration", time.Since(startTime)))
+				}
+			} else {
+				// Cloud: just verify connectivity (auth check)
+				if warmErr := mainLifecycle.WarmModel(warmupCtx, model, providers.WarmupOptions{}); warmErr != nil {
+					slog.Warn("Cloud provider auth check failed",
+						slog.String("provider", roleConfig.Main.Provider),
+						slog.String("error", warmErr.Error()))
+				} else {
+					slog.Info("Cloud provider ready",
+						slog.String("provider", roleConfig.Main.Provider),
+						slog.Duration("duration", time.Since(startTime)))
+				}
+			}
+
+			markWarmupComplete()
+			slog.Info("Server ready to accept agent requests",
+				slog.String("provider", roleConfig.Main.Provider),
+				slog.String("model", model))
+		}()
+	}
 
 	// GR-Phase1: Query classification architecture
 	//
@@ -379,7 +447,11 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTo
 		agent.WithPhaseRegistry(registry),
 		agent.WithDependenciesFactory(depsFactory),
 	)
-	agentHandlers := trace.NewAgentHandlers(agentLoop, svc)
+	agentHandlers := trace.NewAgentHandlers(agentLoop, svc,
+		trace.WithProviderFactory(factory),
+		trace.WithModelManager(ollamaModelManager),
+		trace.WithRoleConfig(roleConfig),
+	)
 
 	// S-1: Apply warmup guard middleware to agent routes.
 	// This returns 503 Service Unavailable for agent requests during model warmup.

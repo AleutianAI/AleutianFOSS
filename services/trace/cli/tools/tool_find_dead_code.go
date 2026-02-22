@@ -296,18 +296,20 @@ func (t *findDeadCodeTool) Execute(ctx context.Context, params TypedParams) (*Re
 		filtered = pkgScoped
 	}
 
-	// Phase 3: Filter out test-file symbols
+	// Phase 3: Filter out test and documentation file symbols
 	if p.ExcludeTests {
 		var nonTest []graph.DeadCodeNode
 		for _, dc := range filtered {
-			if dc.Node != nil && dc.Node.Symbol != nil && !isTestFile(dc.Node.Symbol.FilePath) {
+			// GR-60: Use graph-based file classification instead of heuristics
+			if dc.Node != nil && dc.Node.Symbol != nil &&
+				t.analytics.IsProductionFile(dc.Node.Symbol.FilePath) {
 				nonTest = append(nonTest, dc)
 			}
 		}
 		if len(nonTest) > 0 {
 			filtered = nonTest
 		}
-		// If ALL results are from test files, keep them rather than returning empty.
+		// If ALL results are from test/doc files, keep them rather than returning empty.
 	}
 
 	// Apply limit after all filters

@@ -584,6 +584,7 @@ tools:
   - name: find_communities
     keywords:
       - communities
+      - community
       - modules
       - module boundaries
       - natural modules
@@ -596,13 +597,21 @@ tools:
       - real modules
       - cross-package
       - leiden
-    use_when: "User wants to find natural code communities or module boundaries. Also use when user asks what community a subsystem belongs to, whether specific classes form distinct communities, or about community coupling."
+      - bridges between communities
+      - subsystem community
+      - belongs to community
+      - distinct communities
+      - community boundaries
+      - cross-community
+    use_when: "User wants to find natural code communities or module boundaries. Also use when user asks what community a subsystem belongs to, whether specific classes form distinct communities, about community coupling, or about bridges/connections between communities. ANY query containing the word 'community' or 'communities' should use this tool."
     avoid_when: "User wants to find callers or callees of specific functions"
     instead_of:
       - tool: Grep
         when: "Searching for module structure or code organization patterns"
       - tool: find_module_api
         when: "User asks about code communities, which community something belongs to, or community structure"
+      - tool: find_articulation_points
+        when: "User asks about bridges or connections BETWEEN communities — community bridge analysis is find_communities, NOT find_articulation_points"
     requires:
       - graph_initialized
 
@@ -621,8 +630,8 @@ tools:
       - fragility
       - architecture weakness
       - single dependency
-    use_when: "User asks about single points of failure, fragile architecture, or critical bottleneck functions"
-    avoid_when: "User asks about dominators, control flow, or callers/callees of specific functions"
+    use_when: "User asks about single points of failure, fragile architecture, or critical bottleneck functions whose removal would disconnect the graph"
+    avoid_when: "User asks about dominators, control flow, or callers/callees of specific functions. NEVER use when the query mentions 'communities' — if the user asks about bridges or connections BETWEEN communities, use find_communities instead (it includes cross-community edge analysis). Only use find_articulation_points when asking about graph-theoretic bridge nodes, NOT community bridges."
     instead_of:
       - tool: find_hotspots
         when: "User specifically asks about single points of failure or fragility"
@@ -808,8 +817,8 @@ tools:
       - module entry
       - public functions
       - module interface
-    use_when: "User asks about module interfaces, public APIs, or how to interact with different parts of the codebase"
-    avoid_when: "User asks about all entry points globally (use find_entry_points). User asks about code communities, community detection, or which community something belongs to (use find_communities)."
+    use_when: "User asks about module interfaces, public APIs, or how to interact with different parts of the codebase. Do NOT use for community-related queries."
+    avoid_when: "User asks about all entry points globally (use find_entry_points). NEVER use when the query contains the word 'community' or 'communities' — use find_communities instead. This includes queries like 'what community does X belong to', 'community boundaries', 'bridges between communities'."
     requires:
       - graph_initialized
 

@@ -23,6 +23,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/providers"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/routing"
 	"github.com/gin-gonic/gin"
 )
@@ -31,9 +32,53 @@ import (
 //
 // Thread Safety: AgentHandlers is safe for concurrent use.
 type AgentHandlers struct {
-	loop         agent.AgentLoop
-	svc          *Service
-	modelManager *llm.MultiModelManager
+	loop            agent.AgentLoop
+	svc             *Service
+	modelManager    *llm.MultiModelManager
+	providerFactory *providers.ProviderFactory
+	roleConfig      *providers.RoleConfig
+}
+
+// AgentHandlersOption is a functional option for NewAgentHandlers.
+type AgentHandlersOption func(*AgentHandlers)
+
+// WithProviderFactory injects a shared ProviderFactory into AgentHandlers.
+//
+// Description:
+//
+//	When provided, NewAgentHandlers uses this factory instead of creating
+//	its own. This ensures the same ProviderFactory (and thus the same
+//	MultiModelManager) is used throughout the application.
+func WithProviderFactory(f *providers.ProviderFactory) AgentHandlersOption {
+	return func(h *AgentHandlers) {
+		h.providerFactory = f
+	}
+}
+
+// WithModelManager injects a shared MultiModelManager into AgentHandlers.
+//
+// Description:
+//
+//	When provided, NewAgentHandlers uses this manager instead of creating
+//	its own. This prevents the double-MMM bug where two independent managers
+//	track VRAM state independently.
+func WithModelManager(m *llm.MultiModelManager) AgentHandlersOption {
+	return func(h *AgentHandlers) {
+		h.modelManager = m
+	}
+}
+
+// WithRoleConfig injects the startup-loaded RoleConfig into AgentHandlers.
+//
+// Description:
+//
+//	When provided, initializeToolRouter uses this config (with per-session
+//	overrides via MergeSessionOverrides) instead of calling LoadRoleConfig
+//	again. This prevents the double-LoadRoleConfig bug.
+func WithRoleConfig(rc *providers.RoleConfig) AgentHandlersOption {
+	return func(h *AgentHandlers) {
+		h.roleConfig = rc
+	}
 }
 
 // NewAgentHandlers creates handlers for the Code Buddy agent.
@@ -43,12 +88,16 @@ type AgentHandlers struct {
 //	Creates HTTP handlers that wrap the AgentLoop interface.
 //	The handlers provide REST endpoints for starting, continuing,
 //	and aborting agent sessions.
-//	Also initializes a shared MultiModelManager for tool routing.
+//
+//	Accepts optional functional options to inject shared dependencies
+//	(ProviderFactory, MultiModelManager, RoleConfig). When no options
+//	are provided, creates its own dependencies for backward compatibility.
 //
 // Inputs:
 //
 //	loop - The agent loop implementation. Must not be nil.
 //	svc - The Code Buddy service for graph initialization. Must not be nil.
+//	opts - Optional functional options for dependency injection.
 //
 // Outputs:
 //
@@ -56,21 +105,36 @@ type AgentHandlers struct {
 //
 // Example:
 //
-//	loop := agent.NewDefaultAgentLoop()
-//	svc := trace.NewService(config)
-//	handlers := trace.NewAgentHandlers(loop, svc)
-func NewAgentHandlers(loop agent.AgentLoop, svc *Service) *AgentHandlers {
-	// Get Ollama endpoint from environment or use default
-	ollamaURL := os.Getenv("OLLAMA_URL")
-	if ollamaURL == "" {
-		ollamaURL = "http://localhost:11434"
+//	// With injected dependencies (production path):
+//	handlers := trace.NewAgentHandlers(agentLoop, svc,
+//	    trace.WithProviderFactory(factory),
+//	    trace.WithModelManager(ollamaModelManager),
+//	    trace.WithRoleConfig(roleConfig),
+//	)
+//
+//	// Without options (backward compat, tests, error paths):
+//	handlers := trace.NewAgentHandlers(agentLoop, svc)
+func NewAgentHandlers(loop agent.AgentLoop, svc *Service, opts ...AgentHandlersOption) *AgentHandlers {
+	h := &AgentHandlers{
+		loop: loop,
+		svc:  svc,
 	}
 
-	return &AgentHandlers{
-		loop:         loop,
-		svc:          svc,
-		modelManager: llm.NewMultiModelManager(ollamaURL),
+	// Apply functional options first
+	for _, opt := range opts {
+		opt(h)
 	}
+
+	// Backward compatibility: create own MMM and factory if not injected
+	if h.modelManager == nil {
+		ollamaURL := providers.ResolveOllamaURL()
+		h.modelManager = llm.NewMultiModelManager(ollamaURL)
+	}
+	if h.providerFactory == nil {
+		h.providerFactory = providers.NewProviderFactory(h.modelManager)
+	}
+
+	return h
 }
 
 // HandleAgentRun handles POST /v1/codebuddy/agent/run.
@@ -992,19 +1056,59 @@ func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent
 		"endpoint", routerConfig.OllamaEndpoint,
 		"timeout", routerConfig.Timeout)
 
-	// Check prerequisites
-	if h.modelManager == nil {
-		logger.Error("initializeToolRouter: modelManager is nil",
-			"session_id", session.ID)
-		routing.RecordRouterInit(session.Config.ToolRouterModel, false, "model_manager_nil")
-		return fmt.Errorf("modelManager is nil, cannot initialize router")
+	// CB-60b: Use startup-loaded roleConfig if available (avoids double-LoadRoleConfig).
+	// Merge per-session overrides for Router and ParamExtractor models.
+	var roleConfig *providers.RoleConfig
+	if h.roleConfig != nil {
+		roleConfig = providers.MergeSessionOverrides(
+			h.roleConfig,
+			session.Config.ToolRouterModel,
+			session.Config.ParamExtractorModel,
+		)
+	} else {
+		// Backward compatibility: load config when not injected via options.
+		var roleErr error
+		roleConfig, roleErr = providers.LoadRoleConfig(
+			os.Getenv("OLLAMA_MODEL"),
+			session.Config.ToolRouterModel,
+			session.Config.ParamExtractorModel,
+		)
+		if roleErr != nil {
+			logger.Error("initializeToolRouter: LoadRoleConfig failed",
+				"session_id", session.ID,
+				"error", roleErr)
+			routing.RecordRouterInit(session.Config.ToolRouterModel, false, "config_load_failed")
+			return fmt.Errorf("loading role config: %w", roleErr)
+		}
 	}
 
-	// Create the Granite4 router
-	logger.Info("initializeToolRouter: Creating Granite4Router",
-		"session_id", session.ID)
+	// CB-60: Create ChatClient for the router via ProviderFactory.
+	routerChatClient, err := h.providerFactory.CreateChatClient(roleConfig.Router)
+	if err != nil {
+		logger.Error("initializeToolRouter: CreateChatClient failed for router",
+			"session_id", session.ID,
+			"provider", roleConfig.Router.Provider,
+			"error", err)
+		routing.RecordRouterInit(session.Config.ToolRouterModel, false, "chat_client_failed")
+		return fmt.Errorf("creating router chat client: %w", err)
+	}
 
-	router, err := routing.NewGranite4Router(h.modelManager, routerConfig)
+	// CB-60: Create lifecycle manager for warmup.
+	routerLifecycle, err := h.providerFactory.CreateLifecycleManager(roleConfig.Router)
+	if err != nil {
+		logger.Error("initializeToolRouter: CreateLifecycleManager failed",
+			"session_id", session.ID,
+			"error", err)
+		routing.RecordRouterInit(session.Config.ToolRouterModel, false, "lifecycle_failed")
+		return fmt.Errorf("creating router lifecycle manager: %w", err)
+	}
+
+	// Create the Granite4 router with ChatClient
+	logger.Info("initializeToolRouter: Creating Granite4Router",
+		"session_id", session.ID,
+		"provider", roleConfig.Router.Provider)
+
+	router, err := routing.NewGranite4Router(routerChatClient, routerConfig)
 	if err != nil {
 		logger.Error("initializeToolRouter: NewGranite4Router failed",
 			"session_id", session.ID,
@@ -1036,10 +1140,11 @@ func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent
 
 	logger.Info("initializeToolRouter: Starting model warmup",
 		"model", routerConfig.Model,
-		"timeout", "60s")
+		"timeout", "60s",
+		"is_local", routerLifecycle.IsLocal())
 
 	warmupStart := time.Now()
-	if warmErr := router.WarmRouter(warmupCtx); warmErr != nil {
+	if warmErr := router.WarmRouter(warmupCtx, routerLifecycle); warmErr != nil {
 		warmupDuration := time.Since(warmupStart)
 		logger.Error("initializeToolRouter: Model warmup failed",
 			"session_id", session.ID,
@@ -1071,37 +1176,96 @@ func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent
 	// Loading granite4:micro-h into VRAM may evict the main model (gpt-oss:20b)
 	// on resource-constrained systems. Re-warming ensures the first llm_call
 	// doesn't pay a ~14s cold-load penalty.
-	mainModel := os.Getenv("OLLAMA_MODEL")
-	if mainModel != "" && mainModel != routerConfig.Model && h.modelManager != nil {
-		mainWarmStart := time.Now()
-		if warmErr := h.modelManager.WarmModel(warmupCtx, mainModel, "24h", 65536); warmErr != nil {
-			logger.Warn("initializeToolRouter: Main model re-warm failed (non-fatal)",
-				"session_id", session.ID,
-				"model", mainModel,
-				"error", warmErr)
-		} else {
-			logger.Info("initializeToolRouter: Main model re-warmed",
-				"session_id", session.ID,
-				"model", mainModel,
-				"duration", time.Since(mainWarmStart))
+	// CB-60: Only needed when router uses local Ollama (cloud providers don't evict).
+	if routerLifecycle.IsLocal() {
+		mainModel := os.Getenv("OLLAMA_MODEL")
+		if mainModel != "" && mainModel != routerConfig.Model && h.modelManager != nil {
+			mainWarmStart := time.Now()
+			if warmErr := h.modelManager.WarmModel(warmupCtx, mainModel, "24h", 65536); warmErr != nil {
+				logger.Warn("initializeToolRouter: Main model re-warm failed (non-fatal)",
+					"session_id", session.ID,
+					"model", mainModel,
+					"error", warmErr)
+			} else {
+				logger.Info("initializeToolRouter: Main model re-warmed",
+					"session_id", session.ID,
+					"model", mainModel,
+					"duration", time.Since(mainWarmStart))
+			}
 		}
 	}
 
-	// IT-08b: Create ParamExtractor using the same model manager and model.
-	// This reuses the already-warmed granite4:micro-h for parameter extraction.
+	// IT-08e: Create ParamExtractor with a DEDICATED small model.
+	// CB-60: Uses ProviderFactory to create the ChatClient, enabling any provider.
 	paramConfig := routing.DefaultParamExtractorConfig()
-	paramConfig.Model = routerConfig.Model
+
+	// Use session config model if set, otherwise use default (ministral-3:3b)
+	paramModel := session.Config.ParamExtractorModel
+	if paramModel != "" {
+		paramConfig.Model = paramModel
+	}
 	paramConfig.KeepAlive = routerConfig.KeepAlive
-	paramExtractor, paramErr := routing.NewParamExtractor(h.modelManager, paramConfig)
-	if paramErr != nil {
-		logger.Warn("initializeToolRouter: ParamExtractor creation failed (non-fatal)",
+
+	// CB-60: Create ChatClient for param extractor via ProviderFactory.
+	paramChatClient, paramClientErr := h.providerFactory.CreateChatClient(roleConfig.ParamExtractor)
+	if paramClientErr != nil {
+		logger.Warn("initializeToolRouter: ParamExtractor chat client creation failed (non-fatal)",
 			"session_id", session.ID,
-			"error", paramErr)
+			"provider", roleConfig.ParamExtractor.Provider,
+			"error", paramClientErr)
 	} else {
-		session.SetParamExtractor(paramExtractor)
-		logger.Info("initializeToolRouter: ParamExtractor created",
-			"session_id", session.ID,
-			"model", paramConfig.Model)
+		// CB-60: Create lifecycle manager for param extractor warmup.
+		paramLifecycle, paramLifecycleErr := h.providerFactory.CreateLifecycleManager(roleConfig.ParamExtractor)
+		if paramLifecycleErr != nil {
+			logger.Warn("initializeToolRouter: ParamExtractor lifecycle creation failed (non-fatal)",
+				"session_id", session.ID,
+				"error", paramLifecycleErr)
+		}
+
+		// Warm the param extraction model if it's different from the router model
+		// CB-60: Only warm if using local provider
+		if paramLifecycle != nil && paramLifecycle.IsLocal() && paramConfig.Model != routerConfig.Model {
+			paramWarmStart := time.Now()
+			warmOpts := providers.WarmupOptions{
+				KeepAlive: "24h",
+				NumCtx:    paramConfig.NumCtx,
+			}
+			if warmErr := paramLifecycle.WarmModel(warmupCtx, paramConfig.Model, warmOpts); warmErr != nil {
+				logger.Warn("initializeToolRouter: Param model warmup failed (non-fatal)",
+					"session_id", session.ID,
+					"model", paramConfig.Model,
+					"error", warmErr)
+			} else {
+				logger.Info("initializeToolRouter: Param model warmed",
+					"session_id", session.ID,
+					"model", paramConfig.Model,
+					"duration", time.Since(paramWarmStart))
+			}
+
+			// Re-warm main model after param model load (may have been evicted)
+			mainModel := os.Getenv("OLLAMA_MODEL")
+			if mainModel != "" && mainModel != paramConfig.Model && h.modelManager != nil {
+				if warmErr := h.modelManager.WarmModel(warmupCtx, mainModel, "24h", 65536); warmErr != nil {
+					logger.Warn("initializeToolRouter: Main model re-warm after param model failed (non-fatal)",
+						"session_id", session.ID,
+						"model", mainModel,
+						"error", warmErr)
+				}
+			}
+		}
+
+		paramExtractor, paramErr := routing.NewParamExtractor(paramChatClient, paramConfig)
+		if paramErr != nil {
+			logger.Warn("initializeToolRouter: ParamExtractor creation failed (non-fatal)",
+				"session_id", session.ID,
+				"error", paramErr)
+		} else {
+			session.SetParamExtractor(paramExtractor)
+			logger.Info("initializeToolRouter: ParamExtractor created",
+				"session_id", session.ID,
+				"model", paramConfig.Model,
+				"provider", roleConfig.ParamExtractor.Provider)
+		}
 	}
 
 	logger.Info("initializeToolRouter: Complete - Router fully initialized",
@@ -1130,12 +1294,11 @@ func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent
 }
 
 // getOllamaEndpoint returns the Ollama endpoint from environment or default.
+//
+// CB-60b: Delegates to providers.ResolveOllamaURL for consistent URL resolution
+// across all components (OLLAMA_BASE_URL -> OLLAMA_URL -> localhost).
 func (h *AgentHandlers) getOllamaEndpoint() string {
-	endpoint := os.Getenv("OLLAMA_URL")
-	if endpoint == "" {
-		endpoint = "http://localhost:11434"
-	}
-	return endpoint
+	return providers.ResolveOllamaURL()
 }
 
 // verifyRouterModelAvailable performs a pre-flight check to ensure the router model

@@ -74,6 +74,26 @@ func RegisterExploreTools(registry *Registry, g *graph.Graph, idx *index.SymbolI
 	if g.IsFrozen() {
 		hg, err := graph.WrapGraph(g)
 		if err == nil && hg != nil {
+			// GR-60: Graph-based file classification
+			fc, fcErr := graph.ClassifyFiles(hg, graph.FileClassificationOptions{
+				ProjectRoot: g.ProjectRoot,
+			})
+			if fcErr == nil && fc != nil {
+				hg.SetFileClassification(fc)
+				stats := fc.Stats()
+				slog.Info("GR-60: file classification complete",
+					slog.Int("total_files", stats.TotalFiles),
+					slog.Int("production_files", stats.ProductionFiles),
+					slog.Int("non_production_files", stats.NonProductionFiles),
+					slog.Int("isolated_files", stats.IsolatedFiles),
+					slog.Int("likely_consumer_files", stats.LikelyConsumerFiles),
+				)
+			} else if fcErr != nil {
+				slog.Warn("GR-60: file classification failed, tools will use heuristic fallback",
+					slog.String("error", fcErr.Error()),
+				)
+			}
+
 			analytics := graph.NewGraphAnalytics(hg)
 			registry.Register(NewFindHotspotsTool(analytics, idx))
 			registry.Register(NewFindDeadCodeTool(analytics, idx))

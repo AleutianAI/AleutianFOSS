@@ -512,9 +512,19 @@ func (m *MultiModelManager) ChatWithTools(ctx context.Context, model string,
 	}
 	m.mu.Unlock()
 
+	// Convert OllamaToolCall to generic ToolCallResponse
+	var toolCalls []ToolCallResponse
+	for _, tc := range chatResp.Message.ToolCalls {
+		toolCalls = append(toolCalls, ToolCallResponse{
+			ID:        tc.ID,
+			Name:      tc.Function.Name,
+			Arguments: tc.Function.Arguments,
+		})
+	}
+
 	result := &ChatWithToolsResult{
 		Content:   chatResp.Message.Content,
-		ToolCalls: chatResp.Message.ToolCalls,
+		ToolCalls: toolCalls,
 	}
 
 	if len(result.ToolCalls) > 0 {

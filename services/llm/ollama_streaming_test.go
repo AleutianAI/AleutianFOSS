@@ -1463,8 +1463,8 @@ func TestOllamaClient_ChatWithTools_Success(t *testing.T) {
 	if len(result.ToolCalls) != 1 {
 		t.Fatalf("len(ToolCalls) = %d, want 1", len(result.ToolCalls))
 	}
-	if result.ToolCalls[0].Function.Name != "read_file" {
-		t.Errorf("ToolCalls[0].Function.Name = %q, want 'read_file'", result.ToolCalls[0].Function.Name)
+	if result.ToolCalls[0].Name != "read_file" {
+		t.Errorf("ToolCalls[0].Name = %q, want 'read_file'", result.ToolCalls[0].Name)
 	}
 	if result.ToolCalls[0].ID != "call_123" {
 		t.Errorf("ToolCalls[0].ID = %q, want 'call_123'", result.ToolCalls[0].ID)

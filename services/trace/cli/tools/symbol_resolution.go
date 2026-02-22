@@ -1036,7 +1036,56 @@ func isTestFile(filePath string) bool {
 		strings.Contains(filePath, "/asv_bench/") ||
 		strings.HasPrefix(filePath, "asv_bench/") ||
 		strings.Contains(filePath, ".test.") ||
-		strings.Contains(filePath, ".spec.")
+		strings.Contains(filePath, ".spec.") ||
+		strings.Contains(filePath, "/integration/") ||
+		strings.HasPrefix(filePath, "integration/") ||
+		strings.Contains(filePath, "/quicktests/") ||
+		strings.HasPrefix(filePath, "quicktests/") ||
+		strings.Contains(filePath, "/e2e/") ||
+		strings.HasPrefix(filePath, "e2e/") ||
+		strings.Contains(filePath, "/__tests__/") ||
+		strings.HasPrefix(filePath, "__tests__/") ||
+		strings.Contains(filePath, "/__fixtures__/") ||
+		strings.HasPrefix(filePath, "__fixtures__/") ||
+		strings.Contains(filePath, "/cypress/") ||
+		strings.HasPrefix(filePath, "cypress/") ||
+		strings.Contains(filePath, "/fixtures/") ||
+		strings.HasPrefix(filePath, "fixtures/")
+}
+
+// isDocFile returns true if the file path is in a documentation directory
+// or is a documentation/configuration file rather than source code.
+//
+// Thread Safety: This function is safe for concurrent use (pure function).
+func isDocFile(filePath string) bool {
+	lower := strings.ToLower(filePath)
+
+	// Documentation directories
+	for _, dir := range []string{"doc/", "docs/", "documentation/", "examples/", "example/"} {
+		if strings.HasPrefix(lower, dir) || strings.Contains(lower, "/"+dir) {
+			return true
+		}
+	}
+
+	// Documentation and non-source file extensions
+	for _, ext := range []string{".md", ".rst", ".txt", ".html", ".css", ".json", ".yaml", ".yml", ".toml", ".xml", ".csv", ".svg", ".png", ".jpg", ".gif", ".ico"} {
+		if strings.HasSuffix(lower, ext) {
+			return true
+		}
+	}
+
+	// Configuration files
+	for _, name := range []string{"makefile", "dockerfile", "rakefile", "gemfile", "setup.cfg", "pyproject.toml", "package.json", "tsconfig.json"} {
+		base := lower
+		if idx := strings.LastIndex(lower, "/"); idx >= 0 {
+			base = lower[idx+1:]
+		}
+		if base == name {
+			return true
+		}
+	}
+
+	return false
 }
 
 // filterByPackageHint narrows a list of symbols to those whose FilePath, Package,

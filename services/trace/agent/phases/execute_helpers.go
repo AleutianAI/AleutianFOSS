@@ -253,6 +253,10 @@ func extractPackageNameFromQuery(query string) string {
 func extractPackageContextFromQuery(query string) string {
 	lowerQuery := strings.ToLower(query)
 	words := strings.Fields(lowerQuery)
+	// IT-08d: Keep original-case words for capitalization heuristic.
+	// Capitalized words (Express, Flask, Pandas) are likely project names,
+	// not package/module names. Lowercase words (gin, flask, hugolib) are valid.
+	originalWords := strings.Fields(query)
 
 	// Prepositions that introduce a package/scope context.
 	isPrep := func(w string) bool {
@@ -301,6 +305,14 @@ func extractPackageContextFromQuery(query string) string {
 		if strings.Contains(candidate, "/") {
 			return candidate
 		}
+		// IT-08d: Skip capitalized candidates — likely project names (Express, Flask).
+		// Lowercase package names (gin, flask, hugolib) pass through.
+		if i+1 < len(originalWords) {
+			origCandidate := strings.Trim(originalWords[i+1], "?,.()")
+			if len(origCandidate) > 0 && unicode.IsUpper(rune(origCandidate[0])) {
+				continue
+			}
+		}
 		// Must look like a package name: lowercase, alphanumeric, no spaces
 		if isPackageLikeName(candidate) {
 			return candidate
@@ -328,7 +340,21 @@ func extractPackageContextFromQuery(query string) string {
 		for j := i + 3; j < len(words); j++ {
 			scopeWord := strings.Trim(words[j], "?,.()")
 			if scopeKeywords[scopeWord] {
-				// Found scope keyword at j. Return first package-like word after article.
+				// IT-08d: When multiple words between article and scope keyword,
+				// check if first word is capitalized (project name).
+				// "in the Flask helpers module" → "Flask" capitalized → use words[j-1]="helpers"
+				// "in the value log subsystem" → "value" lowercase → use words[i+2]="value"
+				if j > i+3 && i+2 < len(originalWords) {
+					origFirst := strings.Trim(originalWords[i+2], "?,.()")
+					if len(origFirst) > 0 && unicode.IsUpper(rune(origFirst[0])) {
+						// First word is a proper noun — prefer word before scope keyword
+						moduleCandidate := strings.Trim(words[j-1], "?,.()")
+						if isPackageLikeName(moduleCandidate) && !skipGeneric[moduleCandidate] {
+							return moduleCandidate
+						}
+					}
+				}
+				// Default: use first package-like word after article.
 				pkgCandidate := strings.Trim(words[i+2], "?,.()")
 				if isPackageLikeName(pkgCandidate) && !skipGeneric[pkgCandidate] {
 					return pkgCandidate

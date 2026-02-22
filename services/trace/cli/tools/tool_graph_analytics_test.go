@@ -913,6 +913,169 @@ func TestFindImportantTool_MatchesKind(t *testing.T) {
 	})
 }
 
+// TestIsDocFile verifies documentation file detection.
+func TestIsDocFile(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		// Documentation directories
+		{"doc/source/conf.py", true},
+		{"docs/api/README.md", true},
+		{"documentation/guide.rst", true},
+		{"examples/basic.py", true},
+		{"example/demo.go", true},
+		{"src/docs/internal.py", true},
+
+		// Documentation file extensions
+		{"README.md", true},
+		{"CHANGELOG.rst", true},
+		{"notes.txt", true},
+		{"index.html", true},
+		{"style.css", true},
+		{"config.json", true},
+		{"settings.yaml", true},
+		{"data.csv", true},
+		{"logo.svg", true},
+		{"icon.png", true},
+
+		// Source files (should NOT be doc files)
+		{"main.go", false},
+		{"app.py", false},
+		{"index.js", false},
+		{"component.tsx", false},
+		{"core/handler.go", false},
+		{"src/utils.ts", false},
+		{"pandas/core/frame.py", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got := isDocFile(tt.path)
+			if got != tt.want {
+				t.Errorf("isDocFile(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFindImportantTool_ExcludeTests verifies test and doc file filtering in find_important.
+func TestFindImportantTool_ExcludeTests(t *testing.T) {
+	ctx := context.Background()
+	g := graph.NewGraph("/test")
+	idx := index.NewSymbolIndex()
+
+	// Create graph with source, test, and doc file symbols
+	symbols := []*ast.Symbol{
+		{
+			ID: "core/handler.go:10:Handle", Name: "Handle",
+			Kind: ast.SymbolKindFunction, FilePath: "core/handler.go",
+			StartLine: 10, EndLine: 30, Package: "core", Exported: true, Language: "go",
+		},
+		{
+			ID: "core/handler_test.go:10:TestHandle", Name: "TestHandle",
+			Kind: ast.SymbolKindFunction, FilePath: "core/handler_test.go",
+			StartLine: 10, EndLine: 30, Package: "core", Exported: true, Language: "go",
+		},
+		{
+			ID: "doc/source/conf.py:10:setup", Name: "setup",
+			Kind: ast.SymbolKindFunction, FilePath: "doc/source/conf.py",
+			StartLine: 10, EndLine: 20, Package: "conf", Exported: false, Language: "python",
+		},
+		{
+			ID: "core/router.go:10:Route", Name: "Route",
+			Kind: ast.SymbolKindFunction, FilePath: "core/router.go",
+			StartLine: 10, EndLine: 40, Package: "core", Exported: true, Language: "go",
+		},
+	}
+
+	for _, sym := range symbols {
+		g.AddNode(sym)
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("Failed to add symbol: %v", err)
+		}
+	}
+
+	// TestHandle calls Handle (making Handle important via test dependency)
+	g.AddEdge("core/handler_test.go:10:TestHandle", "core/handler.go:10:Handle", graph.EdgeTypeCalls, ast.Location{
+		FilePath: "core/handler_test.go", StartLine: 15,
+	})
+	// Route calls Handle
+	g.AddEdge("core/router.go:10:Route", "core/handler.go:10:Handle", graph.EdgeTypeCalls, ast.Location{
+		FilePath: "core/router.go", StartLine: 20,
+	})
+	// setup calls Handle (doc file dependency)
+	g.AddEdge("doc/source/conf.py:10:setup", "core/handler.go:10:Handle", graph.EdgeTypeCalls, ast.Location{
+		FilePath: "doc/source/conf.py", StartLine: 15,
+	})
+
+	g.Freeze()
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindImportantTool(analytics, idx)
+
+	t.Run("exclude_tests true filters test and doc files", func(t *testing.T) {
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"exclude_tests": true,
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output := result.Output.(FindImportantOutput)
+		for _, sym := range output.Results {
+			if isTestFile(sym.File) {
+				t.Errorf("test file %q should be filtered out", sym.File)
+			}
+			if isDocFile(sym.File) {
+				t.Errorf("doc file %q should be filtered out", sym.File)
+			}
+		}
+	})
+
+	t.Run("exclude_tests false includes everything", func(t *testing.T) {
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"exclude_tests": false,
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output := result.Output.(FindImportantOutput)
+		// Should include all 4 symbols (test, doc, and source)
+		if output.ResultCount < 3 {
+			t.Errorf("with exclude_tests=false, expected at least 3 results, got %d", output.ResultCount)
+		}
+	})
+
+	t.Run("ranks are sequential after filtering", func(t *testing.T) {
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"exclude_tests": true,
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+
+		output := result.Output.(FindImportantOutput)
+		for i, sym := range output.Results {
+			expectedRank := i + 1
+			if sym.Rank != expectedRank {
+				t.Errorf("result[%d].Rank = %d, want %d (sequential after filtering)", i, sym.Rank, expectedRank)
+			}
+		}
+	})
+}
+
 // TestMatchesHotspotKind_Property verifies hotspot kind filter includes Property (IT-08c).
 func TestMatchesHotspotKind_Property(t *testing.T) {
 	if !matchesHotspotKind(ast.SymbolKindProperty, "function") {

@@ -283,7 +283,9 @@ func matchesPackageScope(sym *ast.Symbol, packageFilter string) bool {
 		return false
 	}
 
-	lowerFilter := strings.ToLower(packageFilter)
+	// IT-08d: Strip trailing slash so "src/utils/" matches "src/utils/file.ts"
+	// via boundary check (haystack[endPos]='/') instead of failing (haystack[endPos]='m').
+	lowerFilter := strings.ToLower(strings.TrimRight(packageFilter, "/"))
 
 	// Strategy 1: Boundary-aware match on sym.Package (Go symbols)
 	if sym.Package != "" {

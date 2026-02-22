@@ -20,6 +20,7 @@ import (
 
 	"github.com/AleutianAI/AleutianFOSS/services/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/providers"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -31,19 +32,22 @@ var tracer = otel.Tracer("aleutian.routing")
 // Granite4 Router Implementation
 // =============================================================================
 
-// Granite4Router implements ToolRouter using granite4:micro-h via Ollama.
+// Granite4Router implements ToolRouter using a fast model for tool routing.
 //
 // # Description
 //
-// Uses IBM's Granite4 model with hybrid Mamba-2 architecture for ultra-fast
-// tool routing. The Mamba-2 architecture has linear complexity (vs quadratic
-// for attention), making it ideal for fast classification tasks.
+// Uses a fast model (e.g., IBM Granite4 with hybrid Mamba-2 architecture) for
+// ultra-fast tool routing. The ChatClient interface allows any provider
+// (Ollama, Anthropic, OpenAI, Gemini) to be used as the routing backend.
+//
+// CB-60: Refactored to use providers.ChatClient instead of direct MultiModelManager
+// dependency, enabling any LLM provider for tool routing.
 //
 // # Thread Safety
 //
 // Granite4Router is safe for concurrent use.
 type Granite4Router struct {
-	modelManager  *llm.MultiModelManager
+	chatClient    providers.ChatClient
 	config        RouterConfig
 	promptBuilder *PromptBuilder
 	logger        *slog.Logger
@@ -53,13 +57,14 @@ type Granite4Router struct {
 //
 // # Description
 //
-// Creates a router that uses granite4:micro-h (or another small model) for
-// fast tool selection. The router integrates with MultiModelManager to
-// prevent model thrashing.
+// Creates a router that uses a fast model for tool selection. The ChatClient
+// interface allows any provider (Ollama, Anthropic, OpenAI, Gemini) to be used.
+//
+// CB-60: Accepts providers.ChatClient instead of *llm.MultiModelManager.
 //
 // # Inputs
 //
-//   - modelManager: MultiModelManager for model coordination.
+//   - chatClient: ChatClient for sending routing queries. Must not be nil.
 //   - config: Router configuration.
 //
 // # Outputs
@@ -69,18 +74,19 @@ type Granite4Router struct {
 //
 // # Example
 //
-//	mgr := llm.NewMultiModelManager("http://localhost:11434")
+//	factory := providers.NewProviderFactory(modelManager)
+//	client, _ := factory.CreateChatClient(cfg)
 //	config := routing.DefaultRouterConfig()
-//	router, err := routing.NewGranite4Router(mgr, config)
-func NewGranite4Router(modelManager *llm.MultiModelManager, config RouterConfig) (*Granite4Router, error) {
+//	router, err := routing.NewGranite4Router(client, config)
+func NewGranite4Router(chatClient providers.ChatClient, config RouterConfig) (*Granite4Router, error) {
 	slog.Info("NewGranite4Router: Creating router",
 		slog.String("model", config.Model),
 		slog.String("endpoint", config.OllamaEndpoint),
-		slog.Bool("has_model_manager", modelManager != nil))
+		slog.Bool("has_chat_client", chatClient != nil))
 
-	if modelManager == nil {
-		slog.Error("NewGranite4Router: modelManager is nil")
-		return nil, fmt.Errorf("modelManager must not be nil")
+	if chatClient == nil {
+		slog.Error("NewGranite4Router: chatClient is nil")
+		return nil, fmt.Errorf("chatClient must not be nil")
 	}
 
 	slog.Info("NewGranite4Router: Creating prompt builder")
@@ -95,7 +101,7 @@ func NewGranite4Router(modelManager *llm.MultiModelManager, config RouterConfig)
 		slog.String("model", config.Model))
 
 	return &Granite4Router{
-		modelManager:  modelManager,
+		chatClient:    chatClient,
 		config:        config,
 		promptBuilder: promptBuilder,
 		logger:        slog.Default(),
@@ -106,8 +112,9 @@ func NewGranite4Router(modelManager *llm.MultiModelManager, config RouterConfig)
 //
 // # Description
 //
-// Convenience constructor that creates a MultiModelManager and uses
-// default configuration. For more control, use NewGranite4Router.
+// Convenience constructor that creates a MultiModelManager wrapped in an
+// OllamaChatAdapter and uses default configuration. For more control or
+// non-Ollama providers, use NewGranite4Router with a custom ChatClient.
 //
 // # Inputs
 //
@@ -122,8 +129,9 @@ func NewGranite4RouterWithDefaults(ollamaEndpoint string) (*Granite4Router, erro
 	config.OllamaEndpoint = ollamaEndpoint
 
 	modelManager := llm.NewMultiModelManager(ollamaEndpoint)
+	chatClient := providers.NewOllamaChatAdapter(modelManager, config.Model)
 
-	return NewGranite4Router(modelManager, config)
+	return NewGranite4Router(chatClient, config)
 }
 
 // SelectTool chooses the best tool for the given query.
@@ -196,26 +204,23 @@ func (r *Granite4Router) SelectTool(ctx context.Context, query string, available
 		{Role: "user", Content: userPrompt},
 	}
 
-	temp := float32(r.config.Temperature)
-	maxTokens := r.config.MaxTokens
-	numCtx := r.config.NumCtx
-	params := llm.GenerationParams{
-		Temperature:   &temp,
-		MaxTokens:     &maxTokens,
-		NumCtx:        &numCtx,
-		KeepAlive:     r.config.KeepAlive,
-		ModelOverride: r.config.Model,
+	opts := providers.ChatOptions{
+		Temperature: r.config.Temperature,
+		MaxTokens:   r.config.MaxTokens,
+		NumCtx:      r.config.NumCtx,
+		KeepAlive:   r.config.KeepAlive,
+		Model:       r.config.Model,
 	}
 
-	slog.Info("CB-31d Granite4Router calling modelManager.Chat",
+	slog.Info("CB-31d Granite4Router calling chatClient.Chat",
 		slog.String("model", r.config.Model),
 		slog.Int("num_messages", len(messages)),
 		slog.Int("system_prompt_len", len(systemPrompt)),
 		slog.Int("user_prompt_len", len(userPrompt)),
-		slog.Int("num_ctx", numCtx),
+		slog.Int("num_ctx", opts.NumCtx),
 	)
 
-	response, err := r.modelManager.Chat(ctx, r.config.Model, messages, params)
+	response, err := r.chatClient.Chat(ctx, messages, opts)
 	if err != nil {
 		slog.Error("CB-31d Granite4Router.Chat FAILED",
 			slog.String("model", r.config.Model),
@@ -332,20 +337,17 @@ func (r *Granite4Router) FilterBatch(ctx context.Context, prompt string) (string
 		{Role: "user", Content: prompt},
 	}
 
-	// Build generation params
-	temp := float32(r.config.Temperature)
-	maxTokens := 256 // Short response expected
-	numCtx := r.config.NumCtx
-	params := llm.GenerationParams{
-		Temperature:   &temp,
-		MaxTokens:     &maxTokens,
-		NumCtx:        &numCtx,
-		KeepAlive:     r.config.KeepAlive,
-		ModelOverride: r.config.Model,
+	// Build chat options
+	opts := providers.ChatOptions{
+		Temperature: r.config.Temperature,
+		MaxTokens:   256, // Short response expected
+		NumCtx:      r.config.NumCtx,
+		KeepAlive:   r.config.KeepAlive,
+		Model:       r.config.Model,
 	}
 
-	// Use model manager for coordinated model access
-	response, err := r.modelManager.Chat(ctx, r.config.Model, messages, params)
+	// Use chat client for coordinated model access
+	response, err := r.chatClient.Chat(ctx, messages, opts)
 	if err != nil {
 		duration := time.Since(startTime)
 		span.RecordError(err)
@@ -529,28 +531,41 @@ func (r *Granite4Router) Close() error {
 	return nil
 }
 
-// WarmRouter pre-loads the routing model.
+// WarmRouter pre-loads the routing model using the provided lifecycle manager.
 //
 // # Description
 //
 // Warms up the router model so the first routing request doesn't incur
 // model loading latency. Should be called during initialization.
 //
+// CB-60: Refactored to accept a ModelLifecycleManager instead of using
+// the internal model manager. For cloud providers, warmup is a no-op.
+//
 // # Inputs
 //
 //   - ctx: Context for cancellation.
+//   - lifecycle: Lifecycle manager for model warmup. If nil, warmup is skipped.
 //
 // # Outputs
 //
 //   - error: Non-nil if warmup fails.
-func (r *Granite4Router) WarmRouter(ctx context.Context) error {
+func (r *Granite4Router) WarmRouter(ctx context.Context, lifecycle providers.ModelLifecycleManager) error {
+	if lifecycle == nil {
+		r.logger.Info("WarmRouter: No lifecycle manager, skipping warmup",
+			slog.String("model", r.config.Model))
+		return nil
+	}
+
 	r.logger.Info("WarmRouter: Starting model warmup",
 		slog.String("model", r.config.Model),
 		slog.String("keep_alive", r.config.KeepAlive),
-		slog.Bool("has_model_manager", r.modelManager != nil))
+		slog.Bool("is_local", lifecycle.IsLocal()))
 
 	startTime := time.Now()
-	err := r.modelManager.WarmModel(ctx, r.config.Model, r.config.KeepAlive, r.config.NumCtx)
+	err := lifecycle.WarmModel(ctx, r.config.Model, providers.WarmupOptions{
+		KeepAlive: r.config.KeepAlive,
+		NumCtx:    r.config.NumCtx,
+	})
 	duration := time.Since(startTime)
 
 	if err != nil {

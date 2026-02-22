@@ -229,13 +229,13 @@ func (a *OllamaAdapter) completeWithTools(
 		}
 	}
 
-	// Convert Ollama tool calls to agent format
+	// Convert generic tool calls to agent format
 	var agentToolCalls []ToolCall
 	for _, tc := range result.ToolCalls {
 		agentToolCalls = append(agentToolCalls, ToolCall{
 			ID:        tc.ID,
-			Name:      tc.Function.Name,
-			Arguments: tc.Function.ArgumentsString(),
+			Name:      tc.Name,
+			Arguments: tc.ArgumentsString(),
 		})
 	}
 

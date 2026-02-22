@@ -1409,7 +1409,22 @@ func (p *ExecutePhase) extractToolParameters(
 		includeExported := false
 		lowerQuery := strings.ToLower(query)
 		if strings.Contains(lowerQuery, "export") || strings.Contains(lowerQuery, "public") {
-			includeExported = true
+			// IT-08d: Check for negation before enabling exported inclusion.
+			// "not public", "non-exported" etc. mean the opposite.
+			negated := false
+			for _, neg := range []string{
+				"not public", "not export", "no public", "no export",
+				"non-public", "non-export", "aren't public", "isn't public",
+				"without public", "without export", "excluding public", "excluding export",
+			} {
+				if strings.Contains(lowerQuery, neg) {
+					negated = true
+					break
+				}
+			}
+			if !negated {
+				includeExported = true
+			}
 		}
 		// IT-08: Only include test files if the query explicitly mentions tests
 		excludeTests := !strings.Contains(lowerQuery, "test")
@@ -1472,18 +1487,21 @@ func (p *ExecutePhase) extractToolParameters(
 		}, nil
 
 	case "find_important":
-		// Extract "top N" and "kind" from query (same as find_hotspots)
-		// Defaults: top=10, kind="all"
+		// Extract "top N", "kind", and "exclude_tests" from query (same as find_hotspots)
+		// Defaults: top=10, kind="all", exclude_tests=true
 		top := extractTopNFromQuery(query, 10)
 		kind := extractKindFromQuery(query)
+		excludeTests := extractExcludeTestsFromQuery(query)
 		slog.Debug("GR-Phase1: extracted find_important params",
 			slog.String("tool", toolName),
 			slog.Int("top", top),
 			slog.String("kind", kind),
+			slog.Bool("exclude_tests", excludeTests),
 		)
 		return tools.FindImportantParams{
-			Top:  top,
-			Kind: kind,
+			Top:          top,
+			Kind:         kind,
+			ExcludeTests: excludeTests,
 		}, nil
 
 	case "find_symbol":
@@ -2397,8 +2415,9 @@ func convertMapToTypedParams(toolName string, params map[string]any) (tools.Type
 
 	case "find_important":
 		return tools.FindImportantParams{
-			Top:  getIntParam(params, "top", 10),
-			Kind: getStringParam(params, "kind", "all"),
+			Top:          getIntParam(params, "top", 10),
+			Kind:         getStringParam(params, "kind", "all"),
+			ExcludeTests: getBoolParam(params, "exclude_tests", true),
 		}, nil
 
 	case "find_symbol":

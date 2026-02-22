@@ -2085,6 +2085,46 @@ func TestExtractPackageContextFromQuery(t *testing.T) {
 			query: "Find dead code in the Router class",
 			want:  "router",
 		},
+		// IT-08d: Capitalized project names skipped in Pattern 1
+		{
+			name:  "capitalized project name in Pattern 1 skipped",
+			query: "Find dead code or unreachable functions in Express.",
+			want:  "",
+		},
+		// IT-08d: Capitalized project name in Pattern 2 → use module name
+		{
+			name:  "capitalized project name in Pattern 2 uses module",
+			query: "Find dead code specifically in the Flask helpers module",
+			want:  "helpers",
+		},
+		{
+			name:  "capitalized project name in Pattern 2 Pandas",
+			query: "Find dead code specifically in the Pandas reshape module",
+			want:  "reshape",
+		},
+		// IT-08d: Lowercase multi-word still uses first word (no regression)
+		{
+			name:  "lowercase multi-word subsystem unchanged",
+			query: "Find dead code in the value log subsystem",
+			want:  "value",
+		},
+		// IT-08d: Single word after article unchanged regardless of case
+		{
+			name:  "single word after article unchanged",
+			query: "Find dead code in the Router class",
+			want:  "router",
+		},
+		// IT-08d Next Steps: Exact queries from failing integration tests
+		{
+			name:  "IT-08d_5056_hugo_resources_package",
+			query: "Find unused or dead code in the resources package",
+			want:  "resources",
+		},
+		{
+			name:  "IT-08d_8056_nestjs_packages_common_directory",
+			query: "Find dead code specifically in the packages/common directory",
+			want:  "packages/common",
+		},
 	}
 
 	for _, tt := range tests {

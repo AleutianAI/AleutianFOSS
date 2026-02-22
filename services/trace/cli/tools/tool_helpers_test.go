@@ -269,4 +269,16 @@ func TestMatchesPackageScope(t *testing.T) {
 			t.Error("expected 'page' to match Go package 'page'")
 		}
 	})
+
+	// IT-08d: Trailing slash stripped from filter
+	t.Run("trailing slash stripped from filter", func(t *testing.T) {
+		sym := &ast.Symbol{
+			Name:     "mathUtils",
+			FilePath: "src/utils/mathutils.ts",
+			Package:  "",
+		}
+		if !matchesPackageScope(sym, "src/utils/") {
+			t.Error("expected 'src/utils/' (with trailing slash) to match 'src/utils/mathutils.ts' after TrimRight")
+		}
+	})
 }

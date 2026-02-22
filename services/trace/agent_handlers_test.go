@@ -19,7 +19,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AleutianAI/AleutianFOSS/services/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/providers"
 	"github.com/gin-gonic/gin"
 )
 
@@ -581,6 +583,94 @@ func TestAgentHandlers_HandleGetCRSExport_NoCRS(t *testing.T) {
 	// Should return 204 No Content when CRS not enabled
 	if w.Code != http.StatusNoContent {
 		t.Errorf("Status = %d, want %d", w.Code, http.StatusNoContent)
+	}
+}
+
+// =============================================================================
+// CB-60b: Functional Options Tests
+// =============================================================================
+
+func TestNewAgentHandlers_WithOptions_SameMMM(t *testing.T) {
+	mockLoop := &MockAgentLoop{}
+	mgr := llm.NewMultiModelManager("http://localhost:11434")
+	factory := providers.NewProviderFactory(mgr)
+	rc := &providers.RoleConfig{
+		Main:   providers.ProviderConfig{Provider: providers.ProviderOllama, Model: "test"},
+		Router: providers.ProviderConfig{Provider: providers.ProviderOllama, Model: "router"},
+	}
+
+	handlers := NewAgentHandlers(mockLoop, nil,
+		WithProviderFactory(factory),
+		WithModelManager(mgr),
+		WithRoleConfig(rc),
+	)
+
+	// Verify the same manager pointer is used (no double MMM)
+	if handlers.modelManager != mgr {
+		t.Error("expected injected modelManager to be used (pointer equality)")
+	}
+	if handlers.providerFactory != factory {
+		t.Error("expected injected providerFactory to be used (pointer equality)")
+	}
+	if handlers.roleConfig != rc {
+		t.Error("expected injected roleConfig to be used (pointer equality)")
+	}
+}
+
+func TestNewAgentHandlers_WithOptions_NilMMM_NoPanic(t *testing.T) {
+	// All-cloud configuration: no Ollama MMM needed, should not panic.
+	// When nil MMM is passed via option, backward compat creates a fallback.
+	mockLoop := &MockAgentLoop{}
+	factory := providers.NewProviderFactory(nil)
+
+	handlers := NewAgentHandlers(mockLoop, nil,
+		WithProviderFactory(factory),
+	)
+
+	// Factory was injected, so it should be the same pointer
+	if handlers.providerFactory != factory {
+		t.Error("expected injected factory to be used")
+	}
+	// modelManager should have been created as fallback (backward compat)
+	if handlers.modelManager == nil {
+		t.Error("expected fallback modelManager to be created")
+	}
+}
+
+func TestNewAgentHandlers_NoOptions_CreatesOwnMMM(t *testing.T) {
+	mockLoop := &MockAgentLoop{}
+
+	handlers := NewAgentHandlers(mockLoop, nil)
+
+	if handlers.modelManager == nil {
+		t.Error("expected modelManager to be created when no options provided")
+	}
+	if handlers.providerFactory == nil {
+		t.Error("expected providerFactory to be created when no options provided")
+	}
+	if handlers.roleConfig != nil {
+		t.Error("expected roleConfig to be nil when not injected")
+	}
+}
+
+func TestNewAgentHandlers_WithRoleConfig_StoredCorrectly(t *testing.T) {
+	mockLoop := &MockAgentLoop{}
+	rc := &providers.RoleConfig{
+		Main:           providers.ProviderConfig{Provider: providers.ProviderAnthropic, Model: "claude-sonnet"},
+		Router:         providers.ProviderConfig{Provider: providers.ProviderOllama, Model: "granite4:micro-h"},
+		ParamExtractor: providers.ProviderConfig{Provider: providers.ProviderOllama, Model: "ministral-3:3b"},
+	}
+
+	handlers := NewAgentHandlers(mockLoop, nil, WithRoleConfig(rc))
+
+	if handlers.roleConfig == nil {
+		t.Fatal("expected roleConfig to be set")
+	}
+	if handlers.roleConfig.Main.Provider != providers.ProviderAnthropic {
+		t.Errorf("Main.Provider = %q, want %q", handlers.roleConfig.Main.Provider, providers.ProviderAnthropic)
+	}
+	if handlers.roleConfig.Router.Model != "granite4:micro-h" {
+		t.Errorf("Router.Model = %q, want %q", handlers.roleConfig.Router.Model, "granite4:micro-h")
 	}
 }
 

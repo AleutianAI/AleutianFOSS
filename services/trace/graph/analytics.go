@@ -304,6 +304,35 @@ func (a *GraphAnalytics) GetNode(id string) (*Node, bool) {
 }
 
 // =============================================================================
+// GR-60: File Classification Delegation
+// =============================================================================
+
+// IsProductionFile returns true if the file is classified as production code.
+//
+// Description:
+//
+//	Delegates to the underlying HierarchicalGraph.IsProductionFile().
+//	This is the primary method that analytics tools should use to filter
+//	test/example/documentation files from results.
+//
+// Inputs:
+//
+//	filePath - The file path to check.
+//
+// Outputs:
+//
+//	bool - True if the file is production code. Returns true if analytics
+//	       or graph is nil (conservative default).
+//
+// Thread Safety: Safe for concurrent use.
+func (a *GraphAnalytics) IsProductionFile(filePath string) bool {
+	if a == nil || a.graph == nil {
+		return true
+	}
+	return a.graph.IsProductionFile(filePath)
+}
+
+// =============================================================================
 // Hotspot Detection
 // =============================================================================
 
