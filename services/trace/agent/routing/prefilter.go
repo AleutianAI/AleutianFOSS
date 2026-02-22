@@ -33,7 +33,7 @@ import (
 
 var (
 	prefilterNarrowedCount = promauto.NewHistogram(prometheus.HistogramOpts{
-		Namespace: "code_buddy",
+		Namespace: "trace",
 		Subsystem: "prefilter",
 		Name:      "narrowed_count",
 		Help:      "Number of tools after pre-filtering",
@@ -41,14 +41,14 @@ var (
 	})
 
 	prefilterForcedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "code_buddy",
+		Namespace: "trace",
 		Subsystem: "prefilter",
 		Name:      "forced_total",
 		Help:      "Total forced tool selections by rule type and tool",
 	}, []string{"rule_type", "tool"})
 
 	prefilterLatency = promauto.NewHistogram(prometheus.HistogramOpts{
-		Namespace: "code_buddy",
+		Namespace: "trace",
 		Subsystem: "prefilter",
 		Name:      "latency_seconds",
 		Help:      "Pre-filter execution latency",
@@ -56,14 +56,14 @@ var (
 	})
 
 	prefilterRulesFired = promauto.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "code_buddy",
+		Namespace: "trace",
 		Subsystem: "prefilter",
 		Name:      "rules_fired_total",
 		Help:      "Total rules fired by type",
 	}, []string{"rule_type"})
 
 	prefilterPassthroughTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Namespace: "code_buddy",
+		Namespace: "trace",
 		Subsystem: "prefilter",
 		Name:      "passthrough_total",
 		Help:      "Times pre-filter passed through unchanged",

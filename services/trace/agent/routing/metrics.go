@@ -23,7 +23,7 @@ var (
 	// routingLatency measures the time taken for tool routing decisions.
 	// Labels: model (the router model used), status (success, error, low_confidence)
 	routingLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Namespace: "code_buddy",
+		Namespace: "trace",
 		Subsystem: "routing",
 		Name:      "latency_seconds",
 		Help:      "Tool routing decision latency in seconds",
@@ -33,7 +33,7 @@ var (
 	// routingConfidence tracks the distribution of confidence scores.
 	// Labels: model
 	routingConfidence = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Namespace: "code_buddy",
+		Namespace: "trace",
 		Subsystem: "routing",
 		Name:      "confidence",
 		Help:      "Distribution of routing confidence scores",
@@ -43,7 +43,7 @@ var (
 	// routingSelections counts tool selections by the router.
 	// Labels: model, tool (selected tool name)
 	routingSelections = promauto.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "code_buddy",
+		Namespace: "trace",
 		Subsystem: "routing",
 		Name:      "selections_total",
 		Help:      "Total tool selections by router",
@@ -52,7 +52,7 @@ var (
 	// routingFallbacks counts when routing falls back to main LLM.
 	// Labels: model, reason (error, low_confidence, disabled)
 	routingFallbacks = promauto.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "code_buddy",
+		Namespace: "trace",
 		Subsystem: "routing",
 		Name:      "fallbacks_total",
 		Help:      "Total routing fallbacks to main LLM",
@@ -61,7 +61,7 @@ var (
 	// routingErrors counts routing errors by type.
 	// Labels: model, error_type (timeout, parse_error, model_unavailable)
 	routingErrors = promauto.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "code_buddy",
+		Namespace: "trace",
 		Subsystem: "routing",
 		Name:      "errors_total",
 		Help:      "Total routing errors by type",
@@ -70,7 +70,7 @@ var (
 	// modelWarmupDuration measures time to warm up router models.
 	// Labels: model
 	modelWarmupDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Namespace: "code_buddy",
+		Namespace: "trace",
 		Subsystem: "routing",
 		Name:      "warmup_duration_seconds",
 		Help:      "Time to warm up router model",
@@ -80,7 +80,7 @@ var (
 	// modelWarmupStatus tracks warmup success/failure.
 	// Labels: model, status (success, error)
 	modelWarmupStatus = promauto.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "code_buddy",
+		Namespace: "trace",
 		Subsystem: "routing",
 		Name:      "warmup_total",
 		Help:      "Model warmup attempts by status",
@@ -89,12 +89,58 @@ var (
 	// routerInitStatus tracks router initialization success/failure.
 	// Labels: model, status (success, error), reason (if error)
 	routerInitStatus = promauto.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "code_buddy",
+		Namespace: "trace",
 		Subsystem: "routing",
 		Name:      "init_total",
 		Help:      "Router initialization attempts by status",
 	}, []string{"model", "status", "reason"})
 )
+
+// =============================================================================
+// Param Extraction Metrics (IT-08b)
+// =============================================================================
+
+var (
+	// paramExtractionLatency measures the time taken for LLM parameter extraction.
+	// Labels: model (the extractor model used), status (success, timeout, error, parse_error)
+	paramExtractionLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "trace",
+		Subsystem: "param_extraction",
+		Name:      "latency_seconds",
+		Help:      "LLM parameter extraction latency in seconds",
+		Buckets:   []float64{0.01, 0.025, 0.05, 0.1, 0.2, 0.3, 0.5, 1.0, 2.0},
+	}, []string{"model", "status"})
+
+	// paramExtractionTotal counts parameter extraction attempts by status.
+	// Labels: model, status (success, timeout, error, parse_error, fallback)
+	paramExtractionTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "trace",
+		Subsystem: "param_extraction",
+		Name:      "total",
+		Help:      "Total LLM parameter extraction attempts by status",
+	}, []string{"model", "status"})
+)
+
+// RecordParamExtractionLatency records the latency of a parameter extraction call.
+//
+// Inputs:
+//
+//	model - The extractor model name.
+//	status - "success", "timeout", "error", or "parse_error".
+//	durationSec - Duration in seconds.
+func RecordParamExtractionLatency(model, status string, durationSec float64) {
+	paramExtractionLatency.WithLabelValues(model, status).Observe(durationSec)
+}
+
+// RecordParamExtractionTotal records a parameter extraction attempt.
+//
+// Inputs:
+//
+//	model - The extractor model name.
+//	status - "success", "timeout", "error", "parse_error", or "fallback".
+func RecordParamExtractionTotal(model, status string) {
+	paramExtractionTotal.WithLabelValues(model, status).Inc()
+}
 
 // =============================================================================
 // Metrics Recording Functions
@@ -203,7 +249,7 @@ var (
 	// ucb1SelectionScore tracks the distribution of UCB1 final scores.
 	// Labels: tool (selected tool name)
 	ucb1SelectionScore = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Namespace: "code_buddy",
+		Namespace: "trace",
 		Subsystem: "ucb1",
 		Name:      "selection_score",
 		Help:      "Distribution of UCB1 final scores for selected tools",
@@ -213,7 +259,7 @@ var (
 	// ucb1ProofPenalty tracks proof penalty values.
 	// Labels: tool
 	ucb1ProofPenalty = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Namespace: "code_buddy",
+		Namespace: "trace",
 		Subsystem: "ucb1",
 		Name:      "proof_penalty",
 		Help:      "Distribution of proof penalties applied to tools",
@@ -223,7 +269,7 @@ var (
 	// ucb1ExplorationBonus tracks exploration bonus values.
 	// Labels: tool
 	ucb1ExplorationBonus = promauto.NewHistogramVec(prometheus.HistogramOpts{
-		Namespace: "code_buddy",
+		Namespace: "trace",
 		Subsystem: "ucb1",
 		Name:      "exploration_bonus",
 		Help:      "Distribution of exploration bonuses for tools",
@@ -233,7 +279,7 @@ var (
 	// ucb1BlockedSelections counts tool selections blocked by clauses.
 	// Labels: tool, reason_type (clause violation category)
 	ucb1BlockedSelections = promauto.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "code_buddy",
+		Namespace: "trace",
 		Subsystem: "ucb1",
 		Name:      "blocked_selections_total",
 		Help:      "Total tool selections blocked by learned clauses",
@@ -242,7 +288,7 @@ var (
 	// ucb1ForcedMoves counts forced moves detected by unit propagation.
 	// Labels: tool
 	ucb1ForcedMoves = promauto.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "code_buddy",
+		Namespace: "trace",
 		Subsystem: "ucb1",
 		Name:      "forced_moves_total",
 		Help:      "Total forced moves detected via unit propagation",
@@ -250,7 +296,7 @@ var (
 
 	// ucb1CacheHits counts tool selection cache hits.
 	ucb1CacheHits = promauto.NewCounter(prometheus.CounterOpts{
-		Namespace: "code_buddy",
+		Namespace: "trace",
 		Subsystem: "ucb1",
 		Name:      "cache_hits_total",
 		Help:      "Total tool selection cache hits",
@@ -258,7 +304,7 @@ var (
 
 	// ucb1CacheMisses counts tool selection cache misses.
 	ucb1CacheMisses = promauto.NewCounter(prometheus.CounterOpts{
-		Namespace: "code_buddy",
+		Namespace: "trace",
 		Subsystem: "ucb1",
 		Name:      "cache_misses_total",
 		Help:      "Total tool selection cache misses",
@@ -267,7 +313,7 @@ var (
 	// ucb1CacheInvalidations counts cache invalidations.
 	// Labels: reason (ttl_expired, generation_changed, evicted)
 	ucb1CacheInvalidations = promauto.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "code_buddy",
+		Namespace: "trace",
 		Subsystem: "ucb1",
 		Name:      "cache_invalidations_total",
 		Help:      "Total cache invalidations by reason",
@@ -275,7 +321,7 @@ var (
 
 	// ucb1ScoringLatency measures UCB1 scoring duration.
 	ucb1ScoringLatency = promauto.NewHistogram(prometheus.HistogramOpts{
-		Namespace: "code_buddy",
+		Namespace: "trace",
 		Subsystem: "ucb1",
 		Name:      "scoring_latency_seconds",
 		Help:      "UCB1 scoring latency in seconds",
@@ -284,7 +330,7 @@ var (
 
 	// ucb1AllBlockedTotal counts when all tools are blocked.
 	ucb1AllBlockedTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Namespace: "code_buddy",
+		Namespace: "trace",
 		Subsystem: "ucb1",
 		Name:      "all_blocked_total",
 		Help:      "Total times all tools were blocked by clauses",

@@ -59,37 +59,37 @@ func TestMatchScope(t *testing.T) {
 		{
 			name:        "wildcard matches everything",
 			memoryScope: "*",
-			targetPath:  "services/code_buddy/handlers.go",
+			targetPath:  "services/trace/handlers.go",
 			expected:    true,
 		},
 		{
 			name:        "exact match",
-			memoryScope: "services/code_buddy/handlers.go",
-			targetPath:  "services/code_buddy/handlers.go",
+			memoryScope: "services/trace/handlers.go",
+			targetPath:  "services/trace/handlers.go",
 			expected:    true,
 		},
 		{
 			name:        "prefix wildcard matches",
-			memoryScope: "services/code_buddy/*",
-			targetPath:  "services/code_buddy/handlers.go",
+			memoryScope: "services/trace/*",
+			targetPath:  "services/trace/handlers.go",
 			expected:    true,
 		},
 		{
 			name:        "prefix wildcard doesn't match different path",
 			memoryScope: "services/rag_engine/*",
-			targetPath:  "services/code_buddy/handlers.go",
+			targetPath:  "services/trace/handlers.go",
 			expected:    false,
 		},
 		{
 			name:        "exact mismatch",
-			memoryScope: "services/code_buddy/types.go",
-			targetPath:  "services/code_buddy/handlers.go",
+			memoryScope: "services/trace/types.go",
+			targetPath:  "services/trace/handlers.go",
 			expected:    false,
 		},
 		{
 			name:        "empty scope doesn't match",
 			memoryScope: "",
-			targetPath:  "services/code_buddy/handlers.go",
+			targetPath:  "services/trace/handlers.go",
 			expected:    false,
 		},
 	}
@@ -118,22 +118,22 @@ func TestCommonPrefix(t *testing.T) {
 		},
 		{
 			name:     "single path",
-			paths:    []string{"services/code_buddy/handlers.go"},
-			expected: "services/code_buddy/handlers.go",
+			paths:    []string{"services/trace/handlers.go"},
+			expected: "services/trace/handlers.go",
 		},
 		{
 			name:     "same directory",
-			paths:    []string{"services/code_buddy/handlers.go", "services/code_buddy/types.go"},
-			expected: "services/code_buddy",
+			paths:    []string{"services/trace/handlers.go", "services/trace/types.go"},
+			expected: "services/trace",
 		},
 		{
 			name:     "different directories",
-			paths:    []string{"services/code_buddy/handlers.go", "services/rag_engine/agent.py"},
+			paths:    []string{"services/trace/handlers.go", "services/rag_engine/agent.py"},
 			expected: "services",
 		},
 		{
 			name:     "no common prefix",
-			paths:    []string{"services/code_buddy/handlers.go", "pkg/utils/helpers.go"},
+			paths:    []string{"services/trace/handlers.go", "pkg/utils/helpers.go"},
 			expected: "",
 		},
 	}
@@ -167,7 +167,7 @@ func TestCalculateScore(t *testing.T) {
 			Scope:      "services/*",
 		}
 
-		score := retriever.calculateScore(memory, 1.0, now, "services/code_buddy")
+		score := retriever.calculateScore(memory, 1.0, now, "services/trace")
 		// Should be > 1.0 due to scope boost
 		if score <= 1.0 {
 			t.Errorf("expected high score > 1.0, got %f", score)
@@ -181,7 +181,7 @@ func TestCalculateScore(t *testing.T) {
 			Scope:      "pkg/*",
 		}
 
-		score := retriever.calculateScore(memory, 0.1, now, "services/code_buddy")
+		score := retriever.calculateScore(memory, 0.1, now, "services/trace")
 		if score >= 0.2 {
 			t.Errorf("expected low score < 0.2, got %f", score)
 		}
@@ -194,7 +194,7 @@ func TestCalculateScore(t *testing.T) {
 			Scope:      "services/*",
 		}
 
-		scoreWithMatch := retriever.calculateScore(memory, 0.5, now, "services/code_buddy")
+		scoreWithMatch := retriever.calculateScore(memory, 0.5, now, "services/trace")
 		scoreWithoutMatch := retriever.calculateScore(memory, 0.5, now, "pkg/utils")
 
 		if scoreWithMatch <= scoreWithoutMatch {

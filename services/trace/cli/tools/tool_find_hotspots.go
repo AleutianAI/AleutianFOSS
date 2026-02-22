@@ -317,17 +317,14 @@ func (t *findHotspotsTool) Execute(ctx context.Context, params TypedParams) (*Re
 		}
 	}
 
-	// IT-07 Bug 3: Filter by package if specified
+	// IT-07 Bug 3 / IT-08 Run 3: Filter by package using boundary-aware matching
 	if p.Package != "" {
-		lowerPkg := strings.ToLower(p.Package)
 		var pkgFiltered []graph.HotspotNode
 		for _, hs := range filtered {
 			if hs.Node == nil || hs.Node.Symbol == nil {
 				continue
 			}
-			sym := hs.Node.Symbol
-			if strings.EqualFold(sym.Package, p.Package) ||
-				strings.Contains(strings.ToLower(sym.FilePath), lowerPkg) {
+			if matchesPackageScope(hs.Node.Symbol, p.Package) {
 				pkgFiltered = append(pkgFiltered, hs)
 			}
 		}
@@ -585,7 +582,8 @@ func (t *findHotspotsTool) formatText(hotspots []graph.HotspotNode, packageFilte
 func matchesHotspotKind(kind ast.SymbolKind, filter string) bool {
 	switch filter {
 	case "function", "method":
-		return kind == ast.SymbolKindFunction || kind == ast.SymbolKindMethod
+		return kind == ast.SymbolKindFunction || kind == ast.SymbolKindMethod ||
+			kind == ast.SymbolKindProperty // IT-08c: Python @property has callable body
 	case "type", "class", "struct", "interface":
 		return kind == ast.SymbolKindType || kind == ast.SymbolKindStruct ||
 			kind == ast.SymbolKindInterface || kind == ast.SymbolKindClass

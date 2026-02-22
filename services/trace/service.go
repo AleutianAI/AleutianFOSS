@@ -8,14 +8,14 @@
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
 
-// Package code_buddy provides the Code Buddy HTTP service for code analysis.
+// Package trace provides the Trace HTTP service for code analysis.
 //
 // The service exposes endpoints for:
 //   - Initializing and caching code graphs
 //   - Querying symbols and relationships
 //   - Assembling context for LLM prompts
 //   - Seeding library documentation
-package code_buddy
+package trace
 
 import (
 	"context"

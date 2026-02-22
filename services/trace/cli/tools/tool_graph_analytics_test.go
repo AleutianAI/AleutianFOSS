@@ -14,6 +14,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
 )
@@ -849,6 +850,76 @@ func TestFindImportantTool_Definition(t *testing.T) {
 	// Check for expected parameters (Parameters is a map[string]ParamDef)
 	if _, ok := def.Parameters["top"]; !ok {
 		t.Error("Missing 'top' parameter")
+	}
+}
+
+// TestFindImportantTool_MatchesKind verifies kind filter consistency (IT-08c).
+func TestFindImportantTool_MatchesKind(t *testing.T) {
+	tool := &findImportantTool{}
+
+	t.Run("function filter includes Property", func(t *testing.T) {
+		if !tool.matchesKind(ast.SymbolKindProperty, "function") {
+			t.Error("function filter should include Property (Python @property)")
+		}
+	})
+
+	t.Run("function filter includes Function and Method", func(t *testing.T) {
+		if !tool.matchesKind(ast.SymbolKindFunction, "function") {
+			t.Error("function filter should include Function")
+		}
+		if !tool.matchesKind(ast.SymbolKindMethod, "function") {
+			t.Error("function filter should include Method")
+		}
+	})
+
+	t.Run("function filter rejects Class", func(t *testing.T) {
+		if tool.matchesKind(ast.SymbolKindClass, "function") {
+			t.Error("function filter should reject Class")
+		}
+	})
+
+	t.Run("type filter includes Class", func(t *testing.T) {
+		if !tool.matchesKind(ast.SymbolKindClass, "type") {
+			t.Error("type filter should include Class (JS/TS/Python)")
+		}
+	})
+
+	t.Run("type filter includes Interface Struct Type", func(t *testing.T) {
+		for _, kind := range []ast.SymbolKind{
+			ast.SymbolKindInterface, ast.SymbolKindStruct, ast.SymbolKindType,
+		} {
+			if !tool.matchesKind(kind, "type") {
+				t.Errorf("type filter should include %s", kind)
+			}
+		}
+	})
+
+	t.Run("type filter rejects Function", func(t *testing.T) {
+		if tool.matchesKind(ast.SymbolKindFunction, "type") {
+			t.Error("type filter should reject Function")
+		}
+	})
+
+	t.Run("all filter accepts everything", func(t *testing.T) {
+		for _, kind := range []ast.SymbolKind{
+			ast.SymbolKindFunction, ast.SymbolKindMethod, ast.SymbolKindProperty,
+			ast.SymbolKindClass, ast.SymbolKindStruct, ast.SymbolKindInterface,
+			ast.SymbolKindVariable, ast.SymbolKindEnum,
+		} {
+			if !tool.matchesKind(kind, "all") {
+				t.Errorf("all filter should accept %s", kind)
+			}
+		}
+	})
+}
+
+// TestMatchesHotspotKind_Property verifies hotspot kind filter includes Property (IT-08c).
+func TestMatchesHotspotKind_Property(t *testing.T) {
+	if !matchesHotspotKind(ast.SymbolKindProperty, "function") {
+		t.Error("hotspot function filter should include Property (Python @property)")
+	}
+	if !matchesHotspotKind(ast.SymbolKindProperty, "method") {
+		t.Error("hotspot method filter should include Property (Python @property)")
 	}
 }
 

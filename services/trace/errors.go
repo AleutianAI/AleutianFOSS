@@ -8,7 +8,7 @@
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
 
-package code_buddy
+package trace
 
 import "errors"
 

@@ -249,37 +249,54 @@ func (t *findDeadCodeTool) Execute(ctx context.Context, params TypedParams) (*Re
 	)
 
 	// Apply filters
+	// IT-08 Run 3: Filter order is package scope FIRST, then export filter.
+	// In library codebases, most symbols are exported. If export filter runs first,
+	// it depletes the candidate set before package scoping can select the right area.
 	var filtered []graph.DeadCodeNode
 
-	// Hoist lowerPkg outside the loop for efficiency
-	lowerPkg := ""
-	if p.Package != "" {
-		lowerPkg = strings.ToLower(p.Package)
-	}
-
+	// Phase 1: Filter by package scope (boundary-aware, cross-language)
+	var pkgScoped []graph.DeadCodeNode
 	for _, dc := range deadCode {
 		if dc.Node == nil || dc.Node.Symbol == nil {
 			continue
 		}
-		sym := dc.Node.Symbol
+		if matchesPackageScope(dc.Node.Symbol, p.Package) {
+			pkgScoped = append(pkgScoped, dc)
+		}
+	}
 
-		// Filter by exported status
+	// Warn when package filter matches zero symbols
+	if p.Package != "" && len(pkgScoped) == 0 {
+		t.logger.Warn("package filter matched zero symbols",
+			slog.String("tool", "find_dead_code"),
+			slog.String("package_filter", p.Package),
+			slog.Int("raw_count", len(deadCode)),
+		)
+	}
+
+	// Phase 2: Filter by exported status
+	for _, dc := range pkgScoped {
+		sym := dc.Node.Symbol
 		if !p.IncludeExported && sym.Exported {
 			continue
 		}
-
-		// Filter by package (exact match OR file path substring)
-		if p.Package != "" {
-			if !strings.EqualFold(sym.Package, p.Package) &&
-				!strings.Contains(strings.ToLower(sym.FilePath), lowerPkg) {
-				continue
-			}
-		}
-
 		filtered = append(filtered, dc)
 	}
 
-	// IT-08: Filter out test-file symbols
+	// Phase 2b: Fallback — if package+unexported yields 0 results but
+	// package-only had results, fall back to include exported in that scope.
+	// This prevents empty results when the user asks about a specific area
+	// where all symbols happen to be exported (common in library codebases).
+	if p.Package != "" && len(filtered) == 0 && len(pkgScoped) > 0 && !p.IncludeExported {
+		t.logger.Debug("package scope fallback: including exported symbols in scoped results",
+			slog.String("tool", "find_dead_code"),
+			slog.String("package_filter", p.Package),
+			slog.Int("scoped_count", len(pkgScoped)),
+		)
+		filtered = pkgScoped
+	}
+
+	// Phase 3: Filter out test-file symbols
 	if p.ExcludeTests {
 		var nonTest []graph.DeadCodeNode
 		for _, dc := range filtered {

@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1528,9 +1529,19 @@ func (p *ExecutePhase) extractToolParameters(
 			slog.Float64("resolution", resolution),
 			slog.Int("top", top),
 		)
+		// IT-11: Must set ALL defaults explicitly — Go zero values for MinSize (0)
+		// and ShowCrossEdges (false) cause: (a) 11K micro-communities flooding output,
+		// (b) cross-community edges section missing, making coupling queries unanswerable.
+		// IT-11 J-9: Do NOT use extractPackageContextFromQuery here — it produces false
+		// positives for community queries ("natural code" → "natural", "what code" → "what")
+		// because generic words before scopeKeyword "code" pass isPackageLikeName.
+		// The LLM-enhanced path (IT-08b) handles package_filter correctly.
 		return tools.FindCommunitiesParams{
-			Resolution: resolution,
-			Top:        top,
+			MinSize:        3,
+			Resolution:     resolution,
+			Top:            top,
+			ShowCrossEdges: true,
+			PackageFilter:  "",
 		}, nil
 
 	case "find_articulation_points":
@@ -2169,6 +2180,399 @@ func (p *ExecutePhase) extractToolParameters(
 	default:
 		// For other tools, fallback to Main LLM
 		return nil, fmt.Errorf("parameter extraction not implemented for tool: %s", toolName)
+	}
+}
+
+// enhanceParamsWithLLM attempts to improve regex-extracted parameters using the LLM.
+//
+// Description:
+//
+//	IT-08b: Takes the regex extraction result, sends it to the LLM as a hint
+//	along with the tool schema and user query. The LLM can confirm or correct
+//	the parameters. If the LLM call fails for any reason, the original regex
+//	result is returned unchanged (safe fallback).
+//
+// Inputs:
+//
+//	ctx - Context for cancellation.
+//	deps - Phase dependencies (must have ParamExtractor set).
+//	toolName - The name of the tool.
+//	toolDefs - Available tool definitions.
+//	regexResult - The regex extraction result to enhance.
+//
+// Outputs:
+//
+//	tools.TypedParams - Enhanced params, or original regexResult on failure.
+func (p *ExecutePhase) enhanceParamsWithLLM(
+	ctx context.Context,
+	deps *Dependencies,
+	toolName string,
+	toolDefs []tools.ToolDefinition,
+	regexResult tools.TypedParams,
+) tools.TypedParams {
+	if deps.ParamExtractor == nil || !deps.ParamExtractor.IsEnabled() {
+		return regexResult
+	}
+
+	// Find tool definition for schema
+	var toolDef *tools.ToolDefinition
+	for i := range toolDefs {
+		if toolDefs[i].Name == toolName {
+			toolDef = &toolDefs[i]
+			break
+		}
+	}
+	if toolDef == nil {
+		return regexResult
+	}
+
+	// Build param schemas from tool definition
+	schemas := buildParamSchemas(toolDef)
+	if len(schemas) == 0 {
+		return regexResult
+	}
+
+	// Get regex hint as map
+	regexHint := regexResult.ToMap()
+
+	// Call LLM extractor
+	enhanced, llmErr := deps.ParamExtractor.ExtractParams(
+		ctx, deps.Query, toolName, schemas, regexHint,
+	)
+	if llmErr != nil {
+		slog.Warn("IT-08b: LLM param extraction failed, using regex fallback",
+			slog.String("tool", toolName),
+			slog.String("error", llmErr.Error()),
+		)
+		return regexResult
+	}
+
+	// Convert enhanced map back to TypedParams
+	converted, convErr := convertMapToTypedParams(toolName, enhanced)
+	if convErr != nil {
+		slog.Warn("IT-08b: Failed to convert LLM params, using regex fallback",
+			slog.String("tool", toolName),
+			slog.String("error", convErr.Error()),
+		)
+		return regexResult
+	}
+
+	return converted
+}
+
+// buildParamSchemas converts a ToolDefinition's parameters to ParamExtractorSchema.
+// Schemas are sorted by name for deterministic LLM prompt construction.
+func buildParamSchemas(toolDef *tools.ToolDefinition) []agent.ParamExtractorSchema {
+	if toolDef == nil || len(toolDef.Parameters) == 0 {
+		return nil
+	}
+
+	// Collect param names and sort for deterministic order.
+	// Go map iteration is non-deterministic; sorting ensures the LLM
+	// prompt is identical for the same tool across invocations.
+	names := make([]string, 0, len(toolDef.Parameters))
+	for name := range toolDef.Parameters {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	schemas := make([]agent.ParamExtractorSchema, 0, len(toolDef.Parameters))
+	for _, name := range names {
+		paramDef := toolDef.Parameters[name]
+		defaultStr := ""
+		if paramDef.Default != nil {
+			defaultStr = fmt.Sprintf("%v", paramDef.Default)
+		}
+		schemas = append(schemas, agent.ParamExtractorSchema{
+			Name:        name,
+			Type:        string(paramDef.Type),
+			Required:    paramDef.Required,
+			Default:     defaultStr,
+			Description: paramDef.Description,
+		})
+	}
+	return schemas
+}
+
+// convertMapToTypedParams converts the LLM's map[string]any output back to the
+// correct TypedParams concrete type based on tool name.
+//
+// Description:
+//
+//	IT-08b: Each tool has a specific TypedParams struct. This function converts
+//	from the generic map to the concrete type, applying type coercion and
+//	defaults as needed.
+//
+// Inputs:
+//
+//	toolName - The tool name.
+//	params - The LLM-extracted parameters.
+//
+// Outputs:
+//
+//	tools.TypedParams - The concrete typed params.
+//	error - Non-nil if conversion fails.
+func convertMapToTypedParams(toolName string, params map[string]any) (tools.TypedParams, error) {
+	switch toolName {
+	case "find_dead_code":
+		return tools.FindDeadCodeParams{
+			Package:         getStringParam(params, "package", ""),
+			IncludeExported: getBoolParam(params, "include_exported", false),
+			Limit:           getIntParam(params, "limit", 50),
+			ExcludeTests:    getBoolParam(params, "exclude_tests", true),
+		}, nil
+
+	case "find_hotspots":
+		return tools.FindHotspotsParams{
+			Top:          getIntParam(params, "top", 10),
+			Kind:         getStringParam(params, "kind", "all"),
+			Package:      getStringParam(params, "package", ""),
+			ExcludeTests: getBoolParam(params, "exclude_tests", true),
+			SortBy:       getStringParam(params, "sort_by", "score"),
+		}, nil
+
+	case "find_callers":
+		return tools.FindCallersParams{
+			FunctionName: getStringParam(params, "function_name", ""),
+			Limit:        getIntParam(params, "limit", 20),
+			PackageHint:  getStringParam(params, "package_hint", ""),
+		}, nil
+
+	case "find_callees":
+		return tools.FindCalleesParams{
+			FunctionName: getStringParam(params, "function_name", ""),
+			Limit:        getIntParam(params, "limit", 20),
+			PackageHint:  getStringParam(params, "package_hint", ""),
+		}, nil
+
+	case "find_implementations":
+		return tools.FindImplementationsParams{
+			InterfaceName: getStringParam(params, "interface_name", ""),
+			Limit:         getIntParam(params, "limit", 20),
+			PackageHint:   getStringParam(params, "package_hint", ""),
+		}, nil
+
+	case "find_references":
+		return tools.FindReferencesParams{
+			SymbolName:  getStringParam(params, "symbol_name", ""),
+			Limit:       getIntParam(params, "limit", 20),
+			PackageHint: getStringParam(params, "package_hint", ""),
+		}, nil
+
+	case "find_communities":
+		return tools.FindCommunitiesParams{
+			MinSize:        getIntParam(params, "min_size", 3),
+			Resolution:     getFloat64Param(params, "resolution", 1.0),
+			Top:            getIntParam(params, "top", 20),
+			ShowCrossEdges: getBoolParam(params, "show_cross_edges", true),
+			PackageFilter:  getStringParam(params, "package_filter", ""),
+		}, nil
+
+	case "find_cycles":
+		return tools.FindCyclesParams{
+			MinSize:       getIntParam(params, "min_size", 2),
+			Limit:         getIntParam(params, "limit", 20),
+			PackageFilter: getStringParam(params, "package_filter", ""),
+			SortBy:        getStringParam(params, "sort_by", "length_desc"),
+		}, nil
+
+	case "find_dominators":
+		return tools.FindDominatorsParams{
+			Target:   getStringParam(params, "target", ""),
+			Entry:    getStringParam(params, "entry", ""),
+			ShowTree: getBoolParam(params, "show_tree", false),
+		}, nil
+
+	case "find_critical_path":
+		return tools.FindCriticalPathParams{
+			Target: getStringParam(params, "target", ""),
+			Entry:  getStringParam(params, "entry", ""),
+		}, nil
+
+	case "find_path":
+		return tools.FindPathParams{
+			From: getStringParam(params, "from", ""),
+			To:   getStringParam(params, "to", ""),
+		}, nil
+
+	case "find_important":
+		return tools.FindImportantParams{
+			Top:  getIntParam(params, "top", 10),
+			Kind: getStringParam(params, "kind", "all"),
+		}, nil
+
+	case "find_symbol":
+		return tools.FindSymbolParams{
+			Name:    getStringParam(params, "name", ""),
+			Kind:    getStringParam(params, "kind", ""),
+			Package: getStringParam(params, "package", ""),
+		}, nil
+
+	case "find_articulation_points":
+		return tools.FindArticulationPointsParams{
+			Top:            getIntParam(params, "top", 20),
+			IncludeBridges: getBoolParam(params, "include_bridges", true),
+		}, nil
+
+	case "find_common_dependency":
+		targetsRaw, ok := params["targets"]
+		targets := []string{}
+		if ok {
+			if arr, isArr := targetsRaw.([]any); isArr {
+				for _, v := range arr {
+					if s, isStr := v.(string); isStr {
+						targets = append(targets, s)
+					}
+				}
+			}
+		}
+		return tools.FindCommonDependencyParams{
+			Targets: targets,
+			Entry:   getStringParam(params, "entry", ""),
+		}, nil
+
+	case "find_merge_points":
+		return tools.FindMergePointsParams{
+			Top:        getIntParam(params, "top", 20),
+			MinSources: getIntParam(params, "min_sources", 2),
+		}, nil
+
+	case "find_control_dependencies":
+		return tools.FindControlDependenciesParams{
+			Target: getStringParam(params, "target", ""),
+			Depth:  getIntParam(params, "depth", 5),
+		}, nil
+
+	case "find_loops":
+		return tools.FindLoopsParams{
+			Top:         getIntParam(params, "top", 20),
+			MinSize:     getIntParam(params, "min_size", 1),
+			ShowNesting: getBoolParam(params, "show_nesting", true),
+		}, nil
+
+	case "find_weighted_criticality":
+		return tools.FindWeightedCriticalityParams{
+			Top:          getIntParam(params, "top", 20),
+			Entry:        getStringParam(params, "entry", ""),
+			ShowQuadrant: getBoolParam(params, "show_quadrant", true),
+		}, nil
+
+	case "find_module_api":
+		return tools.FindModuleAPIParams{
+			CommunityID:      getIntParam(params, "community_id", -1),
+			Top:              getIntParam(params, "top", 10),
+			MinCommunitySize: getIntParam(params, "min_community_size", 3),
+		}, nil
+
+	case "get_call_chain":
+		return tools.GetCallChainParams{
+			FunctionName:    getStringParam(params, "function_name", ""),
+			Direction:       getStringParam(params, "direction", "downstream"),
+			MaxDepth:        getIntParam(params, "max_depth", 5),
+			PackageHint:     getStringParam(params, "package_hint", ""),
+			DestinationName: getStringParam(params, "destination_name", ""),
+		}, nil
+
+	case "check_reducibility":
+		return tools.CheckReducibilityParams{
+			ShowIrreducible: getBoolParam(params, "show_irreducible", true),
+		}, nil
+
+	case "explore_package":
+		return tools.ExplorePackageParams{
+			Package:             getStringParam(params, "package", ""),
+			IncludeDependencies: getBoolParam(params, "include_dependencies", true),
+			IncludeDependents:   getBoolParam(params, "include_dependents", true),
+		}, nil
+
+	case "graph_overview":
+		return tools.GraphOverviewParams{
+			Depth:               getIntParam(params, "depth", 2),
+			IncludeDependencies: getBoolParam(params, "include_dependencies", true),
+			IncludeMetrics:      getBoolParam(params, "include_metrics", true),
+		}, nil
+
+	case "Grep":
+		return tools.GrepToolParams{
+			Pattern:    getStringParam(params, "pattern", ""),
+			OutputMode: getStringParam(params, "output_mode", "content"),
+		}, nil
+
+	case "list_packages", "find_entry_points", "find_extractable_regions":
+		return tools.EmptyParams{Tool: toolName}, nil
+
+	default:
+		return tools.MapParams{Tool: toolName, Params: params}, nil
+	}
+}
+
+// =============================================================================
+// Parameter type conversion helpers
+// =============================================================================
+
+// getStringParam extracts a string parameter from a map with a default.
+func getStringParam(params map[string]any, key, defaultVal string) string {
+	v, ok := params[key]
+	if !ok {
+		return defaultVal
+	}
+	s, ok := v.(string)
+	if !ok {
+		return defaultVal
+	}
+	return s
+}
+
+// getBoolParam extracts a boolean parameter from a map with a default.
+func getBoolParam(params map[string]any, key string, defaultVal bool) bool {
+	v, ok := params[key]
+	if !ok {
+		return defaultVal
+	}
+	b, ok := v.(bool)
+	if ok {
+		return b
+	}
+	// Handle string "true"/"false"
+	if s, ok := v.(string); ok {
+		return strings.EqualFold(s, "true")
+	}
+	return defaultVal
+}
+
+// getIntParam extracts an integer parameter from a map with a default.
+func getIntParam(params map[string]any, key string, defaultVal int) int {
+	v, ok := params[key]
+	if !ok {
+		return defaultVal
+	}
+	switch n := v.(type) {
+	case int:
+		return n
+	case float64:
+		return int(n)
+	case int64:
+		return int(n)
+	default:
+		return defaultVal
+	}
+}
+
+// getFloat64Param extracts a float64 parameter from a map with a default.
+func getFloat64Param(params map[string]any, key string, defaultVal float64) float64 {
+	v, ok := params[key]
+	if !ok {
+		return defaultVal
+	}
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	default:
+		return defaultVal
 	}
 }
 

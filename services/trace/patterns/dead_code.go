@@ -54,15 +54,37 @@ type DeadCodeExclusions struct {
 }
 
 // DefaultExclusions returns conservative default exclusions.
+//
+// IT-08 H-1: Extended from Go-only to cross-language entry point patterns.
 func DefaultExclusions() *DeadCodeExclusions {
 	return &DeadCodeExclusions{
 		EntryPoints: []string{
+			// Go entry points
 			"main",
 			"init",
 			"Test*",
 			"Benchmark*",
 			"Example*",
 			"Fuzz*",
+			// Python entry points (pytest, unittest)
+			"test_*",
+			"__main__",
+			"setUp",
+			"tearDown",
+			"setUpClass",
+			"tearDownClass",
+			// JS/TS test framework entry points (Jest, Mocha, Vitest)
+			"it",
+			"test",
+			"describe",
+			"beforeEach",
+			"afterEach",
+			"beforeAll",
+			"afterAll",
+			// Next.js special exports
+			"getServerSideProps",
+			"getStaticProps",
+			"getStaticPaths",
 		},
 		ExportedSymbols: true,
 		InterfaceImpls:  true,

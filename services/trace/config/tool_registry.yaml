@@ -596,11 +596,13 @@ tools:
       - real modules
       - cross-package
       - leiden
-    use_when: "User wants to find natural code communities or module boundaries"
+    use_when: "User wants to find natural code communities or module boundaries. Also use when user asks what community a subsystem belongs to, whether specific classes form distinct communities, or about community coupling."
     avoid_when: "User wants to find callers or callees of specific functions"
     instead_of:
       - tool: Grep
         when: "Searching for module structure or code organization patterns"
+      - tool: find_module_api
+        when: "User asks about code communities, which community something belongs to, or community structure"
     requires:
       - graph_initialized
 
@@ -807,7 +809,7 @@ tools:
       - public functions
       - module interface
     use_when: "User asks about module interfaces, public APIs, or how to interact with different parts of the codebase"
-    avoid_when: "User asks about all entry points globally (use find_entry_points)"
+    avoid_when: "User asks about all entry points globally (use find_entry_points). User asks about code communities, community detection, or which community something belongs to (use find_communities)."
     requires:
       - graph_initialized
 

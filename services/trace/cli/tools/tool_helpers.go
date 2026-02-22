@@ -13,8 +13,10 @@ package tools
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 
+	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
 )
@@ -241,6 +243,74 @@ func parseStringParam(value any) (string, bool) {
 		return s, true
 	}
 	return "", false
+}
+
+// =============================================================================
+// Package Scope Matching
+// =============================================================================
+
+// matchesPackageScope checks if a symbol matches a package filter using
+// boundary-aware matching across multiple strategies.
+//
+// Description:
+//
+//	Determines whether a symbol belongs to a given package scope. This function
+//	handles cross-language scoping: Go symbols have Package populated from the
+//	package declaration, while Python/JS/TS symbols have Package="" and must be
+//	matched via file path or file stem.
+//
+//	Uses containsPackageSegment() (from symbol_resolution.go) for boundary-aware
+//	matching that avoids false positives like "log" matching "dialog".
+//
+// Inputs:
+//   - sym: The symbol to check. Must not be nil.
+//   - packageFilter: The package/scope name to match against. If empty, returns true.
+//
+// Outputs:
+//   - bool: True if the symbol matches the package filter.
+//
+// Match strategies (tried in order):
+//  1. Boundary-aware match on sym.Package (Go symbols where Package is populated)
+//  2. Boundary-aware match on sym.FilePath (all languages — matches directory segments)
+//  3. File stem match: base name without extension == filter (handles "engine.ts" matching "engine")
+//
+// Thread Safety: Safe for concurrent use (read-only operations).
+func matchesPackageScope(sym *ast.Symbol, packageFilter string) bool {
+	if packageFilter == "" {
+		return true
+	}
+	if sym == nil {
+		return false
+	}
+
+	lowerFilter := strings.ToLower(packageFilter)
+
+	// Strategy 1: Boundary-aware match on sym.Package (Go symbols)
+	if sym.Package != "" {
+		if containsPackageSegment(strings.ToLower(sym.Package), lowerFilter) {
+			return true
+		}
+	}
+
+	// Strategy 2: Boundary-aware match on sym.FilePath (all languages)
+	if sym.FilePath != "" {
+		if containsPackageSegment(strings.ToLower(sym.FilePath), lowerFilter) {
+			return true
+		}
+	}
+
+	// Strategy 3: File stem match (base name without extension)
+	// Handles single-file modules: "engine" matches "engine.ts"
+	if sym.FilePath != "" {
+		base := filepath.Base(sym.FilePath)
+		ext := filepath.Ext(base)
+		stem := strings.ToLower(strings.TrimSuffix(base, ext))
+		if stem == lowerFilter {
+			return true
+		}
+	}
+
+	return false
 }
 
 // =============================================================================

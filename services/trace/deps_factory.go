@@ -8,7 +8,7 @@
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
 
-package code_buddy
+package trace
 
 import (
 	"context"
@@ -421,6 +421,11 @@ func (f *DefaultDependenciesFactory) Create(session *agent.Session, query string
 		ResponseGrounder: f.responseGrounder,
 		// Retrieve existing context from session (persisted by PlanPhase)
 		Context: session.GetCurrentContext(),
+	}
+
+	// IT-08b: Wire ParamExtractor from session into dependencies
+	if pe := session.GetParamExtractor(); pe != nil {
+		deps.ParamExtractor = pe
 	}
 
 	// Try to get the cached graph if we need context or tools

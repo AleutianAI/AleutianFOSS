@@ -445,7 +445,7 @@ func parseFileWithTimeout(ctx context.Context, filePath string, timeout time.Dur
 }
 
 // extractSymbolsSimple is a simple symbol extractor for demonstration.
-// In production, this would use tree-sitter parsers from services/code_buddy/ast/.
+// In production, this would use tree-sitter parsers from services/trace/ast/.
 func extractSymbolsSimple(ctx context.Context, filePath string, content []byte, lang string) ([]Symbol, []Edge) {
 	symbols := make([]Symbol, 0)
 	edges := make([]Edge, 0)

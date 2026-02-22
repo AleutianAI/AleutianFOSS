@@ -331,12 +331,20 @@ func (t *findImportantTool) parseParams(params map[string]any) (FindImportantPar
 }
 
 // matchesKind checks if a symbol kind matches a filter string.
+//
+// IT-08c: Aligned with matchesKindFilter in symbol_resolution.go and
+// matchesHotspotKind in tool_find_hotspots.go for cross-language consistency.
 func (t *findImportantTool) matchesKind(kind ast.SymbolKind, filter string) bool {
 	switch filter {
 	case "function":
-		return kind == ast.SymbolKindFunction || kind == ast.SymbolKindMethod
+		return kind == ast.SymbolKindFunction ||
+			kind == ast.SymbolKindMethod ||
+			kind == ast.SymbolKindProperty // IT-08c: Python @property has callable body
 	case "type":
-		return kind == ast.SymbolKindType || kind == ast.SymbolKindStruct || kind == ast.SymbolKindInterface
+		return kind == ast.SymbolKindType ||
+			kind == ast.SymbolKindStruct ||
+			kind == ast.SymbolKindInterface ||
+			kind == ast.SymbolKindClass // IT-08c: JS/TS/Python classes
 	default:
 		return true
 	}

@@ -13,6 +13,8 @@ package tools
 import (
 	"strings"
 	"testing"
+
+	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 )
 
 func TestIsGenericWord(t *testing.T) {
@@ -145,6 +147,126 @@ func TestValidateSymbolName(t *testing.T) {
 		err = ValidateSymbolName("functions", "target", "'main'")
 		if !strings.Contains(err.Error(), "target 'functions'") {
 			t.Errorf("expected 'target' in generic word error: %v", err)
+		}
+	})
+}
+
+func TestMatchesPackageScope(t *testing.T) {
+	t.Run("empty filter matches everything", func(t *testing.T) {
+		sym := &ast.Symbol{
+			Name:     "foo",
+			FilePath: "src/core/handler.go",
+			Package:  "core",
+		}
+		if !matchesPackageScope(sym, "") {
+			t.Error("expected empty filter to match")
+		}
+	})
+
+	t.Run("nil symbol returns false", func(t *testing.T) {
+		if matchesPackageScope(nil, "core") {
+			t.Error("expected nil symbol to not match")
+		}
+	})
+
+	t.Run("Go exact package match", func(t *testing.T) {
+		sym := &ast.Symbol{
+			Name:     "HandleRequest",
+			FilePath: "handlers/agent.go",
+			Package:  "handlers",
+		}
+		if !matchesPackageScope(sym, "handlers") {
+			t.Error("expected Go package exact match")
+		}
+	})
+
+	t.Run("Go package match is case insensitive", func(t *testing.T) {
+		sym := &ast.Symbol{
+			Name:     "HandleRequest",
+			FilePath: "handlers/agent.go",
+			Package:  "handlers",
+		}
+		if !matchesPackageScope(sym, "Handlers") {
+			t.Error("expected case-insensitive Go package match")
+		}
+	})
+
+	t.Run("file path boundary match for directory segment", func(t *testing.T) {
+		sym := &ast.Symbol{
+			Name:     "merge",
+			FilePath: "pandas/core/reshape/merge.py",
+			Package:  "", // Python: Package not set
+		}
+		if !matchesPackageScope(sym, "reshape") {
+			t.Error("expected 'reshape' to match directory segment in file path")
+		}
+	})
+
+	t.Run("Python empty-Package path match", func(t *testing.T) {
+		sym := &ast.Symbol{
+			Name:     "helper_func",
+			FilePath: "src/flask/helpers.py",
+			Package:  "", // Python: Package not set
+		}
+		if !matchesPackageScope(sym, "flask") {
+			t.Error("expected 'flask' to match directory segment for Python symbol")
+		}
+	})
+
+	t.Run("JS file stem match", func(t *testing.T) {
+		sym := &ast.Symbol{
+			Name:     "Engine",
+			FilePath: "src/Engines/engine.ts",
+			Package:  "", // TS: Package not set
+		}
+		if !matchesPackageScope(sym, "engine") {
+			t.Error("expected 'engine' to match file stem 'engine.ts'")
+		}
+	})
+
+	t.Run("no false positive on substring", func(t *testing.T) {
+		sym := &ast.Symbol{
+			Name:     "dialogHelper",
+			FilePath: "src/ui/dialog/helper.go",
+			Package:  "dialog",
+		}
+		// "log" should NOT match "dialog" because containsPackageSegment
+		// requires boundary-aware matching
+		if matchesPackageScope(sym, "log") {
+			t.Error("expected 'log' to NOT match 'dialog' (substring, not boundary)")
+		}
+	})
+
+	t.Run("no match returns false", func(t *testing.T) {
+		sym := &ast.Symbol{
+			Name:     "foo",
+			FilePath: "src/core/handler.go",
+			Package:  "core",
+		}
+		if matchesPackageScope(sym, "nonexistent") {
+			t.Error("expected 'nonexistent' to not match")
+		}
+	})
+
+	t.Run("PascalCase directory matched case insensitively", func(t *testing.T) {
+		sym := &ast.Symbol{
+			Name:     "AbstractMesh",
+			FilePath: "src/Engines/Meshes/abstractMesh.ts",
+			Package:  "",
+		}
+		if !matchesPackageScope(sym, "meshes") {
+			t.Error("expected 'meshes' to match 'Meshes' directory (case insensitive)")
+		}
+	})
+
+	t.Run("Go slash-path package", func(t *testing.T) {
+		sym := &ast.Symbol{
+			Name:     "Parse",
+			FilePath: "hugolib/page/parse.go",
+			Package:  "page",
+		}
+		if !matchesPackageScope(sym, "page") {
+			t.Error("expected 'page' to match Go package 'page'")
 		}
 	})
 }

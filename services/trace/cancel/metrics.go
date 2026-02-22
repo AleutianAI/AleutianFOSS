@@ -71,7 +71,7 @@ func NewMetrics() *Metrics {
 	return &Metrics{
 		CancelTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "code_buddy",
+				Namespace: "trace",
 				Subsystem: "cancel",
 				Name:      "total",
 				Help:      "Total cancellations by type, level, and component",
@@ -81,7 +81,7 @@ func NewMetrics() *Metrics {
 
 		CancelAllTotal: promauto.NewCounter(
 			prometheus.CounterOpts{
-				Namespace: "code_buddy",
+				Namespace: "trace",
 				Subsystem: "cancel",
 				Name:      "all_total",
 				Help:      "Total emergency cancel-all operations",
@@ -90,7 +90,7 @@ func NewMetrics() *Metrics {
 
 		CancelDurationSeconds: promauto.NewHistogramVec(
 			prometheus.HistogramOpts{
-				Namespace: "code_buddy",
+				Namespace: "trace",
 				Subsystem: "cancel",
 				Name:      "duration_seconds",
 				Help:      "Time from cancel signal to completion",
@@ -101,7 +101,7 @@ func NewMetrics() *Metrics {
 
 		DeadlockDetectedTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "code_buddy",
+				Namespace: "trace",
 				Subsystem: "cancel",
 				Name:      "deadlock_detected_total",
 				Help:      "Total deadlock detections by component",
@@ -111,7 +111,7 @@ func NewMetrics() *Metrics {
 
 		ResourceLimitExceededTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "code_buddy",
+				Namespace: "trace",
 				Subsystem: "cancel",
 				Name:      "resource_limit_exceeded_total",
 				Help:      "Total resource limit violations by resource type and component",
@@ -121,7 +121,7 @@ func NewMetrics() *Metrics {
 
 		TimeoutTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "code_buddy",
+				Namespace: "trace",
 				Subsystem: "cancel",
 				Name:      "timeout_total",
 				Help:      "Total algorithm timeouts by component",
@@ -131,7 +131,7 @@ func NewMetrics() *Metrics {
 
 		PartialResultsCollected: promauto.NewCounter(
 			prometheus.CounterOpts{
-				Namespace: "code_buddy",
+				Namespace: "trace",
 				Subsystem: "cancel",
 				Name:      "partial_results_collected_total",
 				Help:      "Total partial results collected during shutdown",
@@ -140,7 +140,7 @@ func NewMetrics() *Metrics {
 
 		ForceKilledTotal: promauto.NewCounter(
 			prometheus.CounterOpts{
-				Namespace: "code_buddy",
+				Namespace: "trace",
 				Subsystem: "cancel",
 				Name:      "force_killed_total",
 				Help:      "Total contexts force-killed during shutdown",
@@ -149,7 +149,7 @@ func NewMetrics() *Metrics {
 
 		SessionsCreated: promauto.NewCounter(
 			prometheus.CounterOpts{
-				Namespace: "code_buddy",
+				Namespace: "trace",
 				Subsystem: "cancel",
 				Name:      "sessions_created_total",
 				Help:      "Total sessions created",
@@ -158,7 +158,7 @@ func NewMetrics() *Metrics {
 
 		ActiveContexts: promauto.NewGaugeVec(
 			prometheus.GaugeOpts{
-				Namespace: "code_buddy",
+				Namespace: "trace",
 				Subsystem: "cancel",
 				Name:      "active_contexts",
 				Help:      "Currently active (non-terminal) contexts by level",
@@ -168,7 +168,7 @@ func NewMetrics() *Metrics {
 
 		GracefulShutdownDurationSeconds: promauto.NewHistogram(
 			prometheus.HistogramOpts{
-				Namespace: "code_buddy",
+				Namespace: "trace",
 				Subsystem: "cancel",
 				Name:      "graceful_shutdown_duration_seconds",
 				Help:      "Total graceful shutdown duration",
@@ -178,7 +178,7 @@ func NewMetrics() *Metrics {
 
 		ProgressReportsTotal: promauto.NewCounterVec(
 			prometheus.CounterOpts{
-				Namespace: "code_buddy",
+				Namespace: "trace",
 				Subsystem: "cancel",
 				Name:      "progress_reports_total",
 				Help:      "Total progress reports by component",
@@ -194,7 +194,7 @@ type MetricsConfig struct {
 	Enabled bool
 
 	// Namespace is the Prometheus namespace prefix.
-	// Default: "code_buddy"
+	// Default: "trace"
 	Namespace string
 
 	// Subsystem is the Prometheus subsystem prefix.
@@ -206,7 +206,7 @@ type MetricsConfig struct {
 func DefaultMetricsConfig() MetricsConfig {
 	return MetricsConfig{
 		Enabled:   true,
-		Namespace: "code_buddy",
+		Namespace: "trace",
 		Subsystem: "cancel",
 	}
 }

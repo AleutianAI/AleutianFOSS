@@ -348,6 +348,10 @@ type Session struct {
 	// Shared between tool router and main LLM.
 	modelManager ModelManager
 
+	// paramExtractor uses a fast LLM to extract tool parameters from queries.
+	// IT-08b: Optional - nil when LLM parameter extraction is not enabled.
+	paramExtractor ParamExtractor
+
 	// recentToolErrors tracks tools that failed recently.
 	// Fed back to the tool router to avoid suggesting the same tool.
 	recentToolErrors []ToolRouterError
@@ -1175,6 +1179,38 @@ func (s *Session) IsToolRouterEnabled() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.Config.ToolRouterEnabled && s.toolRouter != nil
+}
+
+// -----------------------------------------------------------------------------
+// Param Extractor Methods (IT-08b)
+// -----------------------------------------------------------------------------
+
+// SetParamExtractor sets the LLM-based parameter extractor for this session.
+//
+// Description:
+//
+//	Associates a ParamExtractor instance with this session for LLM-enhanced
+//	parameter extraction. Should be called after session creation if LLM
+//	parameter extraction is enabled.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) SetParamExtractor(extractor ParamExtractor) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.paramExtractor = extractor
+}
+
+// GetParamExtractor returns the parameter extractor for this session.
+//
+// Outputs:
+//
+//	ParamExtractor - The extractor, or nil if not enabled.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) GetParamExtractor() ParamExtractor {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.paramExtractor
 }
 
 // RecordToolError records a tool failure for router feedback.

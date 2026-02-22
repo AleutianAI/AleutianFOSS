@@ -16,7 +16,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -532,37 +534,201 @@ func (a *GraphAnalytics) DeadCodeWithCRS(ctx context.Context) ([]DeadCodeNode, c
 	return deadCode, step
 }
 
-// isEntryPoint checks if a symbol is an entry point.
+// isEntryPoint checks if a symbol is an entry point across all supported languages.
+//
+// Description:
+//
+//	Detects entry points for Go, Python, JavaScript, and TypeScript using
+//	language-specific patterns. Entry points are functions/methods that are
+//	invoked by the runtime, framework, or test runner rather than by other
+//	application code. These should not be reported as dead code.
+//
+// IT-08 H-1: Extended from Go-only to cross-language detection.
 func isEntryPoint(sym *ast.Symbol) bool {
 	if sym == nil {
 		return false
 	}
 
 	name := sym.Name
+	lang := strings.ToLower(sym.Language)
 
-	// Main and init are always entry points
-	if name == "main" || name == "init" {
+	// === Cross-language entry points ===
+
+	// main is an entry point in all languages
+	if name == "main" {
 		return true
 	}
 
-	// Test and benchmark functions
+	// === Go entry points ===
+
+	if lang == "" || lang == "go" {
+		if isGoEntryPoint(sym) {
+			return true
+		}
+	}
+
+	// === Python entry points ===
+
+	if lang == "python" {
+		if isPythonEntryPoint(sym) {
+			return true
+		}
+	}
+
+	// === JavaScript / TypeScript entry points ===
+
+	if lang == "javascript" || lang == "typescript" {
+		if isJSTSEntryPoint(sym) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// isGoEntryPoint checks Go-specific entry point patterns.
+func isGoEntryPoint(sym *ast.Symbol) bool {
+	name := sym.Name
+
+	// init functions (package initialization)
+	if name == "init" {
+		return true
+	}
+
+	// Test, Benchmark, Fuzz, Example functions (go test runner)
 	if len(name) > 4 && (name[:4] == "Test" || name[:4] == "Fuzz") {
 		return true
 	}
 	if len(name) > 9 && name[:9] == "Benchmark" {
 		return true
 	}
-
-	// Example functions (for documentation)
 	if len(name) > 7 && name[:7] == "Example" {
 		return true
 	}
 
-	// HTTP handlers (common patterns)
+	// HTTP handler interface implementation
 	if sym.Kind == ast.SymbolKindMethod && name == "ServeHTTP" {
 		return true
 	}
 
+	return false
+}
+
+// isPythonEntryPoint checks Python-specific entry point patterns.
+func isPythonEntryPoint(sym *ast.Symbol) bool {
+	name := sym.Name
+
+	// __main__ block
+	if name == "__main__" {
+		return true
+	}
+
+	// __main__.py file — all top-level functions are entry points
+	if sym.FilePath != "" && filepath.Base(sym.FilePath) == "__main__.py" {
+		return true
+	}
+
+	// pytest test functions (test_*)
+	if strings.HasPrefix(name, "test_") {
+		return true
+	}
+
+	// unittest setUp/tearDown methods
+	if name == "setUp" || name == "tearDown" || name == "setUpClass" || name == "tearDownClass" {
+		return true
+	}
+
+	// Decorator-based entry points (Flask routes, FastAPI, Click CLI, etc.)
+	if sym.Metadata != nil && len(sym.Metadata.Decorators) > 0 {
+		if hasPythonEntryPointDecorator(sym.Metadata.Decorators) {
+			return true
+		}
+	}
+
+	// Classes extending TestCase are entry points (unittest)
+	if sym.Kind == ast.SymbolKindClass && sym.Metadata != nil && sym.Metadata.Extends != "" {
+		if strings.HasSuffix(sym.Metadata.Extends, "TestCase") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// hasPythonEntryPointDecorator checks if any decorator marks this as a
+// framework entry point (route handler, CLI command, etc.).
+func hasPythonEntryPointDecorator(decorators []string) bool {
+	for _, dec := range decorators {
+		d := strings.ToLower(dec)
+		// Flask/FastAPI route decorators
+		if strings.Contains(d, "route") || strings.Contains(d, ".get") ||
+			strings.Contains(d, ".post") || strings.Contains(d, ".put") ||
+			strings.Contains(d, ".delete") || strings.Contains(d, ".patch") {
+			return true
+		}
+		// Click/Typer CLI decorators
+		if strings.Contains(d, "click.command") || strings.Contains(d, "click.group") ||
+			strings.Contains(d, "app.command") {
+			return true
+		}
+		// Celery tasks
+		if strings.Contains(d, ".task") {
+			return true
+		}
+		// pytest fixtures
+		if strings.Contains(d, "fixture") {
+			return true
+		}
+	}
+	return false
+}
+
+// isJSTSEntryPoint checks JavaScript and TypeScript entry point patterns.
+func isJSTSEntryPoint(sym *ast.Symbol) bool {
+	name := sym.Name
+
+	// Jest/Mocha/Vitest test framework entry points
+	switch name {
+	case "it", "test", "describe", "beforeEach", "afterEach",
+		"beforeAll", "afterAll", "before", "after":
+		return true
+	}
+
+	// NestJS and other decorator-based frameworks
+	if sym.Metadata != nil && len(sym.Metadata.Decorators) > 0 {
+		if hasJSTSEntryPointDecorator(sym.Metadata.Decorators) {
+			return true
+		}
+	}
+
+	// module.exports target functions are consumed externally
+	if sym.Exported {
+		return true
+	}
+
+	// Next.js special exports
+	switch name {
+	case "getServerSideProps", "getStaticProps", "getStaticPaths",
+		"generateStaticParams", "generateMetadata":
+		return true
+	}
+
+	return false
+}
+
+// hasJSTSEntryPointDecorator checks if any decorator marks this as a
+// framework entry point (NestJS controller, route handler, etc.).
+func hasJSTSEntryPointDecorator(decorators []string) bool {
+	for _, dec := range decorators {
+		// NestJS decorators (case-sensitive — they're PascalCase)
+		switch dec {
+		case "Controller", "Get", "Post", "Put", "Delete", "Patch",
+			"Injectable", "Module", "Guard", "Interceptor", "Pipe",
+			"ExceptionFilter", "UseGuards", "UseInterceptors",
+			"WebSocketGateway", "SubscribeMessage":
+			return true
+		}
+	}
 	return false
 }
 

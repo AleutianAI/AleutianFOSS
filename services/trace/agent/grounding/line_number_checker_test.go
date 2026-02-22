@@ -419,7 +419,7 @@ func TestLineNumberChecker_MatchByBasename(t *testing.T) {
 	checker := NewLineNumberChecker(nil)
 
 	idx := NewEvidenceIndex()
-	idx.FileLines["services/code_buddy/parser.go"] = 50
+	idx.FileLines["services/trace/parser.go"] = 50
 
 	// Citation uses just basename
 	input := &CheckInput{
@@ -545,10 +545,10 @@ func TestLineNumberChecker_Integration(t *testing.T) {
 	checker := NewLineNumberChecker(nil)
 
 	idx := NewEvidenceIndex()
-	idx.FileLines["services/code_buddy/agent/grounding/grounder.go"] = 850
-	idx.FileLines["services/code_buddy/agent/grounding/types.go"] = 470
+	idx.FileLines["services/trace/agent/grounding/grounder.go"] = 850
+	idx.FileLines["services/trace/agent/grounding/types.go"] = 470
 	idx.SymbolDetails["buildEvidenceIndex"] = []SymbolInfo{
-		{Name: "buildEvidenceIndex", Kind: "method", File: "services/code_buddy/agent/grounding/grounder.go", Line: 262},
+		{Name: "buildEvidenceIndex", Kind: "method", File: "services/trace/agent/grounding/grounder.go", Line: 262},
 	}
 
 	input := &CheckInput{

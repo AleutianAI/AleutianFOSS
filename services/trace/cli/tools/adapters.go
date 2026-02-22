@@ -1385,6 +1385,12 @@ func StaticToolDefinitions() []ToolDefinition {
 					Required:    false,
 					Default:     true,
 				},
+				"package_filter": {
+					Type:        ParamTypeString,
+					Description: "Only show communities with members in this directory/package (case-insensitive substring match, e.g. 'hugolib', 'core', 'plots')",
+					Required:    false,
+					Default:     "",
+				},
 			},
 			Category:    CategoryExploration,
 			Priority:    82,

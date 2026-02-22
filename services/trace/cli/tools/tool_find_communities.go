@@ -50,6 +50,10 @@ type FindCommunitiesParams struct {
 	// ShowCrossEdges indicates whether to show edges between communities.
 	// Default: true
 	ShowCrossEdges bool
+
+	// PackageFilter limits results to communities with members in this
+	// directory/package (case-insensitive substring match). Default: "" (all).
+	PackageFilter string
 }
 
 // ToolName returns the tool name for TypedParams interface.
@@ -57,12 +61,16 @@ func (p FindCommunitiesParams) ToolName() string { return "find_communities" }
 
 // ToMap converts typed parameters to the map consumed by Tool.Execute().
 func (p FindCommunitiesParams) ToMap() map[string]any {
-	return map[string]any{
+	m := map[string]any{
 		"min_size":         p.MinSize,
 		"resolution":       p.Resolution,
 		"top":              p.Top,
 		"show_cross_edges": p.ShowCrossEdges,
 	}
+	if p.PackageFilter != "" {
+		m["package_filter"] = p.PackageFilter
+	}
+	return m
 }
 
 // FindCommunitiesOutput contains the structured result.
@@ -228,6 +236,12 @@ func (t *findCommunitiesTool) Definition() ToolDefinition {
 				Required:    false,
 				Default:     true,
 			},
+			"package_filter": {
+				Type:        ParamTypeString,
+				Description: "Only show communities with members in this directory/package (case-insensitive substring match, e.g. 'hugolib', 'core', 'plots')",
+				Required:    false,
+				Default:     "",
+			},
 		},
 		Category:    CategoryExploration,
 		Priority:    82,
@@ -266,6 +280,7 @@ func (t *findCommunitiesTool) Execute(ctx context.Context, params TypedParams) (
 			attribute.Float64("resolution", p.Resolution),
 			attribute.Int("top", p.Top),
 			attribute.Bool("show_cross_edges", p.ShowCrossEdges),
+			attribute.String("package_filter", p.PackageFilter),
 		),
 	)
 	defer span.End()
@@ -299,6 +314,32 @@ func (t *findCommunitiesTool) Execute(ctx context.Context, params TypedParams) (
 		if len(comm.Nodes) >= p.MinSize {
 			filtered = append(filtered, comm)
 		}
+	}
+
+	// IT-11 GAP-2: Filter by package_filter before sorting/trimming.
+	// Expansion tests ask about specific directories ("within packages/core",
+	// "within the plots directory") — without this, they get global top-20.
+	if p.PackageFilter != "" {
+		filterLower := strings.ToLower(p.PackageFilter)
+		var pkgFiltered []graph.Community
+		for _, comm := range filtered {
+			for _, nodeID := range comm.Nodes {
+				pkg := t.extractPackageFromNodeID(nodeID)
+				if pkg != "" && strings.Contains(strings.ToLower(pkg), filterLower) {
+					pkgFiltered = append(pkgFiltered, comm)
+					break
+				}
+				// Also check the file name part for flat-structured projects
+				if colonIdx := strings.Index(nodeID, ":"); colonIdx > 0 {
+					filePath := strings.ToLower(nodeID[:colonIdx])
+					if strings.Contains(filePath, filterLower) {
+						pkgFiltered = append(pkgFiltered, comm)
+						break
+					}
+				}
+			}
+		}
+		filtered = pkgFiltered
 	}
 
 	// Sort by size (largest first)
@@ -419,6 +460,13 @@ func (t *findCommunitiesTool) parseParams(params map[string]any) (FindCommunitie
 	if showCrossEdgesRaw, ok := params["show_cross_edges"]; ok {
 		if showCrossEdges, ok := parseBoolParam(showCrossEdgesRaw); ok {
 			p.ShowCrossEdges = showCrossEdges
+		}
+	}
+
+	// Extract package_filter (optional)
+	if filterRaw, ok := params["package_filter"]; ok {
+		if filter, ok := filterRaw.(string); ok {
+			p.PackageFilter = strings.TrimSpace(filter)
 		}
 	}
 
@@ -618,20 +666,17 @@ func (t *findCommunitiesTool) formatText(
 		sb.WriteString(fmt.Sprintf("  Connectivity: %.0f%% internal edges\n",
 			comm.Connectivity*100))
 
-		// Sample members (limit to 5)
-		limit := minInt(len(comm.Nodes), 5)
+		// Sample members (limit to 8) — show file.go:symbol for LLM context.
+		// IT-11 GAP-1: Bare symbol names ("Set", "diff") give the LLM no context
+		// to infer subsystem labels. Showing "txn.go:Set" lets it infer "transaction".
+		limit := minInt(len(comm.Nodes), 8)
 		sb.WriteString("  Members: ")
 		for j := 0; j < limit; j++ {
 			if j > 0 {
 				sb.WriteString(", ")
 			}
 			nodeID := comm.Nodes[j]
-			parts := strings.Split(nodeID, ":")
-			if len(parts) > 0 {
-				sb.WriteString(parts[len(parts)-1])
-			} else {
-				sb.WriteString(nodeID)
-			}
+			sb.WriteString(formatMemberName(nodeID))
 		}
 		if len(comm.Nodes) > limit {
 			sb.WriteString(fmt.Sprintf(" (+%d more)", len(comm.Nodes)-limit))
@@ -645,12 +690,29 @@ func (t *findCommunitiesTool) formatText(
 		sb.WriteString("\n")
 	}
 
-	// Cross-community edges
+	// Cross-community edges — IT-11 GAP-4: Include community labels (dominant package)
+	// so the LLM can identify inter-community coupling by subsystem name, not bare IDs.
 	if len(crossEdges) > 0 {
-		sb.WriteString("Cross-community edges (abstraction seams):\n")
+		// Build ID-to-display-index and ID-to-label maps
+		idToDisplay := make(map[int]int)
+		idToLabel := make(map[int]string)
+		for i, comm := range filtered {
+			idToDisplay[comm.ID] = i + 1
+			if comm.DominantPackage != "" {
+				idToLabel[comm.ID] = comm.DominantPackage
+			} else {
+				idToLabel[comm.ID] = fmt.Sprintf("community_%d", i+1)
+			}
+		}
+
+		sb.WriteString("Strongest cross-community coupling:\n")
 		for _, edge := range crossEdges {
-			sb.WriteString(fmt.Sprintf("  Community %d -> %d: %d edges\n",
-				edge.FromCommunity, edge.ToCommunity, edge.Count))
+			fromDisplay := idToDisplay[edge.FromCommunity]
+			toDisplay := idToDisplay[edge.ToCommunity]
+			fromLabel := idToLabel[edge.FromCommunity]
+			toLabel := idToLabel[edge.ToCommunity]
+			sb.WriteString(fmt.Sprintf("  Community %d (%s) <-> Community %d (%s): %d edges\n",
+				fromDisplay, fromLabel, toDisplay, toLabel, edge.Count))
 		}
 		sb.WriteString("\n")
 	}
@@ -668,4 +730,36 @@ func (t *findCommunitiesTool) formatText(
 	}
 
 	return sb.String()
+}
+
+// formatMemberName extracts "file.go:symbol" from a node ID like "pkg/file.go:42:symbol".
+// IT-11 GAP-1: Bare symbol names give the LLM no context to infer subsystem labels.
+// Showing file.go:symbol lets it map members to architectural concepts
+// (e.g., "txn.go:Set" → "transaction management", "page.go:renderPage" → "rendering").
+func formatMemberName(nodeID string) string {
+	// Node ID format: "pkg/subpkg/file.go:line:symbol"
+	firstColon := strings.Index(nodeID, ":")
+	if firstColon == -1 {
+		return nodeID
+	}
+
+	pathPart := nodeID[:firstColon]
+	remaining := nodeID[firstColon+1:]
+
+	// Extract file basename from path
+	fileName := pathPart
+	if lastSlash := strings.LastIndex(pathPart, "/"); lastSlash >= 0 {
+		fileName = pathPart[lastSlash+1:]
+	}
+
+	// Extract symbol name (after "line:" in remaining)
+	symbol := remaining
+	if colonIdx := strings.Index(remaining, ":"); colonIdx >= 0 {
+		symbol = remaining[colonIdx+1:]
+	}
+
+	if symbol == "" {
+		return fileName
+	}
+	return fileName + ":" + symbol
 }

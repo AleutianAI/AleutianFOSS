@@ -57,15 +57,15 @@ func newTestServer(t *testing.T) *testServer {
 
 	gin.SetMode(gin.TestMode)
 
-	cfg := code_buddy.DefaultServiceConfig()
-	svc := code_buddy.NewService(cfg)
-	handlers := code_buddy.NewHandlers(svc)
+	cfg := trace.DefaultServiceConfig()
+	svc := trace.NewService(cfg)
+	handlers := trace.NewHandlers(svc)
 
 	router := gin.New()
 	router.Use(gin.Recovery())
 
 	v1 := router.Group("/v1")
-	code_buddy.RegisterRoutes(v1, handlers)
+	trace.RegisterRoutes(v1, handlers)
 
 	ts := &testServer{
 		router: router,
@@ -1591,20 +1591,20 @@ func newAgentTestServer(t *testing.T) *testServer {
 
 	gin.SetMode(gin.TestMode)
 
-	cfg := code_buddy.DefaultServiceConfig()
-	svc := code_buddy.NewService(cfg)
-	handlers := code_buddy.NewHandlers(svc)
+	cfg := trace.DefaultServiceConfig()
+	svc := trace.NewService(cfg)
+	handlers := trace.NewHandlers(svc)
 
 	// Create agent loop (will be mock mode without Ollama)
 	agentLoop := agent.NewDefaultAgentLoop()
-	agentHandlers := code_buddy.NewAgentHandlers(agentLoop, svc)
+	agentHandlers := trace.NewAgentHandlers(agentLoop, svc)
 
 	router := gin.New()
 	router.Use(gin.Recovery())
 
 	v1 := router.Group("/v1")
-	code_buddy.RegisterRoutes(v1, handlers)
-	code_buddy.RegisterAgentRoutes(v1, agentHandlers)
+	trace.RegisterRoutes(v1, handlers)
+	trace.RegisterAgentRoutes(v1, agentHandlers)
 
 	ts := &testServer{
 		router: router,

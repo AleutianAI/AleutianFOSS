@@ -29,8 +29,8 @@ import (
 func TestDefaultPrometheusConfig(t *testing.T) {
 	config := DefaultPrometheusConfig()
 
-	if config.Namespace != "code_buddy" {
-		t.Errorf("Namespace = %s, want code_buddy", config.Namespace)
+	if config.Namespace != "trace" {
+		t.Errorf("Namespace = %s, want trace", config.Namespace)
 	}
 	if config.Subsystem != "eval" {
 		t.Errorf("Subsystem = %s, want eval", config.Subsystem)
@@ -157,13 +157,13 @@ func TestPrometheusSink_RecordBenchmark(t *testing.T) {
 		}
 
 		expectedMetrics := []string{
-			"code_buddy_eval_benchmark_duration_seconds",
-			"code_buddy_eval_benchmark_iterations_total",
-			"code_buddy_eval_benchmark_latency_seconds",
-			"code_buddy_eval_benchmark_throughput_ops_per_second",
-			"code_buddy_eval_benchmark_memory_bytes",
-			"code_buddy_eval_benchmark_gc_pauses_total",
-			"code_buddy_eval_benchmark_errors_total",
+			"trace_eval_benchmark_duration_seconds",
+			"trace_eval_benchmark_iterations_total",
+			"trace_eval_benchmark_latency_seconds",
+			"trace_eval_benchmark_throughput_ops_per_second",
+			"trace_eval_benchmark_memory_bytes",
+			"trace_eval_benchmark_gc_pauses_total",
+			"trace_eval_benchmark_errors_total",
 		}
 
 		for _, name := range expectedMetrics {
@@ -313,10 +313,10 @@ func TestPrometheusSink_RecordComparison(t *testing.T) {
 		}
 
 		expectedMetrics := []string{
-			"code_buddy_eval_comparison_speedup_ratio",
-			"code_buddy_eval_comparison_p_value",
-			"code_buddy_eval_comparison_effect_size",
-			"code_buddy_eval_comparisons_total",
+			"trace_eval_comparison_speedup_ratio",
+			"trace_eval_comparison_p_value",
+			"trace_eval_comparison_effect_size",
+			"trace_eval_comparisons_total",
 		}
 
 		for _, name := range expectedMetrics {
@@ -703,8 +703,8 @@ func TestPrometheusSink_MetricOutput(t *testing.T) {
 		// Verify metric naming convention
 		for _, mf := range mfs {
 			name := mf.GetName()
-			if !strings.HasPrefix(name, "code_buddy_eval_") {
-				t.Errorf("Metric %s should have prefix code_buddy_eval_", name)
+			if !strings.HasPrefix(name, "trace_eval_") {
+				t.Errorf("Metric %s should have prefix trace_eval_", name)
 			}
 		}
 	})

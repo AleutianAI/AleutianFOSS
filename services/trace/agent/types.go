@@ -684,6 +684,59 @@ type SessionSummary struct {
 }
 
 // =============================================================================
+// Param Extractor Interface (IT-08b)
+// =============================================================================
+
+// ParamExtractor uses a fast LLM to extract tool parameters from queries.
+//
+// # Description
+//
+// Corrects regex-based parameter extraction errors using semantic understanding.
+// When enabled, the regex result is passed as a hint and the LLM can confirm
+// or correct it. Falls back to regex result on any error.
+//
+// # Thread Safety
+//
+// Implementations must be safe for concurrent use.
+type ParamExtractor interface {
+	// ExtractParams extracts corrected parameters for a tool.
+	//
+	// Inputs:
+	//   - ctx: Context for cancellation/timeout.
+	//   - query: The user's natural language query.
+	//   - toolName: The name of the selected tool.
+	//   - paramSchemas: Parameter definitions for the tool.
+	//   - regexHint: The regex extractor's output (used as a hint).
+	//
+	// Outputs:
+	//   - map[string]any: Corrected parameter values.
+	//   - error: Non-nil if extraction fails (caller should use regexHint).
+	ExtractParams(ctx context.Context, query string, toolName string,
+		paramSchemas []ParamExtractorSchema, regexHint map[string]any) (map[string]any, error)
+
+	// IsEnabled returns true if the extractor is enabled.
+	IsEnabled() bool
+}
+
+// ParamExtractorSchema describes a tool parameter for the LLM prompt.
+type ParamExtractorSchema struct {
+	// Name is the parameter name.
+	Name string
+
+	// Type is the parameter type (string, integer, boolean).
+	Type string
+
+	// Required indicates if the parameter is required.
+	Required bool
+
+	// Default is the default value as a string.
+	Default string
+
+	// Description explains what the parameter is for.
+	Description string
+}
+
+// =============================================================================
 // Tool Router Interface
 // =============================================================================
 

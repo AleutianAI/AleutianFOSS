@@ -29,6 +29,9 @@ import (
 //   - testHelper (in test file, no callers)
 //   - deadInPkg (in "pkg" package, no callers)
 //   - deadByPath (in file path containing "pkg", different package name)
+//   - deadPython (Python symbol, Package="", in pandas/core/reshape/merge.py)
+//   - DeadPythonExported (exported Python symbol in same reshape path)
+//   - deadJS (JS symbol, Package="", in src/Engines/engine.ts)
 func createTestGraphForDeadCode(t *testing.T) (*graph.Graph, *index.SymbolIndex) {
 	t.Helper()
 
@@ -112,6 +115,39 @@ func createTestGraphForDeadCode(t *testing.T) (*graph.Graph, *index.SymbolIndex)
 			Package:   "helper",
 			Exported:  false,
 			Language:  "go",
+		},
+		{
+			ID:        "pandas/core/reshape/merge.py:50:deadPython",
+			Name:      "deadPython",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "pandas/core/reshape/merge.py",
+			StartLine: 50,
+			EndLine:   60,
+			Package:   "", // Python: Package not set
+			Exported:  false,
+			Language:  "python",
+		},
+		{
+			ID:        "pandas/core/reshape/merge.py:70:DeadPythonExported",
+			Name:      "DeadPythonExported",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "pandas/core/reshape/merge.py",
+			StartLine: 70,
+			EndLine:   80,
+			Package:   "", // Python: Package not set
+			Exported:  true,
+			Language:  "python",
+		},
+		{
+			ID:        "src/Engines/engine.ts:10:deadJS",
+			Name:      "deadJS",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "src/Engines/engine.ts",
+			StartLine: 10,
+			EndLine:   20,
+			Package:   "", // JS: Package not set
+			Exported:  false,
+			Language:  "javascript",
 		},
 	}
 
@@ -567,4 +603,180 @@ func TestFindDeadCode_ToMapOmitsEmptyPackage(t *testing.T) {
 	if _, ok := m["package"]; ok {
 		t.Error("expected package to be omitted when empty")
 	}
+}
+
+func TestFindDeadCode_PackageFilter_CrossLanguage(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphForDeadCode(t)
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindDeadCodeTool(analytics, idx)
+
+	t.Run("reshape matches Python file path with empty Package", func(t *testing.T) {
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"package":       "reshape",
+			"exclude_tests": false,
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindDeadCodeOutput)
+		if !ok {
+			t.Fatalf("Output is not FindDeadCodeOutput, got %T", result.Output)
+		}
+
+		foundPython := false
+		for _, dc := range output.DeadCode {
+			if dc.Name == "deadPython" {
+				foundPython = true
+			}
+		}
+		if !foundPython {
+			t.Error("expected deadPython to match via 'reshape' directory in file path")
+		}
+	})
+
+	t.Run("engine matches JS file stem with empty Package", func(t *testing.T) {
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"package":       "engine",
+			"exclude_tests": false,
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindDeadCodeOutput)
+		if !ok {
+			t.Fatalf("Output is not FindDeadCodeOutput, got %T", result.Output)
+		}
+
+		foundJS := false
+		for _, dc := range output.DeadCode {
+			if dc.Name == "deadJS" {
+				foundJS = true
+			}
+		}
+		if !foundJS {
+			t.Error("expected deadJS to match via 'engine' file stem in engine.ts")
+		}
+	})
+
+	t.Run("fallback includes exported when unexported yields zero in scope", func(t *testing.T) {
+		// Create a graph with only exported symbols in the target scope
+		g2 := graph.NewGraph("/test")
+		idx2 := index.NewSymbolIndex()
+
+		exportedOnly := &ast.Symbol{
+			ID:        "lib/widgets/button.py:10:Button",
+			Name:      "Button",
+			Kind:      ast.SymbolKindClass,
+			FilePath:  "lib/widgets/button.py",
+			StartLine: 10,
+			EndLine:   50,
+			Package:   "", // Python
+			Exported:  true,
+			Language:  "python",
+		}
+		unrelatedUnexported := &ast.Symbol{
+			ID:        "lib/core/internal.py:10:_helper",
+			Name:      "_helper",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "lib/core/internal.py",
+			StartLine: 10,
+			EndLine:   20,
+			Package:   "", // Python
+			Exported:  false,
+			Language:  "python",
+		}
+
+		g2.AddNode(exportedOnly)
+		g2.AddNode(unrelatedUnexported)
+		if err := idx2.Add(exportedOnly); err != nil {
+			t.Fatalf("failed to add symbol: %v", err)
+		}
+		if err := idx2.Add(unrelatedUnexported); err != nil {
+			t.Fatalf("failed to add symbol: %v", err)
+		}
+		g2.Freeze()
+
+		hg2, err := graph.WrapGraph(g2)
+		if err != nil {
+			t.Fatalf("WrapGraph failed: %v", err)
+		}
+		analytics2 := graph.NewGraphAnalytics(hg2)
+		tool2 := NewFindDeadCodeTool(analytics2, idx2)
+
+		// Query for "widgets" package, include_exported=false (default)
+		// Only Button is in widgets/ but it's exported. Fallback should include it.
+		result, err := tool2.Execute(ctx, MapParams{Params: map[string]any{
+			"package":       "widgets",
+			"exclude_tests": false,
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindDeadCodeOutput)
+		if !ok {
+			t.Fatalf("Output is not FindDeadCodeOutput, got %T", result.Output)
+		}
+
+		// Fallback should have included the exported Button in widgets/
+		foundButton := false
+		for _, dc := range output.DeadCode {
+			if dc.Name == "Button" {
+				foundButton = true
+			}
+		}
+		if !foundButton {
+			t.Error("expected fallback to include exported 'Button' when no unexported symbols in 'widgets' scope")
+		}
+
+		// Should NOT include unrelated symbols from other paths
+		for _, dc := range output.DeadCode {
+			if dc.Name == "_helper" {
+				t.Error("expected _helper to be excluded (not in 'widgets' scope)")
+			}
+		}
+	})
+
+	t.Run("no false positive on substring boundary", func(t *testing.T) {
+		// "log" should NOT match "dialog" directory
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"package":          "log",
+			"include_exported": true,
+			"exclude_tests":    false,
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindDeadCodeOutput)
+		if !ok {
+			t.Fatalf("Output is not FindDeadCodeOutput, got %T", result.Output)
+		}
+
+		// None of the test symbols are in a "log" directory or package
+		for _, dc := range output.DeadCode {
+			if strings.Contains(dc.File, "dialog") {
+				t.Errorf("boundary check failed: 'log' matched file in 'dialog': %s", dc.File)
+			}
+		}
+	})
 }

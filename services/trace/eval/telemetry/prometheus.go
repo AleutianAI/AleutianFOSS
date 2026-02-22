@@ -43,7 +43,7 @@ var (
 //
 // Thread Safety: Immutable after creation; safe for concurrent read access.
 type PrometheusConfig struct {
-	// Namespace is the metrics namespace (e.g., "code_buddy").
+	// Namespace is the metrics namespace (e.g., "trace").
 	// Required.
 	Namespace string
 
@@ -91,7 +91,7 @@ type PrometheusConfig struct {
 //	sink, err := telemetry.NewPrometheusSink(config)
 func DefaultPrometheusConfig() *PrometheusConfig {
 	return &PrometheusConfig{
-		Namespace: "code_buddy",
+		Namespace: "trace",
 		Subsystem: "eval",
 		LatencyBuckets: []float64{
 			0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,

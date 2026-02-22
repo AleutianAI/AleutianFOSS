@@ -8,7 +8,7 @@
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
 
-package code_buddy
+package trace
 
 import (
 	"context"
@@ -57,8 +57,8 @@ type AgentHandlers struct {
 // Example:
 //
 //	loop := agent.NewDefaultAgentLoop()
-//	svc := code_buddy.NewService(config)
-//	handlers := code_buddy.NewAgentHandlers(loop, svc)
+//	svc := trace.NewService(config)
+//	handlers := trace.NewAgentHandlers(loop, svc)
 func NewAgentHandlers(loop agent.AgentLoop, svc *Service) *AgentHandlers {
 	// Get Ollama endpoint from environment or use default
 	ollamaURL := os.Getenv("OLLAMA_URL")
@@ -1085,6 +1085,23 @@ func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent
 				"model", mainModel,
 				"duration", time.Since(mainWarmStart))
 		}
+	}
+
+	// IT-08b: Create ParamExtractor using the same model manager and model.
+	// This reuses the already-warmed granite4:micro-h for parameter extraction.
+	paramConfig := routing.DefaultParamExtractorConfig()
+	paramConfig.Model = routerConfig.Model
+	paramConfig.KeepAlive = routerConfig.KeepAlive
+	paramExtractor, paramErr := routing.NewParamExtractor(h.modelManager, paramConfig)
+	if paramErr != nil {
+		logger.Warn("initializeToolRouter: ParamExtractor creation failed (non-fatal)",
+			"session_id", session.ID,
+			"error", paramErr)
+	} else {
+		session.SetParamExtractor(paramExtractor)
+		logger.Info("initializeToolRouter: ParamExtractor created",
+			"session_id", session.ID,
+			"model", paramConfig.Model)
 	}
 
 	logger.Info("initializeToolRouter: Complete - Router fully initialized",

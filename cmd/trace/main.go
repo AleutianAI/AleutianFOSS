@@ -75,7 +75,9 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/events"
 	agentllm "github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/phases"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/routing"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/safety"
+	traceconfig "github.com/AleutianAI/AleutianFOSS/services/trace/config"
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 	"go.opentelemetry.io/otel"
@@ -86,19 +88,19 @@ import (
 )
 
 // IsWarmupComplete checks if the main model warmup has finished.
-// Delegates to the code_buddy package's warmup registry.
+// Delegates to the trace package's warmup registry.
 //
 // Thread Safety: This function is safe for concurrent use.
 func IsWarmupComplete() bool {
-	return code_buddy.IsWarmupComplete()
+	return trace.IsWarmupComplete()
 }
 
 // markWarmupComplete marks the warmup as complete.
-// Delegates to the code_buddy package's warmup registry.
+// Delegates to the trace package's warmup registry.
 //
 // Thread Safety: This function is safe for concurrent use.
 func markWarmupComplete() {
-	code_buddy.MarkWarmupComplete()
+	trace.MarkWarmupComplete()
 }
 
 // WarmupGuardMiddleware returns 503 Service Unavailable for agent endpoints
@@ -190,11 +192,11 @@ func main() {
 	))
 
 	// Create service with default config
-	cfg := code_buddy.DefaultServiceConfig()
-	svc := code_buddy.NewService(cfg)
+	cfg := trace.DefaultServiceConfig()
+	svc := trace.NewService(cfg)
 
 	// Create handlers
-	handlers := code_buddy.NewHandlers(svc)
+	handlers := trace.NewHandlers(svc)
 
 	// Setup router
 	router := gin.New()
@@ -207,9 +209,9 @@ func main() {
 		router.Use(gin.Logger())
 	}
 
-	// Register routes under /v1/trace (aliased from code_buddy for compatibility)
+	// Register routes under /v1/trace
 	v1 := router.Group("/v1")
-	code_buddy.RegisterRoutes(v1, handlers)
+	trace.RegisterRoutes(v1, handlers)
 
 	// Setup agent loop and register routes
 	agentEnabled := setupAgentLoop(v1, svc, *withContext, *withTools)
@@ -239,7 +241,7 @@ func main() {
 // setupAgentLoop initializes the agent loop and registers routes.
 //
 // Returns true if the agent is fully enabled with LLM support.
-func setupAgentLoop(v1 *gin.RouterGroup, svc *code_buddy.Service, withContext, withTools bool) bool {
+func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTools bool) bool {
 	ollamaClient, err := llm.NewOllamaClient()
 	if err != nil {
 		slog.Warn("Ollama not available", slog.String("error", err.Error()))
@@ -251,9 +253,9 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *code_buddy.Service, withContext, w
 
 		// Create agent loop without LLM (uses default phase execution)
 		agentLoop := agent.NewDefaultAgentLoop()
-		agentHandlers := code_buddy.NewAgentHandlers(agentLoop, svc)
+		agentHandlers := trace.NewAgentHandlers(agentLoop, svc)
 		// No warmup guard needed for mock mode since warmup is already complete
-		code_buddy.RegisterAgentRoutesWithMiddleware(v1, agentHandlers, nil)
+		trace.RegisterAgentRoutesWithMiddleware(v1, agentHandlers, nil)
 		return false
 	}
 
@@ -309,16 +311,40 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *code_buddy.Service, withContext, w
 
 	// Create phase registry with actual phase implementations
 	registry := agent.NewPhaseRegistry()
-	registry.Register(agent.StateInit, code_buddy.NewPhaseAdapter(phases.NewInitPhase()))
-	registry.Register(agent.StatePlan, code_buddy.NewPhaseAdapter(phases.NewPlanPhase()))
-	registry.Register(agent.StateExecute, code_buddy.NewPhaseAdapter(phases.NewExecutePhase()))
+	registry.Register(agent.StateInit, trace.NewPhaseAdapter(phases.NewInitPhase()))
+	registry.Register(agent.StatePlan, trace.NewPhaseAdapter(phases.NewPlanPhase()))
+	// Pre-filter: load config and registry (singletons, ~0ms after first load).
+	// If either fails, proceed without pre-filter (graceful degradation).
+	pfCtx := context.Background()
+	pfCfg, pfErr := traceconfig.GetPreFilterConfig(pfCtx)
+	if pfErr != nil {
+		slog.Warn("Pre-filter config load failed, pre-filter disabled",
+			slog.String("error", pfErr.Error()))
+	}
+	toolRegistry, trErr := traceconfig.GetToolRoutingRegistry(pfCtx)
+	if trErr != nil {
+		slog.Warn("Tool routing registry load failed, pre-filter disabled",
+			slog.String("error", trErr.Error()))
+	}
 
-	registry.Register(agent.StateReflect, code_buddy.NewPhaseAdapter(phases.NewReflectPhase()))
-	registry.Register(agent.StateClarify, code_buddy.NewPhaseAdapter(phases.NewClarifyPhase()))
+	var executeOpts []phases.ExecutePhaseOption
+	if pfErr == nil && trErr == nil && pfCfg.Enabled {
+		pf := routing.NewPreFilter(toolRegistry, pfCfg, slog.Default())
+		executeOpts = append(executeOpts, phases.WithPreFilter(pf))
+		slog.Info("Pre-filter enabled",
+			slog.Int("forced_mappings", len(pfCfg.ForcedMappings)),
+			slog.Int("negation_rules", len(pfCfg.NegationRules)),
+			slog.Int("confusion_pairs", len(pfCfg.ConfusionPairs)))
+	}
+
+	registry.Register(agent.StateExecute, trace.NewPhaseAdapter(phases.NewExecutePhase(executeOpts...)))
+
+	registry.Register(agent.StateReflect, trace.NewPhaseAdapter(phases.NewReflectPhase()))
+	registry.Register(agent.StateClarify, trace.NewPhaseAdapter(phases.NewClarifyPhase()))
 	slog.Info("Registered phases", slog.Int("count", registry.Count()))
 
 	// Create graph provider wrapping the service
-	serviceAdapter := code_buddy.NewServiceAdapter(svc)
+	serviceAdapter := trace.NewServiceAdapter(svc)
 	graphProvider := agent.NewServiceGraphProvider(serviceAdapter)
 
 	// Create event emitter
@@ -329,16 +355,16 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *code_buddy.Service, withContext, w
 
 	// Create dependencies factory
 	// GR-39: Enable Coordinator and Session Restore for CRS persistence
-	depsFactory := code_buddy.NewDependenciesFactory(
-		code_buddy.WithLLMClient(llmClient),
-		code_buddy.WithGraphProvider(graphProvider),
-		code_buddy.WithEventEmitter(eventEmitter),
-		code_buddy.WithSafetyGate(safetyGate),
-		code_buddy.WithService(svc),
-		code_buddy.WithContextEnabled(withContext),
-		code_buddy.WithToolsEnabled(withTools),
-		code_buddy.WithCoordinatorEnabled(true),
-		code_buddy.WithSessionRestoreEnabled(true),
+	depsFactory := trace.NewDependenciesFactory(
+		trace.WithLLMClient(llmClient),
+		trace.WithGraphProvider(graphProvider),
+		trace.WithEventEmitter(eventEmitter),
+		trace.WithSafetyGate(safetyGate),
+		trace.WithService(svc),
+		trace.WithContextEnabled(withContext),
+		trace.WithToolsEnabled(withTools),
+		trace.WithCoordinatorEnabled(true),
+		trace.WithSessionRestoreEnabled(true),
 	)
 
 	if withContext {
@@ -353,11 +379,11 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *code_buddy.Service, withContext, w
 		agent.WithPhaseRegistry(registry),
 		agent.WithDependenciesFactory(depsFactory),
 	)
-	agentHandlers := code_buddy.NewAgentHandlers(agentLoop, svc)
+	agentHandlers := trace.NewAgentHandlers(agentLoop, svc)
 
 	// S-1: Apply warmup guard middleware to agent routes.
 	// This returns 503 Service Unavailable for agent requests during model warmup.
-	code_buddy.RegisterAgentRoutesWithMiddleware(v1, agentHandlers, WarmupGuardMiddleware())
+	trace.RegisterAgentRoutesWithMiddleware(v1, agentHandlers, WarmupGuardMiddleware())
 	return true
 }
 

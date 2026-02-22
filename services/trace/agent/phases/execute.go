@@ -489,6 +489,12 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 		// TR-1 Fix: Extract tool parameters from query/context
 		// CB-31d: Pass deps for symbol resolution
 		params, paramErr := p.extractToolParameters(ctx, deps.Query, hardForcing.Tool, toolDefs, deps.Context, deps)
+
+		// IT-08b: Enhance regex extraction with LLM when available
+		if paramErr == nil && params != nil {
+			params = p.enhanceParamsWithLLM(ctx, deps, hardForcing.Tool, toolDefs, params)
+		}
+
 		if paramErr != nil {
 			// TR-7 Fix: Fallback to Main LLM on parameter extraction failure
 			slog.Warn("Parameter extraction failed, falling back to Main LLM (CB-31d)",

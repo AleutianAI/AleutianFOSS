@@ -8,7 +8,7 @@
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
 
-package code_buddy
+package trace
 
 import (
 	"github.com/gin-gonic/gin"
@@ -83,11 +83,11 @@ import (
 //
 // Example:
 //
-//	service := code_buddy.NewService(code_buddy.DefaultServiceConfig())
-//	handlers := code_buddy.NewHandlers(service)
+//	service := trace.NewService(trace.DefaultServiceConfig())
+//	handlers := trace.NewHandlers(service)
 //
 //	v1 := router.Group("/v1")
-//	code_buddy.RegisterRoutes(v1, handlers)
+//	trace.RegisterRoutes(v1, handlers)
 func RegisterRoutes(rg *gin.RouterGroup, handlers *Handlers) {
 	codebuddy := rg.Group("/codebuddy")
 	{
@@ -205,11 +205,11 @@ func RegisterRoutes(rg *gin.RouterGroup, handlers *Handlers) {
 // Example:
 //
 //	loop := agent.NewDefaultAgentLoop()
-//	service := code_buddy.NewService(config)
-//	agentHandlers := code_buddy.NewAgentHandlers(loop, service)
+//	service := trace.NewService(config)
+//	agentHandlers := trace.NewAgentHandlers(loop, service)
 //
 //	v1 := router.Group("/v1")
-//	code_buddy.RegisterAgentRoutes(v1, agentHandlers)
+//	trace.RegisterAgentRoutes(v1, agentHandlers)
 func RegisterAgentRoutes(rg *gin.RouterGroup, handlers *AgentHandlers) {
 	RegisterAgentRoutesWithMiddleware(rg, handlers, nil)
 }
