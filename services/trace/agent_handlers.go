@@ -1093,6 +1093,13 @@ func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent
 		return fmt.Errorf("creating router chat client: %w", err)
 	}
 
+	// CB-60d: Wrap router ChatClient with egress guard for audit trail and control.
+	routerChatClient = h.providerFactory.WrapChatClientForEgress(
+		routerChatClient,
+		roleConfig.Router.Provider, roleConfig.Router.Model,
+		session.ID, "ROUTER", 0,
+	)
+
 	// CB-60: Create lifecycle manager for warmup.
 	routerLifecycle, err := h.providerFactory.CreateLifecycleManager(roleConfig.Router)
 	if err != nil {
@@ -1214,6 +1221,12 @@ func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent
 			"provider", roleConfig.ParamExtractor.Provider,
 			"error", paramClientErr)
 	} else {
+		// CB-60d: Wrap param extractor ChatClient with egress guard.
+		paramChatClient = h.providerFactory.WrapChatClientForEgress(
+			paramChatClient,
+			roleConfig.ParamExtractor.Provider, roleConfig.ParamExtractor.Model,
+			session.ID, "PARAM", 0,
+		)
 		// CB-60: Create lifecycle manager for param extractor warmup.
 		paramLifecycle, paramLifecycleErr := h.providerFactory.CreateLifecycleManager(roleConfig.ParamExtractor)
 		if paramLifecycleErr != nil {

@@ -249,16 +249,34 @@ func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*R
 	// Phase 1: Filter out test and documentation files
 	var sourceOnly []graph.PageRankNode
 	if p.ExcludeTests {
+		filteredCount := 0
 		for _, prn := range pageRankNodes {
 			if prn.Node == nil || prn.Node.Symbol == nil {
 				continue
 			}
 			filePath := prn.Node.Symbol.FilePath
 			// GR-60: Use graph-based file classification instead of heuristics
-			if !t.analytics.IsProductionFile(filePath) {
+			isProd := t.analytics.IsProductionFile(filePath)
+			if !isProd {
+				filteredCount++
+				// GR-60c: Debug log for classification decisions on top results
+				if filteredCount <= 10 {
+					t.logger.Info("GR-60c: filtered non-production file from find_important",
+						slog.String("file", filePath),
+						slog.String("symbol", prn.Node.Symbol.Name),
+						slog.Float64("pagerank", prn.Score),
+					)
+				}
 				continue
 			}
 			sourceOnly = append(sourceOnly, prn)
+		}
+		if filteredCount > 0 {
+			t.logger.Info("GR-60c: find_important filter summary",
+				slog.Int("raw_results", len(pageRankNodes)),
+				slog.Int("filtered_out", filteredCount),
+				slog.Int("kept", len(sourceOnly)),
+			)
 		}
 		if len(sourceOnly) > 0 {
 			pageRankNodes = sourceOnly

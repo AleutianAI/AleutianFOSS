@@ -1238,3 +1238,98 @@ func truncateForTest(s string, maxLen int) string {
 	}
 	return s[:maxLen] + "..."
 }
+
+// TestExecutePhase_SynthesisMode_SkipsToolForcing verifies the IT-11 fix:
+// when handleCompletion is called from forceLLMSynthesis (ToolChoice=none),
+// tool forcing must NOT trigger, even for analytical queries. Before the fix,
+// this caused a redundant second EXECUTE loop wasting ~9-18s per test.
+func TestExecutePhase_SynthesisMode_SkipsToolForcing(t *testing.T) {
+	phase := NewExecutePhase()
+	deps := createTestDependencies()
+	// Use an analytical query that would normally trigger tool forcing.
+	deps.Query = "Find natural code communities and module boundaries in this codebase"
+	deps.Context = &agent.AssembledContext{
+		ConversationHistory: []agent.Message{},
+		ToolResults: []agent.ToolResult{
+			{
+				Success: true,
+				Output:  "Detected 20 communities (modularity: 0.45):\n\nCommunity 1 (3776 symbols)...",
+			},
+		},
+	}
+	deps.ContextManager = &agentcontext.Manager{}
+
+	// Simulate a successful synthesis response.
+	response := &llm.Response{
+		Content:      "The community detection found 20 distinct groups...",
+		OutputTokens: 500,
+	}
+
+	// Build a request with ToolChoice=none (what forceLLMSynthesis sets).
+	request := &llm.Request{
+		ToolChoice: llm.ToolChoiceNone(),
+	}
+
+	nextState, err := phase.handleCompletion(
+		context.Background(), deps, response, request, time.Now(), 1,
+	)
+	if err != nil {
+		t.Fatalf("handleCompletion failed: %v", err)
+	}
+
+	// Must complete, NOT return to EXECUTE for a redundant loop.
+	if nextState != agent.StateComplete {
+		t.Errorf("nextState = %s, want COMPLETE (synthesis mode should skip tool forcing)", nextState)
+	}
+
+	// Verify no forcing retry was counted.
+	forcingRetries := deps.Session.GetMetric(agent.MetricToolForcingRetries)
+	if forcingRetries != 0 {
+		t.Errorf("MetricToolForcingRetries = %d, want 0 (no forcing should occur in synthesis mode)", forcingRetries)
+	}
+}
+
+// TestExecutePhase_NonSynthesisMode_StillForcesTools verifies that the IT-11 fix
+// does NOT break normal tool forcing: when ToolChoice is NOT none (i.e., a normal
+// LLM response without tool calls for an analytical query), tool forcing should
+// still trigger as before.
+func TestExecutePhase_NonSynthesisMode_StillForcesTools(t *testing.T) {
+	phase := NewExecutePhase()
+	deps := createTestDependencies()
+	// Analytical query that should trigger tool forcing.
+	deps.Query = "Find natural code communities and module boundaries in this codebase"
+	deps.Context = &agent.AssembledContext{
+		ConversationHistory: []agent.Message{},
+	}
+	deps.ContextManager = &agentcontext.Manager{}
+
+	// Register a tool so the forcing hint has something to suggest.
+	deps.ToolRegistry = tools.NewRegistry()
+
+	// LLM returned text without tool calls (normal response, not synthesis).
+	response := &llm.Response{
+		Content:      "I think the code has several modules...",
+		OutputTokens: 100,
+	}
+
+	// Normal request — ToolChoice is nil or auto, NOT none.
+	request := &llm.Request{}
+
+	nextState, err := phase.handleCompletion(
+		context.Background(), deps, response, request, time.Now(), 1,
+	)
+	if err != nil {
+		t.Fatalf("handleCompletion failed: %v", err)
+	}
+
+	// Should return EXECUTE to force tool usage for this analytical query.
+	if nextState != agent.StateExecute {
+		t.Errorf("nextState = %s, want EXECUTE (tool forcing should trigger for analytical query without synthesis mode)", nextState)
+	}
+
+	// Verify forcing retry was counted.
+	forcingRetries := deps.Session.GetMetric(agent.MetricToolForcingRetries)
+	if forcingRetries != 1 {
+		t.Errorf("MetricToolForcingRetries = %d, want 1", forcingRetries)
+	}
+}

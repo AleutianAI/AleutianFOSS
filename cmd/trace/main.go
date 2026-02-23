@@ -71,11 +71,13 @@ import (
 
 	"github.com/AleutianAI/AleutianFOSS/services/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
+	"github.com/AleutianAI/AleutianFOSS/services/policy_engine"
 	"github.com/AleutianAI/AleutianFOSS/services/trace"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/events"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/phases"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/providers"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/providers/egress"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/routing"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/safety"
 	traceconfig "github.com/AleutianAI/AleutianFOSS/services/trace/config"
@@ -271,7 +273,27 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTo
 		ollamaModelManager = llm.NewMultiModelManager(ollamaURL)
 	}
 
-	factory := providers.NewProviderFactory(ollamaModelManager)
+	// CB-60d: Load egress config and create guard builder for data egress control.
+	egressCfg := egress.LoadEgressConfig()
+	var egressBuilder *egress.EgressGuardBuilder
+	{
+		var classifier egress.DataClassifier
+		policyEngine, peErr := policy_engine.NewPolicyEngine()
+		if peErr != nil {
+			slog.Warn("PolicyEngine unavailable, egress classifier will use NoOp (all data treated as public)",
+				slog.String("error", peErr.Error()))
+			classifier = egress.NewNoOpClassifier()
+		} else {
+			classifier = egress.NewPolicyEngineClassifier(policyEngine)
+		}
+		egressBuilder = egress.NewEgressGuardBuilder(egressCfg, classifier)
+		slog.Info("Egress guard initialized",
+			slog.Bool("enabled", egressCfg.Enabled),
+			slog.Bool("local_only", egressCfg.LocalOnly),
+			slog.Bool("audit", egressCfg.AuditEnabled))
+	}
+
+	factory := providers.NewProviderFactory(ollamaModelManager, providers.WithEgressGuard(egressBuilder))
 
 	// CB-60: Create main agent client using the factory.
 	llmClient, err := factory.CreateAgentClient(roleConfig.Main)

@@ -1874,7 +1874,13 @@ func (p *ExecutePhase) handleCompletion(ctx context.Context, deps *Dependencies,
 
 	// Check if tool forcing should be applied (before grounding validation)
 	// GR-44: Skip tool forcing when circuit breaker has fired
-	if !deps.Session.IsCircuitBreakerActive() && p.shouldForceToolUsage(ctx, deps, stepNumber) {
+	// IT-11: Skip tool forcing when already in synthesis mode (ToolChoice=none).
+	// forceLLMSynthesis delegates to handleCompletion after a successful synthesis,
+	// but without this check, shouldForceToolUsage returns true (analytical query,
+	// step ≤ 2, retries < max) and triggers a redundant second EXECUTE loop that
+	// wastes ~9-18s on re-routing + a second LLM synthesis call.
+	isSynthesisMode := request.ToolChoice != nil && request.ToolChoice.Type == "none"
+	if !isSynthesisMode && !deps.Session.IsCircuitBreakerActive() && p.shouldForceToolUsage(ctx, deps, stepNumber) {
 		return p.forceToolUsage(ctx, deps, response, stepNumber)
 	}
 

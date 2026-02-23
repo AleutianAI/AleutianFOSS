@@ -11,11 +11,14 @@
 package providers
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 
 	"github.com/AleutianAI/AleutianFOSS/services/llm"
+	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	agentllm "github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/providers/egress"
 )
 
 // ProviderFactory creates the right LLM adapters based on provider configuration.
@@ -32,7 +35,28 @@ type ProviderFactory struct {
 	// May be nil if Ollama is not used by any role.
 	ollamaModelManager *llm.MultiModelManager
 
+	// egressBuilder wraps created clients with egress guard decorators.
+	// When nil, clients are returned unwrapped (no egress control).
+	egressBuilder *egress.EgressGuardBuilder
+
 	logger *slog.Logger
+}
+
+// FactoryOption configures a ProviderFactory.
+type FactoryOption func(*ProviderFactory)
+
+// WithEgressGuard configures the factory to wrap all created cloud clients
+// with egress guard decorators for data egress control and audit trail.
+//
+// Inputs:
+//   - builder: The egress guard builder with shared components.
+//
+// Outputs:
+//   - FactoryOption: Option to pass to NewProviderFactory.
+func WithEgressGuard(builder *egress.EgressGuardBuilder) FactoryOption {
+	return func(f *ProviderFactory) {
+		f.egressBuilder = builder
+	}
 }
 
 // NewProviderFactory creates a new ProviderFactory.
@@ -44,14 +68,19 @@ type ProviderFactory struct {
 //
 // Inputs:
 //   - ollamaModelManager: Shared MultiModelManager for Ollama (may be nil).
+//   - opts: Optional factory configuration (e.g., WithEgressGuard).
 //
 // Outputs:
 //   - *ProviderFactory: Configured factory.
-func NewProviderFactory(ollamaModelManager *llm.MultiModelManager) *ProviderFactory {
-	return &ProviderFactory{
+func NewProviderFactory(ollamaModelManager *llm.MultiModelManager, opts ...FactoryOption) *ProviderFactory {
+	f := &ProviderFactory{
 		ollamaModelManager: ollamaModelManager,
 		logger:             slog.Default(),
 	}
+	for _, opt := range opts {
+		opt(f)
+	}
+	return f
 }
 
 // CreateChatClient creates a ChatClient adapter for the given provider config.
@@ -140,6 +169,8 @@ func (f *ProviderFactory) CreateChatClient(cfg ProviderConfig) (ChatClient, erro
 //	    APIKey:   "sk-ant-...",
 //	})
 func (f *ProviderFactory) CreateAgentClient(cfg ProviderConfig) (agentllm.Client, error) {
+	var rawClient agentllm.Client
+
 	switch cfg.Provider {
 	case ProviderOllama:
 		if f.ollamaModelManager == nil {
@@ -149,7 +180,7 @@ func (f *ProviderFactory) CreateAgentClient(cfg ProviderConfig) (agentllm.Client
 		if err != nil {
 			return nil, fmt.Errorf("creating Ollama client: %w", err)
 		}
-		return agentllm.NewOllamaAdapter(ollamaClient, cfg.Model), nil
+		rawClient = agentllm.NewOllamaAdapter(ollamaClient, cfg.Model)
 
 	case ProviderAnthropic:
 		if cfg.APIKey == "" {
@@ -159,7 +190,7 @@ func (f *ProviderFactory) CreateAgentClient(cfg ProviderConfig) (agentllm.Client
 		if err != nil {
 			return nil, fmt.Errorf("creating Anthropic client: %w", err)
 		}
-		return agentllm.NewAnthropicAgentAdapter(client, cfg.Model), nil
+		rawClient = agentllm.NewAnthropicAgentAdapter(client, cfg.Model)
 
 	case ProviderOpenAI:
 		if cfg.APIKey == "" {
@@ -169,7 +200,7 @@ func (f *ProviderFactory) CreateAgentClient(cfg ProviderConfig) (agentllm.Client
 		if err != nil {
 			return nil, fmt.Errorf("creating OpenAI client: %w", err)
 		}
-		return agentllm.NewOpenAIAgentAdapter(client, cfg.Model), nil
+		rawClient = agentllm.NewOpenAIAgentAdapter(client, cfg.Model)
 
 	case ProviderGemini:
 		if cfg.APIKey == "" {
@@ -179,11 +210,98 @@ func (f *ProviderFactory) CreateAgentClient(cfg ProviderConfig) (agentllm.Client
 		if err != nil {
 			return nil, fmt.Errorf("creating Gemini client: %w", err)
 		}
-		return agentllm.NewGeminiAgentAdapter(client, cfg.Model), nil
+		rawClient = agentllm.NewGeminiAgentAdapter(client, cfg.Model)
 
 	default:
 		return nil, fmt.Errorf("unsupported provider: %q (valid: %v)", cfg.Provider, ValidProviders)
 	}
+
+	// CB-60d: Wrap with egress guard if configured.
+	// Note: The main LLM client is created once and shared across all agent sessions,
+	// so we use "shared-main" as the session ID. The token budget is 0 (unlimited) at
+	// this level because per-session budgets are enforced by wrapping router/param clients
+	// at the handler layer where the actual session ID is available.
+	if f.egressBuilder != nil {
+		rawClient = f.egressBuilder.WrapAgentClient(rawClient, cfg.Provider, cfg.Model, "shared-main", 0)
+	}
+
+	return rawClient, nil
+}
+
+// EgressBuilder returns the egress guard builder, if configured.
+//
+// Outputs:
+//   - *egress.EgressGuardBuilder: The builder, or nil if not configured.
+func (f *ProviderFactory) EgressBuilder() *egress.EgressGuardBuilder {
+	return f.egressBuilder
+}
+
+// WrapChatClientForEgress wraps a providers.ChatClient with egress guard checks.
+//
+// Description:
+//
+//	Bridges the type gap between providers.ChatClient (which uses providers.ChatOptions)
+//	and egress.ChatClient (which uses egress.ChatOptions) by using a thin adapter.
+//	This enables per-session egress wrapping for router and param extractor clients
+//	at the handler layer where the actual session ID is available.
+//
+//	Returns the original client unwrapped if no egress builder is configured.
+//
+// Inputs:
+//   - client: The providers.ChatClient to wrap.
+//   - provider: The provider name (e.g., "anthropic").
+//   - model: The model name.
+//   - sessionID: The agent session ID.
+//   - role: The role name ("ROUTER" or "PARAM").
+//   - tokenLimit: Token budget for this session/role. 0 means unlimited.
+//
+// Outputs:
+//   - ChatClient: The guarded client (or the original if no egress builder or provider is "ollama").
+func (f *ProviderFactory) WrapChatClientForEgress(
+	client ChatClient,
+	provider, model, sessionID, role string,
+	tokenLimit int,
+) ChatClient {
+	if f.egressBuilder == nil {
+		return client
+	}
+	// Adapt providers.ChatClient → egress.ChatClient
+	adapted := &chatClientAdapter{inner: client}
+	wrapped := f.egressBuilder.WrapChatClient(adapted, provider, model, sessionID, role, tokenLimit)
+	// Adapt egress.ChatClient → providers.ChatClient
+	return &egressChatClientAdapter{inner: wrapped}
+}
+
+// chatClientAdapter adapts providers.ChatClient to egress.ChatClient.
+// Required because Go's nominal typing means providers.ChatOptions != egress.ChatOptions
+// even though they have identical fields.
+type chatClientAdapter struct {
+	inner ChatClient
+}
+
+func (a *chatClientAdapter) Chat(ctx context.Context, messages []datatypes.Message, opts egress.ChatOptions) (string, error) {
+	return a.inner.Chat(ctx, messages, ChatOptions{
+		Temperature: opts.Temperature,
+		MaxTokens:   opts.MaxTokens,
+		KeepAlive:   opts.KeepAlive,
+		NumCtx:      opts.NumCtx,
+		Model:       opts.Model,
+	})
+}
+
+// egressChatClientAdapter adapts egress.ChatClient back to providers.ChatClient.
+type egressChatClientAdapter struct {
+	inner egress.ChatClient
+}
+
+func (a *egressChatClientAdapter) Chat(ctx context.Context, messages []datatypes.Message, opts ChatOptions) (string, error) {
+	return a.inner.Chat(ctx, messages, egress.ChatOptions{
+		Temperature: opts.Temperature,
+		MaxTokens:   opts.MaxTokens,
+		KeepAlive:   opts.KeepAlive,
+		NumCtx:      opts.NumCtx,
+		Model:       opts.Model,
+	})
 }
 
 // CreateLifecycleManager creates a ModelLifecycleManager for the given provider.
