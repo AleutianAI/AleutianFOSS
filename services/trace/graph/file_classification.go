@@ -341,12 +341,42 @@ func ClassifyFiles(hg *HierarchicalGraph, opts FileClassificationOptions) (*File
 			}
 
 			ratio := float64(prodIn) / float64(total)
-			if ratio < 0.10 {
+
+			// GR-60c: Caller purity check. If a file originally had many
+			// incoming edges but < 10% survive after removing non-production
+			// callers, the file is test infrastructure regardless of its
+			// outgoing edges. Example: Hugo's integrationtest_builder.go has
+			// 3193 incoming edges from _test.go files, only 136 from prod
+			// (4.3%) — but its 115 outgoing edges to production code keep
+			// the ratio at 0.54. The caller purity check catches this.
+			origIn, origOut := computeFileRatio(nodes, hg, filePath)
+			callerPurityFailed := origIn > 20 && float64(prodIn)/float64(origIn) < 0.10
+
+			if ratio < 0.10 || callerPurityFailed {
 				// When counting only production edges, this file is a consumer
 				fc.files[filePath] = false
 				fc.stats.ProductionFiles--
 				fc.stats.NonProductionFiles++
 				reclassified++
+				if callerPurityFailed && ratio >= 0.10 {
+					slog.Info("GR-60c: Phase 6 caller purity reclassified file",
+						slog.String("file", filePath),
+						slog.Int("prod_in", prodIn),
+						slog.Int("orig_in", origIn),
+						slog.Float64("caller_purity", float64(prodIn)/float64(origIn)),
+						slog.Float64("prod_ratio", ratio),
+					)
+				}
+			} else if pass == 0 && strings.Contains(strings.ToLower(filePath), "test") {
+				// GR-60c diagnostic: log test-path files that survive Phase 6
+				slog.Info("GR-60c: Phase 6 kept test-path file as production",
+					slog.String("file", filePath),
+					slog.Int("prod_in", prodIn),
+					slog.Int("prod_out", prodOut),
+					slog.Float64("prod_ratio", ratio),
+					slog.Int("orig_in", origIn),
+					slog.Int("orig_out", origOut),
+				)
 			}
 		}
 
@@ -452,6 +482,7 @@ func isDefinitiveTestFile(filePath string) bool {
 	for _, dir := range []string{
 		"__tests__/", "__fixtures__/", "__mocks__/",
 		"quicktests/", "e2e/", "cypress/",
+		"integration/",
 	} {
 		if strings.Contains(lower, "/"+dir) || strings.HasPrefix(lower, dir) {
 			return true

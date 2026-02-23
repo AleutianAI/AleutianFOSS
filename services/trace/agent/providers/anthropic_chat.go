@@ -48,7 +48,7 @@ func (a *AnthropicChatAdapter) Chat(ctx context.Context, messages []datatypes.Me
 	}
 
 	params := llm.GenerationParams{}
-	if opts.Temperature > 0 {
+	if opts.Temperature >= 0 {
 		temp := float32(opts.Temperature)
 		params.Temperature = &temp
 	}

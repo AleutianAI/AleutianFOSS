@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	agentllm "github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
@@ -770,6 +771,33 @@ func TestStripAbsolutePaths(t *testing.T) {
 	}
 }
 
+func TestTruncateToTokens_UTF8Safety(t *testing.T) {
+	// Create a string with multi-byte UTF-8 characters (Japanese: 3 bytes each)
+	input := strings.Repeat("日本語", 20)       // 60 runes, 180 bytes
+	truncated := truncateToTokens(input, 10) // ~40 bytes target
+
+	// Result must be valid UTF-8
+	if !utf8.ValidString(truncated) {
+		t.Error("truncated string is not valid UTF-8")
+	}
+	if len(truncated) > 40 {
+		t.Errorf("expected truncated to be ≤40 bytes, got %d", len(truncated))
+	}
+}
+
+func TestTruncateString_UTF8(t *testing.T) {
+	// "日本語テスト" = 6 runes, 18 bytes
+	input := "日本語テスト"
+	result := truncateString(input, 5) // 5 runes max, "日本..." = 2 chars + "..."
+	if !utf8.ValidString(result) {
+		t.Error("truncated string is not valid UTF-8")
+	}
+	runes := []rune(result)
+	if len(runes) > 5 {
+		t.Errorf("expected ≤5 runes, got %d", len(runes))
+	}
+}
+
 func TestCleanBlankLines(t *testing.T) {
 	input := "line1\n\n\n\n\nline2\n\nline3"
 	result := cleanBlankLines(input)
@@ -804,11 +832,21 @@ func TestCompressTurn(t *testing.T) {
 		msg := agentllm.Message{
 			Role:      "assistant",
 			Content:   "Let me check",
-			ToolCalls: []agentllm.ToolCall{{Name: "Grep"}, {Name: "find_callers"}},
+			ToolCalls: []agentllm.ToolCall{{ID: "tc_1", Name: "Grep", Arguments: `{"pattern":"foo"}`}, {ID: "tc_2", Name: "find_callers", Arguments: `{"name":"bar"}`}},
 		}
 		compressed := compressTurn(msg)
 		if !strings.Contains(compressed.Content, "tools: Grep, find_callers") {
 			t.Errorf("expected tool names in compressed, got %q", compressed.Content)
+		}
+		// ToolCalls stubs should be preserved with original IDs
+		if len(compressed.ToolCalls) != 2 {
+			t.Fatalf("expected 2 ToolCalls stubs preserved, got %d", len(compressed.ToolCalls))
+		}
+		if compressed.ToolCalls[0].ID != "tc_1" || compressed.ToolCalls[0].Name != "Grep" {
+			t.Errorf("expected stub to preserve ID/Name, got %+v", compressed.ToolCalls[0])
+		}
+		if compressed.ToolCalls[0].Arguments != "{}" {
+			t.Errorf("expected stub arguments cleared to '{}', got %q", compressed.ToolCalls[0].Arguments)
 		}
 	})
 
@@ -822,6 +860,16 @@ func TestCompressTurn(t *testing.T) {
 		compressed := compressTurn(msg)
 		if !strings.Contains(compressed.Content, "call_123") {
 			t.Errorf("expected tool call ID in compressed, got %q", compressed.Content)
+		}
+		// ToolResults stubs should be preserved with original IDs
+		if len(compressed.ToolResults) != 1 {
+			t.Fatalf("expected 1 ToolResults stub preserved, got %d", len(compressed.ToolResults))
+		}
+		if compressed.ToolResults[0].ToolCallID != "call_123" {
+			t.Errorf("expected stub to preserve ToolCallID, got %q", compressed.ToolResults[0].ToolCallID)
+		}
+		if compressed.ToolResults[0].Content != "[compressed]" {
+			t.Errorf("expected stub content '[compressed]', got %q", compressed.ToolResults[0].Content)
 		}
 	})
 }

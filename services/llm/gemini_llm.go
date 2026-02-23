@@ -50,6 +50,31 @@ type GeminiClient struct {
 // Outputs:
 //   - *GeminiClient: The configured client.
 //   - error: Non-nil if GEMINI_API_KEY is missing.
+//
+// NewGeminiClientWithConfig creates a GeminiClient with explicit configuration.
+//
+// Description:
+//
+//	Creates a GeminiClient without reading environment variables. Useful
+//	for testing with mock servers or when configuration comes from a source
+//	other than environment variables.
+//
+// Inputs:
+//   - apiKey: The Gemini API key.
+//   - model: The model name (e.g., "gemini-1.5-flash").
+//   - baseURL: The base URL for API requests (e.g., "https://generativelanguage.googleapis.com/v1beta").
+//
+// Outputs:
+//   - *GeminiClient: The configured client.
+func NewGeminiClientWithConfig(apiKey, model, baseURL string) *GeminiClient {
+	return &GeminiClient{
+		httpClient: &http.Client{Timeout: 120 * time.Second},
+		apiKey:     apiKey,
+		model:      model,
+		baseURL:    baseURL,
+	}
+}
+
 func NewGeminiClient() (*GeminiClient, error) {
 	apiKey := os.Getenv("GEMINI_API_KEY")
 	if apiKey == "" {

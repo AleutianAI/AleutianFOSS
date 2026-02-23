@@ -1165,7 +1165,7 @@ func TestIsDefinitiveTestFile(t *testing.T) {
 
 		// Should NOT match
 		{"src/utils.go", false, "regular Go file"},
-		{"integration/scopes/service.ts", false, "integration dir not in definitive list"},
+		{"integration/scopes/service.ts", true, "integration dir is in definitive list"},
 	}
 
 	for _, tt := range tests {
@@ -1460,6 +1460,116 @@ func TestClassifyFiles_TestInfrastructure(t *testing.T) {
 		}
 		if !fc.IsProduction("core/render.go") {
 			t.Error("production file should remain production")
+		}
+	})
+
+	t.Run("caller purity catches test infra with some production callers", func(t *testing.T) {
+		// Simulates the Hugo integrationtest_builder.go scenario:
+		// - Builder is called by 100 test files AND 5 production files
+		// - Builder calls 10 production functions
+		// - Production files have enough cross-file edges among themselves
+		//   to remain stable when builder is reclassified
+		// prod_ratio = 5/(5+10) = 0.33 → above 0.10 threshold
+		// caller purity = 5/105 = 4.8% → below 10% → reclassified
+		g := NewGraph("/test")
+
+		// core/engine.go — main production file (10 functions)
+		var engineFuncs []*ast.Symbol
+		for i := 0; i < 10; i++ {
+			sym := &ast.Symbol{
+				ID:   ast.GenerateID("core/engine.go", i, "Engine"),
+				Name: "Engine", Kind: ast.SymbolKindFunction,
+				FilePath: "core/engine.go", StartLine: i, Language: "go",
+			}
+			mustAddNode(t, g, sym)
+			engineFuncs = append(engineFuncs, sym)
+		}
+
+		// core/config.go — another production file (10 functions)
+		var configFuncs []*ast.Symbol
+		for i := 0; i < 10; i++ {
+			sym := &ast.Symbol{
+				ID:   ast.GenerateID("core/config.go", i, "Config"),
+				Name: "Config", Kind: ast.SymbolKindFunction,
+				FilePath: "core/config.go", StartLine: i, Language: "go",
+			}
+			mustAddNode(t, g, sym)
+			configFuncs = append(configFuncs, sym)
+		}
+
+		// Bidirectional production edges: engine ↔ config (strong prod-to-prod)
+		for i := 0; i < 10; i++ {
+			mustAddEdge(t, g, engineFuncs[i].ID, configFuncs[i].ID, EdgeTypeCalls)
+			mustAddEdge(t, g, configFuncs[i].ID, engineFuncs[i].ID, EdgeTypeCalls)
+		}
+
+		// hugolib/helpers.go — production utilities (5 functions)
+		var helperFuncs []*ast.Symbol
+		for i := 0; i < 5; i++ {
+			sym := &ast.Symbol{
+				ID:   ast.GenerateID("hugolib/helpers.go", i, "Helper"),
+				Name: "Helper", Kind: ast.SymbolKindFunction,
+				FilePath: "hugolib/helpers.go", StartLine: i, Language: "go",
+			}
+			mustAddNode(t, g, sym)
+			helperFuncs = append(helperFuncs, sym)
+			// Helpers call engine (outgoing prod edge)
+			mustAddEdge(t, g, sym.ID, engineFuncs[i].ID, EdgeTypeCalls)
+			// Engine calls helpers back (incoming prod edge)
+			mustAddEdge(t, g, engineFuncs[i].ID, sym.ID, EdgeTypeCalls)
+		}
+
+		// Test infrastructure file
+		infraSym := &ast.Symbol{
+			ID: "hugolib/integrationtest_builder.go:1:AssertFileContent", Name: "AssertFileContent",
+			Kind: ast.SymbolKindMethod, FilePath: "hugolib/integrationtest_builder.go",
+			StartLine: 1, Language: "go",
+		}
+		mustAddNode(t, g, infraSym)
+
+		// Builder calls 10 production functions (outgoing)
+		for i := 0; i < 10; i++ {
+			mustAddEdge(t, g, infraSym.ID, engineFuncs[i].ID, EdgeTypeCalls)
+		}
+
+		// 100 test callers from _test.go files
+		for i := 0; i < 100; i++ {
+			testSym := &ast.Symbol{
+				ID:   ast.GenerateID("hugolib/feature_test.go", i, "TestFeature"),
+				Name: "TestFeature", Kind: ast.SymbolKindFunction,
+				FilePath: "hugolib/feature_test.go", StartLine: i, Language: "go",
+			}
+			mustAddNode(t, g, testSym)
+			mustAddEdge(t, g, testSym.ID, infraSym.ID, EdgeTypeCalls)
+		}
+
+		// 5 production callers (helpers also call builder — referencing types)
+		for i := 0; i < 5; i++ {
+			mustAddEdge(t, g, helperFuncs[i].ID, infraSym.ID, EdgeTypeCalls)
+		}
+
+		g.Freeze()
+		hg, _ := WrapGraph(g)
+		fc, err := ClassifyFiles(hg, FileClassificationOptions{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Builder should be reclassified by caller purity check:
+		// 5 prod callers / 105 total callers = 4.8% < 10%
+		if fc.IsProduction("hugolib/integrationtest_builder.go") {
+			t.Error("test infrastructure file should be reclassified by caller purity check")
+		}
+
+		// Production files stay production (strong mutual edges)
+		if !fc.IsProduction("core/engine.go") {
+			t.Error("core/engine.go should remain production")
+		}
+		if !fc.IsProduction("core/config.go") {
+			t.Error("core/config.go should remain production")
+		}
+		if !fc.IsProduction("hugolib/helpers.go") {
+			t.Error("hugolib/helpers.go should remain production")
 		}
 	})
 

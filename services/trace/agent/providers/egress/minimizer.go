@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"unicode/utf8"
 
 	agentllm "github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
@@ -398,15 +399,23 @@ func (m *DataMinimizer) truncateToContextWindow(request *agentllm.Request, maxTo
 		return request, 0
 	}
 
-	// Drop messages from the beginning until we fit, keeping the last messages
+	// Drop messages from the beginning until we fit, keeping the last messages.
+	// Subtract each dropped message's tokens to avoid O(N²) rescanning.
 	messages := request.Messages
 	dropped := 0
 	messageTokens := estimateMessagesTokens(messages)
 
 	for messageTokens > availableForMessages && len(messages) > 1 {
+		droppedTokens := estimateTokens(messages[0].Content) + 4 // +4 for per-message overhead
+		for _, tc := range messages[0].ToolCalls {
+			droppedTokens += estimateTokens(tc.Name) + estimateTokens(tc.Arguments)
+		}
+		for _, tr := range messages[0].ToolResults {
+			droppedTokens += estimateTokens(tr.Content)
+		}
+		messageTokens -= droppedTokens
 		messages = messages[1:]
 		dropped++
-		messageTokens = estimateMessagesTokens(messages)
 	}
 
 	if dropped > 0 {
@@ -419,6 +428,13 @@ func (m *DataMinimizer) truncateToContextWindow(request *agentllm.Request, maxTo
 }
 
 // compressTurn compresses an old conversation turn into a brief summary.
+//
+// Description:
+//
+//	Preserves the ToolCalls and ToolResults structure with minimal stubs
+//	so that providers validating tool_call → tool_result pairing do not
+//	reject compressed conversation history. Only the Content and
+//	ToolResults[].Content fields are replaced with summaries.
 func compressTurn(msg agentllm.Message) agentllm.Message {
 	compressed := agentllm.Message{
 		Role: msg.Role,
@@ -431,10 +447,19 @@ func compressTurn(msg agentllm.Message) agentllm.Message {
 	case "assistant":
 		if len(msg.ToolCalls) > 0 {
 			toolNames := make([]string, len(msg.ToolCalls))
+			// Preserve ToolCalls stubs with original IDs and names
+			// but clear arguments to reduce tokens.
+			stubs := make([]agentllm.ToolCall, len(msg.ToolCalls))
 			for i, tc := range msg.ToolCalls {
 				toolNames[i] = tc.Name
+				stubs[i] = agentllm.ToolCall{
+					ID:        tc.ID,
+					Name:      tc.Name,
+					Arguments: "{}",
+				}
 			}
 			compressed.Content = fmt.Sprintf("[Previous turn: assistant used tools: %s]", strings.Join(toolNames, ", "))
+			compressed.ToolCalls = stubs
 		} else {
 			preview := truncateString(msg.Content, 100)
 			compressed.Content = fmt.Sprintf("[Previous turn: assistant said: %s]", preview)
@@ -442,10 +467,18 @@ func compressTurn(msg agentllm.Message) agentllm.Message {
 	case "tool":
 		if len(msg.ToolResults) > 0 {
 			ids := make([]string, len(msg.ToolResults))
+			// Preserve ToolResults stubs with original IDs so they
+			// match the preceding assistant ToolCalls.
+			stubs := make([]agentllm.ToolCallResult, len(msg.ToolResults))
 			for i, tr := range msg.ToolResults {
 				ids[i] = tr.ToolCallID
+				stubs[i] = agentllm.ToolCallResult{
+					ToolCallID: tr.ToolCallID,
+					Content:    "[compressed]",
+				}
 			}
 			compressed.Content = fmt.Sprintf("[Previous turn: tool results for: %s]", strings.Join(ids, ", "))
+			compressed.ToolResults = stubs
 		} else {
 			compressed.Content = "[Previous turn: tool result]"
 		}
@@ -542,23 +575,30 @@ func estimateMessagesTokens(messages []agentllm.Message) int {
 }
 
 // truncateToTokens truncates a string to approximately the given token count.
+// Uses UTF-8-aware truncation to avoid splitting multi-byte characters.
 func truncateToTokens(s string, maxTokens int) string {
-	maxChars := maxTokens * 4
-	if len(s) <= maxChars {
+	maxBytes := maxTokens * 4
+	if len(s) <= maxBytes {
 		return s
 	}
-	return s[:maxChars]
+	// Back up to a valid UTF-8 boundary
+	truncated := s[:maxBytes]
+	for len(truncated) > 0 && !utf8.Valid([]byte(truncated)) {
+		truncated = truncated[:len(truncated)-1]
+	}
+	return truncated
 }
 
-// truncateString truncates a string to maxLen characters, adding "..." if truncated.
+// truncateString truncates a string to maxLen runes, adding "..." if truncated.
 func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
 	if maxLen <= 3 {
-		return s[:maxLen]
+		return string(runes[:maxLen])
 	}
-	return s[:maxLen-3] + "..."
+	return string(runes[:maxLen-3]) + "..."
 }
 
 // stripAbsolutePaths replaces absolute file paths with relative ones.
@@ -583,23 +623,24 @@ func stripAbsolutePaths(s string) string {
 }
 
 // stripPathsInLine replaces absolute paths within a single line.
+// Uses rune-aware iteration for correct handling of multi-byte characters,
+// though path prefixes and delimiters are always ASCII.
 func stripPathsInLine(line string) string {
-	// Look for patterns like /Users/*/.../ or /home/*/...
-	// We process the line character by character to find path-like tokens.
 	var result strings.Builder
 	result.Grow(len(line))
 
 	i := 0
 	for i < len(line) {
-		if line[i] == '/' && i < len(line)-1 && isPathStart(line[i:]) {
+		r, size := utf8.DecodeRuneInString(line[i:])
+		if r == '/' && i < len(line)-1 && isPathStart(line[i:]) {
 			// Found what looks like an absolute path
 			pathEnd := findPathEnd(line, i)
 			absPath := line[i:pathEnd]
 			result.WriteString(makeRelative(absPath))
 			i = pathEnd
 		} else {
-			result.WriteByte(line[i])
-			i++
+			result.WriteRune(r)
+			i += size
 		}
 	}
 
@@ -633,26 +674,14 @@ func findPathEnd(line string, start int) int {
 }
 
 // makeRelative converts an absolute path to a relative one by stripping
-// everything up to and including the last recognizable project directory.
+// the user home directory prefix. This avoids hardcoding IDE-specific
+// directory names and works for any project layout.
+//
+// Strategy: strip /Users/<user>/ or /home/<user>/ (the first 3 path
+// components), leaving the project-relative remainder.
 func makeRelative(absPath string) string {
-	// Find a reasonable point to cut: look for common project indicators
-	// like "GolandProjects/", "Projects/", "src/", "services/"
-	markers := []string{"GolandProjects/", "Projects/", "workspace/", "repos/"}
-	for _, marker := range markers {
-		idx := strings.Index(absPath, marker)
-		if idx >= 0 {
-			// Skip the marker and the project name after it
-			after := absPath[idx+len(marker):]
-			slashIdx := strings.Index(after, "/")
-			if slashIdx >= 0 {
-				return "./" + after[slashIdx+1:]
-			}
-			return "./" + after
-		}
-	}
-
-	// Fallback: strip /Users/<user>/ or /home/<user>/
-	parts := strings.SplitN(absPath, "/", 5) // ["", "Users", "<user>", ...]
+	// Split into ["", "Users"|"home"|..., "<user>", "rest", ...]
+	parts := strings.SplitN(absPath, "/", 5) // max 5 parts
 	if len(parts) >= 5 {
 		return "./" + parts[4]
 	}

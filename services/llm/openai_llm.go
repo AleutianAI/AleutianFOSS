@@ -117,6 +117,31 @@ type OpenAIClient struct {
 // Outputs:
 //   - *OpenAIClient: The configured client.
 //   - error: Non-nil if OPENAI_API_KEY is missing.
+//
+// NewOpenAIClientWithConfig creates an OpenAIClient with explicit configuration.
+//
+// Description:
+//
+//	Creates an OpenAIClient without reading environment variables. Useful
+//	for testing with mock servers or when configuration comes from a source
+//	other than environment variables.
+//
+// Inputs:
+//   - apiKey: The OpenAI API key.
+//   - model: The model name (e.g., "gpt-4o").
+//   - baseURL: The base URL for API requests.
+//
+// Outputs:
+//   - *OpenAIClient: The configured client.
+func NewOpenAIClientWithConfig(apiKey, model, baseURL string) *OpenAIClient {
+	return &OpenAIClient{
+		httpClient: &http.Client{Timeout: 120 * time.Second},
+		apiKey:     apiKey,
+		model:      model,
+		baseURL:    baseURL,
+	}
+}
+
 func NewOpenAIClient() (*OpenAIClient, error) {
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	model := os.Getenv("OPENAI_MODEL")

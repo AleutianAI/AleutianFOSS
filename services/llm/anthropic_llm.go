@@ -168,6 +168,31 @@ type AnthropicClient struct {
 	httpClient *http.Client
 	apiKey     string
 	model      string
+	baseURL    string
+}
+
+// NewAnthropicClientWithConfig creates an AnthropicClient with explicit configuration.
+//
+// Description:
+//
+//	Creates an AnthropicClient without reading environment variables. Useful
+//	for testing with mock servers or when configuration comes from a source
+//	other than environment variables.
+//
+// Inputs:
+//   - apiKey: The Anthropic API key.
+//   - model: The model name (e.g., "claude-sonnet-4-20250514").
+//   - baseURL: The base URL for API requests.
+//
+// Outputs:
+//   - *AnthropicClient: The configured client.
+func NewAnthropicClientWithConfig(apiKey, model, baseURL string) *AnthropicClient {
+	return &AnthropicClient{
+		httpClient: &http.Client{Timeout: 60 * time.Second},
+		apiKey:     apiKey,
+		model:      model,
+		baseURL:    baseURL,
+	}
 }
 
 func NewAnthropicClient() (*AnthropicClient, error) {
@@ -200,6 +225,7 @@ func NewAnthropicClient() (*AnthropicClient, error) {
 		httpClient: &http.Client{Timeout: 60 * time.Second},
 		apiKey:     apiKey,
 		model:      model,
+		baseURL:    defaultBaseURL,
 	}, nil
 }
 
@@ -284,7 +310,7 @@ func (a *AnthropicClient) Chat(ctx context.Context, messages []datatypes.Message
 		return "", fmt.Errorf("anthropic: marshaling request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", defaultBaseURL, bytes.NewBuffer(reqBodyBytes))
+	req, err := http.NewRequestWithContext(ctx, "POST", a.baseURL, bytes.NewBuffer(reqBodyBytes))
 	if err != nil {
 		return "", fmt.Errorf("anthropic: creating HTTP request: %w", err)
 	}
@@ -490,7 +516,7 @@ func (a *AnthropicClient) ChatWithTools(ctx context.Context, messages []ChatMess
 		return nil, fmt.Errorf("anthropic: marshaling request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", defaultBaseURL, bytes.NewBuffer(reqBodyBytes))
+	req, err := http.NewRequestWithContext(ctx, "POST", a.baseURL, bytes.NewBuffer(reqBodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("anthropic: creating HTTP request: %w", err)
 	}
@@ -661,7 +687,7 @@ func (a *AnthropicClient) ChatStream(
 		return fmt.Errorf("anthropic: marshaling stream request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", defaultBaseURL, bytes.NewBuffer(reqBodyBytes))
+	req, err := http.NewRequestWithContext(ctx, "POST", a.baseURL, bytes.NewBuffer(reqBodyBytes))
 	if err != nil {
 		return fmt.Errorf("anthropic: creating stream HTTP request: %w", err)
 	}

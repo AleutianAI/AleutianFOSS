@@ -48,7 +48,7 @@ func (a *GeminiChatAdapter) Chat(ctx context.Context, messages []datatypes.Messa
 	}
 
 	params := llm.GenerationParams{}
-	if opts.Temperature > 0 {
+	if opts.Temperature >= 0 {
 		temp := float32(opts.Temperature)
 		params.Temperature = &temp
 	}

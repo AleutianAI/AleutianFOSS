@@ -432,6 +432,104 @@ func containsHelper(s, substr string) bool {
 	return false
 }
 
+// =============================================================================
+// CB-60f: All-cloud config (nil ModelManager)
+// =============================================================================
+
+func TestProviderFactory_AllCloudConfig_NilModelManager(t *testing.T) {
+	// With nil ModelManager, cloud providers should work but Ollama should fail.
+	factory := NewProviderFactory(nil)
+
+	// Cloud ChatClient should succeed with API keys
+	t.Run("anthropic_chat_succeeds", func(t *testing.T) {
+		t.Setenv("ANTHROPIC_API_KEY", "test-key")
+		_, err := factory.CreateChatClient(ProviderConfig{Provider: ProviderAnthropic, APIKey: "test-key"})
+		if err != nil {
+			t.Fatalf("expected success for Anthropic with API key: %v", err)
+		}
+	})
+
+	t.Run("openai_chat_succeeds", func(t *testing.T) {
+		t.Setenv("OPENAI_API_KEY", "test-key")
+		_, err := factory.CreateChatClient(ProviderConfig{Provider: ProviderOpenAI, APIKey: "test-key"})
+		if err != nil {
+			t.Fatalf("expected success for OpenAI with API key: %v", err)
+		}
+	})
+
+	t.Run("gemini_chat_succeeds", func(t *testing.T) {
+		t.Setenv("GEMINI_API_KEY", "test-key")
+		_, err := factory.CreateChatClient(ProviderConfig{Provider: ProviderGemini, APIKey: "test-key"})
+		if err != nil {
+			t.Fatalf("expected success for Gemini with API key: %v", err)
+		}
+	})
+
+	t.Run("ollama_chat_fails", func(t *testing.T) {
+		_, err := factory.CreateChatClient(ProviderConfig{Provider: ProviderOllama})
+		if err == nil {
+			t.Fatal("expected error for Ollama without model manager")
+		}
+	})
+
+	t.Run("ollama_agent_fails", func(t *testing.T) {
+		_, err := factory.CreateAgentClient(ProviderConfig{Provider: ProviderOllama, Model: "test"})
+		if err == nil {
+			t.Fatal("expected error for Ollama agent without model manager")
+		}
+	})
+
+	// Cloud lifecycle managers should succeed
+	for _, provider := range []string{ProviderAnthropic, ProviderOpenAI, ProviderGemini} {
+		t.Run(provider+"_lifecycle_succeeds", func(t *testing.T) {
+			lm, err := factory.CreateLifecycleManager(ProviderConfig{Provider: provider})
+			if err != nil {
+				t.Fatalf("expected success: %v", err)
+			}
+			if lm.IsLocal() {
+				t.Error("cloud lifecycle manager should not be local")
+			}
+		})
+	}
+}
+
+func TestProviderFactory_MixedConfig(t *testing.T) {
+	// Mixed config: Ollama for some roles, cloud for others.
+	mgr := llm.NewMultiModelManager("http://localhost:11434")
+	factory := NewProviderFactory(mgr)
+
+	t.Run("ollama_chat_succeeds_with_manager", func(t *testing.T) {
+		client, err := factory.CreateChatClient(ProviderConfig{Provider: ProviderOllama, Model: "granite4:micro-h"})
+		if err != nil {
+			t.Fatalf("expected success: %v", err)
+		}
+		if client == nil {
+			t.Fatal("expected non-nil client")
+		}
+	})
+
+	t.Run("cloud_chat_succeeds_alongside_ollama", func(t *testing.T) {
+		t.Setenv("OPENAI_API_KEY", "test-key")
+		client, err := factory.CreateChatClient(ProviderConfig{Provider: ProviderOpenAI, APIKey: "test-key"})
+		if err != nil {
+			t.Fatalf("expected success: %v", err)
+		}
+		if client == nil {
+			t.Fatal("expected non-nil client")
+		}
+	})
+
+	t.Run("ollama_lifecycle_is_local", func(t *testing.T) {
+		lm, err := factory.CreateLifecycleManager(ProviderConfig{Provider: ProviderOllama})
+		if err != nil {
+			t.Fatalf("expected success: %v", err)
+		}
+		if !lm.IsLocal() {
+			t.Error("Ollama lifecycle should be local")
+		}
+	})
+}
+
 func TestLoadRoleConfig_GeminiProvider(t *testing.T) {
 	t.Setenv("TRACE_MAIN_PROVIDER", "gemini")
 	t.Setenv("TRACE_MAIN_MODEL", "gemini-1.5-flash")

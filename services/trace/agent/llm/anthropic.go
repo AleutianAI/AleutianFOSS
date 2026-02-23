@@ -220,7 +220,7 @@ func (a *AnthropicAgentAdapter) buildParams(request *Request) llm.GenerationPara
 		params.MaxTokens = &maxTokens
 	}
 
-	if request.Temperature > 0 {
+	if request.Temperature >= 0 {
 		temp := float32(request.Temperature)
 		params.Temperature = &temp
 	}

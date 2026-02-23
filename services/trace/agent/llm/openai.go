@@ -218,7 +218,7 @@ func (a *OpenAIAgentAdapter) buildParams(request *Request) llm.GenerationParams 
 		params.MaxTokens = &maxTokens
 	}
 
-	if request.Temperature > 0 {
+	if request.Temperature >= 0 {
 		temp := float32(request.Temperature)
 		params.Temperature = &temp
 	}
