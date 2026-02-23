@@ -611,6 +611,176 @@ func TestPreFilter_RealisticKeywords_HotspotsQuery(t *testing.T) {
 }
 
 // =============================================================================
+// IT-06: find_references vs find_symbol disambiguation tests
+// =============================================================================
+
+// makeIT06Config returns a pre-filter config with the find_references and
+// find_symbol forced mappings that fix the Run 4 routing regression (IT-06).
+// These correspond exactly to the patterns in prefilter_rules.yaml.
+func makeIT06Config() *config.PreFilterConfig {
+	base := makeTestConfig()
+	// Prepend reference/symbol disambiguation forced mappings BEFORE any existing
+	// mappings so Phase 1 fires before keyword scoring.
+	refMappings := []config.ForcedMapping{
+		{
+			Patterns: []string{
+				"where is .* referenced across",
+				"where is .* referenced in",
+				"where is .* referenced throughout",
+				"how is .* referenced",
+				"find all references to",
+				"referenced across the codebase",
+				"referenced throughout",
+				"all usages of",
+				"all uses of",
+			},
+			Tool:   "find_references",
+			Reason: "Passive-voice reference query with prepositional context",
+		},
+		{
+			Patterns: []string{
+				"where is .* defined",
+				"where is .* declared",
+				"where is it defined",
+				"find the definition of",
+				"locate the .* definition",
+			},
+			Tool:   "find_symbol",
+			Reason: "Definition lookup — asking for declaration site",
+		},
+	}
+	base.ForcedMappings = append(refMappings, base.ForcedMappings...)
+	return base
+}
+
+// TestPreFilter_IT06_ReferencedAcross verifies that "Where is X referenced across"
+// queries are forced to find_references even when find_symbol would otherwise
+// score from "where is" substring.
+func TestPreFilter_IT06_ReferencedAcross(t *testing.T) {
+	pf := newTestPreFilter(makeIT06Config())
+	specs := []ToolSpec{
+		{Name: "find_references", Description: "Find all references to a symbol", BestFor: []string{"references", "usages"}},
+		{Name: "find_symbol", Description: "Find where a symbol is defined", BestFor: []string{"where is", "locate", "definition"}},
+		{Name: "answer", Description: "Answer", BestFor: []string{"answer"}},
+	}
+
+	queries := []struct {
+		query string
+		desc  string
+	}{
+		{"Where is the Item struct referenced across this codebase?", "Badger IT-06 test 5104"},
+		{"Where is the Blueprint class referenced across the Flask codebase?", "Flask test 6048"},
+		{"Where is the GroupBy class referenced across the Pandas codebase?", "Pandas expansion test"},
+		{"Where is the Response object referenced across the codebase?", "Express expansion test"},
+		{"Where is the Vector3 class referenced across the codebase?", "BabylonJS expansion test"},
+		{"Where is the ModuleRef class referenced across the codebase?", "NestJS expansion test"},
+		{"Where is the Drawer class referenced across the codebase?", "Plottable expansion test"},
+	}
+
+	for _, tc := range queries {
+		t.Run(tc.desc, func(t *testing.T) {
+			result := pf.Filter(context.Background(), tc.query, specs, nil)
+			if result.ForcedTool != "find_references" {
+				t.Errorf("query %q: expected ForcedTool=find_references, got %q", tc.query, result.ForcedTool)
+			}
+		})
+	}
+}
+
+// TestPreFilter_IT06_ReferencedInThroughout verifies "referenced in" and
+// "referenced throughout" forms are forced to find_references.
+func TestPreFilter_IT06_ReferencedInThroughout(t *testing.T) {
+	pf := newTestPreFilter(makeIT06Config())
+	specs := []ToolSpec{
+		{Name: "find_references", Description: "Find all references", BestFor: []string{"references"}},
+		{Name: "find_symbol", Description: "Find definition", BestFor: []string{"locate"}},
+		{Name: "answer", Description: "Answer", BestFor: []string{"answer"}},
+	}
+
+	queries := []struct {
+		query string
+		desc  string
+	}{
+		{"Where is the Route constructor referenced in this codebase?", "Express test with 'in'"},
+		{"Where is WriteBatch referenced throughout the Badger codebase?", "Badger test with 'throughout'"},
+		{"Where is the Resource interface referenced in this project?", "Hugo test with 'in'"},
+		{"Find all references to the Flask class in the codebase.", "Flask CRS test"},
+	}
+
+	for _, tc := range queries {
+		t.Run(tc.desc, func(t *testing.T) {
+			result := pf.Filter(context.Background(), tc.query, specs, nil)
+			if result.ForcedTool != "find_references" {
+				t.Errorf("query %q: expected ForcedTool=find_references, got %q", tc.query, result.ForcedTool)
+			}
+		})
+	}
+}
+
+// TestPreFilter_IT06_FindSymbol_NotHijackedByReferences verifies that "where is X
+// defined?" queries are NOT hijacked by find_references — they should force find_symbol.
+func TestPreFilter_IT06_FindSymbol_NotHijackedByReferences(t *testing.T) {
+	pf := newTestPreFilter(makeIT06Config())
+	specs := []ToolSpec{
+		{Name: "find_references", Description: "Find all references", BestFor: []string{"references"}},
+		{Name: "find_symbol", Description: "Find definition", BestFor: []string{"locate", "definition"}},
+		{Name: "answer", Description: "Answer", BestFor: []string{"answer"}},
+	}
+
+	queries := []struct {
+		query string
+	}{
+		{"Where is the Router type defined?"},
+		{"Where is parseConfig declared?"},
+		{"Where is it defined in the codebase?"},
+		{"Find the definition of DataFrame"},
+	}
+
+	for _, tc := range queries {
+		t.Run(tc.query, func(t *testing.T) {
+			result := pf.Filter(context.Background(), tc.query, specs, nil)
+			if result.ForcedTool != "find_symbol" {
+				t.Errorf("query %q: expected ForcedTool=find_symbol, got %q", tc.query, result.ForcedTool)
+			}
+		})
+	}
+}
+
+// TestPreFilter_IT06_NegationNotHijackedByForcedMappings verifies that negation
+// queries like "not referenced anywhere" still reach the negation phase and are
+// forced to find_dead_code — NOT intercepted by the find_references forced mapping.
+func TestPreFilter_IT06_NegationNotHijackedByForcedMappings(t *testing.T) {
+	pf := newTestPreFilter(makeIT06Config())
+	specs := []ToolSpec{
+		{Name: "find_references", Description: "Find all references", BestFor: []string{"references"}},
+		{Name: "find_dead_code", Description: "Find dead code", BestFor: []string{"dead code", "unused"}},
+		{Name: "find_callers", Description: "Find callers", BestFor: []string{"callers"}},
+		{Name: "answer", Description: "Answer", BestFor: []string{"answer"}},
+	}
+
+	// These negation queries should NOT match the find_references forced mappings
+	// (the YAML comments explain why: patterns require "across/in/throughout" as guard).
+	queries := []struct {
+		query      string
+		expectedDC bool // should route to find_dead_code
+		desc       string
+	}{
+		{"functions with no callers in the package", true, "no callers → dead code"},
+		{"find dead code with zero references", true, "zero references → dead code"},
+		{"functions never called by anyone", true, "never called → dead code"},
+	}
+
+	for _, tc := range queries {
+		t.Run(tc.desc, func(t *testing.T) {
+			result := pf.Filter(context.Background(), tc.query, specs, nil)
+			if tc.expectedDC && result.ForcedTool != "find_dead_code" {
+				t.Errorf("query %q: expected ForcedTool=find_dead_code, got %q (negation should not be hijacked by find_references forced mapping)", tc.query, result.ForcedTool)
+			}
+		})
+	}
+}
+
+// =============================================================================
 // Benchmarks
 // =============================================================================
 

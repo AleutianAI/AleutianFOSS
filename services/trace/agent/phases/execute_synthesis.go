@@ -239,6 +239,14 @@ func (p *ExecutePhase) synthesizeFromToolResultsSlice(results []agent.ToolResult
 	return sb.String()
 }
 
+// trivialReferenceLocationThreshold is the minimum number of reference locations
+// required before the synthesis LLM is invoked for find_references results. Results
+// with fewer locations are passed through verbatim — the synthesis model tends to
+// return an empty response when there is "too little to say," producing a worse
+// result than the raw tool output. Results at or above this threshold still go
+// through LLM synthesis to produce richer narrative explanations.
+const trivialReferenceLocationThreshold = 3
+
 // getSingleFormattedResult checks if there is exactly one successful tool result
 // that is already well-formatted with markdown headers (## GRAPH RESULT, Found N, etc.).
 //
@@ -296,14 +304,18 @@ func getSingleFormattedResult(results []agent.ToolResult) (string, bool) {
 	//   - "these results are exhaustive" — definitive answer footer
 	trimmed := strings.TrimSpace(singleOutput)
 
-	// IT-06c: Do NOT pass through find_references positive results. Unlike other graph
-	// tools (find_callers, find_implementations) which return function names that are
-	// inherently semantic, find_references returns bare file:line lists. LLM synthesis
-	// transforms these into meaningful explanations (e.g., "used in route registration,
-	// middleware chains, ...") which dramatically improves gold standard match quality.
-	// Negative results ("not found") still pass through to prevent hallucination.
+	// IT-06d Bug 12: For find_references positive results, allow pass-through when the
+	// result is trivially small (fewer than trivialReferenceLocationThreshold locations).
+	// Trivial results cause the synthesis LLM to return an empty response — the raw
+	// tool output is cleaner than the empty-response fallback dump. Larger results
+	// (≥ threshold) still go through LLM synthesis for richer narrative explanations.
+	// Negative results ("not found") still pass through unconditionally to prevent
+	// hallucination (unchanged from IT-06c).
 	if strings.Contains(trimmed, "references to '") && !strings.Contains(strings.ToLower(trimmed), "not found") {
-		return "", false
+		if countReferenceLocations(trimmed) >= trivialReferenceLocationThreshold {
+			return "", false
+		}
+		// Trivial result: fall through to pass-through below.
 	}
 
 	// IT-09: Do NOT pass through find_cycles results. Unlike other graph tools
@@ -595,6 +607,44 @@ func formatGenericObject(obj map[string]interface{}) string {
 // -----------------------------------------------------------------------------
 // Trace Step Filtering
 // -----------------------------------------------------------------------------
+
+// countReferenceLocations counts the number of file:line location entries in a
+// find_references tool result output string.
+//
+// Description:
+//
+//	Parses the "Found N references" header line to extract the location count.
+//	Falls back to counting bullet-prefixed lines if the header is absent or
+//	unparseable. Used by getSingleFormattedResult to determine whether LLM
+//	synthesis adds value or risks producing an empty response.
+//
+// Inputs:
+//
+//	output - Raw find_references tool output (trimmed).
+//
+// Outputs:
+//
+//	int - Number of reference locations reported. Returns 0 if unparseable.
+func countReferenceLocations(output string) int {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Found ") {
+			var n int
+			if _, err := fmt.Sscanf(line, "Found %d", &n); err == nil {
+				return n
+			}
+		}
+	}
+	// Fallback: count bullet-prefixed lines that contain a colon (file:line format).
+	count := 0
+	for _, line := range strings.Split(output, "\n") {
+		trimLine := strings.TrimSpace(line)
+		if strings.HasPrefix(trimLine, "- ") && strings.ContainsRune(trimLine, ':') {
+			count++
+		}
+	}
+	return count
+}
 
 // filterToolCallSteps extracts tool_call steps from trace.
 //

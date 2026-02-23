@@ -1308,9 +1308,20 @@ func (p *JavaScriptParser) extractCallSites(ctx context.Context, bodyNode *sitte
 			return calls
 		}
 
-		// JavaScript tree-sitter uses "call_expression" for calls
+		// JavaScript tree-sitter uses "call_expression" for regular calls.
 		if node.Type() == jsNodeCallExpression {
 			call := p.extractSingleCallSite(node, content, filePath)
+			if call != nil && call.Target != "" {
+				calls = append(calls, *call)
+			}
+		}
+
+		// IT-06d Bug 11: Extract constructor calls: new Route(path), new MongoClient(url).
+		// These are new_expression nodes distinct from call_expression and were previously
+		// skipped silently. Extracting them as call sites produces incoming EdgeTypeCalls
+		// on the constructor symbol, making it visible to find_references.
+		if node.Type() == jsNodeNewExpression {
+			call := p.extractNewExpressionCallSite(node, content, filePath)
 			if call != nil && call.Target != "" {
 				calls = append(calls, *call)
 			}
@@ -1419,6 +1430,82 @@ func (p *JavaScriptParser) extractSingleCallSite(node *sitter.Node, content []by
 	argsNode := node.ChildByFieldName("arguments")
 	if argsNode != nil {
 		call.FunctionArgs = p.extractCallbackArgIdentifiers(argsNode, content)
+	}
+
+	return call
+}
+
+// extractNewExpressionCallSite extracts a call site from a JavaScript new_expression node.
+//
+// Description:
+//
+//	Parses a new_expression node (e.g., `new Route(path, opts)`) and returns a
+//	CallSite with the constructor name as the target. This mirrors extractSingleCallSite
+//	but uses the "constructor" named field of new_expression rather than the "function"
+//	field of call_expression.
+//
+//	Handles:
+//	  - Simple constructors: new ClassName(args)         → Target: "ClassName"
+//	  - Qualified constructors: new module.ClassName()   → Target: "ClassName" (leaf only)
+//
+// Inputs:
+//   - node: A new_expression node from tree-sitter-javascript. Must not be nil.
+//   - content: The source file content bytes.
+//   - filePath: Path to the source file for location data.
+//
+// Outputs:
+//   - *CallSite: The extracted call site, or nil if extraction fails.
+//
+// Thread Safety: Safe for concurrent use.
+func (p *JavaScriptParser) extractNewExpressionCallSite(node *sitter.Node, content []byte, filePath string) *CallSite {
+	if node == nil || node.Type() != jsNodeNewExpression {
+		return nil
+	}
+
+	// new_expression named field: "constructor" holds the class identifier or member expression.
+	constructorNode := node.ChildByFieldName("constructor")
+	if constructorNode == nil {
+		return nil
+	}
+
+	call := &CallSite{
+		Location: Location{
+			FilePath:  filePath,
+			StartLine: int(node.StartPoint().Row) + 1,
+			EndLine:   int(node.EndPoint().Row) + 1,
+			StartCol:  int(node.StartPoint().Column),
+			EndCol:    int(node.EndPoint().Column),
+		},
+		IsMethod: false,
+	}
+
+	switch constructorNode.Type() {
+	case "identifier":
+		// new ClassName(args)
+		call.Target = string(content[constructorNode.StartByte():constructorNode.EndByte()])
+
+	case jsNodeMemberExpression:
+		// new module.ClassName(args) — use the property (leaf) as target, object as receiver.
+		propertyNode := constructorNode.ChildByFieldName("property")
+		objectNode := constructorNode.ChildByFieldName("object")
+		if propertyNode != nil {
+			call.Target = string(content[propertyNode.StartByte():propertyNode.EndByte()])
+		}
+		if objectNode != nil {
+			call.Receiver = string(content[objectNode.StartByte():objectNode.EndByte()])
+			call.IsMethod = true
+		}
+
+	default:
+		text := string(content[constructorNode.StartByte():constructorNode.EndByte()])
+		if len(text) > 100 {
+			text = text[:100]
+		}
+		call.Target = text
+	}
+
+	if call.Target == "" {
+		return nil
 	}
 
 	return call

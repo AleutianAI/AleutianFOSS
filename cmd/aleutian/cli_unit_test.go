@@ -14,6 +14,9 @@
 package main
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1463,6 +1466,737 @@ func TestCLIUnit_Harness_Timeout(t *testing.T) {
 	if result.TimedOut {
 		t.Error("Should not have timed out with 5s timeout")
 	}
+}
+
+// =============================================================================
+// 14. INIT COMMAND TESTS
+// =============================================================================
+
+func TestCLIUnit_Init_Help(t *testing.T) {
+	tests := []struct {
+		name         string
+		args         []string
+		wantExit     int
+		wantContains []string
+	}{
+		{"init help long", []string{"init", "--help"}, 0, []string{"init", "index"}},
+		{"init help short", []string{"init", "-h"}, 0, []string{"init"}},
+		{"init shows force flag", []string{"init", "--help"}, 0, []string{"--force"}},
+		{"init shows json flag", []string{"init", "--help"}, 0, []string{"--json"}},
+		{"init shows dry-run flag", []string{"init", "--help"}, 0, []string{"--dry-run"}},
+		{"init shows languages flag", []string{"init", "--help"}, 0, []string{"--languages"}},
+		{"init shows exclude flag", []string{"init", "--help"}, 0, []string{"--exclude"}},
+		{"init shows max-workers flag", []string{"init", "--help"}, 0, []string{"--max-workers"}},
+		{"init shows quiet flag", []string{"init", "--help"}, 0, []string{"--quiet"}},
+		{"init shows verbose flag", []string{"init", "--help"}, 0, []string{"--verbose"}},
+		{"init examples documented", []string{"init", "--help"}, 0, []string{"Examples"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := unitTestHarness.Run(tt.args...)
+			if err != nil {
+				t.Fatalf("Run failed: %v", err)
+			}
+			if err := result.AssertExitCode(tt.wantExit); err != nil {
+				t.Error(err)
+			}
+			for _, want := range tt.wantContains {
+				if err := result.AssertOutputContains(want); err != nil {
+					t.Error(err)
+				}
+			}
+		})
+	}
+}
+
+func TestCLIUnit_Init_InvalidArgs(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		wantExit int
+	}{
+		{"path does not exist", []string{"init", "/nonexistent/path/abc123"}, 2},
+		{"too many args", []string{"init", "path1", "path2"}, 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := unitTestHarness.Run(tt.args...)
+			if err != nil {
+				t.Fatalf("Run failed: %v", err)
+			}
+			if err := result.AssertExitCode(tt.wantExit); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+}
+
+func TestCLIUnit_Init_PathIsFile(t *testing.T) {
+	// Create a temp file to pass as the path (not a directory)
+	f, err := os.CreateTemp("", "aleutian-test-file-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	f.Close()
+	defer os.Remove(f.Name())
+
+	result, err := unitTestHarness.Run("init", f.Name())
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if err := result.AssertExitCode(2); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestCLIUnit_Init_DryRunOnFixture(t *testing.T) {
+	// dry-run on a real Go project must NOT create .aleutian/, only report what would be indexed.
+	fixtureDir := findFixtureDir(t)
+	workDir := copyFixture(t, fixtureDir)
+	defer os.RemoveAll(workDir)
+
+	result, err := unitTestHarness.RunWithOptions(CLIRunOptions{
+		Args:    []string{"init", "--dry-run"},
+		WorkDir: workDir,
+		Timeout: 60 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if err := result.AssertExitCode(0); err != nil {
+		t.Error(err)
+	}
+	if _, statErr := os.Stat(workDir + "/.aleutian"); statErr == nil {
+		t.Error("dry-run must not create .aleutian/ directory")
+	}
+}
+
+func TestCLIUnit_Init_Functional(t *testing.T) {
+	// Run aleutian init on the sample-go-project fixture and validate the index.
+	fixtureDir := findFixtureDir(t)
+
+	// Use a temp copy so we don't pollute the checked-in fixture.
+	workDir := copyFixture(t, fixtureDir)
+	defer os.RemoveAll(workDir)
+
+	result, err := unitTestHarness.RunWithOptions(CLIRunOptions{
+		Args:    []string{"init", "--json"},
+		WorkDir: workDir,
+		Timeout: 60 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if err := result.AssertExitCode(0); err != nil {
+		t.Error(err)
+	}
+	// Index must exist after init
+	indexPath := workDir + "/.aleutian/index.json"
+	if _, statErr := os.Stat(indexPath); statErr != nil {
+		t.Errorf("index.json not created after init: %v", statErr)
+	}
+	// JSON output must contain success indicators
+	if err := result.AssertStdoutContains("symbols"); err != nil {
+		t.Error(err)
+	}
+}
+
+// =============================================================================
+// 15. GRAPH COMMAND TESTS
+// =============================================================================
+
+func TestCLIUnit_Graph_Help(t *testing.T) {
+	tests := []struct {
+		name         string
+		args         []string
+		wantExit     int
+		wantContains []string
+	}{
+		{"graph help", []string{"graph", "--help"}, 0, []string{"callers", "callees", "path"}},
+		{"graph -h", []string{"graph", "-h"}, 0, []string{"callers", "callees"}},
+		{"graph callers help", []string{"graph", "callers", "--help"}, 0, []string{"SYMBOL"}},
+		{"graph callers flags", []string{"graph", "callers", "--help"}, 0, []string{"--json", "--depth", "--limit"}},
+		{"graph callees help", []string{"graph", "callees", "--help"}, 0, []string{"SYMBOL"}},
+		{"graph callees flags", []string{"graph", "callees", "--help"}, 0, []string{"--json", "--depth"}},
+		{"graph path help", []string{"graph", "path", "--help"}, 0, []string{"FROM", "TO"}},
+		{"graph path flags", []string{"graph", "path", "--help"}, 0, []string{"--json"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := unitTestHarness.Run(tt.args...)
+			if err != nil {
+				t.Fatalf("Run failed: %v", err)
+			}
+			if err := result.AssertExitCode(tt.wantExit); err != nil {
+				t.Error(err)
+			}
+			for _, want := range tt.wantContains {
+				if err := result.AssertOutputContains(want); err != nil {
+					t.Error(err)
+				}
+			}
+		})
+	}
+}
+
+func TestCLIUnit_Graph_MissingArgs(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		wantExit int
+	}{
+		{"callers no symbol", []string{"graph", "callers"}, 1},
+		{"callees no symbol", []string{"graph", "callees"}, 1},
+		{"path no args", []string{"graph", "path"}, 1},
+		{"path one arg only", []string{"graph", "path", "main.main"}, 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := unitTestHarness.Run(tt.args...)
+			if err != nil {
+				t.Fatalf("Run failed: %v", err)
+			}
+			if err := result.AssertExitCode(tt.wantExit); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+}
+
+func TestCLIUnit_Graph_MissingIndex(t *testing.T) {
+	// Running graph callers from a directory with no .aleutian/ must exit 1
+	// (graph.ExitError = 1 covers all error conditions including missing index).
+	dir, err := os.MkdirTemp("", "aleutian-graph-noindex-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	result, err := unitTestHarness.RunWithOptions(CLIRunOptions{
+		Args:    []string{"graph", "callers", "SomeFunction"},
+		WorkDir: dir,
+	})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if err := result.AssertExitCode(1); err != nil {
+		t.Error(err)
+	}
+	if err := result.AssertStderrContains("index"); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestCLIUnit_Graph_Functional(t *testing.T) {
+	// Run init on fixture then query callers and callees.
+	fixtureDir := findFixtureDir(t)
+	workDir := copyFixture(t, fixtureDir)
+	defer os.RemoveAll(workDir)
+
+	// Initialize index first.
+	initResult, err := unitTestHarness.RunWithOptions(CLIRunOptions{
+		Args:    []string{"init"},
+		WorkDir: workDir,
+		Timeout: 60 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+	if err := initResult.AssertExitCode(0); err != nil {
+		t.Fatalf("init must succeed before graph tests: %v", err)
+	}
+
+	t.Run("callers of ValidateToken returns results", func(t *testing.T) {
+		result, err := unitTestHarness.RunWithOptions(CLIRunOptions{
+			Args:    []string{"graph", "callers", "ValidateToken", "--json"},
+			WorkDir: workDir,
+		})
+		if err != nil {
+			t.Fatalf("Run failed: %v", err)
+		}
+		if err := result.AssertExitCode(0); err != nil {
+			t.Error(err)
+		}
+		if err := result.AssertStdoutContains("callers"); err != nil {
+			t.Error(err)
+		}
+	})
+
+	t.Run("callees of main returns results", func(t *testing.T) {
+		result, err := unitTestHarness.RunWithOptions(CLIRunOptions{
+			Args:    []string{"graph", "callees", "main", "--json"},
+			WorkDir: workDir,
+		})
+		if err != nil {
+			t.Fatalf("Run failed: %v", err)
+		}
+		if err := result.AssertExitCode(0); err != nil {
+			t.Error(err)
+		}
+		if err := result.AssertStdoutContains("callees"); err != nil {
+			t.Error(err)
+		}
+	})
+
+	t.Run("callers of unknown symbol exits 1 with fail-if-empty", func(t *testing.T) {
+		result, err := unitTestHarness.RunWithOptions(CLIRunOptions{
+			Args:    []string{"graph", "callers", "NonExistentSymbolXYZ123", "--fail-if-empty"},
+			WorkDir: workDir,
+		})
+		if err != nil {
+			t.Fatalf("Run failed: %v", err)
+		}
+		if err := result.AssertExitCode(1); err != nil {
+			t.Error(err)
+		}
+	})
+}
+
+// =============================================================================
+// 16. IMPACT COMMAND TESTS
+// =============================================================================
+
+func TestCLIUnit_Impact_Help(t *testing.T) {
+	tests := []struct {
+		name         string
+		args         []string
+		wantExit     int
+		wantContains []string
+	}{
+		{"impact help", []string{"impact", "--help"}, 0, []string{"impact"}},
+		{"impact -h", []string{"impact", "-h"}, 0, []string{"impact"}},
+		{"impact shows diff flag", []string{"impact", "--help"}, 0, []string{"--diff"}},
+		{"impact shows staged flag", []string{"impact", "--help"}, 0, []string{"--staged"}},
+		{"impact shows commit flag", []string{"impact", "--help"}, 0, []string{"--commit"}},
+		{"impact shows branch flag", []string{"impact", "--help"}, 0, []string{"--branch"}},
+		{"impact shows json flag", []string{"impact", "--help"}, 0, []string{"--json"}},
+		{"impact shows exit codes", []string{"impact", "--help"}, 0, []string{"exits"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := unitTestHarness.Run(tt.args...)
+			if err != nil {
+				t.Fatalf("Run failed: %v", err)
+			}
+			if err := result.AssertExitCode(tt.wantExit); err != nil {
+				t.Error(err)
+			}
+			for _, want := range tt.wantContains {
+				if err := result.AssertOutputContains(want); err != nil {
+					t.Error(err)
+				}
+			}
+		})
+	}
+}
+
+func TestCLIUnit_Impact_MutuallyExclusiveModes(t *testing.T) {
+	// Specifying more than one change mode must exit 2.
+	dir, err := os.MkdirTemp("", "aleutian-impact-modes-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"diff and staged", []string{"impact", "--diff", "--staged"}},
+		{"diff and commit", []string{"impact", "--diff", "--commit", "abc123"}},
+		{"staged and branch", []string{"impact", "--staged", "--branch", "main"}},
+		{"commit and branch", []string{"impact", "--commit", "abc123", "--branch", "main"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := unitTestHarness.RunWithOptions(CLIRunOptions{
+				Args:    tt.args,
+				WorkDir: dir,
+			})
+			if err != nil {
+				t.Fatalf("Run failed: %v", err)
+			}
+			if err := result.AssertExitCode(2); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+}
+
+func TestCLIUnit_Impact_NoDiffInNonGitDir(t *testing.T) {
+	// Impact --diff in a non-git directory must exit with error (2).
+	dir, err := os.MkdirTemp("", "aleutian-impact-nogit-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	result, err := unitTestHarness.RunWithOptions(CLIRunOptions{
+		Args:    []string{"impact", "--diff"},
+		WorkDir: dir,
+	})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	// Must not exit 0 — non-git dir has no diff
+	if result.ExitCode == 0 {
+		t.Error("impact --diff in non-git dir should not exit 0")
+	}
+}
+
+func TestCLIUnit_Impact_Functional(t *testing.T) {
+	// Use the fixture dir directly: it has a real git repo. impact --diff is read-only
+	// (it reads git diffs, does not write to .aleutian/) so using the original is safe.
+	fixtureDir := findFixtureDir(t)
+
+	// Initialize the index first so impact has a valid index to work with.
+	workDir := copyFixture(t, fixtureDir)
+	defer os.RemoveAll(workDir)
+
+	// Restore git history in the copy (copyFixture skips .git, so re-init)
+	if out, initErr := exec.Command("git", "-C", workDir, "init").CombinedOutput(); initErr != nil {
+		t.Fatalf("git init failed: %v: %s", initErr, out)
+	}
+	if out, addErr := exec.Command("git", "-C", workDir, "add", ".").CombinedOutput(); addErr != nil {
+		t.Fatalf("git add failed: %v: %s", addErr, out)
+	}
+	if out, commitErr := exec.Command("git", "-C", workDir, "-c", "user.email=test@test.com",
+		"-c", "user.name=Test", "commit", "-m", "fixture").CombinedOutput(); commitErr != nil {
+		t.Fatalf("git commit failed: %v: %s", commitErr, out)
+	}
+
+	// Build index.
+	initResult, err := unitTestHarness.RunWithOptions(CLIRunOptions{
+		Args:    []string{"init"},
+		WorkDir: workDir,
+		Timeout: 60 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+	if err := initResult.AssertExitCode(0); err != nil {
+		t.Fatalf("init must succeed before impact test: %v", err)
+	}
+
+	t.Run("diff with no changes exits 0", func(t *testing.T) {
+		result, err := unitTestHarness.RunWithOptions(CLIRunOptions{
+			Args:    []string{"impact", "--diff", "--json"},
+			WorkDir: workDir,
+		})
+		if err != nil {
+			t.Fatalf("Run failed: %v", err)
+		}
+		// With no uncommitted changes, impact should exit 0.
+		if err := result.AssertExitCode(0); err != nil {
+			t.Error(err)
+		}
+	})
+}
+
+// =============================================================================
+// 17. POLICY CHECK COMMAND TESTS
+// =============================================================================
+
+func TestCLIUnit_PolicyCheck_Help(t *testing.T) {
+	tests := []struct {
+		name         string
+		args         []string
+		wantExit     int
+		wantContains []string
+	}{
+		{"policy check help", []string{"policy", "check", "--help"}, 0, []string{"check"}},
+		{"policy check -h", []string{"policy", "check", "-h"}, 0, []string{"check"}},
+		{"policy check shows json flag", []string{"policy", "check", "--help"}, 0, []string{"--json"}},
+		{"policy check shows threshold flag", []string{"policy", "check", "--help"}, 0, []string{"--threshold"}},
+		{"policy check shows severity flag", []string{"policy", "check", "--help"}, 0, []string{"--severity"}},
+		{"policy check shows exclude flag", []string{"policy", "check", "--help"}, 0, []string{"--exclude"}},
+		{"policy check shows redact flag", []string{"policy", "check", "--help"}, 0, []string{"--redact"}},
+		{"policy check shows workers flag", []string{"policy", "check", "--help"}, 0, []string{"--workers"}},
+		{"policy check exit codes documented", []string{"policy", "check", "--help"}, 0, []string{"Exit"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := unitTestHarness.Run(tt.args...)
+			if err != nil {
+				t.Fatalf("Run failed: %v", err)
+			}
+			if err := result.AssertExitCode(tt.wantExit); err != nil {
+				t.Error(err)
+			}
+			for _, want := range tt.wantContains {
+				if err := result.AssertOutputContains(want); err != nil {
+					t.Error(err)
+				}
+			}
+		})
+	}
+}
+
+func TestCLIUnit_PolicyCheck_InvalidPath(t *testing.T) {
+	result, err := unitTestHarness.Run("policy", "check", "/nonexistent/path/abc123")
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if err := result.AssertExitCode(2); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestCLIUnit_PolicyCheck_JSONErrorOnInvalidPath(t *testing.T) {
+	result, err := unitTestHarness.Run("policy", "check", "--json", "/nonexistent/path/abc123")
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+	if err := result.AssertExitCode(2); err != nil {
+		t.Error(err)
+	}
+	// JSON error output goes to stdout
+	if err := result.AssertStdoutContains("error"); err != nil {
+		t.Error(err)
+	}
+}
+
+func TestCLIUnit_PolicyCheck_Functional(t *testing.T) {
+	fixtureDir := findFixtureDir(t)
+
+	t.Run("finds credential violation in fixture", func(t *testing.T) {
+		result, err := unitTestHarness.RunWithOptions(CLIRunOptions{
+			Args:    []string{"policy", "check", "--json", "--threshold", "low"},
+			WorkDir: fixtureDir,
+		})
+		if err != nil {
+			t.Fatalf("Run failed: %v", err)
+		}
+		// Must exit 1 — fixture has intentional credential pattern in config.go
+		if err := result.AssertExitCode(1); err != nil {
+			t.Error(err)
+		}
+		if err := result.AssertStdoutContains("violations"); err != nil {
+			t.Error(err)
+		}
+	})
+
+	t.Run("clean dir has no violations", func(t *testing.T) {
+		dir, mkErr := os.MkdirTemp("", "aleutian-policy-clean-*")
+		if mkErr != nil {
+			t.Fatalf("Failed to create temp dir: %v", mkErr)
+		}
+		defer os.RemoveAll(dir)
+
+		// Write a file with no secrets
+		if writeErr := os.WriteFile(dir+"/clean.go", []byte("package main\n\nfunc main() {}\n"), 0644); writeErr != nil {
+			t.Fatalf("Failed to write file: %v", writeErr)
+		}
+
+		result, err := unitTestHarness.RunWithOptions(CLIRunOptions{
+			Args:    []string{"policy", "check", "--json"},
+			WorkDir: dir,
+		})
+		if err != nil {
+			t.Fatalf("Run failed: %v", err)
+		}
+		if err := result.AssertExitCode(0); err != nil {
+			t.Error(err)
+		}
+	})
+
+	t.Run("redact flag hides matched content", func(t *testing.T) {
+		result, err := unitTestHarness.RunWithOptions(CLIRunOptions{
+			Args:    []string{"policy", "check", "--json", "--redact", "--threshold", "low"},
+			WorkDir: fixtureDir,
+		})
+		if err != nil {
+			t.Fatalf("Run failed: %v", err)
+		}
+		// The matched content should be redacted
+		if err := result.AssertStdoutContains("REDACTED"); err != nil {
+			t.Error(err)
+		}
+		// The raw secret value must not appear in output
+		if err := result.AssertStdoutNotContains("sk-test-hardcoded-secret-12345"); err != nil {
+			t.Error(err)
+		}
+	})
+}
+
+// =============================================================================
+// 18. RISK COMMAND TESTS
+// =============================================================================
+
+func TestCLIUnit_Risk_Help(t *testing.T) {
+	tests := []struct {
+		name         string
+		args         []string
+		wantExit     int
+		wantContains []string
+	}{
+		{"risk help", []string{"risk", "--help"}, 0, []string{"risk"}},
+		{"risk -h", []string{"risk", "-h"}, 0, []string{"risk"}},
+		{"risk shows json flag", []string{"risk", "--help"}, 0, []string{"--json"}},
+		{"risk shows threshold flag", []string{"risk", "--help"}, 0, []string{"--threshold"}},
+		{"risk shows strict flag", []string{"risk", "--help"}, 0, []string{"--strict"}},
+		{"risk shows permissive flag", []string{"risk", "--help"}, 0, []string{"--permissive"}},
+		{"risk shows timeout flag", []string{"risk", "--help"}, 0, []string{"--timeout"}},
+		{"risk shows skip-impact flag", []string{"risk", "--help"}, 0, []string{"--skip-impact"}},
+		{"risk shows skip-policy flag", []string{"risk", "--help"}, 0, []string{"--skip-policy"}},
+		{"risk shows skip-complexity flag", []string{"risk", "--help"}, 0, []string{"--skip-complexity"}},
+		{"risk shows explain flag", []string{"risk", "--help"}, 0, []string{"--explain"}},
+		{"risk shows exit codes", []string{"risk", "--help"}, 0, []string{"Exit"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := unitTestHarness.Run(tt.args...)
+			if err != nil {
+				t.Fatalf("Run failed: %v", err)
+			}
+			if err := result.AssertExitCode(tt.wantExit); err != nil {
+				t.Error(err)
+			}
+			for _, want := range tt.wantContains {
+				if err := result.AssertOutputContains(want); err != nil {
+					t.Error(err)
+				}
+			}
+		})
+	}
+}
+
+func TestCLIUnit_Risk_Functional(t *testing.T) {
+	// Use the fixture dir: it has a real git repo, so git diff succeeds.
+	// We skip-impact (no .aleutian/ index in the original fixture) and use
+	// best-effort mode so other signal failures don't abort the run.
+	fixtureDir := findFixtureDir(t)
+
+	t.Run("skip-impact with real git dir runs without error exit", func(t *testing.T) {
+		result, err := unitTestHarness.RunWithOptions(CLIRunOptions{
+			Args:    []string{"risk", "--skip-impact", "--best-effort", "--json", "--threshold", "critical"},
+			WorkDir: fixtureDir,
+		})
+		if err != nil {
+			t.Fatalf("Run failed: %v", err)
+		}
+		// Can be 0 (below threshold) or 1 (risk found) but not 2 (fatal error)
+		if result.ExitCode == 2 {
+			t.Errorf("risk must not exit 2 in best-effort mode: stderr=%s stdout=%s",
+				result.Stderr, result.Stdout)
+		}
+	})
+
+	t.Run("json output contains risk_level field", func(t *testing.T) {
+		result, err := unitTestHarness.RunWithOptions(CLIRunOptions{
+			Args:    []string{"risk", "--skip-impact", "--best-effort", "--json"},
+			WorkDir: fixtureDir,
+		})
+		if err != nil {
+			t.Fatalf("Run failed: %v", err)
+		}
+		if err := result.AssertStdoutContains("risk_level"); err != nil {
+			t.Error(err)
+		}
+	})
+
+	t.Run("strict flag maps to threshold low", func(t *testing.T) {
+		result, err := unitTestHarness.RunWithOptions(CLIRunOptions{
+			Args:    []string{"risk", "--skip-impact", "--best-effort", "--strict", "--json"},
+			WorkDir: fixtureDir,
+		})
+		if err != nil {
+			t.Fatalf("Run failed: %v", err)
+		}
+		if result.ExitCode == 2 {
+			t.Errorf("risk --strict must not exit 2: stderr=%s", result.Stderr)
+		}
+	})
+
+	t.Run("permissive flag runs without error", func(t *testing.T) {
+		result, err := unitTestHarness.RunWithOptions(CLIRunOptions{
+			Args:    []string{"risk", "--skip-impact", "--best-effort", "--permissive", "--json"},
+			WorkDir: fixtureDir,
+		})
+		if err != nil {
+			t.Fatalf("Run failed: %v", err)
+		}
+		if result.ExitCode == 2 {
+			t.Errorf("risk --permissive must not exit 2: stderr=%s", result.Stderr)
+		}
+	})
+}
+
+// =============================================================================
+// TEST FIXTURE HELPERS (CLI-01)
+// =============================================================================
+
+// findFixtureDir returns the absolute path to test/fixtures/sample-go-project.
+func findFixtureDir(t *testing.T) string {
+	t.Helper()
+
+	sourceDir, err := findSourceDir()
+	if err != nil {
+		t.Fatalf("Cannot find source directory: %v", err)
+	}
+
+	fixtureDir := strings.Join([]string{sourceDir, "test", "fixtures", "sample-go-project"}, string(os.PathSeparator))
+	if _, statErr := os.Stat(fixtureDir); statErr != nil {
+		t.Fatalf("Fixture directory not found at %s: %v", fixtureDir, statErr)
+	}
+	return fixtureDir
+}
+
+// copyFixture copies the fixture directory to a fresh temp directory.
+// This prevents test runs from dirtying the checked-in fixture (e.g. .aleutian/).
+func copyFixture(t *testing.T, fixtureDir string) string {
+	t.Helper()
+
+	destDir, err := os.MkdirTemp("", "aleutian-fixture-copy-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir for fixture copy: %v", err)
+	}
+
+	if err := copyDir(fixtureDir, destDir); err != nil {
+		os.RemoveAll(destDir)
+		t.Fatalf("Failed to copy fixture: %v", err)
+	}
+
+	return destDir
+}
+
+// copyDir recursively copies src to dst, skipping .aleutian/ and .git/.
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Skip .aleutian and .git directories (don't copy index or git history)
+		base := filepath.Base(path)
+		if info.IsDir() && (base == ".aleutian" || base == ".git") {
+			return filepath.SkipDir
+		}
+
+		relPath, relErr := filepath.Rel(src, path)
+		if relErr != nil {
+			return relErr
+		}
+		destPath := filepath.Join(dst, relPath)
+
+		if info.IsDir() {
+			return os.MkdirAll(destPath, info.Mode())
+		}
+
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		return os.WriteFile(destPath, data, info.Mode())
+	})
 }
 
 // =============================================================================

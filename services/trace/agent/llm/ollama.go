@@ -103,11 +103,10 @@ func (a *OllamaAdapter) Complete(ctx context.Context, request *Request) (*Respon
 
 	// Build generation params
 	params := a.buildParams(request)
-	startTime := time.Now()
 
 	// Use ChatWithTools if tools are provided
 	if len(request.Tools) > 0 {
-		return a.completeWithTools(ctx, messages, params, request.Tools, startTime)
+		return a.completeWithTools(ctx, messages, params, request.Tools)
 	}
 
 	// Create OTel span for non-tools path
@@ -122,7 +121,7 @@ func (a *OllamaAdapter) Complete(ctx context.Context, request *Request) (*Respon
 	defer span.End()
 
 	// Track active requests
-	incActiveRequests(ctx, "ollama")
+	incActiveRequests("ollama")
 	defer decActiveRequests("ollama")
 
 	logger := telemetry.LoggerWithTrace(ctx, slog.Default())
@@ -144,6 +143,7 @@ func (a *OllamaAdapter) Complete(ctx context.Context, request *Request) (*Respon
 	}
 
 	// Call Ollama without tools
+	startTime := time.Now()
 	content, err := a.client.Chat(ctx, messages, params)
 	duration := time.Since(startTime)
 
@@ -207,7 +207,7 @@ func (a *OllamaAdapter) Complete(ctx context.Context, request *Request) (*Respon
 	return &Response{
 		Content:      content,
 		StopReason:   "end",
-		TokensUsed:   estimateTokens(content),
+		TokensUsed:   inputTokens + outputTokens,
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
 		Duration:     duration,
@@ -229,7 +229,6 @@ func (a *OllamaAdapter) Complete(ctx context.Context, request *Request) (*Respon
 //	messages - Converted messages in Ollama format.
 //	params - Generation parameters.
 //	toolDefs - Tool definitions from the request.
-//	startTime - When the request started (for duration tracking).
 //
 // Outputs:
 //
@@ -240,7 +239,6 @@ func (a *OllamaAdapter) completeWithTools(
 	messages []datatypes.Message,
 	params llm.GenerationParams,
 	toolDefs []tools.ToolDefinition,
-	startTime time.Time,
 ) (*Response, error) {
 	// Convert tool definitions to Ollama format
 	ollamaTools := convertToolDefinitions(toolDefs)
@@ -257,7 +255,7 @@ func (a *OllamaAdapter) completeWithTools(
 	defer span.End()
 
 	// Track active requests
-	incActiveRequests(ctx, "ollama")
+	incActiveRequests("ollama")
 	defer decActiveRequests("ollama")
 
 	logger := telemetry.LoggerWithTrace(ctx, slog.Default())
@@ -266,6 +264,7 @@ func (a *OllamaAdapter) completeWithTools(
 	)
 
 	// Call Ollama with tools
+	startTime := time.Now()
 	result, err := a.client.ChatWithTools(ctx, messages, params, ollamaTools)
 	duration := time.Since(startTime)
 
@@ -341,7 +340,7 @@ func (a *OllamaAdapter) completeWithTools(
 		Content:      result.Content,
 		ToolCalls:    agentToolCalls,
 		StopReason:   result.StopReason,
-		TokensUsed:   estimateTokens(result.Content),
+		TokensUsed:   inputTokens + outputTokens,
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
 		Duration:     duration,

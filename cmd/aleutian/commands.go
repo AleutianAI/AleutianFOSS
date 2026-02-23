@@ -470,4 +470,5 @@ func init() {
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(graphCmd)
 	rootCmd.AddCommand(impactCmd)
+	rootCmd.AddCommand(riskCmd)
 }

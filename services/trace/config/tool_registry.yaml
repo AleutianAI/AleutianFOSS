@@ -100,13 +100,17 @@ tools:
       - where is used
       - used across
       - is referenced
+      - referenced
+      - referenced across
+      - referenced in
+      - referenced throughout
       - occurrences
       - all usages
       - find all uses
       - type used
       - struct used
       - class used
-    use_when: "User asks WHERE a symbol (type, class, struct, function, variable) is USED or REFERENCED across the codebase. Examples: 'Where is Entry type used?', 'What code references Config?', 'Show usages of HandlerFunc', 'Where is the Request object used across the codebase?', 'Find all references to Flask class'. This is the correct tool for any 'where is X used?' or 'references to X' query."
+    use_when: "User asks WHERE a symbol (type, class, struct, function, variable) is USED or REFERENCED across the codebase. Examples: 'Where is Entry type used?', 'What code references Config?', 'Show usages of HandlerFunc', 'Where is the Request object used across the codebase?', 'Find all references to Flask class', 'Where is X referenced across this codebase?'. This is the correct tool for any 'where is X used?' or 'where is X referenced?' or 'references to X' query."
     avoid_when: "User specifically asks who CALLS a function (use find_callers). User asks what a function CALLS (use find_callees)."
     instead_of:
       - tool: Grep
@@ -119,6 +123,7 @@ tools:
       - find symbol
       - locate function
       - where is defined
+      - where is declared
       - definition of
       - find function
       - find type
@@ -126,19 +131,19 @@ tools:
       - find class
       - find struct
       - find interface
-      - where is
       - what is
       - locate
       - symbol lookup
       - definition location
     use_when: >
       User wants to find where a symbol (function, class, struct, interface, type, variable)
-      is defined. Examples: "Where is Router defined?", "Find the DataFrame class",
+      is defined or declared. Examples: "Where is Router defined?", "Find the DataFrame class",
       "What is Context?", "Locate the NestFactory class". Works across Go, Python, JS, TS.
     avoid_when: >
-      User wants to find usages/references of a symbol (use find_references instead).
-      User wants to find who calls a function (use find_callers).
-      User wants to find what a function calls (use find_callees).
+      NEVER use find_symbol when the query asks where a symbol is USED, REFERENCED, or has USAGES
+      (use find_references instead). "Where is X referenced?" and "Where is X used?" are
+      find_references queries, not find_symbol queries. User wants to find who calls a function
+      (use find_callers). User wants to find what a function calls (use find_callees).
     requires:
       - graph_initialized
 

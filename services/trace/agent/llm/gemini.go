@@ -80,7 +80,7 @@ func (a *GeminiAgentAdapter) Complete(ctx context.Context, request *Request) (*R
 	defer span.End()
 
 	// Track active requests
-	incActiveRequests(ctx, "gemini")
+	incActiveRequests("gemini")
 	defer decActiveRequests("gemini")
 
 	logger := telemetry.LoggerWithTrace(ctx, slog.Default())
@@ -143,7 +143,7 @@ func (a *GeminiAgentAdapter) Complete(ctx context.Context, request *Request) (*R
 	return &Response{
 		Content:      content,
 		StopReason:   "end",
-		TokensUsed:   estimateTokens(content),
+		TokensUsed:   inputTokens + outputTokens,
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
 		Duration:     duration,
@@ -233,7 +233,7 @@ func (a *GeminiAgentAdapter) completeWithTools(ctx context.Context, request *Req
 	defer span.End()
 
 	// Track active requests
-	incActiveRequests(ctx, "gemini")
+	incActiveRequests("gemini")
 	defer decActiveRequests("gemini")
 
 	logger := telemetry.LoggerWithTrace(ctx, slog.Default())
@@ -304,7 +304,7 @@ func (a *GeminiAgentAdapter) completeWithTools(ctx context.Context, request *Req
 		Content:      result.Content,
 		ToolCalls:    agentToolCalls,
 		StopReason:   result.StopReason,
-		TokensUsed:   estimateTokens(result.Content),
+		TokensUsed:   inputTokens + outputTokens,
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
 		Duration:     duration,

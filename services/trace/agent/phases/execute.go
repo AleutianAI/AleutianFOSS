@@ -1591,7 +1591,7 @@ func (p *ExecutePhase) callLLM(ctx context.Context, deps *Dependencies, request 
 			contentPreview = contentPreview[:200] + "..."
 		}
 
-		deps.Session.RecordTraceStep(crs.TraceStep{
+		step := crs.TraceStep{
 			Timestamp: time.Now().UnixMilli(),
 			Action:    "llm_call",
 			Target:    deps.LLMClient.Model(),
@@ -1603,12 +1603,23 @@ func (p *ExecutePhase) callLLM(ctx context.Context, deps *Dependencies, request 
 				"tool_count":        fmt.Sprintf("%d", len(request.Tools)),
 				"last_user_message": lastUserMsg,
 				"output_tokens":     fmt.Sprintf("%d", response.OutputTokens),
+				"input_tokens":      fmt.Sprintf("%d", response.InputTokens),
 				"content_len":       fmt.Sprintf("%d", len(response.Content)),
 				"content_preview":   contentPreview,
 				"stop_reason":       response.StopReason,
 				"tool_call_count":   fmt.Sprintf("%d", len(response.ToolCalls)),
+				"provider":          deps.LLMClient.Name(),
 			},
-		})
+		}
+		// Merge provider-level metadata from Response.TraceStep if present
+		if response.TraceStep != nil {
+			for k, v := range response.TraceStep.Metadata {
+				if _, exists := step.Metadata[k]; !exists {
+					step.Metadata[k] = v
+				}
+			}
+		}
+		deps.Session.RecordTraceStep(step)
 	}
 
 	return response, nil

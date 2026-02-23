@@ -81,7 +81,7 @@ func (a *AnthropicAgentAdapter) Complete(ctx context.Context, request *Request) 
 	defer span.End()
 
 	// Track active requests
-	incActiveRequests(ctx, "anthropic")
+	incActiveRequests("anthropic")
 	defer decActiveRequests("anthropic")
 
 	logger := telemetry.LoggerWithTrace(ctx, slog.Default())
@@ -146,7 +146,7 @@ func (a *AnthropicAgentAdapter) Complete(ctx context.Context, request *Request) 
 	return &Response{
 		Content:      content,
 		StopReason:   "end",
-		TokensUsed:   estimateTokens(content),
+		TokensUsed:   inputTokens + outputTokens,
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
 		Duration:     duration,
@@ -236,7 +236,7 @@ func (a *AnthropicAgentAdapter) completeWithTools(ctx context.Context, request *
 	defer span.End()
 
 	// Track active requests
-	incActiveRequests(ctx, "anthropic")
+	incActiveRequests("anthropic")
 	defer decActiveRequests("anthropic")
 
 	logger := telemetry.LoggerWithTrace(ctx, slog.Default())
@@ -307,7 +307,7 @@ func (a *AnthropicAgentAdapter) completeWithTools(ctx context.Context, request *
 		Content:      result.Content,
 		ToolCalls:    agentToolCalls,
 		StopReason:   result.StopReason,
-		TokensUsed:   estimateTokens(result.Content),
+		TokensUsed:   inputTokens + outputTokens,
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
 		Duration:     duration,
