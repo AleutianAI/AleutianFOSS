@@ -12,13 +12,20 @@ package llm
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/telemetry"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // OllamaAdapter adapts services/llm.OllamaClient to the agent's Client interface.
@@ -94,23 +101,6 @@ func (a *OllamaAdapter) Complete(ctx context.Context, request *Request) (*Respon
 	// Convert agent messages to datatypes.Message format
 	messages := a.convertMessages(request)
 
-	slog.Info("OllamaAdapter sending request",
-		slog.String("model", a.model),
-		slog.Int("message_count", len(messages)),
-		slog.Int("tool_count", len(request.Tools)),
-		slog.String("system_prompt_preview", truncate(request.SystemPrompt, 100)),
-	)
-
-	// Log each message for debugging (use Info level so it shows)
-	for i, msg := range messages {
-		slog.Info("OllamaAdapter message",
-			slog.Int("index", i),
-			slog.String("role", msg.Role),
-			slog.Int("content_len", len(msg.Content)),
-			slog.String("content_preview", truncate(msg.Content, 300)),
-		)
-	}
-
 	// Build generation params
 	params := a.buildParams(request)
 	startTime := time.Now()
@@ -120,47 +110,109 @@ func (a *OllamaAdapter) Complete(ctx context.Context, request *Request) (*Respon
 		return a.completeWithTools(ctx, messages, params, request.Tools, startTime)
 	}
 
+	// Create OTel span for non-tools path
+	ctx, span := otel.Tracer(llmTracerName).Start(ctx, "agent.llm.OllamaAdapter.Complete",
+		trace.WithAttributes(
+			attribute.String("provider", "ollama"),
+			attribute.String("model", a.model),
+			attribute.Int("message_count", len(messages)),
+			attribute.Int("tool_count", 0),
+		),
+	)
+	defer span.End()
+
+	// Track active requests
+	incActiveRequests(ctx, "ollama")
+	defer decActiveRequests("ollama")
+
+	logger := telemetry.LoggerWithTrace(ctx, slog.Default())
+	logger.Info("OllamaAdapter sending request",
+		slog.String("model", a.model),
+		slog.Int("message_count", len(messages)),
+		slog.Int("tool_count", len(request.Tools)),
+		slog.String("system_prompt_preview", truncate(request.SystemPrompt, 100)),
+	)
+
+	// Log each message for debugging
+	for i, msg := range messages {
+		logger.Debug("OllamaAdapter message",
+			slog.Int("index", i),
+			slog.String("role", msg.Role),
+			slog.Int("content_len", len(msg.Content)),
+			slog.String("content_preview", truncate(msg.Content, 300)),
+		)
+	}
+
 	// Call Ollama without tools
 	content, err := a.client.Chat(ctx, messages, params)
+	duration := time.Since(startTime)
+
 	if err != nil {
-		slog.Error("OllamaAdapter.Chat failed",
+		logger.Error("OllamaAdapter.Chat failed",
 			slog.String("error", err.Error()),
 		)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		recordLLMMetrics("ollama", duration, 0, 0, err)
 		return nil, err
 	}
 
-	duration := time.Since(startTime)
-
-	slog.Info("OllamaAdapter received response",
+	logger.Info("OllamaAdapter received response",
 		slog.Int("content_len", len(content)),
 		slog.String("content_preview", truncate(content, 200)),
 		slog.Duration("duration", duration),
 	)
 
-	// Handle empty response - this indicates a problem with the model or context
-	// Previously empty responses passed through silently, causing downstream issues.
-	// Fixed in cb_30a.
+	// Handle empty response
 	if len(strings.TrimSpace(content)) == 0 {
-		slog.Warn("OllamaAdapter received empty response",
+		logger.Warn("OllamaAdapter received empty response",
 			slog.Duration("duration", duration),
 			slog.Int("message_count", len(messages)),
 		)
-		return nil, &EmptyResponseError{
+		emptyErr := &EmptyResponseError{
 			Duration:     duration,
 			MessageCount: len(messages),
 			Model:        a.model,
 		}
+		span.RecordError(emptyErr)
+		span.SetStatus(codes.Error, emptyErr.Error())
+		recordLLMMetrics("ollama", duration, 0, 0, emptyErr)
+		return nil, emptyErr
 	}
+
+	inputTokens := estimateInputTokens(messages)
+	outputTokens := estimateTokens(content)
+
+	span.AddEvent("response_received", trace.WithAttributes(
+		attribute.Int("input_tokens", inputTokens),
+		attribute.Int("output_tokens", outputTokens),
+		attribute.String("stop_reason", "end"),
+	))
+
+	recordLLMMetrics("ollama", duration, inputTokens, outputTokens, nil)
+
+	// Build CRS TraceStep
+	traceStep := crs.NewTraceStepBuilder().
+		WithAction("provider_call").
+		WithTarget(a.model).
+		WithTool("OllamaAdapter").
+		WithDuration(duration).
+		WithMetadata("provider", "ollama").
+		WithMetadata("tokens_sent", fmt.Sprintf("%d", inputTokens)).
+		WithMetadata("tokens_received", fmt.Sprintf("%d", outputTokens)).
+		WithMetadata("model", a.model).
+		Build()
 
 	// Build response
 	return &Response{
 		Content:      content,
 		StopReason:   "end",
 		TokensUsed:   estimateTokens(content),
-		InputTokens:  estimateInputTokens(messages),
-		OutputTokens: estimateTokens(content),
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
 		Duration:     duration,
 		Model:        a.model,
+		TraceStep:    &traceStep,
 	}, nil
 }
 
@@ -193,40 +245,62 @@ func (a *OllamaAdapter) completeWithTools(
 	// Convert tool definitions to Ollama format
 	ollamaTools := convertToolDefinitions(toolDefs)
 
-	slog.Debug("OllamaAdapter calling ChatWithTools",
+	// Create OTel span
+	ctx, span := otel.Tracer(llmTracerName).Start(ctx, "agent.llm.OllamaAdapter.CompleteWithTools",
+		trace.WithAttributes(
+			attribute.String("provider", "ollama"),
+			attribute.String("model", a.model),
+			attribute.Int("message_count", len(messages)),
+			attribute.Int("tool_count", len(ollamaTools)),
+		),
+	)
+	defer span.End()
+
+	// Track active requests
+	incActiveRequests(ctx, "ollama")
+	defer decActiveRequests("ollama")
+
+	logger := telemetry.LoggerWithTrace(ctx, slog.Default())
+	logger.Debug("OllamaAdapter calling ChatWithTools",
 		slog.Int("num_tools", len(ollamaTools)),
 	)
 
 	// Call Ollama with tools
 	result, err := a.client.ChatWithTools(ctx, messages, params, ollamaTools)
+	duration := time.Since(startTime)
+
 	if err != nil {
-		slog.Error("OllamaAdapter.ChatWithTools failed",
+		logger.Error("OllamaAdapter.ChatWithTools failed",
 			slog.String("error", err.Error()),
 		)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		recordLLMMetrics("ollama", duration, 0, 0, err)
 		return nil, err
 	}
 
-	slog.Info("OllamaAdapter received tool response",
+	logger.Info("OllamaAdapter received tool response",
 		slog.Int("content_len", len(result.Content)),
 		slog.Int("tool_calls", len(result.ToolCalls)),
 		slog.String("stop_reason", result.StopReason),
-		slog.Duration("duration", time.Since(startTime)),
+		slog.Duration("duration", duration),
 	)
 
-	// Handle empty response with no tool calls - this indicates a model/context problem.
-	// Empty responses should not silently pass through as they cause downstream issues.
-	// Fixed in cb_30a.
+	// Handle empty response with no tool calls
 	if len(strings.TrimSpace(result.Content)) == 0 && len(result.ToolCalls) == 0 {
-		duration := time.Since(startTime)
-		slog.Warn("OllamaAdapter received empty response with no tool calls",
+		logger.Warn("OllamaAdapter received empty response with no tool calls",
 			slog.Duration("duration", duration),
 			slog.Int("message_count", len(messages)),
 		)
-		return nil, &EmptyResponseError{
+		emptyErr := &EmptyResponseError{
 			Duration:     duration,
 			MessageCount: len(messages),
 			Model:        a.model,
 		}
+		span.RecordError(emptyErr)
+		span.SetStatus(codes.Error, emptyErr.Error())
+		recordLLMMetrics("ollama", duration, 0, 0, emptyErr)
+		return nil, emptyErr
 	}
 
 	// Convert generic tool calls to agent format
@@ -239,16 +313,40 @@ func (a *OllamaAdapter) completeWithTools(
 		})
 	}
 
-	duration := time.Since(startTime)
+	inputTokens := estimateInputTokens(messages)
+	outputTokens := estimateTokens(result.Content)
+
+	span.AddEvent("response_received", trace.WithAttributes(
+		attribute.Int("input_tokens", inputTokens),
+		attribute.Int("output_tokens", outputTokens),
+		attribute.Int("tool_calls", len(agentToolCalls)),
+		attribute.String("stop_reason", result.StopReason),
+	))
+
+	recordLLMMetrics("ollama", duration, inputTokens, outputTokens, nil)
+
+	// Build CRS TraceStep
+	traceStep := crs.NewTraceStepBuilder().
+		WithAction("provider_call").
+		WithTarget(a.model).
+		WithTool("OllamaAdapter").
+		WithDuration(duration).
+		WithMetadata("provider", "ollama").
+		WithMetadata("tokens_sent", fmt.Sprintf("%d", inputTokens)).
+		WithMetadata("tokens_received", fmt.Sprintf("%d", outputTokens)).
+		WithMetadata("model", a.model).
+		Build()
+
 	return &Response{
 		Content:      result.Content,
 		ToolCalls:    agentToolCalls,
 		StopReason:   result.StopReason,
 		TokensUsed:   estimateTokens(result.Content),
-		InputTokens:  estimateInputTokens(messages),
-		OutputTokens: estimateTokens(result.Content),
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
 		Duration:     duration,
 		Model:        a.model,
+		TraceStep:    &traceStep,
 	}, nil
 }
 

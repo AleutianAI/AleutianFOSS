@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -224,11 +225,15 @@ func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*R
 	}
 
 	// Adaptive request size based on filters.
-	// When filtering by kind or excluding tests/docs, request more to ensure enough results.
+	// F-5: When filtering by kind or excluding tests/docs, request 10x to ensure
+	// enough results survive. PageRank computes scores for ALL nodes anyway —
+	// the only cost of requesting more is iterating a larger slice in the filter loop.
+	// Previous 5x multiplier was insufficient for projects like NestJS where
+	// Phase 4 reclassifies 576 integration/ files as non-production.
 	hasFilters := p.Kind != "all" || p.ExcludeTests
 	requestCount := p.Top
 	if hasFilters {
-		requestCount = p.Top * 5 // Request 5x when filtering (test+doc+kind)
+		requestCount = p.Top * 10 // Request 10x when filtering (test+doc+kind)
 		t.logger.Debug("pagerank request adjusted for filtering",
 			slog.String("tool", "find_important"),
 			slog.String("kind_filter", p.Kind),
@@ -257,6 +262,12 @@ func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*R
 			filePath := prn.Node.Symbol.FilePath
 			// GR-60: Use graph-based file classification instead of heuristics
 			isProd := t.analytics.IsProductionFile(filePath)
+			// F-3: Safety net — _test.go is NEVER production regardless of classification.
+			// Defense-in-depth for cases where graph classification misses a test file
+			// (e.g., file path normalization issues).
+			if isProd && strings.HasSuffix(filepath.Base(filePath), "_test.go") {
+				isProd = false
+			}
 			if !isProd {
 				filteredCount++
 				// GR-60c: Debug log for classification decisions on top results
@@ -313,19 +324,21 @@ func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*R
 
 	span.SetAttributes(attribute.Int("filtered_results", len(filtered)))
 
-	// Structured logging for edge cases
+	// F-5: Warn when filtering removes too many results — indicates the project
+	// has a high test-to-production ratio and the multiplier may need further tuning.
 	if len(pageRankNodes) > 0 && len(filtered) == 0 {
-		t.logger.Debug("all PageRank results filtered",
+		t.logger.Warn("F-5: all PageRank results filtered — project may have very few production symbols",
 			slog.String("tool", "find_important"),
 			slog.Int("raw_count", len(pageRankNodes)),
 			slog.String("kind_filter", p.Kind),
 			slog.Bool("exclude_tests", p.ExcludeTests),
 		)
 	} else if len(filtered) < p.Top && hasFilters {
-		t.logger.Debug("fewer results than requested after filtering",
+		t.logger.Warn("F-5: fewer results than requested after filtering",
 			slog.String("tool", "find_important"),
 			slog.Int("requested", p.Top),
 			slog.Int("returned", len(filtered)),
+			slog.Int("raw_count", len(pageRankNodes)),
 			slog.String("kind_filter", p.Kind),
 			slog.Bool("exclude_tests", p.ExcludeTests),
 		)
@@ -448,16 +461,27 @@ func (t *findImportantTool) buildOutput(nodes []graph.PageRankNode) FindImportan
 	}
 }
 
-// formatText creates a human-readable text summary.
+// formatText creates a human-readable text summary with graph markers.
+//
+// F-4: Output must include graph markers so that getSingleFormattedResult()
+// can identify authoritative results and skip LLM synthesis:
+//   - Zero results: "## GRAPH RESULT" header + "Do NOT use Grep" footer
+//   - Positive results: "Found N" prefix + exhaustive footer + "Do NOT use Grep" footer
+//
+// This matches the pattern used by find_hotspots and find_dead_code.
 func (t *findImportantTool) formatText(nodes []graph.PageRankNode) string {
 	var sb strings.Builder
 
 	if len(nodes) == 0 {
-		sb.WriteString("No important symbols found.\n")
+		sb.WriteString("## GRAPH RESULT: No important symbols found\n\n")
+		sb.WriteString("No symbols with PageRank score > 0 exist in the graph.\n\n")
+		sb.WriteString("---\n")
+		sb.WriteString("The graph has been fully indexed — these results are exhaustive.\n")
+		sb.WriteString("**Do NOT use Grep or Read to verify** — the graph already analyzed all source files.\n")
 		return sb.String()
 	}
 
-	sb.WriteString(fmt.Sprintf("Top %d Most Important Symbols (PageRank):\n\n", len(nodes)))
+	sb.WriteString(fmt.Sprintf("Found %d most important symbols (PageRank):\n\n", len(nodes)))
 
 	for _, prn := range nodes {
 		if prn.Node == nil || prn.Node.Symbol == nil {
@@ -474,7 +498,9 @@ func (t *findImportantTool) formatText(nodes []graph.PageRankNode) string {
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString("Note: PageRank considers caller importance, not just caller count.\n")
+	sb.WriteString("---\n")
+	sb.WriteString("The graph has been fully indexed — these results are exhaustive.\n")
+	sb.WriteString("**Do NOT use Grep or Read to verify** — the graph already analyzed all source files.\n")
 
 	return sb.String()
 }

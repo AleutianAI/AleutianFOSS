@@ -25,6 +25,58 @@ forced_mappings:
     tool: find_path
     reason: "Path query is unambiguous"
 
+  # GR-61 Option L: Intent templates for reference vs symbol disambiguation.
+  #
+  # Ordering constraint: Phase 1 (forced mappings) fires BEFORE Phase 2
+  # (negation detection). Patterns here must therefore be structurally
+  # specific enough that they cannot appear in negated form in practice.
+  #
+  # Design choice: broad patterns like "where is .* referenced" are
+  # intentionally EXCLUDED because they would match "where is X not
+  # referenced" before the negation phase fires — wrongly forcing
+  # find_references when find_dead_code is correct.
+  #
+  # Go regexp uses RE2, which does NOT support lookaheads (?!...) or \b.
+  # The specificity of the prepositional phrase ("across", "in", "throughout")
+  # is the negation guard: these phrases are not idiomatic with negation.
+  - patterns:
+      - "where is .* referenced across"
+      - "where is .* referenced in"
+      - "where is .* referenced throughout"
+      - "how is .* referenced"
+      - "find all references to"
+      - "referenced across the codebase"
+      - "referenced throughout"
+      - "all usages of"
+      - "all uses of"
+    tool: find_references
+    reason: "Passive-voice reference query with prepositional context — subject is being referenced"
+
+  - patterns:
+      - "where is .* defined"
+      - "where is .* declared"
+      - "where is it defined"
+      - "find the definition of"
+      - "locate the .* definition"
+    tool: find_symbol
+    reason: "Definition lookup — asking for declaration site, not call sites"
+
+  - patterns:
+      - "what calls .*"
+      - "who calls .*"
+      - "what invokes .*"
+      - "who invokes .*"
+    tool: find_callers
+    reason: "Active-voice caller query — subject is the callee, looking for callers"
+
+  - patterns:
+      - "what does .* call"
+      - "what does .* invoke"
+      - "what functions does .* call"
+      - "what methods does .* call"
+    tool: find_callees
+    reason: "Callee/dependency query — subject is the caller, looking for callees"
+
 negation_rules:
   - negation_words: ["no", "not", "never", "zero", "without"]
     trigger_keywords: ["callers", "incoming calls", "called", "referenced"]

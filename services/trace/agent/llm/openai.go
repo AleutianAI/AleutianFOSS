@@ -12,12 +12,19 @@ package llm
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/telemetry"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // OpenAIAgentAdapter adapts OpenAIClient to the agent's Client interface.
@@ -61,9 +68,26 @@ func (a *OpenAIAgentAdapter) Complete(ctx context.Context, request *Request) (*R
 		return a.completeWithTools(ctx, request)
 	}
 
+	// Create OTel span
+	ctx, span := otel.Tracer(llmTracerName).Start(ctx, "agent.llm.OpenAIAdapter.Complete",
+		trace.WithAttributes(
+			attribute.String("provider", "openai"),
+			attribute.String("model", a.model),
+			attribute.Int("message_count", len(request.Messages)),
+			attribute.Int("tool_count", 0),
+		),
+	)
+	defer span.End()
+
+	// Track active requests
+	incActiveRequests(ctx, "openai")
+	defer decActiveRequests("openai")
+
+	logger := telemetry.LoggerWithTrace(ctx, slog.Default())
+
 	messages := a.convertMessages(request)
 
-	slog.Info("OpenAIAgentAdapter sending request",
+	logger.Info("OpenAIAgentAdapter sending request",
 		slog.String("model", a.model),
 		slog.Int("message_count", len(messages)),
 	)
@@ -72,28 +96,59 @@ func (a *OpenAIAgentAdapter) Complete(ctx context.Context, request *Request) (*R
 	startTime := time.Now()
 
 	content, err := a.client.Chat(ctx, messages, params)
+	duration := time.Since(startTime)
+
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		recordLLMMetrics("openai", duration, 0, 0, err)
 		return nil, err
 	}
 
-	duration := time.Since(startTime)
-
 	if len(strings.TrimSpace(content)) == 0 {
-		return nil, &EmptyResponseError{
+		emptyErr := &EmptyResponseError{
 			Duration:     duration,
 			MessageCount: len(messages),
 			Model:        a.model,
 		}
+		span.RecordError(emptyErr)
+		span.SetStatus(codes.Error, emptyErr.Error())
+		recordLLMMetrics("openai", duration, 0, 0, emptyErr)
+		return nil, emptyErr
 	}
+
+	inputTokens := estimateInputTokens(messages)
+	outputTokens := estimateTokens(content)
+
+	span.AddEvent("response_received", trace.WithAttributes(
+		attribute.Int("input_tokens", inputTokens),
+		attribute.Int("output_tokens", outputTokens),
+		attribute.String("stop_reason", "end"),
+	))
+
+	recordLLMMetrics("openai", duration, inputTokens, outputTokens, nil)
+
+	// Build CRS TraceStep
+	traceStep := crs.NewTraceStepBuilder().
+		WithAction("provider_call").
+		WithTarget(a.model).
+		WithTool("OpenAIAdapter").
+		WithDuration(duration).
+		WithMetadata("provider", "openai").
+		WithMetadata("tokens_sent", fmt.Sprintf("%d", inputTokens)).
+		WithMetadata("tokens_received", fmt.Sprintf("%d", outputTokens)).
+		WithMetadata("model", a.model).
+		Build()
 
 	return &Response{
 		Content:      content,
 		StopReason:   "end",
 		TokensUsed:   estimateTokens(content),
-		InputTokens:  estimateInputTokens(messages),
-		OutputTokens: estimateTokens(content),
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
 		Duration:     duration,
 		Model:        a.model,
+		TraceStep:    &traceStep,
 	}, nil
 }
 
@@ -165,27 +220,51 @@ func (a *OpenAIAgentAdapter) completeWithTools(ctx context.Context, request *Req
 	chatMessages := convertToChat(request)
 	toolDefs := convertToolDefs(request.Tools)
 	params := a.buildParams(request)
-	startTime := time.Now()
 
-	slog.Info("OpenAIAgentAdapter sending request with tools",
+	// Create OTel span
+	ctx, span := otel.Tracer(llmTracerName).Start(ctx, "agent.llm.OpenAIAdapter.CompleteWithTools",
+		trace.WithAttributes(
+			attribute.String("provider", "openai"),
+			attribute.String("model", a.model),
+			attribute.Int("message_count", len(chatMessages)),
+			attribute.Int("tool_count", len(toolDefs)),
+		),
+	)
+	defer span.End()
+
+	// Track active requests
+	incActiveRequests(ctx, "openai")
+	defer decActiveRequests("openai")
+
+	logger := telemetry.LoggerWithTrace(ctx, slog.Default())
+	logger.Info("OpenAIAgentAdapter sending request with tools",
 		slog.String("model", a.model),
 		slog.Int("message_count", len(chatMessages)),
 		slog.Int("tool_count", len(toolDefs)),
 	)
 
+	startTime := time.Now()
+
 	result, err := a.client.ChatWithTools(ctx, chatMessages, params, toolDefs)
+	duration := time.Since(startTime)
+
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		recordLLMMetrics("openai", duration, 0, 0, err)
 		return nil, err
 	}
 
-	duration := time.Since(startTime)
-
 	if len(strings.TrimSpace(result.Content)) == 0 && len(result.ToolCalls) == 0 {
-		return nil, &EmptyResponseError{
+		emptyErr := &EmptyResponseError{
 			Duration:     duration,
 			MessageCount: len(chatMessages),
 			Model:        a.model,
 		}
+		span.RecordError(emptyErr)
+		span.SetStatus(codes.Error, emptyErr.Error())
+		recordLLMMetrics("openai", duration, 0, 0, emptyErr)
+		return nil, emptyErr
 	}
 
 	var agentToolCalls []ToolCall
@@ -197,15 +276,40 @@ func (a *OpenAIAgentAdapter) completeWithTools(ctx context.Context, request *Req
 		})
 	}
 
+	inputTokens := estimateInputTokensChat(chatMessages)
+	outputTokens := estimateTokens(result.Content)
+
+	span.AddEvent("response_received", trace.WithAttributes(
+		attribute.Int("input_tokens", inputTokens),
+		attribute.Int("output_tokens", outputTokens),
+		attribute.Int("tool_calls", len(agentToolCalls)),
+		attribute.String("stop_reason", result.StopReason),
+	))
+
+	recordLLMMetrics("openai", duration, inputTokens, outputTokens, nil)
+
+	// Build CRS TraceStep
+	traceStep := crs.NewTraceStepBuilder().
+		WithAction("provider_call").
+		WithTarget(a.model).
+		WithTool("OpenAIAdapter").
+		WithDuration(duration).
+		WithMetadata("provider", "openai").
+		WithMetadata("tokens_sent", fmt.Sprintf("%d", inputTokens)).
+		WithMetadata("tokens_received", fmt.Sprintf("%d", outputTokens)).
+		WithMetadata("model", a.model).
+		Build()
+
 	return &Response{
 		Content:      result.Content,
 		ToolCalls:    agentToolCalls,
 		StopReason:   result.StopReason,
 		TokensUsed:   estimateTokens(result.Content),
-		InputTokens:  estimateInputTokensChat(chatMessages),
-		OutputTokens: estimateTokens(result.Content),
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
 		Duration:     duration,
 		Model:        a.model,
+		TraceStep:    &traceStep,
 	}, nil
 }
 

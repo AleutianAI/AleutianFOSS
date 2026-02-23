@@ -53,7 +53,10 @@ type ChatClient interface {
 //	Contains options common to all providers plus Ollama-specific fields
 //	that are ignored by cloud providers.
 type ChatOptions struct {
-	// Temperature controls randomness (0.0-1.0). Lower = more deterministic.
+	// Temperature controls randomness (0.0-1.0). Set to 0.0 for most
+	// deterministic output. Set to a negative value (e.g., -1) to omit
+	// from the request and use the provider's default. The Go zero value
+	// (0.0) is treated as an explicit "most deterministic" setting.
 	Temperature float64
 
 	// MaxTokens limits the response length.

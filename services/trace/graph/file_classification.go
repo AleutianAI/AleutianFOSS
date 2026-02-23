@@ -477,13 +477,10 @@ func isDefinitiveTestFile(filePath string) bool {
 		}
 	}
 
-	// === Definitive test directories ===
-	// These are directories whose SOLE purpose is test/example code.
-	for _, dir := range []string{
-		"__tests__/", "__fixtures__/", "__mocks__/",
-		"quicktests/", "e2e/", "cypress/",
-		"integration/",
-	} {
+	// === Definitive non-production directories ===
+	// F-2: Uses the shared nonProductionDirs list so graph classification and
+	// fallback heuristics agree on which directories are non-production.
+	for _, dir := range nonProductionDirs {
 		if strings.Contains(lower, "/"+dir) || strings.HasPrefix(lower, dir) {
 			return true
 		}
@@ -611,6 +608,29 @@ var testKeywords = []string{
 	"assert", "test", "mock", "stub", "fixture",
 	"setup", "teardown", "benchmark", "expect",
 	"verify", "fake", "spy",
+}
+
+// nonProductionDirs is the canonical list of directory patterns that indicate
+// non-production code (test, example, documentation, benchmark, fixture).
+//
+// F-2: Single source of truth used by:
+//   - isDefinitiveTestFile() (Phase 4 of graph classification)
+//   - isTestFilePath() (fallback heuristic)
+//   - isDocFilePath() (fallback heuristic)
+//
+// Each entry must end with "/" and is matched as a directory component.
+// Matching logic: strings.Contains(lower, "/"+dir) || strings.HasPrefix(lower, dir)
+var nonProductionDirs = []string{
+	// Test directories
+	"__tests__/", "__fixtures__/", "__mocks__/",
+	"quicktests/", "e2e/", "cypress/",
+	"integration/", "fixtures/",
+	// Example / demo directories
+	"examples/", "example/",
+	// Documentation directories
+	"doc/", "docs/", "documentation/",
+	// Benchmark directories
+	"asv_bench/",
 }
 
 // computeProductionFileRatio counts cross-file edges but only counting edges
@@ -845,50 +865,47 @@ func inferLanguageFromPath(filePath string) string {
 //
 // Description:
 //
-//	Copy of the heuristic from symbol_resolution.go for use in the graph
-//	package. The graph package cannot import the tools package, so this
-//	is a standalone copy used as a fallback when FileClassification is nil.
+//	Fallback heuristic for when FileClassification is nil. Checks both
+//	directory patterns (via shared nonProductionDirs) and file-level
+//	patterns (_test, .test., .spec., /test, /tests/, /benchmark).
 //
 // Thread Safety: Safe for concurrent use (pure function).
 func isTestFilePath(filePath string) bool {
+	lower := strings.ToLower(filePath)
+
+	// F-2: Check shared non-production directory list
+	for _, dir := range nonProductionDirs {
+		if strings.Contains(lower, "/"+dir) || strings.HasPrefix(lower, dir) {
+			return true
+		}
+	}
+
+	// File-level patterns not covered by directory list
 	return strings.Contains(filePath, "/test") ||
 		strings.HasPrefix(filePath, "test/") ||
 		strings.Contains(filePath, "_test") ||
 		strings.Contains(filePath, "/tests/") ||
 		strings.HasPrefix(filePath, "tests/") ||
 		strings.Contains(filePath, "/benchmark") ||
-		strings.Contains(filePath, "/asv_bench/") ||
-		strings.HasPrefix(filePath, "asv_bench/") ||
 		strings.Contains(filePath, ".test.") ||
-		strings.Contains(filePath, ".spec.") ||
-		strings.Contains(filePath, "/integration/") ||
-		strings.HasPrefix(filePath, "integration/") ||
-		strings.Contains(filePath, "/quicktests/") ||
-		strings.HasPrefix(filePath, "quicktests/") ||
-		strings.Contains(filePath, "/e2e/") ||
-		strings.HasPrefix(filePath, "e2e/") ||
-		strings.Contains(filePath, "/__tests__/") ||
-		strings.HasPrefix(filePath, "__tests__/") ||
-		strings.Contains(filePath, "/__fixtures__/") ||
-		strings.HasPrefix(filePath, "__fixtures__/") ||
-		strings.Contains(filePath, "/cypress/") ||
-		strings.HasPrefix(filePath, "cypress/") ||
-		strings.Contains(filePath, "/fixtures/") ||
-		strings.HasPrefix(filePath, "fixtures/")
+		strings.Contains(filePath, ".spec.")
 }
 
 // isDocFilePath returns true if the file path matches documentation file heuristics.
 //
 // Description:
 //
-//	Copy of the heuristic from symbol_resolution.go for use in the graph
-//	package. Used as a fallback when FileClassification is nil.
+//	Fallback heuristic for when FileClassification is nil. Directory checks
+//	are handled by the shared nonProductionDirs list (which includes doc/,
+//	docs/, documentation/, examples/, example/). This function adds
+//	extension-based and filename-based checks for non-source files.
 //
 // Thread Safety: Safe for concurrent use (pure function).
 func isDocFilePath(filePath string) bool {
 	lower := strings.ToLower(filePath)
 
-	for _, dir := range []string{"doc/", "docs/", "documentation/", "examples/", "example/"} {
+	// F-2: Directory patterns covered by shared nonProductionDirs list
+	for _, dir := range nonProductionDirs {
 		if strings.HasPrefix(lower, dir) || strings.Contains(lower, "/"+dir) {
 			return true
 		}

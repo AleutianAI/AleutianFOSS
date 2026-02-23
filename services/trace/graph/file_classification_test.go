@@ -1163,6 +1163,15 @@ func TestIsDefinitiveTestFile(t *testing.T) {
 		{"e2e/login.test.ts", true, "e2e directory"},
 		{"cypress/integration/spec.js", true, "cypress directory"},
 
+		// F-2: examples/ and example/ directories
+		{"examples/route-map/index.js", true, "examples directory"},
+		{"src/examples/demo.ts", true, "nested examples directory"},
+		{"example/basic/main.go", true, "example directory"},
+
+		// F-2: doc directories (from unified nonProductionDirs)
+		{"doc/api/handler.go", true, "doc directory"},
+		{"docs/guide/setup.md", true, "docs directory"},
+
 		// Should NOT match
 		{"src/utils.go", false, "regular Go file"},
 		{"integration/scopes/service.ts", true, "integration dir is in definitive list"},

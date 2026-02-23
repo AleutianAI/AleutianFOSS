@@ -227,6 +227,15 @@ type buildState struct {
 	// Used by resolveCallTarget for inheritance-aware method resolution.
 	classExtends map[string]string
 
+	// classAdditionalParents maps a class name to additional parent class names
+	// beyond the primary parent stored in classExtends.
+	// GR-62a P-1: Python's class C(A, B) stores A in Extends and B in Implements.
+	// For non-Go-struct symbols, Metadata.Implements represents additional base classes
+	// that need to be included in the inheritance chain for method resolution.
+	// Guarded: only populated for non-Struct symbols (Go struct embeds use Implements
+	// differently — they represent embedded types, not base classes).
+	classAdditionalParents map[string][]string
+
 	// importNameMap maps filePath → localName → importEntry.
 	// R3-P2b: Built from fileImports during collectPhase. Enables import-aware
 	// call resolution: when "merge" is called in frame.py and the file imports
@@ -246,8 +255,9 @@ type buildState struct {
 //
 // Thread Safety: Immutable after construction.
 type importEntry struct {
-	ModulePath   string // "pandas.core.reshape.merge"
-	OriginalName string // "merge" (the name in the source module)
+	ModulePath   string       // "pandas.core.reshape.merge"
+	OriginalName string       // "merge" (the name in the source module)
+	Location     ast.Location // where the import statement appears in the importing file
 }
 
 // Build constructs a graph from the given parse results.
@@ -287,14 +297,15 @@ func (b *Builder) Build(ctx context.Context, results []*ast.ParseResult) (*Build
 			FileErrors: make([]FileError, 0),
 			EdgeErrors: make([]EdgeError, 0),
 		},
-		symbolsByID:   make(map[string]*ast.Symbol),
-		symbolsByName: make(map[string][]*ast.Symbol),
-		fileImports:   make(map[string][]ast.Import),
-		placeholders:  make(map[string]*Node),
-		symbolParent:  make(map[string]string),
-		classExtends:  make(map[string]string),
-		importNameMap: make(map[string]map[string]importEntry),
-		startTime:     time.Now(),
+		symbolsByID:            make(map[string]*ast.Symbol),
+		symbolsByName:          make(map[string][]*ast.Symbol),
+		fileImports:            make(map[string][]ast.Import),
+		placeholders:           make(map[string]*Node),
+		symbolParent:           make(map[string]string),
+		classExtends:           make(map[string]string),
+		classAdditionalParents: make(map[string][]string),
+		importNameMap:          make(map[string]map[string]importEntry),
+		startTime:              time.Now(),
 	}
 	state.result.Graph = state.graph
 
@@ -391,6 +402,12 @@ func (b *Builder) collectPhase(ctx context.Context, state *buildState, results [
 				state.classExtends[sym.Name] = sym.Metadata.Extends
 			}
 
+			// GR-62a P-1: Track additional parents from Metadata.Implements.
+			// Guard: Go structs use Implements for embedded types, not base classes.
+			if sym.Metadata != nil && len(sym.Metadata.Implements) > 0 && sym.Kind != ast.SymbolKindStruct {
+				state.classAdditionalParents[sym.Name] = sym.Metadata.Implements
+			}
+
 			// Recursively add children with parent tracking
 			b.addChildSymbols(state, sym.Children, sym.ID)
 		}
@@ -412,7 +429,14 @@ func (b *Builder) addChildSymbols(state *buildState, children []*ast.Symbol, par
 
 		_, err := state.graph.AddNode(child)
 		if err != nil {
-			// Log but don't fail - child nodes are optional
+			// GR-62a J-1: Node already exists (e.g., JS prototype methods added as
+			// both top-level and children). Still set symbolParent so this/self
+			// resolution works via findOwnerClassName Strategy 2, and recurse
+			// for grandchildren.
+			if parentID != "" {
+				state.symbolParent[child.ID] = parentID
+			}
+			b.addChildSymbols(state, child.Children, child.ID)
 			continue
 		}
 
@@ -428,6 +452,12 @@ func (b *Builder) addChildSymbols(state *buildState, children []*ast.Symbol, par
 		// Track class inheritance from Metadata.Extends
 		if child.Metadata != nil && child.Metadata.Extends != "" {
 			state.classExtends[child.Name] = child.Metadata.Extends
+		}
+
+		// GR-62a P-1: Track additional parents from Metadata.Implements.
+		// Guard: Go structs use Implements for embedded types, not base classes.
+		if child.Metadata != nil && len(child.Metadata.Implements) > 0 && child.Kind != ast.SymbolKindStruct {
+			state.classAdditionalParents[child.Name] = child.Metadata.Implements
 		}
 
 		// Recurse
@@ -471,6 +501,12 @@ func (b *Builder) extractEdgesPhase(ctx context.Context, state *buildState, resu
 			Err:      err,
 		})
 	}
+
+	// GR-62: Resolve Python named imports to symbol-level EdgeTypeReferences.
+	// "from X import Y" creates an edge from the importing package symbol to
+	// the Y symbol node, enabling find_references to return cross-file callers.
+	// Runs after per-file extraction so the full symbol index is available.
+	b.resolveNamedImportEdges(ctx, state, results)
 
 	// GR-41: Record call edge metrics after all edges extracted
 	recordCallEdgeMetrics(ctx,
@@ -1342,6 +1378,17 @@ func (b *Builder) resolveCallTarget(state *buildState, call ast.CallSite, caller
 	if call.IsMethod && call.Receiver != "" {
 		candidates := b.resolveSymbolByName(state, target, caller.FilePath)
 
+		// GR-62a P-3: Sub-strategy 3-super: super() receiver → resolve to parent class method.
+		// Python's super().method() should skip the caller's own class and start from
+		// the parent in the inheritance chain. Use ALL candidates across all files since
+		// the parent class method is typically in a different file.
+		if call.Receiver == "super" {
+			allCandidates := b.resolveAllSymbolsByName(state, target)
+			if resolved := b.resolveSuperCall(state, allCandidates, caller); resolved != "" {
+				return resolved
+			}
+		}
+
 		// Sub-strategy 3a: this/self receiver → resolve to caller's owning class
 		if call.Receiver == "this" || call.Receiver == "self" {
 			if resolved := b.resolveThisSelfCall(state, candidates, caller); resolved != "" {
@@ -1351,7 +1398,7 @@ func (b *Builder) resolveCallTarget(state *buildState, call ast.CallSite, caller
 
 		// Sub-strategy 3b: Go-style receiver matching (case-insensitive)
 		// Handles: txn.Get() → Txn.Get, ctx.Done() → Context.Done
-		if call.Receiver != "this" && call.Receiver != "self" {
+		if call.Receiver != "this" && call.Receiver != "self" && call.Receiver != "super" {
 			if resolved := b.resolveReceiverCaseInsensitive(state, candidates, call.Receiver); resolved != "" {
 				return resolved
 			}
@@ -1374,6 +1421,18 @@ func (b *Builder) resolveCallTarget(state *buildState, call ast.CallSite, caller
 		for _, id := range candidates {
 			if sym, ok := state.symbolsByID[id]; ok {
 				if sym.Kind == ast.SymbolKindMethod || sym.Kind == ast.SymbolKindProperty {
+					return id
+				}
+			}
+		}
+
+		// GR-62a P-4: Sub-strategy 3d: Variable fallback.
+		// When a callable is stored as a Variable (e.g., handler = _MergeOperation),
+		// method-style calls like obj.handler() won't match Method/Property in 3c.
+		// Accept Variable as last resort after Method/Property have been tried.
+		for _, id := range candidates {
+			if sym, ok := state.symbolsByID[id]; ok {
+				if sym.Kind == ast.SymbolKindVariable {
 					return id
 				}
 			}
@@ -1428,6 +1487,68 @@ func (b *Builder) resolveThisSelfCall(state *buildState, candidates []string, ca
 			}
 
 			// Check 2: sym is a child of the class (Python, TS — Receiver often empty)
+			parentID, hasParent := state.symbolParent[id]
+			if hasParent {
+				if parentSym, ok := state.symbolsByID[parentID]; ok {
+					if parentSym.Name == className {
+						return id
+					}
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+// resolveSuperCall resolves super().method() calls to the parent class method.
+//
+// Description:
+//
+//	GR-62a P-3: When Python code calls super().save(), the target should resolve to
+//	the parent class's save() method, not the caller's own class. This function
+//	uses the same logic as resolveThisSelfCall but starts from classChain[1:]
+//	(skipping the caller's own class).
+//
+// Inputs:
+//
+//	state - Build state with symbol indexes and parent/inheritance maps.
+//	candidates - Symbol IDs that match the target method name.
+//	caller - The calling function/method symbol.
+//
+// Outputs:
+//
+//	string - Resolved symbol ID, or empty if no match found.
+func (b *Builder) resolveSuperCall(state *buildState, candidates []string, caller *ast.Symbol) string {
+	// Find the caller's owning class
+	ownerClassName := b.findOwnerClassName(state, caller)
+	if ownerClassName == "" {
+		return ""
+	}
+
+	// Build inheritance chain and skip the first entry (caller's own class)
+	classChain := b.buildInheritanceChain(state, ownerClassName)
+	if len(classChain) < 2 {
+		return "" // No parent class to resolve to
+	}
+
+	// Start from classChain[1:] — skip the caller's own class
+	for _, className := range classChain[1:] {
+		for _, id := range candidates {
+			sym, ok := state.symbolsByID[id]
+			if !ok {
+				continue
+			}
+			if sym.Kind != ast.SymbolKindMethod && sym.Kind != ast.SymbolKindFunction && sym.Kind != ast.SymbolKindProperty {
+				continue
+			}
+
+			// Check 1: sym.Receiver matches the class name
+			if sym.Receiver == className {
+				return id
+			}
+
+			// Check 2: sym is a child of the class (Python — Receiver often empty)
 			parentID, hasParent := state.symbolParent[id]
 			if hasParent {
 				if parentSym, ok := state.symbolsByID[parentID]; ok {
@@ -1511,32 +1632,60 @@ func (b *Builder) findOwnerClassName(state *buildState, method *ast.Symbol) stri
 	return ""
 }
 
-// buildInheritanceChain builds the chain of class names from the given class up through its parents.
+// buildInheritanceChain builds the chain of class names from the given class
+// through all parents (primary via classExtends, secondary via classAdditionalParents).
 //
 // Description:
 //
-//	Walks the classExtends map to build [className, parentName, grandparentName, ...].
-//	Stops at a maximum depth of 10 to prevent infinite loops from circular inheritance.
+//	GR-62a P-1: Uses BFS to traverse both classExtends (single primary parent) and
+//	classAdditionalParents (secondary parents from Python's multiple inheritance).
+//	BFS preserves Python MRO-like breadth-first ordering: the starting class is first,
+//	then its direct parents, then their parents, etc.
+//
+//	A visited set prevents duplicates from diamond inheritance (e.g., C(A,B), A(D), B(D)
+//	— D appears once). Max chain length is 11 to prevent infinite loops.
 //
 // Inputs:
 //
-//	state - Build state with classExtends map.
+//	state - Build state with classExtends and classAdditionalParents maps.
 //	className - Starting class name.
 //
 // Outputs:
 //
-//	[]string - Class names from child to root, including className itself.
+//	[]string - Class names in BFS order from child through all ancestors.
 func (b *Builder) buildInheritanceChain(state *buildState, className string) []string {
-	chain := []string{className}
-	current := className
-	for i := 0; i < 10; i++ {
-		parent, ok := state.classExtends[current]
-		if !ok || parent == "" {
-			break
+	const maxChainLen = 11
+
+	chain := make([]string, 0, 4)
+	visited := make(map[string]bool)
+
+	// BFS queue
+	queue := []string{className}
+	visited[className] = true
+
+	for len(queue) > 0 && len(chain) < maxChainLen {
+		current := queue[0]
+		queue = queue[1:]
+
+		chain = append(chain, current)
+
+		// Enqueue primary parent from classExtends
+		if parent, ok := state.classExtends[current]; ok && parent != "" && !visited[parent] {
+			visited[parent] = true
+			queue = append(queue, parent)
 		}
-		chain = append(chain, parent)
-		current = parent
+
+		// Enqueue additional parents from classAdditionalParents
+		if additionalParents, ok := state.classAdditionalParents[current]; ok {
+			for _, ap := range additionalParents {
+				if ap != "" && !visited[ap] {
+					visited[ap] = true
+					queue = append(queue, ap)
+				}
+			}
+		}
 	}
+
 	return chain
 }
 
@@ -1638,6 +1787,157 @@ func filterOutID(ids []string, exclude string) []string {
 	return result
 }
 
+// resolveNamedImportEdges creates EdgeTypeReferences edges for Python named imports.
+//
+// # Description
+//
+// Python's "from X import Y" syntax creates a named dependency on a specific
+// symbol Y within module X. The existing extractImportEdges pass creates only
+// a coarse EdgeTypeImports edge from the importing file's package symbol to the
+// module placeholder. That edge points at the container (X), not the member (Y),
+// so FindReferencesByID on Y returns 0 results even though Y is widely used.
+//
+// This pass resolves each imported name to its in-project symbol node and emits
+// a precise EdgeTypeReferences edge. External library imports (symbols not
+// present in the project index) are silently skipped — they have no node to
+// point at.
+//
+// # When It Runs
+//
+// Inside extractEdgesPhase, after the per-file loop. Requires:
+//   - Full symbol index (state.symbolsByID, state.symbolsByName) — built in collectPhase.
+//   - state.importNameMap — built by buildImportNameMap before extractEdgesPhase.
+//
+// # Scope
+//
+// Python only. Go uses qualified identifiers (pkg.Symbol) which already create
+// call/type-ref edges. TypeScript named imports already populate TypeReferences
+// via type annotations. JavaScript has no static type resolution path.
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation.
+//   - state: Build state with full symbol index and importNameMap.
+//   - results: All parse results; used to find package symbol ID and filter by language.
+//
+// # Outputs
+//
+//   - None. Edges are added to state.graph; count recorded in state.result.Stats.
+//
+// # Thread Safety
+//
+// Modifies state.graph and state.result. Not safe for concurrent use on the
+// same buildState; the builder serializes calls appropriately.
+func (b *Builder) resolveNamedImportEdges(ctx context.Context, state *buildState, results []*ast.ParseResult) {
+	_, span := tracer.Start(ctx, "GraphBuilder.resolveNamedImportEdges")
+	defer span.End()
+
+	resolved := 0
+	skippedNoSource := 0
+	skippedNoTarget := 0
+
+	for _, r := range results {
+		if ctx.Err() != nil {
+			slog.Debug("GR-62: context cancelled during named import resolution")
+			break
+		}
+
+		if r == nil || r.Language != "python" {
+			continue
+		}
+
+		fileMap := state.importNameMap[r.FilePath]
+		if len(fileMap) == 0 {
+			continue
+		}
+
+		// Use the same source node as extractImportEdges: the package symbol
+		// of the importing file. If the file has no package symbol, skip it.
+		sourceID := findPackageSymbolID(r)
+		if sourceID == "" {
+			skippedNoSource += len(fileMap)
+			slog.Debug("GR-62: no package symbol for file, skipping named import resolution",
+				slog.String("file", r.FilePath),
+			)
+			continue
+		}
+		if _, exists := state.graph.GetNode(sourceID); !exists {
+			skippedNoSource += len(fileMap)
+			continue
+		}
+
+		for _, entry := range fileMap {
+			// Look up all in-project symbols with this name.
+			candidates := state.symbolsByName[entry.OriginalName]
+			if len(candidates) == 0 {
+				skippedNoTarget++
+				continue
+			}
+
+			// Filter to symbols whose file path matches the import module path.
+			// matchesImportPath converts "flask.globals" → "flask/globals" and
+			// handles __init__.py packages, so relative and absolute imports both work.
+			matched := false
+			for _, sym := range candidates {
+				if !matchesImportPath(sym.FilePath, entry.ModulePath) {
+					continue
+				}
+
+				// A matching symbol was found in the index. Mark matched=true now
+				// so that skippedNoTarget reflects "no symbol in index" not "AddEdge failed".
+				// Edge failures are separately recorded in EdgeErrors.
+				matched = true
+
+				err := state.graph.AddEdge(sourceID, sym.ID, EdgeTypeReferences, entry.Location)
+				if err != nil {
+					if strings.Contains(err.Error(), "already exists") {
+						// Duplicate edges are benign — same symbol imported via
+						// multiple aliases, or the edge was already created by
+						// a type annotation. Not an error.
+						continue
+					}
+					state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+						FromID:   sourceID,
+						ToID:     sym.ID,
+						EdgeType: EdgeTypeReferences,
+						Err:      fmt.Errorf("GR-62 named import edge: %w", err),
+					})
+					continue
+				}
+
+				state.result.Stats.EdgesCreated++
+				state.result.Stats.NamedImportEdgesResolved++
+				resolved++
+
+				slog.Debug("GR-62: named import edge created",
+					slog.String("from", sourceID),
+					slog.String("to", sym.ID),
+					slog.String("module", entry.ModulePath),
+					slog.String("name", entry.OriginalName),
+				)
+			}
+
+			if !matched {
+				skippedNoTarget++
+			}
+		}
+	}
+
+	span.SetAttributes(
+		attribute.Int("resolved", resolved),
+		attribute.Int("skipped_no_source", skippedNoSource),
+		attribute.Int("skipped_no_target", skippedNoTarget),
+	)
+
+	if resolved > 0 || skippedNoSource > 0 {
+		slog.Debug("GR-62: named import resolution complete",
+			slog.Int("edges_created", resolved),
+			slog.Int("skipped_no_source", skippedNoSource),
+			slog.Int("skipped_no_target", skippedNoTarget),
+		)
+	}
+}
+
 // buildImportNameMap builds the import name lookup table from fileImports.
 //
 // Description:
@@ -1665,6 +1965,7 @@ func (b *Builder) buildImportNameMap(state *buildState) {
 				state.importNameMap[filePath][localName] = importEntry{
 					ModulePath:   imp.Path,
 					OriginalName: originalName,
+					Location:     imp.Location,
 				}
 				entries++
 			}
@@ -1738,9 +2039,21 @@ func (b *Builder) resolveViaImportMap(state *buildState, target string, callerFi
 //	ends with it. Uses HasSuffix (not Contains) to prevent false positives from
 //	prefix pollution (e.g., "my_pandas/core/reshape/merge.py").
 //
+//	GR-62: Handles relative imports by stripping leading dots before conversion.
+//	Python relative imports like ".globals" or "..utils" are stored with the leading
+//	dot(s) intact by the parser. Stripping the dots lets the suffix check work:
+//	".globals" → "globals" → matches "src/flask/globals.py".
+//
 // Thread Safety: This function is safe for concurrent use.
 func matchesImportPath(filePath string, importPath string) bool {
-	pathFragment := strings.ReplaceAll(importPath, ".", "/")
+	// Strip leading dots from relative imports (e.g., ".globals" → "globals").
+	// Absolute imports (e.g., "flask.globals") are unaffected by TrimLeft.
+	stripped := strings.TrimLeft(importPath, ".")
+	if stripped == "" {
+		// Bare relative import ("from . import x") — no module path to match against.
+		return false
+	}
+	pathFragment := strings.ReplaceAll(stripped, ".", "/")
 	// Handle both "merge.py" and "merge/__init__.py" (Python package)
 	normalized := strings.TrimSuffix(filePath, ".py")
 	normalized = strings.TrimSuffix(normalized, "/__init__")
@@ -1964,10 +2277,13 @@ func isCallable(kind ast.SymbolKind) bool {
 // This is a superset of isCallable: it additionally allows Class and Struct symbols
 // because constructor calls (e.g., DataFrameFormatter(), new Router()) target class/struct symbols.
 // R3-P1b: Fixes silently dropped constructor call edges.
+// GR-62a P-4: Also allows Variable symbols because Python stores callables in variables
+// (e.g., handler = _MergeOperation) which are then called as methods.
 func isCallTarget(kind ast.SymbolKind) bool {
 	return isCallable(kind) ||
 		kind == ast.SymbolKindClass ||
-		kind == ast.SymbolKindStruct
+		kind == ast.SymbolKindStruct ||
+		kind == ast.SymbolKindVariable
 }
 
 // validateParseResult checks if a ParseResult is valid for building.

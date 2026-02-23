@@ -93,6 +93,12 @@ type BuildStats struct {
 	// See GR-41 for details.
 	CallEdgesUnresolved int
 
+	// NamedImportEdgesResolved is the number of EdgeTypeReferences edges
+	// created by the named import resolution pass (GR-62). Each represents
+	// a "from X import Y" statement where Y was resolved to an in-project
+	// symbol node.
+	NamedImportEdgesResolved int
+
 	// DurationMilli is the total build time in milliseconds.
 	// NOTE: For fast builds (< 1ms), this rounds to 0. Use DurationMicro for precision.
 	DurationMilli int64

@@ -2053,6 +2053,14 @@ func (p *PythonParser) extractSingleCallSite(node *sitter.Node, content []byte, 
 
 		if objectNode != nil {
 			receiver := string(content[objectNode.StartByte():objectNode.EndByte()])
+
+			// GR-62a P-3: Normalize super() calls. When objectNode is a call to super(),
+			// the receiver text is "super()" — normalize to "super" so the builder's
+			// resolveSuperCall strategy can match it.
+			if objectNode.Type() == "call" && (receiver == "super()" || receiver == "super") {
+				receiver = "super"
+			}
+
 			call.Receiver = receiver
 			call.IsMethod = true
 		}

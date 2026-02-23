@@ -2754,3 +2754,58 @@ func TestPythonParser_QualifiedBaseClassName(t *testing.T) {
 		})
 	}
 }
+
+// TestPythonParser_SuperCallExtraction verifies that super().method() calls are
+// normalized to Receiver="super", Target="method", IsMethod=true.
+func TestPythonParser_SuperCallExtraction(t *testing.T) {
+	source := `
+class Parent:
+    def save(self):
+        pass
+
+class Child(Parent):
+    def save(self):
+        super().save()
+        super().validate()
+`
+
+	parser := NewPythonParser()
+	ctx := context.Background()
+	result, err := parser.Parse(ctx, []byte(source), "test_super.py")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	// Find Child class and its save method
+	var childSave *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Child" {
+			for _, child := range sym.Children {
+				if child.Name == "save" {
+					childSave = child
+					break
+				}
+			}
+		}
+	}
+
+	if childSave == nil {
+		t.Fatal("expected to find Child.save method")
+	}
+
+	if len(childSave.Calls) < 2 {
+		t.Fatalf("expected at least 2 calls in Child.save, got %d", len(childSave.Calls))
+	}
+
+	// Check that super() calls are normalized
+	for _, call := range childSave.Calls {
+		if call.Target == "save" || call.Target == "validate" {
+			if call.Receiver != "super" {
+				t.Errorf("super().%s() should have Receiver='super', got %q", call.Target, call.Receiver)
+			}
+			if !call.IsMethod {
+				t.Errorf("super().%s() should have IsMethod=true", call.Target)
+			}
+		}
+	}
+}

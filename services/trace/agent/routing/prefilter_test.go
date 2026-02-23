@@ -129,7 +129,7 @@ func makeTestConfig() *config.PreFilterConfig {
 }
 
 func newTestPreFilter(cfg *config.PreFilterConfig) *PreFilter {
-	return NewPreFilter(nil, cfg, slog.Default())
+	return NewPreFilter(nil, cfg, slog.Default(), nil)
 }
 
 // =============================================================================
@@ -142,7 +142,7 @@ func TestPreFilter_Disabled(t *testing.T) {
 	pf := newTestPreFilter(cfg)
 	specs := makeTestSpecs(10)
 
-	result := pf.Filter(context.Background(), "find callers of main", specs)
+	result := pf.Filter(context.Background(), "find callers of main", specs, nil)
 
 	if result.ForcedTool != "" {
 		t.Errorf("expected no forced tool when disabled, got %q", result.ForcedTool)
@@ -153,10 +153,10 @@ func TestPreFilter_Disabled(t *testing.T) {
 }
 
 func TestPreFilter_NilConfig(t *testing.T) {
-	pf := NewPreFilter(nil, nil, slog.Default())
+	pf := NewPreFilter(nil, nil, slog.Default(), nil)
 	specs := makeTestSpecs(10)
 
-	result := pf.Filter(context.Background(), "test query", specs)
+	result := pf.Filter(context.Background(), "test query", specs, nil)
 
 	if len(result.NarrowedSpecs) != len(specs) {
 		t.Errorf("expected passthrough with nil config, got %d vs %d", len(result.NarrowedSpecs), len(specs))
@@ -167,7 +167,7 @@ func TestPreFilter_EmptyQuery(t *testing.T) {
 	pf := newTestPreFilter(makeTestConfig())
 	specs := makeTestSpecs(10)
 
-	result := pf.Filter(context.Background(), "", specs)
+	result := pf.Filter(context.Background(), "", specs, nil)
 
 	if len(result.NarrowedSpecs) != len(specs) {
 		t.Errorf("expected passthrough for empty query, got %d vs %d", len(result.NarrowedSpecs), len(specs))
@@ -177,7 +177,7 @@ func TestPreFilter_EmptyQuery(t *testing.T) {
 func TestPreFilter_EmptySpecs(t *testing.T) {
 	pf := newTestPreFilter(makeTestConfig())
 
-	result := pf.Filter(context.Background(), "find callers", nil)
+	result := pf.Filter(context.Background(), "find callers", nil, nil)
 
 	if len(result.NarrowedSpecs) != 0 {
 		t.Errorf("expected empty result for nil specs, got %d", len(result.NarrowedSpecs))
@@ -192,7 +192,7 @@ func TestPreFilter_ForcedMapping_Exact(t *testing.T) {
 	pf := newTestPreFilter(makeTestConfig())
 	specs := makeTestSpecs(16)
 
-	result := pf.Filter(context.Background(), "show the call chain from main to handler", specs)
+	result := pf.Filter(context.Background(), "show the call chain from main to handler", specs, nil)
 
 	if result.ForcedTool != "get_call_chain" {
 		t.Errorf("expected forced tool 'get_call_chain', got %q", result.ForcedTool)
@@ -206,7 +206,7 @@ func TestPreFilter_ForcedMapping_CaseInsensitive(t *testing.T) {
 	pf := newTestPreFilter(makeTestConfig())
 	specs := makeTestSpecs(16)
 
-	result := pf.Filter(context.Background(), "Show the CALL CHAIN FROM main", specs)
+	result := pf.Filter(context.Background(), "Show the CALL CHAIN FROM main", specs, nil)
 
 	if result.ForcedTool != "get_call_chain" {
 		t.Errorf("expected forced tool 'get_call_chain', got %q", result.ForcedTool)
@@ -217,7 +217,7 @@ func TestPreFilter_ForcedMapping_Regex(t *testing.T) {
 	pf := newTestPreFilter(makeTestConfig())
 	specs := makeTestSpecs(16)
 
-	result := pf.Filter(context.Background(), "find the path from handler to database", specs)
+	result := pf.Filter(context.Background(), "find the path from handler to database", specs, nil)
 
 	if result.ForcedTool != "find_path" {
 		t.Errorf("expected forced tool 'find_path', got %q", result.ForcedTool)
@@ -228,7 +228,7 @@ func TestPreFilter_ForcedMapping_NoMatch(t *testing.T) {
 	pf := newTestPreFilter(makeTestConfig())
 	specs := makeTestSpecs(16)
 
-	result := pf.Filter(context.Background(), "find callers of main", specs)
+	result := pf.Filter(context.Background(), "find callers of main", specs, nil)
 
 	if result.ForcedTool != "" {
 		t.Errorf("expected no forced tool, got %q", result.ForcedTool)
@@ -243,7 +243,7 @@ func TestPreFilter_Negation_NoCallers(t *testing.T) {
 	pf := newTestPreFilter(makeTestConfig())
 	specs := makeTestSpecs(16)
 
-	result := pf.Filter(context.Background(), "functions with no callers in the routing package", specs)
+	result := pf.Filter(context.Background(), "functions with no callers in the routing package", specs, nil)
 
 	if result.ForcedTool != "find_dead_code" {
 		t.Errorf("expected 'find_dead_code', got %q", result.ForcedTool)
@@ -254,7 +254,7 @@ func TestPreFilter_Negation_NeverCalled(t *testing.T) {
 	pf := newTestPreFilter(makeTestConfig())
 	specs := makeTestSpecs(16)
 
-	result := pf.Filter(context.Background(), "functions never called anywhere", specs)
+	result := pf.Filter(context.Background(), "functions never called anywhere", specs, nil)
 
 	if result.ForcedTool != "find_dead_code" {
 		t.Errorf("expected 'find_dead_code', got %q", result.ForcedTool)
@@ -265,7 +265,7 @@ func TestPreFilter_Negation_ZeroReferences(t *testing.T) {
 	pf := newTestPreFilter(makeTestConfig())
 	specs := makeTestSpecs(16)
 
-	result := pf.Filter(context.Background(), "symbols with zero references in this package", specs)
+	result := pf.Filter(context.Background(), "symbols with zero references in this package", specs, nil)
 
 	if result.ForcedTool != "find_dead_code" {
 		t.Errorf("expected 'find_dead_code', got %q", result.ForcedTool)
@@ -276,7 +276,7 @@ func TestPreFilter_Negation_WithoutCallers(t *testing.T) {
 	pf := newTestPreFilter(makeTestConfig())
 	specs := makeTestSpecs(16)
 
-	result := pf.Filter(context.Background(), "find functions without callers", specs)
+	result := pf.Filter(context.Background(), "find functions without callers", specs, nil)
 
 	if result.ForcedTool != "find_dead_code" {
 		t.Errorf("expected 'find_dead_code', got %q", result.ForcedTool)
@@ -288,7 +288,7 @@ func TestPreFilter_Negation_ProximityBoundary(t *testing.T) {
 	specs := makeTestSpecs(16)
 
 	// "no" at position 0, "callers" at position 6 → distance 6 > 3
-	result := pf.Filter(context.Background(), "no, I actually want to find the callers", specs)
+	result := pf.Filter(context.Background(), "no, I actually want to find the callers", specs, nil)
 
 	if result.ForcedTool == "find_dead_code" {
 		t.Error("should NOT force find_dead_code when negation is far from keyword")
@@ -299,7 +299,7 @@ func TestPreFilter_Negation_NoNegWord(t *testing.T) {
 	pf := newTestPreFilter(makeTestConfig())
 	specs := makeTestSpecs(16)
 
-	result := pf.Filter(context.Background(), "find callers of parseConfig", specs)
+	result := pf.Filter(context.Background(), "find callers of parseConfig", specs, nil)
 
 	if result.ForcedTool == "find_dead_code" {
 		t.Error("should NOT force find_dead_code when there's no negation word")
@@ -310,7 +310,7 @@ func TestPreFilter_Negation_MultiWordTrigger(t *testing.T) {
 	pf := newTestPreFilter(makeTestConfig())
 	specs := makeTestSpecs(16)
 
-	result := pf.Filter(context.Background(), "no incoming calls to this function", specs)
+	result := pf.Filter(context.Background(), "no incoming calls to this function", specs, nil)
 
 	if result.ForcedTool != "find_dead_code" {
 		t.Errorf("expected 'find_dead_code' for multi-word trigger, got %q", result.ForcedTool)
@@ -321,7 +321,7 @@ func TestPreFilter_Negation_NotReferenced(t *testing.T) {
 	pf := newTestPreFilter(makeTestConfig())
 	specs := makeTestSpecs(16)
 
-	result := pf.Filter(context.Background(), "types not referenced anywhere", specs)
+	result := pf.Filter(context.Background(), "types not referenced anywhere", specs, nil)
 
 	if result.ForcedTool != "find_dead_code" {
 		t.Errorf("expected 'find_dead_code', got %q", result.ForcedTool)
@@ -336,7 +336,7 @@ func TestPreFilter_ConfusionPair_CallersVsCallees(t *testing.T) {
 	pf := newTestPreFilter(makeTestConfig())
 	specs := makeTestSpecs(16)
 
-	result := pf.Filter(context.Background(), "what does main call in the handler package", specs)
+	result := pf.Filter(context.Background(), "what does main call in the handler package", specs, nil)
 
 	// find_callees should be boosted
 	if result.Scores["find_callees"] <= result.Scores["find_callers"] {
@@ -349,7 +349,7 @@ func TestPreFilter_ConfusionPair_CallersBoosted(t *testing.T) {
 	pf := newTestPreFilter(makeTestConfig())
 	specs := makeTestSpecs(16)
 
-	result := pf.Filter(context.Background(), "who calls parseConfig in the server", specs)
+	result := pf.Filter(context.Background(), "who calls parseConfig in the server", specs, nil)
 
 	if result.Scores["find_callers"] <= result.Scores["find_callees"] {
 		t.Errorf("expected find_callers score (%f) > find_callees score (%f)",
@@ -361,7 +361,7 @@ func TestPreFilter_ConfusionPair_CallersVsRefs(t *testing.T) {
 	pf := newTestPreFilter(makeTestConfig())
 	specs := makeTestSpecs(16)
 
-	result := pf.Filter(context.Background(), "where is Entry used in the codebase", specs)
+	result := pf.Filter(context.Background(), "where is Entry used in the codebase", specs, nil)
 
 	if result.Scores["find_references"] <= result.Scores["find_callers"] {
 		t.Errorf("expected find_references score (%f) > find_callers score (%f)",
@@ -373,7 +373,7 @@ func TestPreFilter_ConfusionPair_HotspotsVsCriticality(t *testing.T) {
 	pf := newTestPreFilter(makeTestConfig())
 	specs := makeTestSpecs(16)
 
-	result := pf.Filter(context.Background(), "what are the most connected functions", specs)
+	result := pf.Filter(context.Background(), "what are the most connected functions", specs, nil)
 
 	if result.Scores["find_hotspots"] <= result.Scores["find_weighted_criticality"] {
 		t.Errorf("expected find_hotspots score (%f) > find_weighted_criticality score (%f)",
@@ -385,7 +385,7 @@ func TestPreFilter_ConfusionPair_CriticalityBoosted(t *testing.T) {
 	pf := newTestPreFilter(makeTestConfig())
 	specs := makeTestSpecs(16)
 
-	result := pf.Filter(context.Background(), "which functions are highest risk to change", specs)
+	result := pf.Filter(context.Background(), "which functions are highest risk to change", specs, nil)
 
 	if result.Scores["find_weighted_criticality"] <= result.Scores["find_hotspots"] {
 		t.Errorf("expected find_weighted_criticality score (%f) > find_hotspots score (%f)",
@@ -405,7 +405,7 @@ func TestPreFilter_CandidateCount_Max(t *testing.T) {
 
 	// Give all specs a score so we exercise the max cap
 	// We need keyword matches — use a query that matches many BestFor keywords
-	result := pf.Filter(context.Background(), "find symbol callers callees references dead_code hotspots weighted_criticality cycles circular_deps call_chain path entry_points implementations summary read answer", specs)
+	result := pf.Filter(context.Background(), "find symbol callers callees references dead_code hotspots weighted_criticality cycles circular_deps call_chain path entry_points implementations summary read answer", specs, nil)
 
 	if result.ForcedTool == "" && len(result.NarrowedSpecs) > cfg.MaxCandidates+len(cfg.AlwaysInclude) {
 		// Allow max + always_include tools
@@ -421,7 +421,7 @@ func TestPreFilter_CandidateCount_Min(t *testing.T) {
 	specs := makeTestSpecs(16)
 
 	// Query that matches very few keywords
-	result := pf.Filter(context.Background(), "xyzzy", specs)
+	result := pf.Filter(context.Background(), "xyzzy", specs, nil)
 
 	if result.ForcedTool == "" && len(result.NarrowedSpecs) < cfg.MinCandidates {
 		// Passthrough when no keywords match at all
@@ -435,7 +435,7 @@ func TestPreFilter_AnswerAlwaysIncluded(t *testing.T) {
 	specs := makeTestSpecs(16) // includes "answer" at index 15
 
 	// Query that triggers keyword matching but not "answer" keywords
-	result := pf.Filter(context.Background(), "who calls parseConfig in the routing package", specs)
+	result := pf.Filter(context.Background(), "who calls parseConfig in the routing package", specs, nil)
 
 	if result.ForcedTool != "" {
 		// Forced selection — answer inclusion not relevant
@@ -462,7 +462,7 @@ func TestPreFilter_AppliedRules_ForcedMapping(t *testing.T) {
 	pf := newTestPreFilter(makeTestConfig())
 	specs := makeTestSpecs(16)
 
-	result := pf.Filter(context.Background(), "show the full call hierarchy", specs)
+	result := pf.Filter(context.Background(), "show the full call hierarchy", specs, nil)
 
 	if len(result.AppliedRules) == 0 {
 		t.Error("expected at least one applied rule")
@@ -482,7 +482,7 @@ func TestPreFilter_AppliedRules_Negation(t *testing.T) {
 	pf := newTestPreFilter(makeTestConfig())
 	specs := makeTestSpecs(16)
 
-	result := pf.Filter(context.Background(), "functions with no callers", specs)
+	result := pf.Filter(context.Background(), "functions with no callers", specs, nil)
 
 	found := false
 	for _, rule := range result.AppliedRules {
@@ -503,7 +503,7 @@ func TestPreFilter_Duration(t *testing.T) {
 	pf := newTestPreFilter(makeTestConfig())
 	specs := makeTestSpecs(16)
 
-	result := pf.Filter(context.Background(), "find callers of main", specs)
+	result := pf.Filter(context.Background(), "find callers of main", specs, nil)
 
 	if result.Duration <= 0 {
 		t.Error("expected positive duration")
@@ -524,7 +524,7 @@ func TestPreFilter_ForcedMapping_ToolNotInSpecs(t *testing.T) {
 		{Name: "answer", Description: "Answer the question"},
 	}
 
-	result := pf.Filter(context.Background(), "show the call chain from main to handler", specs)
+	result := pf.Filter(context.Background(), "show the call chain from main to handler", specs, nil)
 
 	// Should NOT force since get_call_chain is not in the spec set
 	if result.ForcedTool != "" {
@@ -542,7 +542,7 @@ func TestPreFilter_Negation_ToolNotInSpecs(t *testing.T) {
 		{Name: "answer", Description: "Answer the question"},
 	}
 
-	result := pf.Filter(context.Background(), "functions with no callers", specs)
+	result := pf.Filter(context.Background(), "functions with no callers", specs, nil)
 
 	// Should NOT force since find_dead_code is not in the spec set
 	if result.ForcedTool != "" {
@@ -565,7 +565,7 @@ func TestPreFilter_RealisticKeywords_CallersQuery(t *testing.T) {
 		{Name: "answer", Description: "Answer the user's question directly", BestFor: []string{"answer", "explain", "summarize"}},
 	}
 
-	result := pf.Filter(context.Background(), "who calls parseConfig in the server package", specs)
+	result := pf.Filter(context.Background(), "who calls parseConfig in the server package", specs, nil)
 
 	// find_callers should be boosted via confusion pair
 	if result.ForcedTool != "" {
@@ -586,7 +586,7 @@ func TestPreFilter_RealisticKeywords_DeadCodeQuery(t *testing.T) {
 		{Name: "answer", Description: "Answer the user's question directly", BestFor: []string{"answer", "explain"}},
 	}
 
-	result := pf.Filter(context.Background(), "functions with no callers in the routing package", specs)
+	result := pf.Filter(context.Background(), "functions with no callers in the routing package", specs, nil)
 
 	if result.ForcedTool != "find_dead_code" {
 		t.Errorf("expected forced find_dead_code, got %q", result.ForcedTool)
@@ -602,7 +602,7 @@ func TestPreFilter_RealisticKeywords_HotspotsQuery(t *testing.T) {
 		{Name: "answer", Description: "Answer the user's question directly", BestFor: []string{"answer"}},
 	}
 
-	result := pf.Filter(context.Background(), "which functions have the highest risk to change", specs)
+	result := pf.Filter(context.Background(), "which functions have the highest risk to change", specs, nil)
 
 	if result.Scores["find_weighted_criticality"] <= result.Scores["find_hotspots"] {
 		t.Errorf("expected find_weighted_criticality score (%f) > find_hotspots score (%f)",
@@ -623,7 +623,7 @@ func BenchmarkPreFilter_55Tools(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		pf.Filter(ctx, query, specs)
+		pf.Filter(ctx, query, specs, nil)
 	}
 }
 
@@ -636,7 +636,7 @@ func BenchmarkNegationDetection(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		pf.Filter(ctx, query, specs)
+		pf.Filter(ctx, query, specs, nil)
 	}
 }
 
@@ -649,7 +649,7 @@ func BenchmarkForcedMapping(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		pf.Filter(ctx, query, specs)
+		pf.Filter(ctx, query, specs, nil)
 	}
 }
 
@@ -662,6 +662,6 @@ func BenchmarkConfusionPairs(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		pf.Filter(ctx, query, specs)
+		pf.Filter(ctx, query, specs, nil)
 	}
 }

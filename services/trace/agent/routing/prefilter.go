@@ -13,9 +13,11 @@ package routing
 import (
 	"context"
 	"log/slog"
+	"math"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -68,6 +70,30 @@ var (
 		Name:      "passthrough_total",
 		Help:      "Times pre-filter passed through unchanged",
 	})
+
+	// IT-06c: Hybrid scoring metrics.
+	prefilterHybridMethodTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "trace",
+		Subsystem: "prefilter",
+		Name:      "hybrid_method_total",
+		Help:      "Phase 3 scoring method used: hybrid (BM25+embedding), bm25_only (embedding unavailable), or passthrough (no registry)",
+	}, []string{"method"})
+
+	prefilterEmbeddingLatency = promauto.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "trace",
+		Subsystem: "prefilter",
+		Name:      "embedding_latency_seconds",
+		Help:      "Latency of the embedding similarity scoring call (Ollama)",
+		Buckets:   []float64{0.01, 0.025, 0.05, 0.1, 0.2, 0.5, 1.0, 3.0},
+	})
+
+	prefilterBM25Latency = promauto.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "trace",
+		Subsystem: "prefilter",
+		Name:      "bm25_latency_seconds",
+		Help:      "Latency of the BM25 scoring call",
+		Buckets:   []float64{0.0001, 0.0005, 0.001, 0.005, 0.01},
+	})
 )
 
 // =============================================================================
@@ -108,6 +134,16 @@ type PreFilter struct {
 	registry *config.ToolRoutingRegistry
 	cfg      *config.PreFilterConfig
 	logger   *slog.Logger
+
+	// IT-06c: Hybrid Phase 3 scoring components.
+	// bm25mu is a read-write mutex protecting the bm25 pointer.
+	// Multiple goroutines may read pf.bm25 concurrently (RLock); only the
+	// one-time lazy rebuild writes to it (Lock). Using RWMutex prevents the
+	// per-call read from serializing all concurrent prefilter invocations.
+	bm25mu   sync.RWMutex        // guards bm25 pointer during lazy init
+	bm25     *BM25Index          // BM25 lexical scorer; lazily built on first scored request.
+	embedder *ToolEmbeddingCache // Semantic scorer; lazily warmed on first scored request.
+	warmOnce sync.Once           // ensures embedding warm-up fires exactly once.
 
 	// compiledForcedPatterns holds pre-compiled patterns per forced mapping index.
 	compiledForcedPatterns [][]compiledPattern
@@ -157,20 +193,32 @@ type PreFilterResult struct {
 // Description:
 //
 //	Creates a pre-filter with the given registry and configuration.
-//	If registry is nil, keyword matching (Phase 3) is skipped.
+//	If registry is nil, keyword matching (Phase 3) falls back to legacy
+//	BestFor substring matching.
+//
+//	IT-06c: BM25 and embedding components are lazily initialized on the first
+//	Filter/FilterAgentSpecs call that provides non-empty tool specs. The embedding
+//	warm-up runs once in a background goroutine; Phase 3 degrades gracefully to
+//	BM25-only while warm-up is in progress.
+//
+//	GR-61: If store is non-nil, the embedding cache will load pre-computed
+//	vectors from BadgerDB on warm-up (skipping Ollama) and persist newly
+//	computed vectors for future service restarts. Pass nil for tests and for
+//	deployments without a routing cache directory.
 //
 // Inputs:
 //
 //	registry - Tool routing registry for keyword lookup. May be nil.
-//	cfg - Pre-filter configuration. Must not be nil.
-//	logger - Logger instance. Must not be nil.
+//	cfg      - Pre-filter configuration. Must not be nil.
+//	logger   - Logger instance. Must not be nil.
+//	store    - Optional BadgerDB embedding cache store. Nil disables persistence.
 //
 // Outputs:
 //
 //	*PreFilter - The constructed pre-filter.
 //
 // Thread Safety: The returned PreFilter is safe for concurrent use.
-func NewPreFilter(registry *config.ToolRoutingRegistry, cfg *config.PreFilterConfig, logger *slog.Logger) *PreFilter {
+func NewPreFilter(registry *config.ToolRoutingRegistry, cfg *config.PreFilterConfig, logger *slog.Logger, store RouterCacheStore) *PreFilter {
 	if cfg == nil {
 		cfg = &config.PreFilterConfig{
 			Enabled:           false,
@@ -187,15 +235,17 @@ func NewPreFilter(registry *config.ToolRoutingRegistry, cfg *config.PreFilterCon
 		registry: registry,
 		cfg:      cfg,
 		logger:   logger,
+		embedder: NewToolEmbeddingCache(logger, store),
+		bm25:     BuildBM25Index(nil), // empty; replaced on first scored call
 	}
 
-	// Pre-compile regex patterns for forced mappings
+	// Pre-compile regex patterns for forced mappings.
 	pf.compiledForcedPatterns = make([][]compiledPattern, len(cfg.ForcedMappings))
 	for i, fm := range cfg.ForcedMappings {
 		pf.compiledForcedPatterns[i] = compilePatterns(fm.Patterns, logger)
 	}
 
-	// Pre-compile regex patterns for confusion pairs
+	// Pre-compile regex patterns for confusion pairs.
 	pf.compiledConfusionAPatterns = make([][]compiledPattern, len(cfg.ConfusionPairs))
 	pf.compiledConfusionBPatterns = make([][]compiledPattern, len(cfg.ConfusionPairs))
 	for i, cp := range cfg.ConfusionPairs {
@@ -237,18 +287,24 @@ func compilePatterns(patterns []string, logger *slog.Logger) []compiledPattern {
 //	unchanged (passthrough) when disabled, query is empty, or no
 //	rules match.
 //
+//	IT-06c: Phase 3 now uses hybrid BM25 + embedding scoring instead of
+//	plain keyword substring counting. sessionCounts provides per-tool
+//	selection counts for the current session; tools already selected
+//	receive a UCB1 exploration penalty. Pass nil to disable the penalty.
+//
 // Inputs:
 //
-//	ctx - Context for tracing and cancellation. Must not be nil.
-//	query - The user's query string.
-//	allSpecs - All available tool specs.
+//	ctx           - Context for tracing and cancellation. Must not be nil.
+//	query         - The user's query string.
+//	allSpecs      - All available tool specs.
+//	sessionCounts - Current session tool selection counts (tool → count). May be nil.
 //
 // Outputs:
 //
 //	*PreFilterResult - The filtering result with narrowed specs or forced tool.
 //
 // Thread Safety: Safe for concurrent use.
-func (pf *PreFilter) Filter(ctx context.Context, query string, allSpecs []ToolSpec) *PreFilterResult {
+func (pf *PreFilter) Filter(ctx context.Context, query string, allSpecs []ToolSpec, sessionCounts map[string]int) *PreFilterResult {
 	start := time.Now()
 
 	ctx, span := prefilterTracer.Start(ctx, "routing.PreFilter.Filter")
@@ -350,14 +406,14 @@ func (pf *PreFilter) Filter(ctx context.Context, query string, allSpecs []ToolSp
 		}
 	}
 
-	// Phase 3: Keyword matching
-	scores := pf.scoreByKeywords(queryLower, allSpecs)
+	// Phase 3: Hybrid scoring (BM25 + embedding + UCB1 session penalty).
+	scores := pf.scoreHybrid(ctx, queryLower, allSpecs, sessionCounts)
 	for k, v := range scores {
 		result.Scores[k] = v
 	}
 	if len(scores) > 0 {
-		result.AppliedRules = append(result.AppliedRules, "keyword_matching")
-		prefilterRulesFired.WithLabelValues("keyword_matching").Inc()
+		result.AppliedRules = append(result.AppliedRules, "hybrid_scoring")
+		prefilterRulesFired.WithLabelValues("hybrid_scoring").Inc()
 	}
 
 	// Phase 4: Confusion pair resolution
@@ -536,36 +592,175 @@ func (pf *PreFilter) checkNegationRules(queryLower string) (tool string, reason 
 }
 
 // =============================================================================
-// Phase 3: Keyword Matching
+// Phase 3: Hybrid Scoring (IT-06c)
 // =============================================================================
 
-// scoreByKeywords scores tools based on keyword matches from the registry.
+// scoreHybrid scores tools using BM25 + embedding similarity with UCB1
+// session penalty. Replaces the old scoreByKeywords substring counting.
 //
-// Description:
+// # Description
 //
-//	Uses the ToolRoutingRegistry.FindToolsByKeyword() to find matching tools
-//	and assigns scores based on match count. Falls back to basic substring
-//	matching on BestFor keywords if registry is nil.
+// Scoring pipeline:
+//  1. BM25 (always available, pure Go): IDF-weighted lexical scoring over
+//     each tool's keyword + use_when corpus. Normalized to [0,1].
+//  2. Embedding similarity (optional, requires Ollama): cosine similarity
+//     between the query embedding and pre-computed tool embeddings. [0,1].
+//  3. Hybrid blend: 0.4 × BM25 + 0.6 × embedding. Falls back to BM25-only
+//     (weight 1.0) if the embedder is not warmed or the Ollama call fails.
+//  4. UCB1 session penalty: subtract 0.15 per prior selection of each tool
+//     in the current session, floored at 0. Encourages exploration.
 //
-// Inputs:
+// # Inputs
 //
-//	queryLower - Lowercase query string.
-//	allSpecs - All available tool specs.
+//   - ctx: Context for the embedding HTTP call.
+//   - queryLower: Lowercase query string.
+//   - allSpecs: All available tool specs (used only for BestFor fallback).
+//   - sessionCounts: Per-tool selection counts for this session. May be nil.
 //
-// Outputs:
+// # Outputs
 //
-//	map[string]float64 - Score per tool name.
-func (pf *PreFilter) scoreByKeywords(queryLower string, allSpecs []ToolSpec) map[string]float64 {
+//   - map[string]float64: Tool name → blended score. Tools with zero score omitted.
+func (pf *PreFilter) scoreHybrid(ctx context.Context, queryLower string, allSpecs []ToolSpec, sessionCounts map[string]int) map[string]float64 {
+	// --- Lazy corpus init (one-time, double-checked) ---
+	// On the first call that provides non-empty specs, build the BM25 index
+	// and kick off the background embedding warm-up exactly once.
+	//
+	// warmOnce.Do is called AFTER releasing bm25mu to avoid nesting a sync.Once
+	// inside an external lock. specsForWarm is captured while the write lock is
+	// held (before bm25mu.Unlock) so it's safe to use in the goroutine.
+	var specsForWarm []ToolSpec
+	if len(allSpecs) > 0 {
+		// Fast path: read lock to check emptiness without blocking other readers.
+		pf.bm25mu.RLock()
+		isEmpty := pf.bm25.IsEmpty()
+		pf.bm25mu.RUnlock()
+
+		if isEmpty {
+			pf.bm25mu.Lock()
+			// Double-check: another goroutine may have built it while we waited.
+			if pf.bm25.IsEmpty() {
+				pf.bm25 = BuildBM25Index(allSpecs)
+				pf.logger.Info("prefilter: BM25 corpus built",
+					slog.Int("tool_count", len(allSpecs)),
+				)
+				// Capture allSpecs snapshot here, under the write lock, for use
+				// in the warmOnce goroutine below (after the lock is released).
+				specsForWarm = allSpecs
+			}
+			pf.bm25mu.Unlock()
+		}
+	}
+
+	// Kick off the one-time embedding warm-up outside the lock.
+	// warmOnce.Do is idempotent; only the goroutine that built the BM25 index
+	// above will have set specsForWarm, so subsequent calls are no-ops here.
+	if specsForWarm != nil {
+		pf.warmOnce.Do(func() {
+			go func() {
+				warmCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := pf.embedder.Warm(warmCtx, specsForWarm); err != nil {
+					pf.logger.Warn("prefilter: embedding warm-up failed",
+						slog.String("error", err.Error()),
+					)
+				}
+			}()
+		})
+	}
+
+	// Capture the BM25 index pointer under a read lock.
+	// After lazy init above the pointer is stable (immutable BM25Index), but
+	// we still need the lock to publish the write from the init path to this
+	// reader under Go's memory model.
+	pf.bm25mu.RLock()
+	bm25idx := pf.bm25
+	pf.bm25mu.RUnlock()
+
+	// --- BM25 ---
+	bm25Start := time.Now()
+	bm25Scores := bm25idx.Score(queryLower)
+	prefilterBM25Latency.Observe(time.Since(bm25Start).Seconds())
+
+	// Fall back to legacy keyword counting only when the BM25 corpus is empty
+	// (service startup race: allSpecs arrived but BM25 hasn't been built yet).
+	// Do NOT fall back when BM25 has been built but returned zero scores —
+	// that correctly means the query has no lexical overlap with any tool, and
+	// legacy substring counting would reintroduce the pre-IT-06c routing bugs
+	// (e.g. "where is" matching find_symbol for any "where is X referenced" query).
+	if len(bm25Scores) == 0 && bm25idx.IsEmpty() {
+		bm25Scores = pf.scoreByKeywordsLegacy(queryLower, allSpecs)
+	}
+
+	// --- Embedding ---
+	embStart := time.Now()
+	embScores, _ := pf.embedder.Score(ctx, queryLower) // nil on graceful degradation
+	prefilterEmbeddingLatency.Observe(time.Since(embStart).Seconds())
+
+	// --- Blend ---
+	// BM25 scores are normalized to [0,1] (max=1.0 across all tools).
+	// Embedding scores are raw cosine similarities in [0,1] but are NOT
+	// re-normalized — the top tool does not necessarily reach 1.0. Tools
+	// typically cluster in the 0.4–0.9 cosine range, so the effective spread
+	// of the embedding signal is narrower than BM25. This is intentional:
+	// BM25 provides sharp lexical discrimination (term hits → 1.0 quickly)
+	// while embedding provides broader semantic context. The 0.4/0.6 weighting
+	// reflects that the embedding signal carries more semantic information but
+	// over a compressed range.
+	var scores map[string]float64
+	if embScores == nil {
+		// BM25-only mode: Ollama unavailable or not yet warmed.
+		scores = bm25Scores
+		prefilterHybridMethodTotal.WithLabelValues("bm25_only").Inc()
+	} else {
+		// Collect all tool names present in either score set.
+		allTools := make(map[string]struct{}, len(bm25Scores)+len(embScores))
+		for t := range bm25Scores {
+			allTools[t] = struct{}{}
+		}
+		for t := range embScores {
+			allTools[t] = struct{}{}
+		}
+
+		scores = make(map[string]float64, len(allTools))
+		const alphaBM25 = 0.4
+		const alphaEmb = 0.6
+		for t := range allTools {
+			blended := alphaBM25*bm25Scores[t] + alphaEmb*embScores[t]
+			if blended > 0 {
+				scores[t] = blended
+			}
+		}
+		prefilterHybridMethodTotal.WithLabelValues("hybrid").Inc()
+	}
+
+	// --- UCB1 session penalty (Option K) ---
+	// Tools used more often in this session get progressively penalized,
+	// encouraging the router to explore alternatives.
+	if sessionCounts != nil {
+		const penaltyPerUse = 0.15
+		for tool, s := range scores {
+			n := sessionCounts[tool]
+			if n > 0 {
+				scores[tool] = math.Max(0, s-penaltyPerUse*float64(n))
+			}
+		}
+	}
+
+	return scores
+}
+
+// scoreByKeywordsLegacy is the original keyword substring scoring kept as a
+// fallback when BM25 produces no results (e.g., empty specs at startup).
+// It preserves pre-IT-06c behavior exactly.
+func (pf *PreFilter) scoreByKeywordsLegacy(queryLower string, allSpecs []ToolSpec) map[string]float64 {
 	scores := make(map[string]float64)
 
 	if pf.registry != nil {
-		// Use registry keyword index (O(1) lookup per keyword)
 		matches := pf.registry.FindToolsByKeyword(queryLower)
 		for _, m := range matches {
 			scores[m.ToolName] = float64(m.MatchCount)
 		}
 	} else {
-		// Fallback: score based on BestFor keywords in specs
 		for _, spec := range allSpecs {
 			count := 0
 			for _, kw := range spec.BestFor {
@@ -754,19 +949,23 @@ type AgentPreFilterResult struct {
 //	and converts results back. This is the primary integration point for
 //	the execute phase.
 //
+//	IT-06c: sessionCounts provides per-tool selection counts for the current
+//	session, used by Phase 3 UCB1 exploration penalty. Pass nil to disable.
+//
 // Inputs:
 //
-//	ctx - Context for tracing.
-//	query - The user's query string.
-//	allSpecs - All available tool specs in agent format.
+//	ctx           - Context for tracing.
+//	query         - The user's query string.
+//	allSpecs      - All available tool specs in agent format.
+//	sessionCounts - Per-tool selection counts for this session. May be nil.
 //
 // Outputs:
 //
 //	*AgentPreFilterResult - The filtering result.
 //
 // Thread Safety: Safe for concurrent use.
-func (pf *PreFilter) FilterAgentSpecs(ctx context.Context, query string, allSpecs []agent.ToolRouterSpec) *AgentPreFilterResult {
-	// Convert agent specs to routing specs
+func (pf *PreFilter) FilterAgentSpecs(ctx context.Context, query string, allSpecs []agent.ToolRouterSpec, sessionCounts map[string]int) *AgentPreFilterResult {
+	// Convert agent specs to routing specs.
 	routingSpecs := make([]ToolSpec, len(allSpecs))
 	for i, s := range allSpecs {
 		routingSpecs[i] = ToolSpec{
@@ -780,8 +979,8 @@ func (pf *PreFilter) FilterAgentSpecs(ctx context.Context, query string, allSpec
 		}
 	}
 
-	// Run the pre-filter
-	pfResult := pf.Filter(ctx, query, routingSpecs)
+	// Run the pre-filter with session counts.
+	pfResult := pf.Filter(ctx, query, routingSpecs, sessionCounts)
 
 	// Convert narrowed specs back to agent format
 	// Build index for O(1) lookup

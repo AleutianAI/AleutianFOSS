@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
 )
 
@@ -105,7 +106,10 @@ type Request struct {
 	// MaxTokens limits the response length.
 	MaxTokens int `json:"max_tokens,omitempty"`
 
-	// Temperature controls randomness (0.0-1.0).
+	// Temperature controls randomness (0.0-1.0). Set to 0.0 for most
+	// deterministic output. Set to a negative value (e.g., -1) to omit
+	// from the request and use the provider's default. The Go zero value
+	// (0.0) is treated as an explicit "most deterministic" setting.
 	Temperature float64 `json:"temperature,omitempty"`
 
 	// StopSequences defines sequences that stop generation.
@@ -213,6 +217,11 @@ type Response struct {
 
 	// Model is the model that generated this response.
 	Model string `json:"model,omitempty"`
+
+	// TraceStep is the CRS trace step recorded for this LLM call.
+	// Callers can use this to record the step in the CRS trace recorder.
+	// May be nil if CRS recording was not applicable.
+	TraceStep *crs.TraceStep `json:"trace_step,omitempty"`
 }
 
 // HasToolCalls returns true if the response contains tool calls.

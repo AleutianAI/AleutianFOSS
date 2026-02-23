@@ -12,6 +12,7 @@ package providers
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/AleutianAI/AleutianFOSS/services/llm"
@@ -414,22 +415,9 @@ func TestLoadRoleConfig_ExplicitProviderEmptyModel_Error(t *testing.T) {
 
 	// Verify error message is descriptive
 	errMsg := err.Error()
-	if !contains(errMsg, "TRACE_MAIN_PROVIDER") || !contains(errMsg, "anthropic") {
+	if !strings.Contains(errMsg, "TRACE_MAIN_PROVIDER") || !strings.Contains(errMsg, "anthropic") {
 		t.Errorf("error message should mention TRACE_MAIN_PROVIDER and anthropic, got: %s", errMsg)
 	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
-}
-
-func containsHelper(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
 
 // =============================================================================

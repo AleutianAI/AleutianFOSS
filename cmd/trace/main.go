@@ -64,6 +64,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -81,6 +82,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/routing"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/safety"
 	traceconfig "github.com/AleutianAI/AleutianFOSS/services/trace/config"
+	badgerstore "github.com/AleutianAI/AleutianFOSS/services/trace/storage/badger"
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 	"go.opentelemetry.io/otel"
@@ -216,8 +218,38 @@ func main() {
 	v1 := router.Group("/v1")
 	trace.RegisterRoutes(v1, handlers)
 
+	// GR-61: Open routing cache BadgerDB for tool embedding persistence.
+	// Separate from per-project CRS journals — service-global, in ~/.aleutian/cache/routing/.
+	// Graceful degradation: if unavailable, routing continues in in-memory-only mode.
+	var routingStore routing.RouterCacheStore
+	routingCacheDir := os.Getenv("ROUTING_CACHE_DIR")
+	if routingCacheDir == "" {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			routingCacheDir = filepath.Join(home, ".aleutian", "cache", "routing")
+		}
+	}
+	var routingDB *badgerstore.DB
+	if routingCacheDir != "" {
+		cfg := badgerstore.DefaultConfig()
+		cfg.Path = routingCacheDir
+		db, err := badgerstore.OpenDB(cfg)
+		if err != nil {
+			slog.Warn("Routing cache BadgerDB unavailable, embedding persistence disabled",
+				slog.String("path", routingCacheDir),
+				slog.String("error", err.Error()),
+			)
+		} else {
+			routingDB = db
+			routingStore = routing.NewBadgerRouterCacheStore(db, 0, slog.Default())
+			slog.Info("Routing cache BadgerDB opened",
+				slog.String("path", routingCacheDir),
+			)
+		}
+	}
+
 	// Setup agent loop and register routes
-	agentEnabled := setupAgentLoop(v1, svc, *withContext, *withTools)
+	agentEnabled := setupAgentLoop(v1, svc, *withContext, *withTools, routingStore)
 
 	// Print startup banner
 	printBanner(*port, agentEnabled)
@@ -229,6 +261,11 @@ func main() {
 	go func() {
 		<-quit
 		slog.Info("Shutting down Aleutian Trace server")
+		if routingDB != nil {
+			if err := routingDB.Close(); err != nil {
+				slog.Warn("Failed to close routing cache BadgerDB", slog.String("error", err.Error()))
+			}
+		}
 		os.Exit(0)
 	}()
 
@@ -243,8 +280,11 @@ func main() {
 
 // setupAgentLoop initializes the agent loop and registers routes.
 //
+// routingStore is the optional BadgerDB cache for tool embedding vectors.
+// Pass nil to disable persistence (e.g. when routing cache directory is unavailable).
+//
 // Returns true if the agent is fully enabled with LLM support.
-func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTools bool) bool {
+func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTools bool, routingStore routing.RouterCacheStore) bool {
 	// CB-60: Load per-role provider configuration from environment variables.
 	// Falls back to Ollama with existing env vars for backward compatibility.
 	mainModelFallback := os.Getenv("OLLAMA_MODEL")
@@ -419,7 +459,7 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTo
 
 	var executeOpts []phases.ExecutePhaseOption
 	if pfErr == nil && trErr == nil && pfCfg.Enabled {
-		pf := routing.NewPreFilter(toolRegistry, pfCfg, slog.Default())
+		pf := routing.NewPreFilter(toolRegistry, pfCfg, slog.Default(), routingStore)
 		executeOpts = append(executeOpts, phases.WithPreFilter(pf))
 		slog.Info("Pre-filter enabled",
 			slog.Int("forced_mappings", len(pfCfg.ForcedMappings)),

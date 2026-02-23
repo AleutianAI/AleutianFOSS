@@ -13,9 +13,14 @@ package providers
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // OpenAIChatAdapter wraps OpenAIClient to implement ChatClient.
@@ -47,6 +52,16 @@ func (a *OpenAIChatAdapter) Chat(ctx context.Context, messages []datatypes.Messa
 		return "", fmt.Errorf("OpenAI client is nil")
 	}
 
+	// Create OTel span
+	ctx, span := otel.Tracer(chatTracerName).Start(ctx, "providers.OpenAIChatAdapter.Chat",
+		trace.WithAttributes(
+			attribute.String("provider", "openai"),
+			attribute.Int("message_count", len(messages)),
+			attribute.Float64("temperature", opts.Temperature),
+		),
+	)
+	defer span.End()
+
 	params := llm.GenerationParams{}
 	if opts.Temperature >= 0 {
 		temp := float32(opts.Temperature)
@@ -56,5 +71,17 @@ func (a *OpenAIChatAdapter) Chat(ctx context.Context, messages []datatypes.Messa
 		params.MaxTokens = &opts.MaxTokens
 	}
 
-	return a.client.Chat(ctx, messages, params)
+	startTime := time.Now()
+	result, err := a.client.Chat(ctx, messages, params)
+	duration := time.Since(startTime)
+
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		recordChatMetrics("openai", duration, err)
+		return "", err
+	}
+
+	recordChatMetrics("openai", duration, nil)
+	return result, nil
 }

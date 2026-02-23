@@ -396,7 +396,11 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 			pfToolDefs = deps.ToolRegistry.GetDefinitions()
 		}
 		pfSpecs := toolDefsToSpecs(pfToolDefs)
-		pfResult := p.prefilter.FilterAgentSpecs(ctx, deps.Query, pfSpecs)
+		var speculativeSessionCounts map[string]int
+		if deps.Session != nil {
+			speculativeSessionCounts = buildToolCountMapFromSession(deps.Session)
+		}
+		pfResult := p.prefilter.FilterAgentSpecs(ctx, deps.Query, pfSpecs, speculativeSessionCounts)
 
 		if pfResult.ForcedTool != "" {
 			speculativeTool = pfResult.ForcedTool
@@ -1023,9 +1027,17 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 	// Convert tool definitions to ToolSpecs for the router
 	toolSpecs := toolDefsToSpecs(toolDefs)
 
+	// GR-61: Build session counts once for both the prefilter UCB1 penalty
+	// and the legacy circuit-breaker check below. Avoids iterating trace steps
+	// twice in the same function call.
+	var sessionCounts map[string]int
+	if deps.Session != nil {
+		sessionCounts = buildToolCountMapFromSession(deps.Session)
+	}
+
 	// CB-38: Pre-filter narrows candidate set before LLM router
 	if p.prefilter != nil {
-		pfResult := p.prefilter.FilterAgentSpecs(ctx, deps.Query, toolSpecs)
+		pfResult := p.prefilter.FilterAgentSpecs(ctx, deps.Query, toolSpecs, sessionCounts)
 		if pfResult.ForcedTool != "" {
 			// CB-38: Check circuit breaker before accepting forced selection.
 			// A forced tool that has been called too many times should not bypass
@@ -1042,13 +1054,13 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 					)
 				}
 			} else if deps.Session != nil {
-				toolCounts := buildToolCountMapFromSession(deps.Session)
-				if toolCounts[pfResult.ForcedTool] >= maxRepeatedToolCalls {
+				// GR-61: reuse sessionCounts built above — no second iteration.
+				if sessionCounts[pfResult.ForcedTool] >= maxRepeatedToolCalls {
 					cbBlocked = true
 					slog.Warn("CB-38 prefilter forced tool blocked by circuit breaker (legacy)",
 						slog.String("session_id", deps.Session.ID),
 						slog.String("tool", pfResult.ForcedTool),
-						slog.Int("call_count", toolCounts[pfResult.ForcedTool]),
+						slog.Int("call_count", sessionCounts[pfResult.ForcedTool]),
 					)
 				}
 			}

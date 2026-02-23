@@ -3270,8 +3270,8 @@ func TestIsCallTarget(t *testing.T) {
 		// Constructor targets
 		{ast.SymbolKindClass, "Class (R3-P1b)", true},
 		{ast.SymbolKindStruct, "Struct (R3-P1b)", true},
-		// Not valid targets
-		{ast.SymbolKindVariable, "Variable", false},
+		// GR-62a P-4: Variable can be a call target (Python stores callables in variables)
+		{ast.SymbolKindVariable, "Variable", true},
 		{ast.SymbolKindConstant, "Constant", false},
 		{ast.SymbolKindField, "Field", false},
 		{ast.SymbolKindImport, "Import", false},
@@ -5635,5 +5635,893 @@ func TestInferPackageFromCall(t *testing.T) {
 					tt.call.Target, got, tt.expected)
 			}
 		})
+	}
+}
+
+// =============================================================================
+// GR-62a Phase 1: Multi-Parent Inheritance Chain Tests
+// =============================================================================
+
+// TestBuilder_BuildInheritanceChain_MultiParent verifies that buildInheritanceChain
+// returns all parents from both classExtends (primary parent) and classAdditionalParents
+// (secondary parents via Python's Metadata.Implements).
+func TestBuilder_BuildInheritanceChain_MultiParent(t *testing.T) {
+	// Setup: class C(A, B) — A is primary (Extends), B is secondary (Implements)
+	// A and B are independent base classes.
+	builder := NewBuilder(WithProjectRoot("/test"))
+
+	classA := &ast.Symbol{
+		ID:       ast.GenerateID("models.py", 1, "A"),
+		Name:     "A",
+		Kind:     ast.SymbolKindClass,
+		FilePath: "models.py",
+		Language: "python",
+		Children: []*ast.Symbol{
+			{
+				ID:        ast.GenerateID("models.py", 2, "method_a"),
+				Name:      "method_a",
+				Kind:      ast.SymbolKindMethod,
+				FilePath:  "models.py",
+				Language:  "python",
+				StartLine: 2, EndLine: 5,
+			},
+		},
+		StartLine: 1, EndLine: 10,
+	}
+
+	classB := &ast.Symbol{
+		ID:       ast.GenerateID("mixins.py", 1, "B"),
+		Name:     "B",
+		Kind:     ast.SymbolKindClass,
+		FilePath: "mixins.py",
+		Language: "python",
+		Children: []*ast.Symbol{
+			{
+				ID:        ast.GenerateID("mixins.py", 2, "mixin_method"),
+				Name:      "mixin_method",
+				Kind:      ast.SymbolKindMethod,
+				FilePath:  "mixins.py",
+				Language:  "python",
+				StartLine: 2, EndLine: 5,
+			},
+		},
+		StartLine: 1, EndLine: 10,
+	}
+
+	classC := &ast.Symbol{
+		ID:       ast.GenerateID("child.py", 1, "C"),
+		Name:     "C",
+		Kind:     ast.SymbolKindClass,
+		FilePath: "child.py",
+		Language: "python",
+		Metadata: &ast.SymbolMetadata{
+			Extends:    "A",
+			Implements: []string{"B"},
+		},
+		Children:  []*ast.Symbol{},
+		StartLine: 1, EndLine: 10,
+	}
+
+	results := []*ast.ParseResult{
+		{FilePath: "models.py", Language: "python", Symbols: []*ast.Symbol{classA}, Package: "models"},
+		{FilePath: "mixins.py", Language: "python", Symbols: []*ast.Symbol{classB}, Package: "mixins"},
+		{FilePath: "child.py", Language: "python", Symbols: []*ast.Symbol{classC}, Package: "child"},
+	}
+
+	buildResult, err := builder.Build(context.Background(), results)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	_ = buildResult
+
+	// Now test the internal buildInheritanceChain via a full build:
+	// Build a state manually to unit-test the chain function directly.
+	state := &buildState{
+		graph:                  NewGraph("/test"),
+		result:                 &BuildResult{FileErrors: make([]FileError, 0), EdgeErrors: make([]EdgeError, 0)},
+		symbolsByID:            make(map[string]*ast.Symbol),
+		symbolsByName:          make(map[string][]*ast.Symbol),
+		fileImports:            make(map[string][]ast.Import),
+		placeholders:           make(map[string]*Node),
+		symbolParent:           make(map[string]string),
+		classExtends:           map[string]string{"C": "A"},
+		classAdditionalParents: map[string][]string{"C": {"B"}},
+		importNameMap:          make(map[string]map[string]importEntry),
+	}
+
+	chain := builder.buildInheritanceChain(state, "C")
+
+	// Chain must include C, A, and B
+	chainSet := make(map[string]bool)
+	for _, name := range chain {
+		chainSet[name] = true
+	}
+
+	if !chainSet["C"] {
+		t.Error("chain missing 'C' (the class itself)")
+	}
+	if !chainSet["A"] {
+		t.Error("chain missing 'A' (primary parent from Extends)")
+	}
+	if !chainSet["B"] {
+		t.Error("chain missing 'B' (secondary parent from Implements)")
+	}
+	if len(chain) != 3 {
+		t.Errorf("expected chain length 3, got %d: %v", len(chain), chain)
+	}
+}
+
+// TestBuilder_BuildInheritanceChain_Diamond verifies that diamond inheritance
+// does not produce duplicates. C(A, B), A(D), B(D) — D appears once.
+func TestBuilder_BuildInheritanceChain_Diamond(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+
+	state := &buildState{
+		graph:  NewGraph("/test"),
+		result: &BuildResult{FileErrors: make([]FileError, 0), EdgeErrors: make([]EdgeError, 0)},
+		classExtends: map[string]string{
+			"C": "A",
+			"A": "D",
+			"B": "D",
+		},
+		classAdditionalParents: map[string][]string{
+			"C": {"B"},
+		},
+		symbolsByID:   make(map[string]*ast.Symbol),
+		symbolsByName: make(map[string][]*ast.Symbol),
+		fileImports:   make(map[string][]ast.Import),
+		placeholders:  make(map[string]*Node),
+		symbolParent:  make(map[string]string),
+		importNameMap: make(map[string]map[string]importEntry),
+	}
+
+	chain := builder.buildInheritanceChain(state, "C")
+
+	// Count occurrences of D
+	dCount := 0
+	for _, name := range chain {
+		if name == "D" {
+			dCount++
+		}
+	}
+	if dCount != 1 {
+		t.Errorf("expected D to appear exactly once in chain, got %d times: %v", dCount, chain)
+	}
+
+	// All four classes should be in the chain
+	chainSet := make(map[string]bool)
+	for _, name := range chain {
+		chainSet[name] = true
+	}
+	for _, expected := range []string{"C", "A", "B", "D"} {
+		if !chainSet[expected] {
+			t.Errorf("chain missing %q: %v", expected, chain)
+		}
+	}
+	if len(chain) != 4 {
+		t.Errorf("expected chain length 4, got %d: %v", len(chain), chain)
+	}
+}
+
+// TestBuilder_ResolveCallTarget_SelfCallMultiParent verifies that self.mixin_method()
+// resolves across a non-primary parent via the multi-parent inheritance chain.
+func TestBuilder_ResolveCallTarget_SelfCallMultiParent(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+
+	// class B with mixin_method
+	mixinMethod := &ast.Symbol{
+		ID:        ast.GenerateID("mixins.py", 2, "mixin_method"),
+		Name:      "mixin_method",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "mixins.py",
+		Language:  "python",
+		StartLine: 2, EndLine: 5,
+	}
+	classB := &ast.Symbol{
+		ID:        ast.GenerateID("mixins.py", 1, "B"),
+		Name:      "B",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "mixins.py",
+		Language:  "python",
+		Children:  []*ast.Symbol{mixinMethod},
+		StartLine: 1, EndLine: 10,
+	}
+
+	// class C(A, B) with a method that calls self.mixin_method()
+	childMethod := &ast.Symbol{
+		ID:       ast.GenerateID("child.py", 5, "do_work"),
+		Name:     "do_work",
+		Kind:     ast.SymbolKindMethod,
+		FilePath: "child.py",
+		Language: "python",
+		Calls: []ast.CallSite{
+			{
+				Target:   "mixin_method",
+				Receiver: "self",
+				IsMethod: true,
+				Location: ast.Location{FilePath: "child.py", StartLine: 6, EndLine: 6},
+			},
+		},
+		StartLine: 5, EndLine: 10,
+	}
+	classC := &ast.Symbol{
+		ID:       ast.GenerateID("child.py", 1, "C"),
+		Name:     "C",
+		Kind:     ast.SymbolKindClass,
+		FilePath: "child.py",
+		Language: "python",
+		Metadata: &ast.SymbolMetadata{
+			Extends:    "A",
+			Implements: []string{"B"},
+		},
+		Children:  []*ast.Symbol{childMethod},
+		StartLine: 1, EndLine: 20,
+	}
+
+	// class A (simple base, no relevant methods)
+	classA := &ast.Symbol{
+		ID:        ast.GenerateID("models.py", 1, "A"),
+		Name:      "A",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "models.py",
+		Language:  "python",
+		Children:  []*ast.Symbol{},
+		StartLine: 1, EndLine: 10,
+	}
+
+	results := []*ast.ParseResult{
+		{FilePath: "models.py", Language: "python", Symbols: []*ast.Symbol{classA}, Package: "models"},
+		{FilePath: "mixins.py", Language: "python", Symbols: []*ast.Symbol{classB}, Package: "mixins"},
+		{FilePath: "child.py", Language: "python", Symbols: []*ast.Symbol{classC}, Package: "child"},
+	}
+
+	buildResult, err := builder.Build(context.Background(), results)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Verify: do_work should have a CALLS edge to mixin_method
+	doWorkID := childMethod.ID
+	mixinMethodID := mixinMethod.ID
+
+	doWorkNode, ok := buildResult.Graph.GetNode(doWorkID)
+	if !ok || doWorkNode == nil {
+		t.Fatalf("do_work node not found in graph")
+	}
+
+	found := false
+	for _, edge := range doWorkNode.Outgoing {
+		if edge.ToID == mixinMethodID && edge.Type == EdgeTypeCalls {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected CALLS edge from do_work to mixin_method (via multi-parent chain)")
+		t.Logf("do_work ID: %s", doWorkID)
+		t.Logf("mixin_method ID: %s", mixinMethodID)
+		for _, edge := range doWorkNode.Outgoing {
+			t.Logf("  edge: type=%s target=%s", edge.Type, edge.ToID)
+		}
+	}
+}
+
+// =============================================================================
+// GR-62a Phase 2: JS this.method() Resolution Tests
+// =============================================================================
+
+// TestBuilder_ResolveThisSelfCall_JSPrototypeMethod verifies that a JS prototype method
+// calling this.otherMethod() resolves correctly even when the prototype method was added
+// as both a top-level symbol AND a child (causing a duplicate in AddNode).
+func TestBuilder_ResolveThisSelfCall_JSPrototypeMethod(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+
+	// Simulate JS prototype method pattern:
+	// Router.prototype.handle = function() { this.route(); }
+	// The parser adds "handle" and "route" both as top-level AND as children of "Router".
+
+	routeMethod := &ast.Symbol{
+		ID:        ast.GenerateID("router.js", 10, "route"),
+		Name:      "route",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "router.js",
+		Language:  "javascript",
+		Receiver:  "Router",
+		StartLine: 10, EndLine: 15,
+	}
+
+	handleMethod := &ast.Symbol{
+		ID:       ast.GenerateID("router.js", 5, "handle"),
+		Name:     "handle",
+		Kind:     ast.SymbolKindMethod,
+		FilePath: "router.js",
+		Language: "javascript",
+		Receiver: "Router",
+		Calls: []ast.CallSite{
+			{
+				Target:   "route",
+				Receiver: "this",
+				IsMethod: true,
+				Location: ast.Location{FilePath: "router.js", StartLine: 7, EndLine: 7},
+			},
+		},
+		StartLine: 5, EndLine: 9,
+	}
+
+	routerClass := &ast.Symbol{
+		ID:       ast.GenerateID("router.js", 1, "Router"),
+		Name:     "Router",
+		Kind:     ast.SymbolKindClass,
+		FilePath: "router.js",
+		Language: "javascript",
+		// Children include the same methods (duplicating top-level)
+		Children:  []*ast.Symbol{handleMethod, routeMethod},
+		StartLine: 1, EndLine: 20,
+	}
+
+	results := []*ast.ParseResult{
+		{
+			FilePath: "router.js",
+			Language: "javascript",
+			// Top-level: handle, route are also added here (simulating JS parser behavior)
+			Symbols: []*ast.Symbol{routerClass, handleMethod, routeMethod},
+			Package: "router",
+		},
+	}
+
+	buildResult, err := builder.Build(context.Background(), results)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Verify: handle should have a CALLS edge to route
+	handleNode, ok := buildResult.Graph.GetNode(handleMethod.ID)
+	if !ok || handleNode == nil {
+		t.Fatalf("handle node not found in graph")
+	}
+
+	found := false
+	for _, edge := range handleNode.Outgoing {
+		if edge.ToID == routeMethod.ID && edge.Type == EdgeTypeCalls {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected CALLS edge from handle to route (this.route() in JS prototype method)")
+		for _, edge := range handleNode.Outgoing {
+			t.Logf("  edge: type=%s target=%s", edge.Type, edge.ToID)
+		}
+	}
+}
+
+// TestBuilder_ResolveThisSelfCall_JSClassMethod verifies that ES6 class method
+// calling this.otherMethod() resolves correctly.
+func TestBuilder_ResolveThisSelfCall_JSClassMethod(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+
+	greetMethod := &ast.Symbol{
+		ID:        ast.GenerateID("app.js", 10, "greet"),
+		Name:      "greet",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "app.js",
+		Language:  "javascript",
+		StartLine: 10, EndLine: 15,
+	}
+
+	initMethod := &ast.Symbol{
+		ID:       ast.GenerateID("app.js", 5, "init"),
+		Name:     "init",
+		Kind:     ast.SymbolKindMethod,
+		FilePath: "app.js",
+		Language: "javascript",
+		Calls: []ast.CallSite{
+			{
+				Target:   "greet",
+				Receiver: "this",
+				IsMethod: true,
+				Location: ast.Location{FilePath: "app.js", StartLine: 7, EndLine: 7},
+			},
+		},
+		StartLine: 5, EndLine: 9,
+	}
+
+	appClass := &ast.Symbol{
+		ID:        ast.GenerateID("app.js", 1, "App"),
+		Name:      "App",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "app.js",
+		Language:  "javascript",
+		Children:  []*ast.Symbol{initMethod, greetMethod},
+		StartLine: 1, EndLine: 20,
+	}
+
+	results := []*ast.ParseResult{
+		{
+			FilePath: "app.js",
+			Language: "javascript",
+			Symbols:  []*ast.Symbol{appClass},
+			Package:  "app",
+		},
+	}
+
+	buildResult, err := builder.Build(context.Background(), results)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Verify: init should have a CALLS edge to greet
+	initNode, ok := buildResult.Graph.GetNode(initMethod.ID)
+	if !ok || initNode == nil {
+		t.Fatalf("init node not found in graph")
+	}
+
+	found := false
+	for _, edge := range initNode.Outgoing {
+		if edge.ToID == greetMethod.ID && edge.Type == EdgeTypeCalls {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected CALLS edge from init to greet (this.greet() in ES6 class method)")
+		for _, edge := range initNode.Outgoing {
+			t.Logf("  edge: type=%s target=%s", edge.Type, edge.ToID)
+		}
+	}
+}
+
+// =============================================================================
+// GR-62a Phase 3: super().method() Resolution Tests
+// =============================================================================
+
+// TestBuilder_ResolveSuperCall verifies that super().method() calls resolve
+// to the parent class method, skipping the caller's own class.
+func TestBuilder_ResolveSuperCall(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+
+	// Parent.save()
+	parentSave := &ast.Symbol{
+		ID:        ast.GenerateID("parent.py", 5, "save"),
+		Name:      "save",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "parent.py",
+		Language:  "python",
+		StartLine: 5, EndLine: 10,
+	}
+	parentClass := &ast.Symbol{
+		ID:        ast.GenerateID("parent.py", 1, "Parent"),
+		Name:      "Parent",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "parent.py",
+		Language:  "python",
+		Children:  []*ast.Symbol{parentSave},
+		StartLine: 1, EndLine: 20,
+	}
+
+	// Child.save() calls super().save() — parser normalizes to Receiver="super"
+	childSave := &ast.Symbol{
+		ID:       ast.GenerateID("child.py", 5, "save"),
+		Name:     "save",
+		Kind:     ast.SymbolKindMethod,
+		FilePath: "child.py",
+		Language: "python",
+		Calls: []ast.CallSite{
+			{
+				Target:   "save",
+				Receiver: "super",
+				IsMethod: true,
+				Location: ast.Location{FilePath: "child.py", StartLine: 7, EndLine: 7},
+			},
+		},
+		StartLine: 5, EndLine: 10,
+	}
+	childClass := &ast.Symbol{
+		ID:       ast.GenerateID("child.py", 1, "Child"),
+		Name:     "Child",
+		Kind:     ast.SymbolKindClass,
+		FilePath: "child.py",
+		Language: "python",
+		Metadata: &ast.SymbolMetadata{
+			Extends: "Parent",
+		},
+		Children:  []*ast.Symbol{childSave},
+		StartLine: 1, EndLine: 20,
+	}
+
+	results := []*ast.ParseResult{
+		{FilePath: "parent.py", Language: "python", Symbols: []*ast.Symbol{parentClass}, Package: "parent"},
+		{FilePath: "child.py", Language: "python", Symbols: []*ast.Symbol{childClass}, Package: "child"},
+	}
+
+	buildResult, err := builder.Build(context.Background(), results)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Verify: Child.save should call Parent.save (not itself)
+	childSaveNode, ok := buildResult.Graph.GetNode(childSave.ID)
+	if !ok || childSaveNode == nil {
+		t.Fatalf("Child.save node not found in graph (ID=%s)", childSave.ID)
+	}
+
+	found := false
+	for _, edge := range childSaveNode.Outgoing {
+		if edge.ToID == parentSave.ID && edge.Type == EdgeTypeCalls {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected CALLS edge from Child.save to Parent.save (super().save() resolution)")
+		for _, edge := range childSaveNode.Outgoing {
+			t.Logf("  edge: type=%s toID=%s", edge.Type, edge.ToID)
+		}
+	}
+
+	// Also verify it did NOT resolve to itself
+	for _, edge := range childSaveNode.Outgoing {
+		if edge.ToID == childSave.ID && edge.Type == EdgeTypeCalls {
+			t.Error("super().save() should NOT resolve to the caller's own class method")
+		}
+	}
+}
+
+// =============================================================================
+// GR-62a Phase 4: Variable Alias Fallback Tests
+// =============================================================================
+
+// TestBuilder_ResolveCallTarget_VariableMethodFallback verifies that when the only
+// candidate for a method call is a Variable symbol, it resolves as a fallback.
+func TestBuilder_ResolveCallTarget_VariableMethodFallback(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+
+	// handler = _MergeOperation (a variable that holds a callable)
+	handlerVar := &ast.Symbol{
+		ID:        ast.GenerateID("merge.py", 10, "handler"),
+		Name:      "handler",
+		Kind:      ast.SymbolKindVariable,
+		FilePath:  "merge.py",
+		Language:  "python",
+		StartLine: 10, EndLine: 10,
+	}
+
+	// Function that calls self.handler()
+	processMethod := &ast.Symbol{
+		ID:       ast.GenerateID("merge.py", 20, "process"),
+		Name:     "process",
+		Kind:     ast.SymbolKindMethod,
+		FilePath: "merge.py",
+		Language: "python",
+		Calls: []ast.CallSite{
+			{
+				Target:   "handler",
+				Receiver: "obj",
+				IsMethod: true,
+				Location: ast.Location{FilePath: "merge.py", StartLine: 22, EndLine: 22},
+			},
+		},
+		StartLine: 20, EndLine: 25,
+	}
+
+	results := []*ast.ParseResult{
+		{
+			FilePath: "merge.py",
+			Language: "python",
+			Symbols:  []*ast.Symbol{handlerVar, processMethod},
+			Package:  "merge",
+		},
+	}
+
+	buildResult, err := builder.Build(context.Background(), results)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	processNode, ok := buildResult.Graph.GetNode(processMethod.ID)
+	if !ok || processNode == nil {
+		t.Fatalf("process node not found in graph")
+	}
+
+	found := false
+	for _, edge := range processNode.Outgoing {
+		if edge.ToID == handlerVar.ID && edge.Type == EdgeTypeCalls {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected CALLS edge from process to handler (Variable fallback)")
+		for _, edge := range processNode.Outgoing {
+			t.Logf("  edge: type=%s target=%s", edge.Type, edge.ToID)
+		}
+	}
+}
+
+// TestBuilder_ResolveCallTarget_MethodPreferredOverVariable verifies that when
+// both a Method and a Variable candidate exist, Method wins.
+func TestBuilder_ResolveCallTarget_MethodPreferredOverVariable(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+
+	handlerMethod := &ast.Symbol{
+		ID:        ast.GenerateID("service.py", 5, "handler"),
+		Name:      "handler",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "service.py",
+		Language:  "python",
+		StartLine: 5, EndLine: 10,
+	}
+
+	handlerVar := &ast.Symbol{
+		ID:        ast.GenerateID("service.py", 15, "handler"),
+		Name:      "handler",
+		Kind:      ast.SymbolKindVariable,
+		FilePath:  "service.py",
+		Language:  "python",
+		StartLine: 15, EndLine: 15,
+	}
+
+	caller := &ast.Symbol{
+		ID:       ast.GenerateID("service.py", 20, "dispatch"),
+		Name:     "dispatch",
+		Kind:     ast.SymbolKindFunction,
+		FilePath: "service.py",
+		Language: "python",
+		Calls: []ast.CallSite{
+			{
+				Target:   "handler",
+				Receiver: "obj",
+				IsMethod: true,
+				Location: ast.Location{FilePath: "service.py", StartLine: 22, EndLine: 22},
+			},
+		},
+		StartLine: 20, EndLine: 25,
+	}
+
+	results := []*ast.ParseResult{
+		{
+			FilePath: "service.py",
+			Language: "python",
+			Symbols:  []*ast.Symbol{handlerMethod, handlerVar, caller},
+			Package:  "service",
+		},
+	}
+
+	buildResult, err := builder.Build(context.Background(), results)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	callerNode, ok := buildResult.Graph.GetNode(caller.ID)
+	if !ok || callerNode == nil {
+		t.Fatalf("caller node not found in graph")
+	}
+
+	// Should resolve to Method, not Variable
+	for _, edge := range callerNode.Outgoing {
+		if edge.Type == EdgeTypeCalls {
+			if edge.ToID == handlerVar.ID {
+				t.Error("expected Method to win over Variable, but Variable was chosen")
+			}
+			if edge.ToID == handlerMethod.ID {
+				// correct
+				return
+			}
+		}
+	}
+	t.Error("expected a CALLS edge from dispatch to handler (method), but none found")
+}
+
+// =============================================================================
+// GR-62a Phase 5: Verification Tests (T-1, J-2, T-2)
+// =============================================================================
+
+// TestBuilder_TSInterfaceExtendsMultiple_EmbedsEdges (T-1) verifies that
+// interface C extends A, B produces EMBEDS edges to both A and B.
+func TestBuilder_TSInterfaceExtendsMultiple_EmbedsEdges(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+
+	ifaceA := &ast.Symbol{
+		ID:        ast.GenerateID("types.ts", 1, "A"),
+		Name:      "A",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "types.ts",
+		Language:  "typescript",
+		StartLine: 1, EndLine: 5,
+	}
+
+	ifaceB := &ast.Symbol{
+		ID:        ast.GenerateID("types.ts", 10, "B"),
+		Name:      "B",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "types.ts",
+		Language:  "typescript",
+		StartLine: 10, EndLine: 15,
+	}
+
+	// interface C extends A, B — A in Extends, B in Implements
+	ifaceC := &ast.Symbol{
+		ID:       ast.GenerateID("types.ts", 20, "C"),
+		Name:     "C",
+		Kind:     ast.SymbolKindInterface,
+		FilePath: "types.ts",
+		Language: "typescript",
+		Metadata: &ast.SymbolMetadata{
+			Extends:    "A",
+			Implements: []string{"B"},
+		},
+		StartLine: 20, EndLine: 25,
+	}
+
+	results := []*ast.ParseResult{
+		{
+			FilePath: "types.ts",
+			Language: "typescript",
+			Symbols:  []*ast.Symbol{ifaceA, ifaceB, ifaceC},
+			Package:  "types",
+		},
+	}
+
+	buildResult, err := builder.Build(context.Background(), results)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	cNode, ok := buildResult.Graph.GetNode(ifaceC.ID)
+	if !ok || cNode == nil {
+		t.Fatalf("interface C node not found in graph")
+	}
+
+	foundA := false
+	foundB := false
+	for _, edge := range cNode.Outgoing {
+		if edge.Type == EdgeTypeEmbeds {
+			if edge.ToID == ifaceA.ID {
+				foundA = true
+			}
+			if edge.ToID == ifaceB.ID {
+				foundB = true
+			}
+		}
+	}
+
+	if !foundA {
+		t.Error("T-1: expected EMBEDS edge from C to A (primary extends)")
+	}
+	if !foundB {
+		t.Error("T-1: expected EMBEDS edge from C to B (secondary extends via Implements)")
+	}
+}
+
+// TestBuilder_JSObjectCreate_ClassExtends (J-2) verifies that when the parser sets
+// Metadata.Extends from Object.create pattern, the builder creates an EMBEDS edge.
+func TestBuilder_JSObjectCreate_ClassExtends(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+
+	parentClass := &ast.Symbol{
+		ID:        ast.GenerateID("parent.js", 1, "Parent"),
+		Name:      "Parent",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "parent.js",
+		Language:  "javascript",
+		StartLine: 1, EndLine: 10,
+	}
+
+	// Child.prototype = Object.create(Parent.prototype) → parser sets Extends="Parent"
+	childClass := &ast.Symbol{
+		ID:       ast.GenerateID("child.js", 1, "Child"),
+		Name:     "Child",
+		Kind:     ast.SymbolKindClass,
+		FilePath: "child.js",
+		Language: "javascript",
+		Metadata: &ast.SymbolMetadata{
+			Extends: "Parent",
+		},
+		StartLine: 1, EndLine: 10,
+	}
+
+	results := []*ast.ParseResult{
+		{FilePath: "parent.js", Language: "javascript", Symbols: []*ast.Symbol{parentClass}, Package: "parent"},
+		{FilePath: "child.js", Language: "javascript", Symbols: []*ast.Symbol{childClass}, Package: "child"},
+	}
+
+	buildResult, err := builder.Build(context.Background(), results)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	childNode, ok := buildResult.Graph.GetNode(childClass.ID)
+	if !ok || childNode == nil {
+		t.Fatalf("Child node not found in graph")
+	}
+
+	found := false
+	for _, edge := range childNode.Outgoing {
+		if edge.ToID == parentClass.ID && edge.Type == EdgeTypeEmbeds {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("J-2: expected EMBEDS edge from Child to Parent (Object.create inheritance)")
+		for _, edge := range childNode.Outgoing {
+			t.Logf("  edge: type=%s target=%s", edge.Type, edge.ToID)
+		}
+	}
+
+	// Also verify classExtends was populated for inheritance chain resolution
+	// (important for this.method() calls through the chain)
+}
+
+// TestBuilder_TSGenericTypeParams_TypeReferences (T-2) verifies that
+// foo(repo: Repository<User>) produces TypeReferences including both
+// "Repository" and "User", and the builder creates REFERENCES edges for them.
+func TestBuilder_TSGenericTypeParams_TypeReferences(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+
+	repoInterface := &ast.Symbol{
+		ID:        ast.GenerateID("types.ts", 1, "Repository"),
+		Name:      "Repository",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "types.ts",
+		Language:  "typescript",
+		StartLine: 1, EndLine: 5,
+	}
+
+	userClass := &ast.Symbol{
+		ID:        ast.GenerateID("types.ts", 10, "User"),
+		Name:      "User",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "types.ts",
+		Language:  "typescript",
+		StartLine: 10, EndLine: 15,
+	}
+
+	// function foo(repo: Repository<User>) — has TypeReferences to both
+	fooFunc := &ast.Symbol{
+		ID:       ast.GenerateID("service.ts", 1, "foo"),
+		Name:     "foo",
+		Kind:     ast.SymbolKindFunction,
+		FilePath: "service.ts",
+		Language: "typescript",
+		TypeReferences: []ast.TypeReference{
+			{Name: "Repository", Location: ast.Location{FilePath: "service.ts", StartLine: 1, EndLine: 1}},
+			{Name: "User", Location: ast.Location{FilePath: "service.ts", StartLine: 1, EndLine: 1}},
+		},
+		StartLine: 1, EndLine: 10,
+	}
+
+	results := []*ast.ParseResult{
+		{FilePath: "types.ts", Language: "typescript", Symbols: []*ast.Symbol{repoInterface, userClass}, Package: "types"},
+		{FilePath: "service.ts", Language: "typescript", Symbols: []*ast.Symbol{fooFunc}, Package: "service"},
+	}
+
+	buildResult, err := builder.Build(context.Background(), results)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	fooNode, ok := buildResult.Graph.GetNode(fooFunc.ID)
+	if !ok || fooNode == nil {
+		t.Fatalf("foo node not found in graph")
+	}
+
+	foundRepo := false
+	foundUser := false
+	for _, edge := range fooNode.Outgoing {
+		if edge.Type == EdgeTypeReferences {
+			if edge.ToID == repoInterface.ID {
+				foundRepo = true
+			}
+			if edge.ToID == userClass.ID {
+				foundUser = true
+			}
+		}
+	}
+
+	if !foundRepo {
+		t.Error("T-2: expected REFERENCES edge from foo to Repository")
+	}
+	if !foundUser {
+		t.Error("T-2: expected REFERENCES edge from foo to User")
 	}
 }

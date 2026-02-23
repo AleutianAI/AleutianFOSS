@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -340,7 +341,12 @@ func (t *findHotspotsTool) Execute(ctx context.Context, params TypedParams) (*Re
 			}
 			filePath := hs.Node.Symbol.FilePath
 			// GR-60: Use graph-based file classification instead of heuristics
-			if t.analytics.IsProductionFile(filePath) {
+			isProd := t.analytics.IsProductionFile(filePath)
+			// F-3: Safety net — _test.go is NEVER production regardless of classification
+			if isProd && strings.HasSuffix(filepath.Base(filePath), "_test.go") {
+				isProd = false
+			}
+			if isProd {
 				nonTestFiltered = append(nonTestFiltered, hs)
 			}
 		}

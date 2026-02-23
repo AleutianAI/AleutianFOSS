@@ -280,6 +280,23 @@ func (a *AnthropicClient) Chat(ctx context.Context, messages []datatypes.Message
 		MaxTokens: 4096,
 	}
 
+	// Apply optional generation parameters
+	if params.Temperature != nil {
+		reqPayload.Temperature = params.Temperature
+	}
+	if params.TopP != nil {
+		reqPayload.TopP = params.TopP
+	}
+	if params.TopK != nil {
+		reqPayload.TopK = params.TopK
+	}
+	if len(params.Stop) > 0 {
+		reqPayload.StopSeqs = params.Stop
+	}
+	if params.MaxTokens != nil {
+		reqPayload.MaxTokens = *params.MaxTokens
+	}
+
 	if len(params.ToolDefinitions) > 0 {
 		var tools []toolsDefinition
 		toolBytes, marshalErr := json.Marshal(params.ToolDefinitions)

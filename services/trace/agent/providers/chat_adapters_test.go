@@ -326,13 +326,6 @@ func TestAllChatAdapters_Chat_TemperatureZeroSent(t *testing.T) {
 
 	for _, p := range providers {
 		t.Run(p.name, func(t *testing.T) {
-			// Note: Anthropic's Chat() method does not apply params.Temperature
-			// to the request body (only ChatWithTools and streaming do).
-			// This is a pre-existing gap in the base Anthropic client.
-			if p.name == "anthropic" {
-				t.Skip("Anthropic Chat() does not forward temperature from params (pre-existing)")
-			}
-
 			server, recorded := chatMockServer(t, http.StatusOK, p.mockResponse)
 			defer server.Close()
 
@@ -422,13 +415,6 @@ func TestAllChatAdapters_Chat_TemperaturePointSeven(t *testing.T) {
 
 	for _, p := range providers {
 		t.Run(p.name, func(t *testing.T) {
-			// Note: Anthropic's Chat() method does not apply params.Temperature
-			// to the request body (only ChatWithTools and streaming do).
-			// This is a pre-existing gap in the base Anthropic client.
-			if p.name == "anthropic" {
-				t.Skip("Anthropic Chat() does not forward temperature from params (pre-existing)")
-			}
-
 			server, recorded := chatMockServer(t, http.StatusOK, p.mockResponse)
 			defer server.Close()
 

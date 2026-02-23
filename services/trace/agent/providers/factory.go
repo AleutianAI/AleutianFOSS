@@ -19,6 +19,9 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	agentllm "github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/providers/egress"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ProviderFactory creates the right LLM adapters based on provider configuration.
@@ -105,6 +108,14 @@ func NewProviderFactory(ollamaModelManager *llm.MultiModelManager, opts ...Facto
 //	    APIKey:   "sk-ant-...",
 //	})
 func (f *ProviderFactory) CreateChatClient(cfg ProviderConfig) (ChatClient, error) {
+	_, span := otel.Tracer(chatTracerName).Start(context.Background(), "providers.Factory.CreateChatClient",
+		trace.WithAttributes(
+			attribute.String("provider", cfg.Provider),
+			attribute.String("model", cfg.Model),
+		),
+	)
+	defer span.End()
+
 	switch cfg.Provider {
 	case ProviderOllama:
 		if f.ollamaModelManager == nil {
@@ -169,6 +180,14 @@ func (f *ProviderFactory) CreateChatClient(cfg ProviderConfig) (ChatClient, erro
 //	    APIKey:   "sk-ant-...",
 //	})
 func (f *ProviderFactory) CreateAgentClient(cfg ProviderConfig) (agentllm.Client, error) {
+	_, span := otel.Tracer(chatTracerName).Start(context.Background(), "providers.Factory.CreateAgentClient",
+		trace.WithAttributes(
+			attribute.String("provider", cfg.Provider),
+			attribute.String("model", cfg.Model),
+		),
+	)
+	defer span.End()
+
 	var rawClient agentllm.Client
 
 	switch cfg.Provider {

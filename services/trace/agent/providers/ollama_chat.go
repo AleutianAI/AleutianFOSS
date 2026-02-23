@@ -13,9 +13,14 @@ package providers
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // OllamaChatAdapter wraps MultiModelManager to implement ChatClient.
@@ -55,6 +60,25 @@ func (a *OllamaChatAdapter) Chat(ctx context.Context, messages []datatypes.Messa
 		return "", fmt.Errorf("Ollama model manager is nil")
 	}
 
+	model := opts.Model
+	if model == "" {
+		model = a.defaultModel
+	}
+	if model == "" {
+		return "", fmt.Errorf("model must be specified in ChatOptions or at adapter construction")
+	}
+
+	// Create OTel span
+	ctx, span := otel.Tracer(chatTracerName).Start(ctx, "providers.OllamaChatAdapter.Chat",
+		trace.WithAttributes(
+			attribute.String("provider", "ollama"),
+			attribute.String("model", model),
+			attribute.Int("message_count", len(messages)),
+			attribute.Float64("temperature", opts.Temperature),
+		),
+	)
+	defer span.End()
+
 	temp := float32(opts.Temperature)
 	maxTokens := opts.MaxTokens
 	numCtx := opts.NumCtx
@@ -69,15 +93,19 @@ func (a *OllamaChatAdapter) Chat(ctx context.Context, messages []datatypes.Messa
 		params.NumCtx = &numCtx
 	}
 
-	model := opts.Model
-	if model == "" {
-		model = a.defaultModel
-	}
-	if model == "" {
-		return "", fmt.Errorf("model must be specified in ChatOptions or at adapter construction")
+	startTime := time.Now()
+	result, err := a.manager.Chat(ctx, model, messages, params)
+	duration := time.Since(startTime)
+
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		recordChatMetrics("ollama", duration, err)
+		return "", err
 	}
 
-	return a.manager.Chat(ctx, model, messages, params)
+	recordChatMetrics("ollama", duration, nil)
+	return result, nil
 }
 
 // OllamaLifecycleAdapter wraps MultiModelManager for lifecycle operations.

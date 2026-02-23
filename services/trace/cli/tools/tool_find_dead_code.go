@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -300,9 +301,17 @@ func (t *findDeadCodeTool) Execute(ctx context.Context, params TypedParams) (*Re
 	if p.ExcludeTests {
 		var nonTest []graph.DeadCodeNode
 		for _, dc := range filtered {
+			if dc.Node == nil || dc.Node.Symbol == nil {
+				continue
+			}
+			filePath := dc.Node.Symbol.FilePath
 			// GR-60: Use graph-based file classification instead of heuristics
-			if dc.Node != nil && dc.Node.Symbol != nil &&
-				t.analytics.IsProductionFile(dc.Node.Symbol.FilePath) {
+			isProd := t.analytics.IsProductionFile(filePath)
+			// F-3: Safety net — _test.go is NEVER production regardless of classification
+			if isProd && strings.HasSuffix(filepath.Base(filePath), "_test.go") {
+				isProd = false
+			}
+			if isProd {
 				nonTest = append(nonTest, dc)
 			}
 		}
