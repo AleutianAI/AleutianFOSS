@@ -8,7 +8,7 @@
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
 
-// Package telemetry provides OpenTelemetry-based observability for Code Buddy.
+// Package telemetry provides OpenTelemetry-based observability for Trace.
 //
 // This package initializes the OTel SDK with opinionated defaults for tracing
 // and metrics, while allowing backend flexibility through exporter configuration.

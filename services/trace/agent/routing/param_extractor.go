@@ -290,7 +290,7 @@ func (e *ParamExtractor) buildSystemPrompt(toolName string, paramSchemas []Param
 
 Given a user's query about a codebase, extract the correct parameter values
 for the selected tool. Pay attention to hierarchical scoping:
-- Project names (flask, pandas, express, hugo, gin, nestjs) are NOT package/module names
+- Project names (flask, pandas, express, hugo, gin, nestjs, badger, babylonjs, plottable) are NOT package/module names
 - Module/package names refer to specific subsystems WITHIN a project
 - "in the Flask helpers module" -> package is "helpers", not "flask"
 - "in the Pandas reshape module" -> package is "reshape", not "pandas"
@@ -298,6 +298,28 @@ for the selected tool. Pay attention to hierarchical scoping:
 - If the user mentions ONLY a project name with no specific module, set "package" to "" (empty)
 - "Find dead code in Express" -> package is "" (Express is the project, not a package)
 - "Find dead code in Flask" -> package is "" (Flask is the project, not a package)
+
+CONCEPTUAL vs LITERAL scope names:
+- LITERAL package/directory names: "table", "hugolib", "io", "plots", "microservices"
+  -> Set package to the literal name (it matches a real directory or Go package)
+- CONCEPTUAL descriptions: "write path", "rendering pipeline", "materials subsystem",
+  "Node class hierarchy", "groupby module" (when module = conceptual, not a directory)
+  -> Set package to "" (empty). These are DESCRIPTIONS, not literal paths.
+  A conceptual description with no matching directory will silently return empty results.
+- RULE: If the scope name contains spaces or is an abstract concept, set package to ""
+
+"from X to Y" pattern (for get_call_chain, find_path):
+- "from X to Y" -> root/start = X (the first symbol), NOT Y
+- Direction is always DOWNSTREAM for "from X to Y" queries
+- "Trace the call chain from Scene.render to Engine._renderFrame" -> function_name = "render", direction = "downstream"
+- Strip package qualifiers from symbols: "gin.New" -> "New", "flask.Blueprint" -> "Blueprint"
+  (the graph indexes symbols without package prefixes)
+
+Symbol name extraction rules:
+- Strip leading package qualifiers: "gin.New" -> "New", "http.ListenAndServe" -> "ListenAndServe"
+- For Type.Method format, keep the dot: "Engine.ServeHTTP" -> "Engine.ServeHTTP"
+- Multi-word concepts should use PascalCase if they map to a type: "resource transformation" -> "ResourceTransformation"
+- Algorithm names are NOT symbols: PageRank, BFS, DFS, Leiden, Tarjan, SCC — NEVER extract these as function_name or symbol targets
 
 `)
 

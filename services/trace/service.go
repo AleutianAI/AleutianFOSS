@@ -37,7 +37,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/lsp"
 )
 
-// ServiceConfig configures the Code Buddy service.
+// ServiceConfig configures the Trace service.
 type ServiceConfig struct {
 	// MaxInitDuration is the maximum time allowed for init operations.
 	// Default: 30s
@@ -90,7 +90,7 @@ func DefaultServiceConfig() ServiceConfig {
 	}
 }
 
-// Service is the Code Buddy service.
+// Service is the Trace service.
 //
 // Thread Safety:
 //
@@ -129,7 +129,7 @@ type CachedPlan struct {
 	CreatedAt time.Time
 }
 
-// NewService creates a new Code Buddy service.
+// NewService creates a new Trace service.
 //
 // Description:
 //

@@ -23,10 +23,10 @@ import (
 	"github.com/weaviate/weaviate-go-client/v5/weaviate"
 )
 
-// ServiceVersion is the Code Buddy service version.
+// ServiceVersion is the Trace service version.
 const ServiceVersion = "0.1.0"
 
-// Handlers contains the HTTP handlers for Code Buddy.
+// Handlers contains the HTTP handlers for Trace.
 type Handlers struct {
 	svc              *Service
 	seeder           *seeder.Seeder
@@ -97,7 +97,7 @@ func (h *Handlers) WithMemory(dataSpace string) *Handlers {
 	return h
 }
 
-// HandleInit handles POST /v1/codebuddy/init.
+// HandleInit handles POST /v1/trace/init.
 //
 // Description:
 //
@@ -168,7 +168,7 @@ func (h *Handlers) HandleInit(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-// HandleContext handles POST /v1/codebuddy/context.
+// HandleContext handles POST /v1/trace/context.
 //
 // Description:
 //
@@ -242,7 +242,7 @@ func (h *Handlers) HandleContext(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-// HandleSymbol handles GET /v1/codebuddy/symbol/:id.
+// HandleSymbol handles GET /v1/trace/symbol/:id.
 //
 // Description:
 //
@@ -308,7 +308,7 @@ func (h *Handlers) HandleSymbol(c *gin.Context) {
 	c.JSON(http.StatusOK, SymbolResponse{Symbol: sym})
 }
 
-// HandleCallers handles GET /v1/codebuddy/callers.
+// HandleCallers handles GET /v1/trace/callers.
 //
 // Description:
 //
@@ -370,7 +370,7 @@ func (h *Handlers) HandleCallers(c *gin.Context) {
 	})
 }
 
-// HandleImplementations handles GET /v1/codebuddy/implementations.
+// HandleImplementations handles GET /v1/trace/implementations.
 //
 // Description:
 //
@@ -432,7 +432,7 @@ func (h *Handlers) HandleImplementations(c *gin.Context) {
 	})
 }
 
-// HandleHealth handles GET /v1/codebuddy/health.
+// HandleHealth handles GET /v1/trace/health.
 //
 // Description:
 //
@@ -448,7 +448,7 @@ func (h *Handlers) HandleHealth(c *gin.Context) {
 	})
 }
 
-// HandleReady handles GET /v1/codebuddy/ready.
+// HandleReady handles GET /v1/trace/ready.
 //
 // Description:
 //
@@ -478,7 +478,7 @@ func (h *Handlers) HandleReady(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-// HandleGetGraphStats handles GET /v1/codebuddy/debug/graph/stats.
+// HandleGetGraphStats handles GET /v1/trace/debug/graph/stats.
 //
 // Description:
 //
@@ -575,7 +575,7 @@ func (h *Handlers) HandleGetGraphStats(c *gin.Context) {
 	})
 }
 
-// HandleGetCacheStats handles GET /v1/codebuddy/debug/cache.
+// HandleGetCacheStats handles GET /v1/trace/debug/cache.
 //
 // Description:
 //
@@ -644,7 +644,7 @@ func (h *Handlers) HandleGetCacheStats(c *gin.Context) {
 	c.JSON(http.StatusOK, stats)
 }
 
-// HandleSeed handles POST /v1/codebuddy/seed.
+// HandleSeed handles POST /v1/trace/seed.
 //
 // Description:
 //
@@ -719,7 +719,7 @@ func getOrCreateRequestID(c *gin.Context) string {
 	return requestID
 }
 
-// HandleListMemories handles GET /v1/codebuddy/memories.
+// HandleListMemories handles GET /v1/trace/memories.
 //
 // Description:
 //
@@ -785,7 +785,7 @@ func (h *Handlers) HandleListMemories(c *gin.Context) {
 	})
 }
 
-// HandleStoreMemory handles POST /v1/codebuddy/memories.
+// HandleStoreMemory handles POST /v1/trace/memories.
 //
 // Description:
 //
@@ -875,7 +875,7 @@ func (h *Handlers) HandleStoreMemory(c *gin.Context) {
 	})
 }
 
-// HandleRetrieveMemories handles POST /v1/codebuddy/memories/retrieve.
+// HandleRetrieveMemories handles POST /v1/trace/memories/retrieve.
 //
 // Description:
 //
@@ -940,7 +940,7 @@ func (h *Handlers) HandleRetrieveMemories(c *gin.Context) {
 	})
 }
 
-// HandleDeleteMemory handles DELETE /v1/codebuddy/memories/:id.
+// HandleDeleteMemory handles DELETE /v1/trace/memories/:id.
 //
 // Description:
 //
@@ -1001,7 +1001,7 @@ func (h *Handlers) HandleDeleteMemory(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-// HandleValidateMemory handles POST /v1/codebuddy/memories/:id/validate.
+// HandleValidateMemory handles POST /v1/trace/memories/:id/validate.
 //
 // Description:
 //
@@ -1075,7 +1075,7 @@ func (h *Handlers) HandleValidateMemory(c *gin.Context) {
 	})
 }
 
-// HandleContradictMemory handles POST /v1/codebuddy/memories/:id/contradict.
+// HandleContradictMemory handles POST /v1/trace/memories/:id/contradict.
 //
 // Description:
 //

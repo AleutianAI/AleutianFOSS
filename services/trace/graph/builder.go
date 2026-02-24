@@ -1154,8 +1154,12 @@ func (b *Builder) extractTypeRefEdges(state *buildState, sym *ast.Symbol) {
 		if len(targets) == 0 {
 			continue // Don't create placeholders for type refs (matches extractTypeArgEdges behavior)
 		}
+		// IT-06d Bug 10: Use typeRef.Location (the annotation site) instead of sym.Location()
+		// (the function definition line). This makes find_references report the exact line
+		// containing `-> Series` or `: Series`, not the function's `def` line.
+		edgeLoc := typeRef.Location
 		for _, targetID := range targets {
-			err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeReferences, sym.Location())
+			err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeReferences, edgeLoc)
 			if err != nil && !strings.Contains(err.Error(), "already exists") {
 				state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
 					FromID:   sym.ID,

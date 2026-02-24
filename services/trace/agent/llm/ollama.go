@@ -33,7 +33,7 @@ import (
 // Description:
 //
 //	OllamaAdapter wraps the existing OllamaClient to provide LLM capabilities
-//	for the agent loop. This allows Code Buddy to use local Ollama models
+//	for the agent loop. This allows Trace to use local Ollama models
 //	(like gpt-oss:20b) for code assistance.
 //
 // Thread Safety:

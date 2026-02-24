@@ -854,7 +854,7 @@ run_crs_test() {
     # errors when embedded via single-quote escaping through SSH.
     local b64_payload
     b64_payload=$(printf '%s' "$json_payload" | base64 | tr -d '\n')
-    local response=$(ssh_cmd "printf '%s' '$b64_payload' | base64 -d | curl -s -X POST 'http://localhost:8080/v1/codebuddy/agent/run' -H 'Content-Type: application/json' -H 'X-Session-ID: crs_test_${session_id}' -d @- --max-time 300")
+    local response=$(ssh_cmd "printf '%s' '$b64_payload' | base64 -d | curl -s -X POST 'http://localhost:8080/v1/trace/agent/run' -H 'Content-Type: application/json' -H 'X-Session-ID: crs_test_${session_id}' -d @- --max-time 300")
 
     local end_time=$(get_time_ms)
     local duration=$((end_time - start_time))
@@ -885,7 +885,7 @@ run_crs_test() {
     local trace_json="{}"
     local crs_details=""
     if [ "$session_actual" != "unknown" ]; then
-        local trace_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_actual/reasoning'" 2>/dev/null)
+        local trace_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/agent/$session_actual/reasoning'" 2>/dev/null)
         if echo "$trace_response" | jq . > /dev/null 2>&1; then
             trace_json="$trace_response"
             local trace_count=$(echo "$trace_response" | jq '.total_steps // 0')

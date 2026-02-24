@@ -193,7 +193,7 @@ start_trace_server() {
     for i in {1..15}; do
         echo -n "."
         sleep 1
-        if ssh_cmd "curl -s http://localhost:8080/v1/codebuddy/health" > /dev/null 2>&1; then
+        if ssh_cmd "curl -s http://localhost:8080/v1/trace/health" > /dev/null 2>&1; then
             responding=1
             break
         fi
@@ -212,7 +212,7 @@ start_trace_server() {
     local ready=0
     for i in {1..120}; do
         # Check /ready endpoint - returns 200 when warmup complete, 503 when still warming
-        local ready_status=$(ssh_cmd "curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/v1/codebuddy/ready" 2>/dev/null)
+        local ready_status=$(ssh_cmd "curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/v1/trace/ready" 2>/dev/null)
         if [ "$ready_status" = "200" ]; then
             ready=1
             break

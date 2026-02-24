@@ -3014,3 +3014,123 @@ export const NestFactory = new NestFactoryStatic();
 		t.Errorf("expected language 'typescript', got %q", nestFactory.Language)
 	}
 }
+
+// findTSMethod searches a ParseResult for a method by class name + method name,
+// traversing the Children of each class symbol.
+func findTSMethod(result *ParseResult, className, methodName string) *Symbol {
+	for _, sym := range result.Symbols {
+		if sym.Name == className {
+			for _, child := range sym.Children {
+				if child.Name == methodName {
+					return child
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// TestTypeScriptParser_NewExpression_SimpleConstructor verifies that `new X()` calls
+// are extracted as Calls entries on the calling method (IT-06d Bug 13).
+func TestTypeScriptParser_NewExpression_SimpleConstructor(t *testing.T) {
+	parser := NewTypeScriptParser(WithTypeScriptParseOptions(ParseOptions{IncludePrivate: true}))
+	content := `
+import { Drawer } from './drawer';
+
+class LinePlot {
+  private drawer: Drawer;
+
+  render(dataset: Dataset): void {
+    this.drawer = new Drawer(this.element);
+    this.drawer.draw(dataset);
+  }
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "src/plots/linePlot.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	renderFn := findTSMethod(result, "LinePlot", "render")
+	if renderFn == nil {
+		t.Fatal("LinePlot.render method not found")
+	}
+
+	callTargets := make(map[string]bool)
+	for _, call := range renderFn.Calls {
+		callTargets[call.Target] = true
+	}
+
+	if !callTargets["Drawer"] {
+		t.Errorf("expected call to Drawer from new Drawer(...), got calls: %v", renderFn.Calls)
+	}
+}
+
+// TestTypeScriptParser_NewExpression_QualifiedConstructor verifies that `new mod.Class()`
+// extracts the leaf class name as target.
+func TestTypeScriptParser_NewExpression_QualifiedConstructor(t *testing.T) {
+	parser := NewTypeScriptParser(WithTypeScriptParseOptions(ParseOptions{IncludePrivate: true}))
+	content := `
+import * as drawers from './drawers';
+
+class BarPlot {
+  createDrawer(): void {
+    const drawer = new drawers.BarDrawer(this.config);
+  }
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "src/plots/barPlot.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	createFn := findTSMethod(result, "BarPlot", "createDrawer")
+	if createFn == nil {
+		t.Fatal("BarPlot.createDrawer method not found")
+	}
+
+	callTargets := make(map[string]bool)
+	for _, call := range createFn.Calls {
+		callTargets[call.Target] = true
+	}
+
+	if !callTargets["BarDrawer"] {
+		t.Errorf("expected call to BarDrawer from new drawers.BarDrawer(...), got calls: %v", createFn.Calls)
+	}
+}
+
+// TestTypeScriptParser_NewExpression_MultipleConstructors verifies multiple new X() calls
+// in a single method body are all extracted.
+func TestTypeScriptParser_NewExpression_MultipleConstructors(t *testing.T) {
+	parser := NewTypeScriptParser(WithTypeScriptParseOptions(ParseOptions{IncludePrivate: true}))
+	content := `
+class ScatterPlot {
+  initialize(config: PlotConfig): void {
+    const drawer = new ScatterDrawer(config.element);
+    const scale = new LinearScale(config.domain);
+    const axis = new Axis(scale);
+    this.render(drawer, scale, axis);
+  }
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "src/plots/scatterPlot.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	initFn := findTSMethod(result, "ScatterPlot", "initialize")
+	if initFn == nil {
+		t.Fatal("ScatterPlot.initialize method not found")
+	}
+
+	callTargets := make(map[string]bool)
+	for _, call := range initFn.Calls {
+		callTargets[call.Target] = true
+	}
+
+	for _, want := range []string{"ScatterDrawer", "LinearScale", "Axis"} {
+		if !callTargets[want] {
+			t.Errorf("expected new-expression call to %s, got calls: %v", want, initFn.Calls)
+		}
+	}
+}

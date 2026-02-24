@@ -181,6 +181,82 @@ KEY DIFFERENCE:
 - A function can be highly connected but LOW risk (peripheral hub)
 - A function can be low-degree but CRITICAL (hidden gatekeeper)
 
+**IMPLEMENTATIONS vs CALLERS/CALLEES:**
+
+IMPLEMENTATIONS (class hierarchy, inheritance, interface satisfaction):
+- "What classes extend X?"
+- "What types implement X?"
+- "What subclasses does X have?"
+- "What derives from X?"
+→ Tool: find_implementations
+
+CALLERS (who calls a specific function):
+- "What calls X?"
+- "Who invokes X?"
+→ Tool: find_callers
+
+CALLEES (what a specific function calls):
+- "What does X call?"
+- "What functions does X invoke?"
+→ Tool: find_callees
+
+KEY DIFFERENCE:
+- "extends" / "implements" / "subclasses" / "base class" → find_implementations
+- "calls X" (upstream) → find_callers
+- "X calls" (downstream) → find_callees
+
+**CYCLES vs CALLEES vs LOOPS:**
+
+CYCLES (Tarjan SCC — circular dependencies between distinct functions):
+- "Find circular call dependencies"
+- "Are there dependency cycles?"
+- "Find circular call chains"
+- "What are the shortest circular dependencies?"
+→ Tool: find_cycles
+
+LOOPS (recursion patterns within individual functions):
+- "Find recursive functions"
+- "Which functions call themselves?"
+- "Find self-recursive or mutually-recursive functions"
+→ Tool: find_loops
+
+CALLEES (what a function calls — NOT cycles):
+- "What does X call?"
+- "What functions does X depend on?"
+→ Tool: find_callees
+
+KEY DIFFERENCE:
+- "circular dependencies" / "dependency cycles" / "circular call chains" → find_cycles
+- "recursive functions" / "self-calls" / "mutual recursion" → find_loops
+- "what does X call" / "X's dependencies" → find_callees
+
+**DEAD CODE vs CALLEES:**
+
+DEAD CODE (unused, deprecated, unreachable):
+- "Find deprecated methods"
+- "Find unreachable functions"
+- "Find unused methods"
+- "Find orphaned code"
+→ Tool: find_dead_code
+
+CALLEES (downstream dependencies):
+- "What does X call?"
+→ Tool: find_callees
+
+**IMPORTANT vs WEIGHTED_CRITICALITY (full disambiguation):**
+
+IMPORTANT (PageRank centrality — recursive influence):
+- "Most important functions by PageRank"
+- "Highest structural importance"
+- "Most influential functions"
+- "Lowest PageRank / peripheral functions"
+→ Tool: find_important
+
+WEIGHTED CRITICALITY (risk/crash assessment):
+- "What production code would break the most if changed?"
+- "Highest-risk functions for stability"
+→ Tool: find_weighted_criticality
+
 ## Current Context
 {{- if .Context}}
 {{- if .Context.Language}}
@@ -372,11 +448,11 @@ func (p *PromptBuilder) BuildUserPrompt(query string) string {
 // Default Tool Specs
 // =============================================================================
 
-// DefaultToolSpecs returns the standard Code Buddy tool specifications.
+// DefaultToolSpecs returns the standard Trace tool specifications.
 //
 // # Description
 //
-// Returns ToolSpec entries for the core Code Buddy tools. These can be
+// Returns ToolSpec entries for the core Trace tools. These can be
 // filtered based on what's actually available in the current session.
 //
 // # Outputs

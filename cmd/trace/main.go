@@ -538,18 +538,18 @@ func printBanner(port int, agentEnabled bool) {
 ║  Quick Start:                                                     ║
 ║  ┌─────────────────────────────────────────────────────────────┐  ║
 ║  │ # Health check                                              │  ║
-║  │ curl http://localhost:%d/v1/codebuddy/health              │  ║
+║  │ curl http://localhost:%d/v1/trace/health              │  ║
 ║  │                                                             │  ║
 ║  │ # List all 30+ agentic tools                                │  ║
-║  │ curl http://localhost:%d/v1/codebuddy/tools | jq          │  ║
+║  │ curl http://localhost:%d/v1/trace/tools | jq          │  ║
 ║  │                                                             │  ║
 ║  │ # Initialize a graph (required first!)                      │  ║
-║  │ curl -X POST http://localhost:%d/v1/codebuddy/init \      │  ║
+║  │ curl -X POST http://localhost:%d/v1/trace/init \      │  ║
 ║  │   -H "Content-Type: application/json" \                     │  ║
 ║  │   -d '{"project_root": "/your/project/path"}'               │  ║
 ║  │                                                             │  ║
 ║  │ # Run agent query (requires Ollama)                         │  ║
-║  │ curl -X POST http://localhost:%d/v1/codebuddy/agent/run \ │  ║
+║  │ curl -X POST http://localhost:%d/v1/trace/agent/run \ │  ║
 ║  │   -H "Content-Type: application/json" \                     │  ║
 ║  │   -d '{"project_root": ".", "query": "What does this do?"}' │  ║
 ║  └─────────────────────────────────────────────────────────────┘  ║

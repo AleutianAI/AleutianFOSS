@@ -8,7 +8,7 @@
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
 
-// Package context provides the Context Assembler for Code Buddy.
+// Package context provides the Context Assembler for Trace.
 //
 // The Context Assembler combines graph traversal, symbol index lookups,
 // and optionally library documentation to produce focused, relevant context

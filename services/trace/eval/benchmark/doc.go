@@ -12,7 +12,7 @@
 //
 // # Overview
 //
-// The benchmark package enables systematic performance measurement of Code Buddy's
+// The benchmark package enables systematic performance measurement of Trace's
 // algorithms and components. It integrates with the eval framework to provide
 // standardized benchmarking with statistical rigor.
 //

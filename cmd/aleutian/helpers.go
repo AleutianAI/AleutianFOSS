@@ -37,7 +37,17 @@ import (
 const (
 	DefaultOrchestratorPort = 12210
 	DefaultOrchestratorHost = "localhost"
+	DefaultTracePort        = 8080
 )
+
+// getTraceBaseURL returns the address for the Aleutian Trace server.
+// Override with ALEUTIAN_TRACE_URL env var (e.g. for remote or non-default port).
+func getTraceBaseURL() string {
+	if url := os.Getenv("ALEUTIAN_TRACE_URL"); url != "" {
+		return url
+	}
+	return fmt.Sprintf("http://%s:%d", DefaultOrchestratorHost, DefaultTracePort)
+}
 
 // --- Global Variables ---
 var (

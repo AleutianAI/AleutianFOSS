@@ -131,7 +131,7 @@ func TestAgentHandlers_HandleAgentRun_Success(t *testing.T) {
 	}
 	jsonBody, _ := json.Marshal(body)
 
-	req := httptest.NewRequest("POST", "/v1/codebuddy/agent/run", bytes.NewBuffer(jsonBody))
+	req := httptest.NewRequest("POST", "/v1/trace/agent/run", bytes.NewBuffer(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
@@ -168,7 +168,7 @@ func TestAgentHandlers_HandleAgentRun_EmptyQuery(t *testing.T) {
 	}
 	jsonBody, _ := json.Marshal(body)
 
-	req := httptest.NewRequest("POST", "/v1/codebuddy/agent/run", bytes.NewBuffer(jsonBody))
+	req := httptest.NewRequest("POST", "/v1/trace/agent/run", bytes.NewBuffer(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
@@ -202,7 +202,7 @@ func TestAgentHandlers_HandleAgentRun_NeedsClarify(t *testing.T) {
 	}
 	jsonBody, _ := json.Marshal(body)
 
-	req := httptest.NewRequest("POST", "/v1/codebuddy/agent/run", bytes.NewBuffer(jsonBody))
+	req := httptest.NewRequest("POST", "/v1/trace/agent/run", bytes.NewBuffer(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
@@ -245,7 +245,7 @@ func TestAgentHandlers_HandleAgentContinue_Success(t *testing.T) {
 	}
 	jsonBody, _ := json.Marshal(body)
 
-	req := httptest.NewRequest("POST", "/v1/codebuddy/agent/continue", bytes.NewBuffer(jsonBody))
+	req := httptest.NewRequest("POST", "/v1/trace/agent/continue", bytes.NewBuffer(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
@@ -281,7 +281,7 @@ func TestAgentHandlers_HandleAgentContinue_NotFound(t *testing.T) {
 	}
 	jsonBody, _ := json.Marshal(body)
 
-	req := httptest.NewRequest("POST", "/v1/codebuddy/agent/continue", bytes.NewBuffer(jsonBody))
+	req := httptest.NewRequest("POST", "/v1/trace/agent/continue", bytes.NewBuffer(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
@@ -309,7 +309,7 @@ func TestAgentHandlers_HandleAgentAbort_Success(t *testing.T) {
 	}
 	jsonBody, _ := json.Marshal(body)
 
-	req := httptest.NewRequest("POST", "/v1/codebuddy/agent/abort", bytes.NewBuffer(jsonBody))
+	req := httptest.NewRequest("POST", "/v1/trace/agent/abort", bytes.NewBuffer(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
@@ -339,7 +339,7 @@ func TestAgentHandlers_HandleAgentAbort_NotFound(t *testing.T) {
 	}
 	jsonBody, _ := json.Marshal(body)
 
-	req := httptest.NewRequest("POST", "/v1/codebuddy/agent/abort", bytes.NewBuffer(jsonBody))
+	req := httptest.NewRequest("POST", "/v1/trace/agent/abort", bytes.NewBuffer(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
@@ -368,7 +368,7 @@ func TestAgentHandlers_HandleAgentState_Success(t *testing.T) {
 	handlers := NewAgentHandlers(mockLoop, nil)
 	r := setupAgentTestRouter(handlers)
 
-	req := httptest.NewRequest("GET", "/v1/codebuddy/agent/test-session-id", nil)
+	req := httptest.NewRequest("GET", "/v1/trace/agent/test-session-id", nil)
 	w := httptest.NewRecorder()
 
 	r.ServeHTTP(w, req)
@@ -403,7 +403,7 @@ func TestAgentHandlers_HandleAgentState_NotFound(t *testing.T) {
 	handlers := NewAgentHandlers(mockLoop, nil)
 	r := setupAgentTestRouter(handlers)
 
-	req := httptest.NewRequest("GET", "/v1/codebuddy/agent/nonexistent-id", nil)
+	req := httptest.NewRequest("GET", "/v1/trace/agent/nonexistent-id", nil)
 	w := httptest.NewRecorder()
 
 	r.ServeHTTP(w, req)
@@ -418,7 +418,7 @@ func TestAgentHandlers_HandleAgentRun_InvalidJSON(t *testing.T) {
 	handlers := NewAgentHandlers(mockLoop, nil)
 	r := setupAgentTestRouter(handlers)
 
-	req := httptest.NewRequest("POST", "/v1/codebuddy/agent/run", bytes.NewBufferString("invalid json"))
+	req := httptest.NewRequest("POST", "/v1/trace/agent/run", bytes.NewBufferString("invalid json"))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
@@ -445,7 +445,7 @@ func TestAgentHandlers_HandleAgentRun_SessionInProgress(t *testing.T) {
 	}
 	jsonBody, _ := json.Marshal(body)
 
-	req := httptest.NewRequest("POST", "/v1/codebuddy/agent/run", bytes.NewBuffer(jsonBody))
+	req := httptest.NewRequest("POST", "/v1/trace/agent/run", bytes.NewBuffer(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
@@ -501,7 +501,7 @@ func TestAgentHandlers_HandleGetReasoningTrace_NotFound(t *testing.T) {
 	handlers := NewAgentHandlers(mockLoop, nil)
 	r := setupAgentTestRouter(handlers)
 
-	req := httptest.NewRequest("GET", "/v1/codebuddy/agent/nonexistent-id/reasoning", nil)
+	req := httptest.NewRequest("GET", "/v1/trace/agent/nonexistent-id/reasoning", nil)
 	w := httptest.NewRecorder()
 
 	r.ServeHTTP(w, req)
@@ -523,7 +523,7 @@ func TestAgentHandlers_HandleGetReasoningTrace_EmptyTrace(t *testing.T) {
 	handlers := NewAgentHandlers(mockLoop, nil)
 	r := setupAgentTestRouter(handlers)
 
-	req := httptest.NewRequest("GET", "/v1/codebuddy/agent/test-session/reasoning", nil)
+	req := httptest.NewRequest("GET", "/v1/trace/agent/test-session/reasoning", nil)
 	w := httptest.NewRecorder()
 
 	r.ServeHTTP(w, req)
@@ -553,7 +553,7 @@ func TestAgentHandlers_HandleGetCRSExport_NotFound(t *testing.T) {
 	handlers := NewAgentHandlers(mockLoop, nil)
 	r := setupAgentTestRouter(handlers)
 
-	req := httptest.NewRequest("GET", "/v1/codebuddy/agent/nonexistent-id/crs", nil)
+	req := httptest.NewRequest("GET", "/v1/trace/agent/nonexistent-id/crs", nil)
 	w := httptest.NewRecorder()
 
 	r.ServeHTTP(w, req)
@@ -575,7 +575,7 @@ func TestAgentHandlers_HandleGetCRSExport_NoCRS(t *testing.T) {
 	handlers := NewAgentHandlers(mockLoop, nil)
 	r := setupAgentTestRouter(handlers)
 
-	req := httptest.NewRequest("GET", "/v1/codebuddy/agent/test-session/crs", nil)
+	req := httptest.NewRequest("GET", "/v1/trace/agent/test-session/crs", nil)
 	w := httptest.NewRecorder()
 
 	r.ServeHTTP(w, req)
@@ -680,7 +680,7 @@ func TestAgentHandlers_HandleGetReasoningTrace_MissingSessionID(t *testing.T) {
 	r := setupAgentTestRouter(handlers)
 
 	// Test with empty session ID - Gin routes to handler with empty :id param
-	req := httptest.NewRequest("GET", "/v1/codebuddy/agent//reasoning", nil)
+	req := httptest.NewRequest("GET", "/v1/trace/agent//reasoning", nil)
 	w := httptest.NewRecorder()
 
 	r.ServeHTTP(w, req)
@@ -697,7 +697,7 @@ func TestAgentHandlers_HandleGetCRSExport_MissingSessionID(t *testing.T) {
 	r := setupAgentTestRouter(handlers)
 
 	// Test with empty session ID - Gin routes to handler with empty :id param
-	req := httptest.NewRequest("GET", "/v1/codebuddy/agent//crs", nil)
+	req := httptest.NewRequest("GET", "/v1/trace/agent//crs", nil)
 	w := httptest.NewRecorder()
 
 	r.ServeHTTP(w, req)

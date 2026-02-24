@@ -363,15 +363,18 @@ func (t *findReferencesTool) Execute(ctx context.Context, params TypedParams) (*
 		})
 	}
 
-	// IT-06 Bug 6: Sort references — core source files before test/benchmark files.
-	// This ensures the LLM sees the most relevant references first.
+	// IT-06d Bug B/C: Sort references by a 4-tier priority before truncation.
+	// The previous binary isTestFile sort left conftest.py and .pyi type stubs
+	// classified as "production" (they have no /test/ path component), so they
+	// appeared before core/frame.py and other production modules.
+	//
+	// Priority tiers (lower = shown first):
+	//   0: production source  — frame.py, groupby/, io/parsers/ etc.
+	//   1: type stubs         — properties.pyi, .d.ts
+	//   2: test helpers/config — conftest.py, _testing/
+	//   3: test/benchmark     — tests/, asv_bench/, spec/
 	sort.SliceStable(allReferences, func(i, j int) bool {
-		iTest := isTestFile(allReferences[i].File)
-		jTest := isTestFile(allReferences[j].File)
-		if iTest != jTest {
-			return !iTest // non-test files sort first
-		}
-		return false // preserve relative order within same category
+		return referenceFilePriority(allReferences[i].File) < referenceFilePriority(allReferences[j].File)
 	})
 
 	// Truncate to requested limit after sorting

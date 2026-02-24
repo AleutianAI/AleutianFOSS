@@ -2795,3 +2795,119 @@ module.exports = Application;
 		t.Errorf("expected exactly 1 Application class symbol (no synthetic duplicate), got %d", count)
 	}
 }
+
+// TestJavaScriptParser_NewExpression_SimpleConstructor verifies that `new X()` calls
+// are extracted as Calls entries on the calling function (IT-06d Bug 11).
+func TestJavaScriptParser_NewExpression_SimpleConstructor(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `
+var Route = require('./route');
+
+function createRoute(path, options) {
+  var route = new Route(path, options);
+  return route;
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "lib/router/index.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var createRoute *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "createRoute" {
+			createRoute = sym
+			break
+		}
+	}
+	if createRoute == nil {
+		t.Fatal("createRoute function not found")
+	}
+
+	callTargets := make(map[string]bool)
+	for _, call := range createRoute.Calls {
+		callTargets[call.Target] = true
+	}
+
+	if !callTargets["Route"] {
+		t.Errorf("expected call to Route from new Route(...), got calls: %v", createRoute.Calls)
+	}
+}
+
+// TestJavaScriptParser_NewExpression_QualifiedConstructor verifies that `new mod.Class()`
+// extracts the leaf class name as target and the module as receiver.
+func TestJavaScriptParser_NewExpression_QualifiedConstructor(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `
+var db = require('./db');
+
+function connect(url) {
+  var client = new db.MongoClient(url);
+  client.connect();
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "lib/db.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var connectFn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "connect" {
+			connectFn = sym
+			break
+		}
+	}
+	if connectFn == nil {
+		t.Fatal("connect function not found")
+	}
+
+	callTargets := make(map[string]bool)
+	for _, call := range connectFn.Calls {
+		callTargets[call.Target] = true
+	}
+
+	if !callTargets["MongoClient"] {
+		t.Errorf("expected call to MongoClient from new db.MongoClient(...), got calls: %v", connectFn.Calls)
+	}
+}
+
+// TestJavaScriptParser_NewExpression_MultipleConstructors verifies multiple new X() calls
+// in a single function body are all extracted.
+func TestJavaScriptParser_NewExpression_MultipleConstructors(t *testing.T) {
+	parser := NewJavaScriptParser()
+	content := `
+function setup(config) {
+  var router = new Router();
+  var server = new Server(config.port);
+  var logger = new Logger(config.logLevel);
+  router.use(logger.middleware());
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "lib/setup.js")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var setupFn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "setup" {
+			setupFn = sym
+			break
+		}
+	}
+	if setupFn == nil {
+		t.Fatal("setup function not found")
+	}
+
+	callTargets := make(map[string]bool)
+	for _, call := range setupFn.Calls {
+		callTargets[call.Target] = true
+	}
+
+	for _, want := range []string{"Router", "Server", "Logger"} {
+		if !callTargets[want] {
+			t.Errorf("expected new-expression call to %s, got calls: %v", want, setupFn.Calls)
+		}
+	}
+}

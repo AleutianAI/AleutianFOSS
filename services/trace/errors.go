@@ -12,7 +12,7 @@ package trace
 
 import "errors"
 
-// Sentinel errors for the Code Buddy service.
+// Sentinel errors for the Trace service.
 var (
 	// ErrGraphNotInitialized indicates no graph has been built for the project.
 	ErrGraphNotInitialized = errors.New("graph not initialized")

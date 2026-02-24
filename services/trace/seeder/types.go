@@ -8,7 +8,7 @@
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
 
-// Package seeder provides library documentation seeding for Code Buddy.
+// Package seeder provides library documentation seeding for Trace.
 //
 // The seeder extracts documentation from project dependencies and indexes
 // them into Weaviate for context assembly. It supports Go modules initially,

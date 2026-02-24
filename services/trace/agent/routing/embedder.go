@@ -117,7 +117,9 @@ func NewToolEmbeddingCache(logger *slog.Logger, store RouterCacheStore) *ToolEmb
 
 	url := os.Getenv("EMBEDDING_SERVICE_URL")
 	if url == "" {
-		url = "http://host.containers.internal:11434/api/embed"
+		// Default to localhost — safe for bare-process deployments.
+		// Container deployments that need host.containers.internal must set EMBEDDING_SERVICE_URL explicitly.
+		url = "http://localhost:11434/api/embed"
 	}
 
 	model := os.Getenv("EMBEDDING_MODEL")

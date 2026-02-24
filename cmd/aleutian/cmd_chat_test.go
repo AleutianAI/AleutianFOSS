@@ -86,9 +86,9 @@ func TestClientSideToolsSecurity(t *testing.T) {
 			// NOTE: We test the security logic wrapper, not the OS call success
 			// So if it returns "Error: Access Denied", that's what we check.
 			if tt.tool == "read_file" {
-				result = readFileSafe(tt.input)
+				result = readFileSafe(tt.input, "")
 			} else {
-				result = listFilesSafe(tt.input)
+				result = listFilesSafe(tt.input, "")
 			}
 
 			if tt.wantError {

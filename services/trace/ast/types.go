@@ -10,7 +10,7 @@
 
 // Package ast provides types and interfaces for language-agnostic AST parsing.
 //
-// This package defines the core data structures used throughout the Code Buddy
+// This package defines the core data structures used throughout the Trace
 // service for representing parsed code symbols, their locations, and relationships.
 // All parser implementations (Go, Python, TypeScript, etc.) produce output
 // conforming to these types.

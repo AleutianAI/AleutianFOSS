@@ -37,7 +37,7 @@ func TestHandlers_HandleHealth(t *testing.T) {
 	svc := NewService(DefaultServiceConfig())
 	router := setupTestRouter(svc)
 
-	req, _ := http.NewRequest("GET", "/v1/codebuddy/health", nil)
+	req, _ := http.NewRequest("GET", "/v1/trace/health", nil)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -67,7 +67,7 @@ func TestHandlers_HandleReady(t *testing.T) {
 	MarkWarmupComplete()
 	defer ResetWarmupStatus() // Clean up after test
 
-	req, _ := http.NewRequest("GET", "/v1/codebuddy/ready", nil)
+	req, _ := http.NewRequest("GET", "/v1/trace/ready", nil)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -121,7 +121,7 @@ func TestHandlers_HandleInit_InvalidRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req, _ := http.NewRequest("POST", "/v1/codebuddy/init",
+			req, _ := http.NewRequest("POST", "/v1/trace/init",
 				bytes.NewBufferString(tt.body))
 			req.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
@@ -148,7 +148,7 @@ func TestHandlers_HandleContext_GraphNotInitialized(t *testing.T) {
 	router := setupTestRouter(svc)
 
 	body := `{"graph_id": "nonexistent", "query": "find HandleUser"}`
-	req, _ := http.NewRequest("POST", "/v1/codebuddy/context",
+	req, _ := http.NewRequest("POST", "/v1/trace/context",
 		bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -182,7 +182,7 @@ func TestHandlers_HandleContext_MissingParameters(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req, _ := http.NewRequest("POST", "/v1/codebuddy/context",
+			req, _ := http.NewRequest("POST", "/v1/trace/context",
 				bytes.NewBufferString(tt.body))
 			req.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
@@ -203,8 +203,8 @@ func TestHandlers_HandleCallers_MissingParameters(t *testing.T) {
 		name string
 		url  string
 	}{
-		{"missing graph_id", "/v1/codebuddy/callers?function=test"},
-		{"missing function", "/v1/codebuddy/callers?graph_id=test"},
+		{"missing graph_id", "/v1/trace/callers?function=test"},
+		{"missing function", "/v1/trace/callers?graph_id=test"},
 	}
 
 	for _, tt := range tests {
@@ -224,7 +224,7 @@ func TestHandlers_HandleCallers_GraphNotInitialized(t *testing.T) {
 	svc := NewService(DefaultServiceConfig())
 	router := setupTestRouter(svc)
 
-	req, _ := http.NewRequest("GET", "/v1/codebuddy/callers?graph_id=nonexistent&function=test", nil)
+	req, _ := http.NewRequest("GET", "/v1/trace/callers?graph_id=nonexistent&function=test", nil)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -250,8 +250,8 @@ func TestHandlers_HandleImplementations_MissingParameters(t *testing.T) {
 		name string
 		url  string
 	}{
-		{"missing graph_id", "/v1/codebuddy/implementations?interface=test"},
-		{"missing interface", "/v1/codebuddy/implementations?graph_id=test"},
+		{"missing graph_id", "/v1/trace/implementations?interface=test"},
+		{"missing interface", "/v1/trace/implementations?graph_id=test"},
 	}
 
 	for _, tt := range tests {
@@ -272,7 +272,7 @@ func TestHandlers_HandleSymbol_MissingParameters(t *testing.T) {
 	router := setupTestRouter(svc)
 
 	// Missing graph_id
-	req, _ := http.NewRequest("GET", "/v1/codebuddy/symbol/test-id", nil)
+	req, _ := http.NewRequest("GET", "/v1/trace/symbol/test-id", nil)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -285,7 +285,7 @@ func TestHandlers_HandleSymbol_GraphNotInitialized(t *testing.T) {
 	svc := NewService(DefaultServiceConfig())
 	router := setupTestRouter(svc)
 
-	req, _ := http.NewRequest("GET", "/v1/codebuddy/symbol/test-id?graph_id=nonexistent", nil)
+	req, _ := http.NewRequest("GET", "/v1/trace/symbol/test-id?graph_id=nonexistent", nil)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -320,7 +320,7 @@ func TestHandlers_HandleGetGraphStats_NoGraphsCached(t *testing.T) {
 	svc := NewService(DefaultServiceConfig())
 	router := setupTestRouter(svc)
 
-	req, _ := http.NewRequest("GET", "/v1/codebuddy/debug/graph/stats", nil)
+	req, _ := http.NewRequest("GET", "/v1/trace/debug/graph/stats", nil)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -342,7 +342,7 @@ func TestHandlers_HandleGetGraphStats_GraphNotFound(t *testing.T) {
 	svc := NewService(DefaultServiceConfig())
 	router := setupTestRouter(svc)
 
-	req, _ := http.NewRequest("GET", "/v1/codebuddy/debug/graph/stats?graph_id=nonexistent", nil)
+	req, _ := http.NewRequest("GET", "/v1/trace/debug/graph/stats?graph_id=nonexistent", nil)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 

@@ -38,7 +38,7 @@ var (
 	// ErrCanceled indicates the operation was canceled via context.
 	ErrCanceled = errors.New("operation canceled")
 
-	// ErrInitFailed indicates Code Buddy initialization failed.
+	// ErrInitFailed indicates Trace initialization failed.
 	ErrInitFailed = errors.New("code buddy initialization failed")
 
 	// ErrToolNotFound indicates the requested tool does not exist.

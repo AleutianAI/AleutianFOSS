@@ -8,11 +8,11 @@
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
 
-// Package nodes provides concrete DAG node implementations for Code Buddy pipelines.
+// Package nodes provides concrete DAG node implementations for Trace pipelines.
 //
 // # Overview
 //
-// This package contains production-ready nodes that wrap the core Code Buddy
+// This package contains production-ready nodes that wrap the core Trace
 // packages (ast, graph, cache, lint, lsp, patterns, impact, safety). Each node
 // implements the dag.Node interface and can be composed into execution pipelines.
 //
@@ -68,7 +68,7 @@
 //
 // # Error Handling
 //
-// Nodes follow Code Buddy error handling conventions:
+// Nodes follow Trace error handling conventions:
 //   - Return wrapped errors with context (never panic)
 //   - Partial results may be returned alongside errors
 //   - Context cancellation is always respected

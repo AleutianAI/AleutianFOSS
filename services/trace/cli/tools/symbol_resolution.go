@@ -400,8 +400,17 @@ func ResolveFunctionWithFuzzy(
 		return nil, false, fmt.Errorf("no symbol named '%s' found matching kind filter (found %d symbols of other kinds)", name, len(fuzzyMatches))
 	}
 
-	// Use first kind-filtered match (best score among matching symbols)
-	selectedMatch := kindFiltered[0]
+	// IT-06d Bug F: When KindFilterAny is used, apply the same significance
+	// ranking as the exact-match path. Without this, a field named "drawer"
+	// (significance=1) beats the Drawer class (significance=10) because the
+	// fuzzy search returns lowercase matches first. The exact-match path already
+	// calls pickMostSignificantSymbol; the fuzzy path must do the same.
+	var selectedMatch *ast.Symbol
+	if cfg.kindFilter == KindFilterAny {
+		selectedMatch = pickMostSignificantSymbol(kindFiltered)
+	} else {
+		selectedMatch = kindFiltered[0]
+	}
 	logger.Info("Symbol resolution: selected fuzzy match",
 		slog.String("query", name),
 		slog.String("matched", selectedMatch.Name),
@@ -1051,6 +1060,75 @@ func isTestFile(filePath string) bool {
 		strings.HasPrefix(filePath, "cypress/") ||
 		strings.Contains(filePath, "/fixtures/") ||
 		strings.HasPrefix(filePath, "fixtures/")
+}
+
+// isTestHelperFile returns true for test infrastructure files that are not test files
+// themselves but exist to support tests: pytest conftest.py and _testing/ directories.
+//
+// These files are not production logic — they set up fixtures and helpers — but
+// they don't match the test path patterns in isTestFile because they live at the
+// repo root or a top-level directory without a "/test" component.
+//
+// Thread Safety: This function is safe for concurrent use (pure function).
+func isTestHelperFile(filePath string) bool {
+	// Isolate the filename component
+	base := filePath
+	if idx := strings.LastIndex(filePath, "/"); idx >= 0 {
+		base = filePath[idx+1:]
+	}
+	if base == "conftest.py" {
+		return true
+	}
+	return strings.Contains(filePath, "/_testing/") ||
+		strings.HasPrefix(filePath, "_testing/") ||
+		strings.Contains(filePath, "/_helpers/") ||
+		strings.HasPrefix(filePath, "_helpers/")
+}
+
+// isTypeStubFile returns true for pure type annotation stub files (.pyi, .d.ts)
+// that carry type information but contain no executable production logic.
+//
+// These files are valuable for type checking tooling but are lower priority
+// than actual production source when showing find_references results to users.
+//
+// Thread Safety: This function is safe for concurrent use (pure function).
+func isTypeStubFile(filePath string) bool {
+	return strings.HasSuffix(filePath, ".pyi") ||
+		strings.HasSuffix(filePath, ".d.ts") ||
+		strings.Contains(filePath, "/stubs/")
+}
+
+// referenceFilePriority returns a sort priority tier for a file in find_references output.
+//
+// Lower values sort first (higher priority = shown to user first).
+//
+// # Tiers
+//
+//	0 = production source code   (most informative — frame.py, groupby/, io/parsers/)
+//	1 = type stub files          (.pyi, .d.ts — type annotations only, no logic)
+//	2 = test helper/config       (conftest.py, _testing/ — infrastructure, not logic)
+//	3 = test/benchmark/spec files (least informative for understanding real usage)
+//
+// IT-06d Bug B/C: The previous binary isTestFile sort left conftest.py and .pyi stubs
+// classified as "production" (no /test/ path component), so they sorted before
+// core/frame.py and other production modules. This function adds a stub and helper
+// tier between production and test to surface the right files first.
+//
+// Thread Safety: This function is safe for concurrent use (pure function).
+func referenceFilePriority(filePath string) int {
+	// isTestHelperFile must be checked BEFORE isTestFile: _testing/ directories
+	// contain "test" in their path and would be caught by isTestFile as tier 3.
+	// Test helpers (conftest.py, _testing/) are tier 2 — above test files.
+	if isTestHelperFile(filePath) {
+		return 2
+	}
+	if isTestFile(filePath) {
+		return 3
+	}
+	if isTypeStubFile(filePath) {
+		return 1
+	}
+	return 0
 }
 
 // isDocFile returns true if the file path is in a documentation directory

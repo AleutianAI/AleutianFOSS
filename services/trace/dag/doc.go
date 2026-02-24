@@ -8,7 +8,7 @@
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
 
-// Package dag provides a DAG-based execution framework for Code Buddy pipelines.
+// Package dag provides a DAG-based execution framework for Trace pipelines.
 //
 // The DAG (Directed Acyclic Graph) framework enables:
 //   - Parallel execution of independent pipeline nodes

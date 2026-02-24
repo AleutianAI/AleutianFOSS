@@ -542,16 +542,38 @@ func (g *Graph) FindReferencesByID(ctx context.Context, symbolID string, opts ..
 	}
 
 	locations := make([]ast.Location, 0)
+
+	// IT-06d Bug 10: Two-pass edge collection ensures EdgeTypeReferences and
+	// EdgeTypeImplements edges appear before EdgeTypeCalls edges, regardless of
+	// graph insertion order. Edges are inserted in builder call order: extractCallEdges
+	// runs before extractTypeRefEdges, so for highly-called symbols (e.g., pandas.Series
+	// with hundreds of asv_bench EdgeTypeCalls), the call edges fill the fetch window and
+	// annotation-based references (core/frame.py etc.) are never returned.
+	//
+	// Pass 1: annotation-based references (most semantically informative).
 	for _, edge := range node.Incoming {
 		if err := ctx.Err(); err != nil {
 			return locations, nil
 		}
-
 		if len(locations) >= options.Limit {
-			break
+			return locations, nil
 		}
+		if edge.Type == EdgeTypeReferences || edge.Type == EdgeTypeImplements {
+			locations = append(locations, edge.Location)
+		}
+	}
 
-		locations = append(locations, edge.Location)
+	// Pass 2: call-based references (constructor calls, direct invocations).
+	for _, edge := range node.Incoming {
+		if err := ctx.Err(); err != nil {
+			return locations, nil
+		}
+		if len(locations) >= options.Limit {
+			return locations, nil
+		}
+		if edge.Type != EdgeTypeReferences && edge.Type != EdgeTypeImplements {
+			locations = append(locations, edge.Location)
+		}
 	}
 
 	return locations, nil

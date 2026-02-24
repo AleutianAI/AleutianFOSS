@@ -276,6 +276,13 @@ func (t *findArticulationPointsTool) Execute(ctx context.Context, params TypedPa
 		slog.Float64("fragility_score", fragilityScore),
 	)
 
+	// RE-4: Enhance TraceStep metadata with fragility metrics
+	if traceStep.Metadata == nil {
+		traceStep.Metadata = make(map[string]string)
+	}
+	traceStep.Metadata["fragility_score"] = fmt.Sprintf("%.4f", fragilityScore)
+	traceStep.Metadata["fragility_level"] = output.FragilityLevel
+
 	return &Result{
 		Success:    true,
 		Output:     output,
@@ -412,6 +419,24 @@ func (t *findArticulationPointsTool) getFragilityLevel(score float64) string {
 	default:
 		return "MINIMAL - well-connected architecture"
 	}
+}
+
+// detectLanguage attempts to infer the project's primary language.
+func (t *findArticulationPointsTool) detectLanguage() string {
+	if t.index == nil {
+		return ""
+	}
+
+	// Sample a few symbols to see what language they are
+	// Use common names that are likely to exist
+	for _, query := range []string{"main", "handler", "App", "config"} {
+		syms, err := t.index.Search(context.Background(), query, 1)
+		if err == nil && len(syms) > 0 && syms[0].Language != "" {
+			return strings.ToLower(syms[0].Language)
+		}
+	}
+
+	return ""
 }
 
 // formatText creates a human-readable text summary.

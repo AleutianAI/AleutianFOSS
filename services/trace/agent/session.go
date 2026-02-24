@@ -300,7 +300,7 @@ type Session struct {
 	// ProjectRoot is the absolute path to the project.
 	ProjectRoot string `json:"project_root"`
 
-	// GraphID is the Code Buddy graph ID (set after init).
+	// GraphID is the Trace graph ID (set after init).
 	GraphID string `json:"graph_id,omitempty"`
 
 	// State is the current agent state.

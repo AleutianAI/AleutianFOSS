@@ -173,7 +173,18 @@ Examples:
 	traceCmd = &cobra.Command{
 		Use:   "trace [query]",
 		Short: "Analyze codebase using autonomous agent",
-		Run:   runTraceCommand, // Defined in cmd_chat.go
+		Long: `Analyze a codebase using the autonomous trace agent.
+
+Pass a query as arguments for a one-shot answer, or use --interactive
+to stay in a conversational loop where the agent retains context between
+questions.
+
+Examples:
+  aleutian trace "what are the hotspot functions?"
+  aleutian trace --path /path/to/repo "find circular dependencies"
+  aleutian trace --interactive
+  aleutian trace --path /path/to/repo --interactive`,
+		Run: runTraceCommand, // Defined in cmd_chat.go
 	}
 
 	// --- Weaviate Admin ---
@@ -400,6 +411,8 @@ func init() {
 	chatCmd.Flags().String("recency-bias", "none", "Prefer recent documents: none, gentle, moderate, aggressive")
 
 	rootCmd.AddCommand(traceCmd)
+	traceCmd.Flags().StringVar(&tracePath, "path", "", "Path to the project/repo to analyze (default: current directory)")
+	traceCmd.Flags().BoolVarP(&traceInteractive, "interactive", "i", false, "Stay in a conversational loop after each answer")
 
 	// weaviate administration commands
 	rootCmd.AddCommand(weaviateCmd)

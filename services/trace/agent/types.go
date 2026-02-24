@@ -36,7 +36,7 @@ const (
 	// StateIdle is the initial state before any query is received.
 	StateIdle AgentState = "IDLE"
 
-	// StateInit initializes the Code Buddy graph for the project.
+	// StateInit initializes the Trace graph for the project.
 	StateInit AgentState = "INIT"
 
 	// StatePlan assembles initial context and classifies the query.
@@ -51,7 +51,7 @@ const (
 	// StateClarify requests additional input from the user.
 	StateClarify AgentState = "CLARIFY"
 
-	// StateDegraded operates with limited tools when Code Buddy unavailable.
+	// StateDegraded operates with limited tools when Trace unavailable.
 	StateDegraded AgentState = "DEGRADED"
 
 	// StateComplete indicates successful completion.
@@ -235,11 +235,11 @@ type SessionMetrics struct {
 	// ToolForcingRetries is the number of tool forcing retries.
 	ToolForcingRetries int `json:"tool_forcing_retries"`
 
-	// GraphStats contains Code Buddy graph statistics.
+	// GraphStats contains Trace graph statistics.
 	GraphStats *GraphStats `json:"graph_stats,omitempty"`
 }
 
-// GraphStats contains statistics about the Code Buddy graph.
+// GraphStats contains statistics about the Trace graph.
 type GraphStats struct {
 	// FilesParsed is the number of files in the graph.
 	FilesParsed int `json:"files_parsed"`
@@ -635,7 +635,7 @@ type SessionState struct {
 	// ProjectRoot is the project being analyzed.
 	ProjectRoot string `json:"project_root"`
 
-	// GraphID is the Code Buddy graph ID.
+	// GraphID is the Trace graph ID.
 	GraphID string `json:"graph_id,omitempty"`
 
 	// State is the current agent state.

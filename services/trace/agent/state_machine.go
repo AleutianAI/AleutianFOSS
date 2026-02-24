@@ -22,7 +22,7 @@ import (
 //
 //	IDLE → INIT                  : User query received
 //	INIT → PLAN                  : Graph initialized successfully
-//	INIT → DEGRADED              : Code Buddy unavailable
+//	INIT → DEGRADED              : Trace unavailable
 //	INIT → ERROR                 : Unrecoverable init failure
 //	PLAN → EXECUTE               : Initial context assembled
 //	PLAN → CLARIFY               : Query ambiguous, need user input
@@ -210,7 +210,7 @@ func (sm *StateMachine) TransitionReason(from, to AgentState) string {
 	reasons := map[string]string{
 		"IDLE->INIT":        "User query received",
 		"INIT->PLAN":        "Graph initialized successfully",
-		"INIT->DEGRADED":    "Code Buddy unavailable, entering degraded mode",
+		"INIT->DEGRADED":    "Trace unavailable, entering degraded mode",
 		"INIT->ERROR":       "Initialization failed unrecoverably",
 		"PLAN->EXECUTE":     "Initial context assembled",
 		"PLAN->CLARIFY":     "Query ambiguous, need user input",

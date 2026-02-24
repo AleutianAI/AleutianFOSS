@@ -28,7 +28,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// AgentHandlers contains the HTTP handlers for the Code Buddy agent.
+// AgentHandlers contains the HTTP handlers for the Trace agent.
 //
 // Thread Safety: AgentHandlers is safe for concurrent use.
 type AgentHandlers struct {
@@ -81,7 +81,7 @@ func WithRoleConfig(rc *providers.RoleConfig) AgentHandlersOption {
 	}
 }
 
-// NewAgentHandlers creates handlers for the Code Buddy agent.
+// NewAgentHandlers creates handlers for the Trace agent.
 //
 // Description:
 //
@@ -96,7 +96,7 @@ func WithRoleConfig(rc *providers.RoleConfig) AgentHandlersOption {
 // Inputs:
 //
 //	loop - The agent loop implementation. Must not be nil.
-//	svc - The Code Buddy service for graph initialization. Must not be nil.
+//	svc - The Trace service for graph initialization. Must not be nil.
 //	opts - Optional functional options for dependency injection.
 //
 // Outputs:
@@ -137,7 +137,7 @@ func NewAgentHandlers(loop agent.AgentLoop, svc *Service, opts ...AgentHandlersO
 	return h
 }
 
-// HandleAgentRun handles POST /v1/codebuddy/agent/run.
+// HandleAgentRun handles POST /v1/trace/agent/run.
 //
 // Description:
 //
@@ -306,7 +306,7 @@ func (h *AgentHandlers) HandleAgentRun(c *gin.Context) {
 	})
 }
 
-// HandleAgentContinue handles POST /v1/codebuddy/agent/continue.
+// HandleAgentContinue handles POST /v1/trace/agent/continue.
 //
 // Description:
 //
@@ -400,7 +400,7 @@ func (h *AgentHandlers) HandleAgentContinue(c *gin.Context) {
 	})
 }
 
-// HandleAgentAbort handles POST /v1/codebuddy/agent/abort.
+// HandleAgentAbort handles POST /v1/trace/agent/abort.
 //
 // Description:
 //
@@ -469,7 +469,7 @@ func (h *AgentHandlers) HandleAgentAbort(c *gin.Context) {
 	})
 }
 
-// HandleAgentState handles GET /v1/codebuddy/agent/:id.
+// HandleAgentState handles GET /v1/trace/agent/:id.
 //
 // Description:
 //
@@ -537,7 +537,7 @@ func (h *AgentHandlers) HandleAgentState(c *gin.Context) {
 	})
 }
 
-// HandleGetReasoningTrace handles GET /v1/codebuddy/agent/:id/reasoning.
+// HandleGetReasoningTrace handles GET /v1/trace/agent/:id/reasoning.
 //
 // Description:
 //
@@ -607,7 +607,7 @@ func (h *AgentHandlers) HandleGetReasoningTrace(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
-// HandleGetCRSExport handles GET /v1/codebuddy/agent/:id/crs.
+// HandleGetCRSExport handles GET /v1/trace/agent/:id/crs.
 //
 // Description:
 //
@@ -677,7 +677,7 @@ func (h *AgentHandlers) HandleGetCRSExport(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
-// HandleDebugCRS handles GET /v1/codebuddy/agent/debug/crs.
+// HandleDebugCRS handles GET /v1/trace/agent/debug/crs.
 //
 // Description:
 //
@@ -827,7 +827,7 @@ func boolToInt(b bool) int {
 	return 0
 }
 
-// HandleDebugHistory handles GET /v1/codebuddy/agent/debug/history.
+// HandleDebugHistory handles GET /v1/trace/agent/debug/history.
 //
 // Description:
 //

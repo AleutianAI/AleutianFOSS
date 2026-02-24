@@ -446,7 +446,7 @@ func TestDegradedModeWorkflow(t *testing.T) {
 
 	workflow := []AgentState{
 		StateInit,     // Start initialization
-		StateDegraded, // Code Buddy unavailable
+		StateDegraded, // Trace unavailable
 		StatePlan,     // Limited planning
 		StateExecute,  // Execute with limited tools
 		StateComplete, // Done

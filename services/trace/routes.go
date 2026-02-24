@@ -14,11 +14,11 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// RegisterRoutes registers all Code Buddy routes with the router.
+// RegisterRoutes registers all Trace routes with the router.
 //
 // Description:
 //
-//	Registers all /v1/codebuddy/* endpoints with the given Gin router group.
+//	Registers all /v1/trace/* endpoints with the given Gin router group.
 //	The router group should already have any required middleware applied.
 //
 // Inputs:
@@ -28,58 +28,58 @@ import (
 //
 // Core Endpoints:
 //
-//	POST /v1/codebuddy/init - Initialize a code graph
-//	POST /v1/codebuddy/context - Assemble context for LLM prompt
-//	GET  /v1/codebuddy/symbol/:id - Get symbol by ID
-//	GET  /v1/codebuddy/callers - Find function callers
-//	GET  /v1/codebuddy/implementations - Find interface implementations
-//	POST /v1/codebuddy/seed - Seed library documentation
+//	POST /v1/trace/init - Initialize a code graph
+//	POST /v1/trace/context - Assemble context for LLM prompt
+//	GET  /v1/trace/symbol/:id - Get symbol by ID
+//	GET  /v1/trace/callers - Find function callers
+//	GET  /v1/trace/implementations - Find interface implementations
+//	POST /v1/trace/seed - Seed library documentation
 //
 // Memory Endpoints:
 //
-//	GET  /v1/codebuddy/memories - List memories
-//	POST /v1/codebuddy/memories - Store a new memory
-//	POST /v1/codebuddy/memories/retrieve - Semantic memory retrieval
-//	DELETE /v1/codebuddy/memories/:id - Delete a memory
-//	POST /v1/codebuddy/memories/:id/validate - Validate a memory
-//	POST /v1/codebuddy/memories/:id/contradict - Contradict a memory
+//	GET  /v1/trace/memories - List memories
+//	POST /v1/trace/memories - Store a new memory
+//	POST /v1/trace/memories/retrieve - Semantic memory retrieval
+//	DELETE /v1/trace/memories/:id - Delete a memory
+//	POST /v1/trace/memories/:id/validate - Validate a memory
+//	POST /v1/trace/memories/:id/contradict - Contradict a memory
 //
 // Agentic Tool Endpoints (24 tools):
 //
-//	GET  /v1/codebuddy/tools - Discover available tools
+//	GET  /v1/trace/tools - Discover available tools
 //
-//	POST /v1/codebuddy/explore/entry_points - Find entry points
-//	POST /v1/codebuddy/explore/data_flow - Trace data flow
-//	POST /v1/codebuddy/explore/error_flow - Trace error flow
-//	POST /v1/codebuddy/explore/config_usage - Find config usages
-//	POST /v1/codebuddy/explore/similar_code - Find similar code
-//	POST /v1/codebuddy/explore/minimal_context - Build minimal context
-//	POST /v1/codebuddy/explore/summarize_file - Summarize a file
-//	POST /v1/codebuddy/explore/summarize_package - Summarize a package
-//	POST /v1/codebuddy/explore/change_impact - Analyze change impact
+//	POST /v1/trace/explore/entry_points - Find entry points
+//	POST /v1/trace/explore/data_flow - Trace data flow
+//	POST /v1/trace/explore/error_flow - Trace error flow
+//	POST /v1/trace/explore/config_usage - Find config usages
+//	POST /v1/trace/explore/similar_code - Find similar code
+//	POST /v1/trace/explore/minimal_context - Build minimal context
+//	POST /v1/trace/explore/summarize_file - Summarize a file
+//	POST /v1/trace/explore/summarize_package - Summarize a package
+//	POST /v1/trace/explore/change_impact - Analyze change impact
 //
-//	POST /v1/codebuddy/reason/breaking_changes - Check breaking changes
-//	POST /v1/codebuddy/reason/simulate_change - Simulate a change
-//	POST /v1/codebuddy/reason/validate_change - Validate code syntax
-//	POST /v1/codebuddy/reason/test_coverage - Find test coverage
-//	POST /v1/codebuddy/reason/side_effects - Detect side effects
-//	POST /v1/codebuddy/reason/suggest_refactor - Suggest refactoring
+//	POST /v1/trace/reason/breaking_changes - Check breaking changes
+//	POST /v1/trace/reason/simulate_change - Simulate a change
+//	POST /v1/trace/reason/validate_change - Validate code syntax
+//	POST /v1/trace/reason/test_coverage - Find test coverage
+//	POST /v1/trace/reason/side_effects - Detect side effects
+//	POST /v1/trace/reason/suggest_refactor - Suggest refactoring
 //
-//	POST /v1/codebuddy/coordinate/plan_changes - Plan multi-file changes
-//	POST /v1/codebuddy/coordinate/validate_plan - Validate a change plan
-//	POST /v1/codebuddy/coordinate/preview_changes - Preview changes as diffs
+//	POST /v1/trace/coordinate/plan_changes - Plan multi-file changes
+//	POST /v1/trace/coordinate/validate_plan - Validate a change plan
+//	POST /v1/trace/coordinate/preview_changes - Preview changes as diffs
 //
-//	POST /v1/codebuddy/patterns/detect - Detect design patterns
-//	POST /v1/codebuddy/patterns/code_smells - Find code smells
-//	POST /v1/codebuddy/patterns/duplication - Find duplicate code
-//	POST /v1/codebuddy/patterns/circular_deps - Find circular dependencies
-//	POST /v1/codebuddy/patterns/conventions - Extract conventions
-//	POST /v1/codebuddy/patterns/dead_code - Find dead code
+//	POST /v1/trace/patterns/detect - Detect design patterns
+//	POST /v1/trace/patterns/code_smells - Find code smells
+//	POST /v1/trace/patterns/duplication - Find duplicate code
+//	POST /v1/trace/patterns/circular_deps - Find circular dependencies
+//	POST /v1/trace/patterns/conventions - Extract conventions
+//	POST /v1/trace/patterns/dead_code - Find dead code
 //
 // Health Endpoints:
 //
-//	GET  /v1/codebuddy/health - Health check
-//	GET  /v1/codebuddy/ready - Readiness check
+//	GET  /v1/trace/health - Health check
+//	GET  /v1/trace/ready - Readiness check
 //
 // Example:
 //
@@ -89,39 +89,39 @@ import (
 //	v1 := router.Group("/v1")
 //	trace.RegisterRoutes(v1, handlers)
 func RegisterRoutes(rg *gin.RouterGroup, handlers *Handlers) {
-	codebuddy := rg.Group("/codebuddy")
+	trace := rg.Group("/trace")
 	{
 		// Graph lifecycle
-		codebuddy.POST("/init", handlers.HandleInit)
+		trace.POST("/init", handlers.HandleInit)
 
 		// Context assembly
-		codebuddy.POST("/context", handlers.HandleContext)
+		trace.POST("/context", handlers.HandleContext)
 
 		// Symbol queries
-		codebuddy.GET("/symbol/:id", handlers.HandleSymbol)
-		codebuddy.GET("/callers", handlers.HandleCallers)
-		codebuddy.GET("/implementations", handlers.HandleImplementations)
+		trace.GET("/symbol/:id", handlers.HandleSymbol)
+		trace.GET("/callers", handlers.HandleCallers)
+		trace.GET("/implementations", handlers.HandleImplementations)
 
 		// Library documentation seeding
-		codebuddy.POST("/seed", handlers.HandleSeed)
+		trace.POST("/seed", handlers.HandleSeed)
 
 		// Memory management
-		codebuddy.GET("/memories", handlers.HandleListMemories)
-		codebuddy.POST("/memories", handlers.HandleStoreMemory)
-		codebuddy.POST("/memories/retrieve", handlers.HandleRetrieveMemories)
-		codebuddy.DELETE("/memories/:id", handlers.HandleDeleteMemory)
-		codebuddy.POST("/memories/:id/validate", handlers.HandleValidateMemory)
-		codebuddy.POST("/memories/:id/contradict", handlers.HandleContradictMemory)
+		trace.GET("/memories", handlers.HandleListMemories)
+		trace.POST("/memories", handlers.HandleStoreMemory)
+		trace.POST("/memories/retrieve", handlers.HandleRetrieveMemories)
+		trace.DELETE("/memories/:id", handlers.HandleDeleteMemory)
+		trace.POST("/memories/:id/validate", handlers.HandleValidateMemory)
+		trace.POST("/memories/:id/contradict", handlers.HandleContradictMemory)
 
 		// Health checks
-		codebuddy.GET("/health", handlers.HandleHealth)
-		codebuddy.GET("/ready", handlers.HandleReady)
+		trace.GET("/health", handlers.HandleHealth)
+		trace.GET("/ready", handlers.HandleReady)
 
 		// =================================================================
 		// DEBUG ENDPOINTS (GR-43)
 		// =================================================================
 
-		debug := codebuddy.Group("/debug")
+		debug := trace.Group("/debug")
 		{
 			debug.GET("/graph/stats", handlers.HandleGetGraphStats)
 			debug.GET("/cache", handlers.HandleGetCacheStats)
@@ -132,10 +132,10 @@ func RegisterRoutes(rg *gin.RouterGroup, handlers *Handlers) {
 		// =================================================================
 
 		// Tool discovery
-		codebuddy.GET("/tools", handlers.HandleGetTools)
+		trace.GET("/tools", handlers.HandleGetTools)
 
 		// Exploration tools (9 endpoints)
-		explore := codebuddy.Group("/explore")
+		explore := trace.Group("/explore")
 		{
 			explore.POST("/entry_points", handlers.HandleFindEntryPoints)
 			explore.POST("/data_flow", handlers.HandleTraceDataFlow)
@@ -149,7 +149,7 @@ func RegisterRoutes(rg *gin.RouterGroup, handlers *Handlers) {
 		}
 
 		// Reasoning tools (6 endpoints)
-		reason := codebuddy.Group("/reason")
+		reason := trace.Group("/reason")
 		{
 			reason.POST("/breaking_changes", handlers.HandleCheckBreakingChanges)
 			reason.POST("/simulate_change", handlers.HandleSimulateChange)
@@ -160,7 +160,7 @@ func RegisterRoutes(rg *gin.RouterGroup, handlers *Handlers) {
 		}
 
 		// Coordination tools (3 endpoints)
-		coordinate := codebuddy.Group("/coordinate")
+		coordinate := trace.Group("/coordinate")
 		{
 			coordinate.POST("/plan_changes", handlers.HandlePlanMultiFileChange)
 			coordinate.POST("/validate_plan", handlers.HandleValidatePlan)
@@ -168,7 +168,7 @@ func RegisterRoutes(rg *gin.RouterGroup, handlers *Handlers) {
 		}
 
 		// Pattern tools (6 endpoints)
-		patterns := codebuddy.Group("/patterns")
+		patterns := trace.Group("/patterns")
 		{
 			patterns.POST("/detect", handlers.HandleDetectPatterns)
 			patterns.POST("/code_smells", handlers.HandleFindCodeSmells)
@@ -180,11 +180,11 @@ func RegisterRoutes(rg *gin.RouterGroup, handlers *Handlers) {
 	}
 }
 
-// RegisterAgentRoutes registers the Code Buddy agent routes with the router.
+// RegisterAgentRoutes registers the Trace agent routes with the router.
 //
 // Description:
 //
-//	Registers all /v1/codebuddy/agent/* endpoints with the given Gin router group.
+//	Registers all /v1/trace/agent/* endpoints with the given Gin router group.
 //	These endpoints provide the agent loop functionality for AI-driven code
 //	assistance with multi-step reasoning, tool execution, and clarification.
 //
@@ -195,12 +195,12 @@ func RegisterRoutes(rg *gin.RouterGroup, handlers *Handlers) {
 //
 // Endpoints:
 //
-//	POST /v1/codebuddy/agent/run - Start a new agent session
-//	POST /v1/codebuddy/agent/continue - Continue from CLARIFY state
-//	POST /v1/codebuddy/agent/abort - Abort an active session
-//	GET  /v1/codebuddy/agent/:id - Get session state
-//	GET  /v1/codebuddy/agent/:id/reasoning - Get reasoning trace
-//	GET  /v1/codebuddy/agent/:id/crs - Get CRS state export
+//	POST /v1/trace/agent/run - Start a new agent session
+//	POST /v1/trace/agent/continue - Continue from CLARIFY state
+//	POST /v1/trace/agent/abort - Abort an active session
+//	GET  /v1/trace/agent/:id - Get session state
+//	GET  /v1/trace/agent/:id/reasoning - Get reasoning trace
+//	GET  /v1/trace/agent/:id/crs - Get CRS state export
 //
 // Example:
 //
@@ -231,9 +231,9 @@ func RegisterAgentRoutes(rg *gin.RouterGroup, handlers *AgentHandlers) {
 func RegisterAgentRoutesWithMiddleware(rg *gin.RouterGroup, handlers *AgentHandlers, middleware gin.HandlerFunc) {
 	var agent *gin.RouterGroup
 	if middleware != nil {
-		agent = rg.Group("/codebuddy/agent", middleware)
+		agent = rg.Group("/trace/agent", middleware)
 	} else {
-		agent = rg.Group("/codebuddy/agent")
+		agent = rg.Group("/trace/agent")
 	}
 	{
 		// Session lifecycle

@@ -887,6 +887,8 @@ func (p *ExecutePhase) buildLLMRequest(deps *Dependencies) (*llm.Request, *agent
 					// trace_logs_30 showed GLM-4.7-flash outputting malformed XML that
 					// crashed Ollama's parser.
 					if circuitBreakerFired {
+						// IT-3/10 FIX-3b: Anti-hallucination circuit breaker prompt.
+						// Addresses ISSUE-03, 09, 10, 12, 14, 17F.
 						synthesisPrompt := `You have gathered information from tools. Now provide a complete answer.
 
 MANDATORY: YOU MUST RESPOND
@@ -900,6 +902,13 @@ CRITICAL - DO NOT OUTPUT ANY XML OR TOOL CALLS:
 - No <function> or </function> tags
 - No XML-formatted invocations
 - Tools are now disabled - you cannot call more tools
+
+CRITICAL - DO NOT FABRICATE:
+- ONLY report data that appeared in tool results above
+- Do NOT use training knowledge about this library/framework
+- Do NOT invent file paths, function names, line numbers, or call chains
+- If tool returned "not found" or empty, say so — do NOT fill in from memory
+- If tool returned data for a different question, state what was returned honestly
 
 DO:
 - Synthesize a clear answer from the tool results above
@@ -929,10 +938,11 @@ Provide your answer now:`
 						slog.String("tool", routerSelection.Tool),
 						slog.Float64("confidence", routerSelection.Confidence),
 					)
+					// GR-44 Rev 2: Set routerUsed before early return to satisfy enforcement check
+					routerUsed = true
 					// Return request with hard forcing selection
 					return request, routerSelection, nil
 				}
-
 				// Emit routing event if we didn't exit early
 				if routerUsed {
 					p.emitToolRouting(deps, routerSelection)
@@ -2706,11 +2716,35 @@ func (p *ExecutePhase) forceLLMSynthesis(
 		slog.Int("total_input_bytes", totalInputLen),
 	)
 
+	// IT-3/10 FIX-3a: Anti-hallucination synthesis prompt. Addresses ISSUE-03, 09, 10, 12, 14, 17F.
 	synthesisPrompt := `You have gathered information from tools. Now provide a complete answer.
 
 MANDATORY: YOU MUST RESPOND WITH A COMPLETE ANSWER based on the tool results in the conversation above.
 Graph tools have already provided exhaustive results — do NOT request more tool calls.
-Summarize the findings clearly and completely.`
+Summarize the findings clearly and completely.
+
+CRITICAL RULES FOR SYNTHESIS — VIOLATING THESE PRODUCES HARMFUL OUTPUT:
+
+1. ONLY use data returned by tools. Do NOT use your training knowledge about this codebase,
+   library, or framework. The graph is the ONLY authoritative source. If the tool returned
+   no results or "not found", report that directly. A response of "X was not found in the
+   codebase graph" is CORRECT — do not fill in what you think the answer should be.
+
+2. Do NOT fabricate file paths, line numbers, function names, class names, or call chains
+   that were not in the tool output. Do not invent intermediate nodes in paths. Do not
+   add usage examples or references that were not returned by the tool.
+
+3. If tool output was TRUNCATED (e.g., "showing 10 of 20 communities"), state that
+   additional results exist but were not returned. Do NOT invent content for the
+   missing entries.
+
+4. When reporting IDs or labels from tool output (community numbers, rank positions),
+   quote them EXACTLY as returned. Do not renumber or reinterpret.
+
+5. If the tool returned data for a DIFFERENT question than what was asked (e.g., callee
+   data when cycles were requested), say "The tool returned [what it returned], which
+   does not directly answer the question about [what was asked]." Do NOT reinterpret
+   callee data as cycle analysis.`
 
 	// Append synthesis instruction as the last user message.
 	synthRequest.Messages = append(synthRequest.Messages, llm.Message{

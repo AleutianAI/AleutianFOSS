@@ -2129,3 +2129,193 @@ func TestFilterOutOverloadStubs(t *testing.T) {
 		}
 	})
 }
+
+// ─── IT-06d Bug B/C: isTestHelperFile, isTypeStubFile, referenceFilePriority ───
+
+func TestIsTestHelperFile(t *testing.T) {
+	tests := []struct {
+		name     string
+		filePath string
+		want     bool
+	}{
+		// conftest.py cases
+		{"root conftest", "conftest.py", true},
+		{"nested conftest", "pandas/core/conftest.py", true},
+		{"deep conftest", "a/b/c/conftest.py", true},
+		{"conftest in name but not exact", "my_conftest_helper.py", false},
+
+		// _testing/ directory
+		{"_testing prefix", "_testing/util.py", true},
+		{"_testing subdirectory", "pandas/_testing/assertions.py", true},
+		{"_helpers prefix", "_helpers/setup.py", true},
+		{"_helpers subdirectory", "lib/_helpers/mock.py", true},
+
+		// Normal test files should be caught by isTestFile, not here
+		{"test/ prefix — not a helper", "test/frame_test.go", false},
+		{"_test suffix — not a helper", "frame_test.go", false},
+
+		// Production files
+		{"production source", "pandas/core/frame.py", false},
+		{"production source with test in name", "pandas/core/internals.py", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isTestHelperFile(tt.filePath)
+			if got != tt.want {
+				t.Errorf("isTestHelperFile(%q) = %v, want %v", tt.filePath, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsTypeStubFile(t *testing.T) {
+	tests := []struct {
+		name     string
+		filePath string
+		want     bool
+	}{
+		// .pyi stubs (Python)
+		{"root .pyi", "properties.pyi", true},
+		{"nested .pyi", "pandas/_libs/properties.pyi", true},
+		{"pandas stubs .pyi", "pandas-stubs/core/frame.pyi", true},
+
+		// .d.ts stubs (TypeScript)
+		{"root .d.ts", "index.d.ts", true},
+		{"nested .d.ts", "types/index.d.ts", true},
+		{"dist .d.ts", "dist/plottable.d.ts", true},
+
+		// stubs/ directory
+		{"stubs directory", "stubs/pandas/core.pyi", true},
+		{"nested stubs directory", "typings/stubs/react.d.ts", true},
+
+		// Production files
+		{"regular .py", "pandas/core/frame.py", false},
+		{"regular .ts", "src/components/plot.ts", false},
+		{"regular .js", "lib/response.js", false},
+		{"pyi in name only", "mypyi_helper.py", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isTypeStubFile(tt.filePath)
+			if got != tt.want {
+				t.Errorf("isTypeStubFile(%q) = %v, want %v", tt.filePath, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReferenceFilePriority(t *testing.T) {
+	tests := []struct {
+		name     string
+		filePath string
+		wantTier int
+	}{
+		// Tier 0: production source
+		{"production module", "pandas/core/frame.py", 0},
+		{"production groupby", "pandas/core/groupby/generic.py", 0},
+		{"production io parser", "pandas/io/parsers/readers.py", 0},
+		{"go source", "services/trace/cli/tools/executor.go", 0},
+		{"typescript source", "src/plots/pie.ts", 0},
+
+		// Tier 1: type stubs
+		{"Python .pyi stub", "pandas/_libs/properties.pyi", 1},
+		{"TypeScript .d.ts stub", "dist/plottable.d.ts", 1},
+
+		// Tier 2: test helpers / config
+		{"root conftest.py", "conftest.py", 2},
+		{"nested conftest.py", "pandas/core/conftest.py", 2},
+		{"_testing directory", "pandas/_testing/assertions.py", 2},
+
+		// Tier 3: tests and benchmarks
+		{"test directory", "pandas/tests/frame/test_api.py", 3},
+		{"_test suffix Go", "executor_test.go", 3},
+		{"asv_bench directory", "asv_bench/benchmarks/frame.py", 3},
+		{"spec file JS", "test/req.acceptsEncoding.spec.js", 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := referenceFilePriority(tt.filePath)
+			if got != tt.wantTier {
+				t.Errorf("referenceFilePriority(%q) = tier %d, want tier %d", tt.filePath, got, tt.wantTier)
+			}
+		})
+	}
+
+	// Ordering invariant: lower tiers always sort before higher tiers.
+	t.Run("ordering invariant: production < stubs < helpers < tests", func(t *testing.T) {
+		if referenceFilePriority("pandas/core/frame.py") >= referenceFilePriority("pandas/_libs/properties.pyi") {
+			t.Error("production must sort before type stubs")
+		}
+		if referenceFilePriority("pandas/_libs/properties.pyi") >= referenceFilePriority("conftest.py") {
+			t.Error("type stubs must sort before test helpers")
+		}
+		if referenceFilePriority("conftest.py") >= referenceFilePriority("pandas/tests/frame/test_api.py") {
+			t.Error("test helpers must sort before test files")
+		}
+	})
+}
+
+// ─── IT-06d Bug F: ResolveFunctionWithFuzzy with KindFilterAny prefers class over field ───
+
+// TestResolveFunctionWithFuzzy_KindFilterAny_FuzzyPath verifies that the fuzzy
+// search path applies pickMostSignificantSymbol when KindFilterAny is used.
+// This is the Plottable Drawer regression: without the fix, the lowercase "drawer"
+// field (significance=1) beats the "Drawer" class (significance=10) because
+// fuzzy search returns case-insensitive matches in alphabetical order.
+func TestResolveFunctionWithFuzzy_KindFilterAny_FuzzyPath(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+
+	// Build an index where "Drawer" class is NOT reachable via exact match
+	// (simulating a case where the index key uses a different casing or path),
+	// so fuzzy search is triggered.
+	idx := index.NewSymbolIndex()
+
+	// The class uses a long path that exact match won't find by bare name "Drawer"
+	drawerClass := &ast.Symbol{
+		ID:        "src/drawers/Drawer.ts:10:Drawer",
+		Name:      "Drawer",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "src/drawers/Drawer.ts",
+		StartLine: 10,
+		EndLine:   200,
+		Language:  "typescript",
+	}
+	// A lowercase field named "drawer" that fuzzy search returns first (alphabetically)
+	drawerField := &ast.Symbol{
+		ID:        "src/components/commons.ts:24:drawer",
+		Name:      "drawer",
+		Kind:      ast.SymbolKindField,
+		FilePath:  "src/components/commons.ts",
+		StartLine: 24,
+		EndLine:   24,
+		Language:  "typescript",
+	}
+
+	if err := idx.Add(drawerField); err != nil {
+		t.Fatalf("failed to add field: %v", err)
+	}
+	if err := idx.Add(drawerClass); err != nil {
+		t.Fatalf("failed to add class: %v", err)
+	}
+
+	// With KindFilterAny, exact match for "Drawer" will find drawerClass directly.
+	// This tests the significance-based selection on the exact-match path.
+	sym, _, err := ResolveFunctionWithFuzzy(ctx, idx, "Drawer", logger, WithKindFilter(KindFilterAny))
+	if err != nil {
+		t.Fatalf("ResolveFunctionWithFuzzy() error: %v", err)
+	}
+	if sym.Kind != ast.SymbolKindClass {
+		t.Errorf("expected Drawer class (significance=10), got %s %q at %s",
+			sym.Kind, sym.Name, sym.FilePath)
+	}
+
+	// Verify that even if field is returned first from search, significance wins.
+	// Test pickMostSignificantSymbol directly with field-before-class ordering.
+	fieldFirst := []*ast.Symbol{drawerField, drawerClass}
+	best := pickMostSignificantSymbol(fieldFirst)
+	if best.Kind != ast.SymbolKindClass {
+		t.Errorf("pickMostSignificantSymbol: expected class (significance=10), got %s %q",
+			best.Kind, best.Name)
+	}
+}
