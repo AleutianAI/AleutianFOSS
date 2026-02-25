@@ -25,6 +25,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/providers"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/routing"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
 	"github.com/gin-gonic/gin"
 )
 
@@ -1128,8 +1129,72 @@ func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent
 	logger.Info("initializeToolRouter: Router created successfully",
 		"session_id", session.ID)
 
+	// CB-62: Wrap with EscalatingRouter if escalation model is configured.
+	// When EscalationModel is empty (default), the EscalatingRouter is a
+	// zero-overhead passthrough — identical to using Granite4Router directly.
+	var finalRouter routing.ToolRouter = router
+	if routerConfig.EscalationModel != "" {
+		logger.Info("initializeToolRouter: Escalation model configured",
+			"escalation_model", routerConfig.EscalationModel,
+			"escalation_threshold", routerConfig.EscalationThreshold,
+			"escalation_timeout", routerConfig.EscalationTimeout)
+
+		// Build escalation router config using the same endpoint but different model.
+		escConfig := routerConfig
+		escConfig.Model = routerConfig.EscalationModel
+		escConfig.Timeout = routerConfig.EscalationTimeout
+		if escConfig.Timeout <= 0 {
+			escConfig.Timeout = 3 * time.Second
+		}
+
+		// CB-62: Use escalation model override for the chat client.
+		// roleConfig.Router has the primary model; override with escalation model.
+		escProviderConfig := roleConfig.Router
+		escProviderConfig.Model = routerConfig.EscalationModel
+		escClient, escErr := h.providerFactory.CreateChatClient(escProviderConfig)
+		if escErr != nil {
+			logger.Warn("initializeToolRouter: Escalation router creation failed, continuing without escalation",
+				"error", escErr)
+		} else {
+			escRouter, escErr := routing.NewGranite4Router(escClient, escConfig)
+			if escErr != nil {
+				logger.Warn("initializeToolRouter: Escalation Granite4Router creation failed, continuing without escalation",
+					"error", escErr)
+			} else {
+				// CB-62: Convert StaticToolDefinitions to routing.ToolSpec for escalation.
+				// The escalation router needs the full 55-tool set to bypass the prefilter.
+				staticDefs := tools.StaticToolDefinitions()
+				allSpecs := make([]routing.ToolSpec, 0, len(staticDefs))
+				for _, def := range staticDefs {
+					paramNames := make([]string, 0, len(def.Parameters))
+					for name := range def.Parameters {
+						paramNames = append(paramNames, name)
+					}
+					allSpecs = append(allSpecs, routing.ToolSpec{
+						Name:        def.Name,
+						Description: def.Description,
+						Params:      paramNames,
+						Category:    string(def.Category),
+					})
+				}
+
+				finalRouter = routing.NewEscalatingRouter(
+					router, escRouter,
+					routerConfig.EscalationThreshold,
+					allSpecs,
+					routerConfig.EscalationTimeout,
+					logger,
+				)
+				logger.Info("initializeToolRouter: EscalatingRouter created",
+					"primary_model", routerConfig.Model,
+					"escalation_model", routerConfig.EscalationModel,
+					"all_specs_count", len(allSpecs))
+			}
+		}
+	}
+
 	// Wrap with adapter to implement agent.ToolRouter interface
-	adapter := routing.NewRouterAdapter(router)
+	adapter := routing.NewRouterAdapter(finalRouter)
 
 	// Set router on session
 	session.SetToolRouter(adapter)

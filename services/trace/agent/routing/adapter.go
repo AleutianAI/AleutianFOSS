@@ -30,19 +30,19 @@ import (
 //
 // RouterAdapter is safe for concurrent use if the underlying router is.
 type RouterAdapter struct {
-	router *Granite4Router
+	router ToolRouter
 }
 
 // NewRouterAdapter creates an adapter that implements agent.ToolRouter.
 //
 // # Inputs
 //
-//   - router: The underlying Granite4Router.
+//   - router: The underlying ToolRouter (Granite4Router, EscalatingRouter, etc).
 //
 // # Outputs
 //
 //   - agent.ToolRouter: The adapted router.
-func NewRouterAdapter(router *Granite4Router) agent.ToolRouter {
+func NewRouterAdapter(router ToolRouter) agent.ToolRouter {
 	return &RouterAdapter{router: router}
 }
 
@@ -156,10 +156,18 @@ func (a *RouterAdapter) Close() error {
 //
 // Allows callers to warm the router model. This is not part of the
 // agent.ToolRouter interface but is useful during initialization.
+// If the underlying router does not support WarmRouter (e.g., EscalatingRouter),
+// this is a no-op.
 //
 // CB-60: Now accepts a ModelLifecycleManager for provider-agnostic warmup.
 func (a *RouterAdapter) WarmRouter(ctx context.Context, lifecycle providers.ModelLifecycleManager) error {
-	return a.router.WarmRouter(ctx, lifecycle)
+	type warmable interface {
+		WarmRouter(ctx context.Context, lifecycle providers.ModelLifecycleManager) error
+	}
+	if w, ok := a.router.(warmable); ok {
+		return w.WarmRouter(ctx, lifecycle)
+	}
+	return nil
 }
 
 // truncateForLog truncates a string for logging purposes.

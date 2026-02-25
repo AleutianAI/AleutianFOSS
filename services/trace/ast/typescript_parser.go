@@ -518,13 +518,17 @@ func (p *TypeScriptParser) extractDeclarations(ctx context.Context, root *sitter
 		case "export_statement":
 			p.processExportStatement(ctx, child, content, filePath, result)
 		case "function_declaration":
-			if fn := p.processFunction(ctx, child, content, filePath, nil, false); fn != nil {
+			fn, dynImps := p.processFunction(ctx, child, content, filePath, nil, false)
+			if fn != nil {
 				result.Symbols = append(result.Symbols, fn)
 			}
+			result.Imports = append(result.Imports, dynImps...)
 		case "class_declaration":
-			if cls := p.processClass(ctx, child, content, filePath, nil, false); cls != nil {
+			cls, dynImps := p.processClass(ctx, child, content, filePath, nil, false)
+			if cls != nil {
 				result.Symbols = append(result.Symbols, cls)
 			}
+			result.Imports = append(result.Imports, dynImps...)
 		case "interface_declaration":
 			if iface := p.processInterface(child, content, filePath, false); iface != nil {
 				result.Symbols = append(result.Symbols, iface)
@@ -539,13 +543,22 @@ func (p *TypeScriptParser) extractDeclarations(ctx context.Context, root *sitter
 			}
 		case "lexical_declaration":
 			p.processLexicalDeclaration(child, content, filePath, result, false)
+			// IT-06e Bug 4: scan for top-level dynamic import() patterns
+			result.Imports = append(result.Imports, p.scanForDynamicImports(child, content, filePath)...)
 		case "variable_declaration":
 			p.processVariableDeclaration(child, content, filePath, result, false)
+			// IT-06e Bug 4: scan for top-level dynamic import() patterns
+			result.Imports = append(result.Imports, p.scanForDynamicImports(child, content, filePath)...)
+		case "expression_statement":
+			// IT-06e Bug 4: scan for top-level dynamic import() expression statements
+			result.Imports = append(result.Imports, p.scanForDynamicImports(child, content, filePath)...)
 		case "abstract_class_declaration":
 			// IT-03a Phase 13 T-4: Handle non-exported abstract classes
-			if cls := p.processAbstractClass(ctx, child, content, filePath, nil, false); cls != nil {
+			cls, dynImps := p.processAbstractClass(ctx, child, content, filePath, nil, false)
+			if cls != nil {
 				result.Symbols = append(result.Symbols, cls)
 			}
+			result.Imports = append(result.Imports, dynImps...)
 		}
 	}
 }
@@ -573,7 +586,8 @@ func (p *TypeScriptParser) processExportStatement(ctx context.Context, node *sit
 		case "default":
 			isDefault = true
 		case "function_declaration":
-			if fn := p.processFunction(ctx, child, content, filePath, decorators, true); fn != nil {
+			fn, dynImps := p.processFunction(ctx, child, content, filePath, decorators, true)
+			if fn != nil {
 				if isDefault {
 					if fn.Metadata == nil {
 						fn.Metadata = &SymbolMetadata{}
@@ -588,8 +602,10 @@ func (p *TypeScriptParser) processExportStatement(ctx context.Context, node *sit
 				}
 				result.Symbols = append(result.Symbols, fn)
 			}
+			result.Imports = append(result.Imports, dynImps...)
 		case "class_declaration":
-			if cls := p.processClass(ctx, child, content, filePath, decorators, true); cls != nil {
+			cls, dynImps := p.processClass(ctx, child, content, filePath, decorators, true)
+			if cls != nil {
 				// IT-03a A-3: Attach decorator arguments
 				if len(decoratorArgs) > 0 {
 					if cls.Metadata == nil {
@@ -599,6 +615,7 @@ func (p *TypeScriptParser) processExportStatement(ctx context.Context, node *sit
 				}
 				result.Symbols = append(result.Symbols, cls)
 			}
+			result.Imports = append(result.Imports, dynImps...)
 		case "interface_declaration":
 			if iface := p.processInterface(child, content, filePath, true); iface != nil {
 				result.Symbols = append(result.Symbols, iface)
@@ -614,9 +631,11 @@ func (p *TypeScriptParser) processExportStatement(ctx context.Context, node *sit
 		case "lexical_declaration":
 			p.processLexicalDeclaration(child, content, filePath, result, true)
 		case "abstract_class_declaration":
-			if cls := p.processAbstractClass(ctx, child, content, filePath, decorators, true); cls != nil {
+			cls, dynImps := p.processAbstractClass(ctx, child, content, filePath, decorators, true)
+			if cls != nil {
 				result.Symbols = append(result.Symbols, cls)
 			}
+			result.Imports = append(result.Imports, dynImps...)
 		case "string", "template_string":
 			// IT-03a B-3: Re-export source module: export { Foo } from './bar'
 			source := p.extractStringContent(child, content)
@@ -638,7 +657,7 @@ func (p *TypeScriptParser) processExportStatement(ctx context.Context, node *sit
 }
 
 // processFunction extracts a function declaration.
-func (p *TypeScriptParser) processFunction(ctx context.Context, node *sitter.Node, content []byte, filePath string, decorators []string, exported bool) *Symbol {
+func (p *TypeScriptParser) processFunction(ctx context.Context, node *sitter.Node, content []byte, filePath string, decorators []string, exported bool) (*Symbol, []Import) {
 	var name string
 	var typeParams []string
 	var params string
@@ -676,7 +695,7 @@ func (p *TypeScriptParser) processFunction(ctx context.Context, node *sitter.Nod
 	}
 
 	if name == "" {
-		return nil
+		return nil, nil
 	}
 
 	// Build signature
@@ -725,8 +744,9 @@ func (p *TypeScriptParser) processFunction(ctx context.Context, node *sitter.Nod
 	}
 
 	// GR-41: Extract call sites from function body
+	var dynImps []Import
 	if bodyNode != nil {
-		sym.Calls = p.extractCallSites(ctx, bodyNode, content, filePath)
+		sym.Calls, dynImps = p.extractCallSites(ctx, bodyNode, content, filePath)
 
 		// IT-03a C-3: Extract type narrowing expressions (instanceof, type predicates)
 		narrowings := p.extractTypeNarrowings(bodyNode, content)
@@ -743,11 +763,11 @@ func (p *TypeScriptParser) processFunction(ctx context.Context, node *sitter.Nod
 		sym.TypeReferences = typeRefs
 	}
 
-	return sym
+	return sym, dynImps
 }
 
 // processClass extracts a class declaration.
-func (p *TypeScriptParser) processClass(ctx context.Context, node *sitter.Node, content []byte, filePath string, decorators []string, exported bool) *Symbol {
+func (p *TypeScriptParser) processClass(ctx context.Context, node *sitter.Node, content []byte, filePath string, decorators []string, exported bool) (*Symbol, []Import) {
 	var name string
 	var typeParams []string
 	var extends string
@@ -772,7 +792,7 @@ func (p *TypeScriptParser) processClass(ctx context.Context, node *sitter.Node, 
 	}
 
 	if name == "" {
-		return nil
+		return nil, nil
 	}
 
 	sym := &Symbol{
@@ -800,50 +820,55 @@ func (p *TypeScriptParser) processClass(ctx context.Context, node *sitter.Node, 
 	}
 
 	// Extract class members
+	var dynImps []Import
 	if bodyNode != nil {
-		p.extractClassMembers(ctx, bodyNode, content, filePath, sym)
+		dynImps = p.extractClassMembers(ctx, bodyNode, content, filePath, sym)
 		// IT-03a Phase 12 F-2: Collect MethodSignatures for implicit interface matching.
 		// Without this, computeInterfaceImplementations() skips all TS classes
 		// because Metadata.Methods is empty.
 		p.collectTSClassMethods(sym)
 	}
 
-	return sym
+	return sym, dynImps
 }
 
 // processAbstractClass extracts an abstract class declaration.
-func (p *TypeScriptParser) processAbstractClass(ctx context.Context, node *sitter.Node, content []byte, filePath string, decorators []string, exported bool) *Symbol {
-	sym := p.processClass(ctx, node, content, filePath, decorators, exported)
+func (p *TypeScriptParser) processAbstractClass(ctx context.Context, node *sitter.Node, content []byte, filePath string, decorators []string, exported bool) (*Symbol, []Import) {
+	sym, dynImps := p.processClass(ctx, node, content, filePath, decorators, exported)
 	if sym != nil {
 		if sym.Metadata == nil {
 			sym.Metadata = &SymbolMetadata{}
 		}
 		sym.Metadata.IsAbstract = true
 	}
-	return sym
+	return sym, dynImps
 }
 
 // extractClassMembers extracts methods and fields from a class body.
-func (p *TypeScriptParser) extractClassMembers(ctx context.Context, body *sitter.Node, content []byte, filePath string, classSym *Symbol) {
+func (p *TypeScriptParser) extractClassMembers(ctx context.Context, body *sitter.Node, content []byte, filePath string, classSym *Symbol) []Import {
+	var dynImps []Import
 	for i := 0; i < int(body.ChildCount()); i++ {
 		child := body.Child(i)
 		switch child.Type() {
 		case "method_definition":
-			if method := p.processMethod(ctx, child, content, filePath); method != nil {
+			method, imps := p.processMethod(ctx, child, content, filePath)
+			if method != nil {
 				// IT-01 Phase C: Set Receiver to class name for graph builder receiver resolution
 				method.Receiver = classSym.Name
 				classSym.Children = append(classSym.Children, method)
 			}
+			dynImps = append(dynImps, imps...)
 		case "public_field_definition":
 			if field := p.processField(child, content, filePath); field != nil {
 				classSym.Children = append(classSym.Children, field)
 			}
 		}
 	}
+	return dynImps
 }
 
 // processMethod extracts a method definition.
-func (p *TypeScriptParser) processMethod(ctx context.Context, node *sitter.Node, content []byte, filePath string) *Symbol {
+func (p *TypeScriptParser) processMethod(ctx context.Context, node *sitter.Node, content []byte, filePath string) (*Symbol, []Import) {
 	var name string
 	var typeParams []string
 	var params string
@@ -886,7 +911,7 @@ func (p *TypeScriptParser) processMethod(ctx context.Context, node *sitter.Node,
 	}
 
 	if name == "" {
-		return nil
+		return nil, nil
 	}
 
 	// Determine visibility
@@ -929,8 +954,9 @@ func (p *TypeScriptParser) processMethod(ctx context.Context, node *sitter.Node,
 	}
 
 	// GR-41: Extract call sites from method body
+	var dynImps []Import
 	if bodyNode != nil {
-		sym.Calls = p.extractCallSites(ctx, bodyNode, content, filePath)
+		sym.Calls, dynImps = p.extractCallSites(ctx, bodyNode, content, filePath)
 
 		// IT-03a Phase 14 T-2: Extract type narrowings (parity with processFunction)
 		narrowings := p.extractTypeNarrowings(bodyNode, content)
@@ -944,7 +970,7 @@ func (p *TypeScriptParser) processMethod(ctx context.Context, node *sitter.Node,
 		sym.TypeReferences = typeRefs
 	}
 
-	return sym
+	return sym, dynImps
 }
 
 // processField extracts a field definition.
@@ -1851,6 +1877,10 @@ func (p *TypeScriptParser) getPrecedingComment(node *sitter.Node, content []byte
 //	and whether it's a method call (e.g., this.method(), obj.func()). This enables
 //	the graph builder to create EdgeTypeCalls edges for find_callers/find_callees.
 //
+//	IT-06e Bug 4: dynamic import() calls (call_expression whose function child has type
+//	"import") are detected inline during this walk and returned as a separate []Import
+//	slice, eliminating the need for a second full-AST post-pass.
+//
 // Inputs:
 //   - ctx: Context for cancellation. Checked every 100 nodes.
 //   - bodyNode: The statement_block node representing the function body. May be nil.
@@ -1859,21 +1889,23 @@ func (p *TypeScriptParser) getPrecedingComment(node *sitter.Node, content []byte
 //
 // Outputs:
 //   - []CallSite: Extracted call sites. Limited to MaxCallSitesPerSymbol (1000).
+//   - []Import: Dynamic import() calls found inside the body. Nil if none.
 //
 // Thread Safety: Safe for concurrent use.
-func (p *TypeScriptParser) extractCallSites(ctx context.Context, bodyNode *sitter.Node, content []byte, filePath string) []CallSite {
+func (p *TypeScriptParser) extractCallSites(ctx context.Context, bodyNode *sitter.Node, content []byte, filePath string) ([]CallSite, []Import) {
 	if bodyNode == nil {
-		return nil
+		return nil, nil
 	}
 
 	if ctx.Err() != nil {
-		return nil
+		return nil, nil
 	}
 
 	ctx, span := tracer.Start(ctx, "TypeScriptParser.extractCallSites")
 	defer span.End()
 
 	calls := make([]CallSite, 0, 16)
+	dynImports := make([]Import, 0)
 
 	type stackEntry struct {
 		node  *sitter.Node
@@ -1908,7 +1940,7 @@ func (p *TypeScriptParser) extractCallSites(ctx context.Context, bodyNode *sitte
 					slog.String("file", filePath),
 					slog.Int("calls_found", len(calls)),
 				)
-				return calls
+				return calls, dynImports
 			}
 		}
 
@@ -1917,14 +1949,45 @@ func (p *TypeScriptParser) extractCallSites(ctx context.Context, bodyNode *sitte
 				slog.String("file", filePath),
 				slog.Int("limit", MaxCallSitesPerSymbol),
 			)
-			return calls
+			return calls, dynImports
 		}
 
 		// TypeScript tree-sitter uses "call_expression" for regular calls.
 		if node.Type() == tsNodeCallExpression {
-			call := p.extractSingleCallSite(node, content, filePath)
-			if call != nil && call.Target != "" {
-				calls = append(calls, *call)
+			funcNode := node.ChildByFieldName("function")
+			argsNode := node.ChildByFieldName("arguments")
+			// IT-06e Bug 4: dynamic import() inside function bodies
+			if funcNode != nil && funcNode.Type() == "import" && argsNode != nil {
+				for i := 0; i < int(argsNode.ChildCount()); i++ {
+					arg := argsNode.Child(i)
+					if arg != nil && arg.Type() == tsNodeString {
+						importPath := p.extractStringContent(arg, content)
+						if importPath != "" {
+							dynImports = append(dynImports, Import{
+								Path:      importPath,
+								IsDynamic: true,
+								IsModule:  true,
+								Location: Location{
+									FilePath:  filePath,
+									StartLine: int(node.StartPoint().Row) + 1,
+									EndLine:   int(node.EndPoint().Row) + 1,
+									StartCol:  int(node.StartPoint().Column),
+									EndCol:    int(node.EndPoint().Column),
+								},
+							})
+							slog.Debug("IT-06e Bug 4: TS dynamic import() in function body",
+								slog.String("file", filePath),
+								slog.String("path", importPath),
+							)
+						}
+						break
+					}
+				}
+			} else {
+				call := p.extractSingleCallSite(node, content, filePath)
+				if call != nil && call.Target != "" {
+					calls = append(calls, *call)
+				}
 			}
 		}
 
@@ -1958,7 +2021,94 @@ func (p *TypeScriptParser) extractCallSites(ctx context.Context, bodyNode *sitte
 		attribute.Int("nodes_traversed", nodeCount),
 	)
 
-	return calls
+	return calls, dynImports
+}
+
+// scanForDynamicImports performs a depth-limited DFS on a subtree looking for
+// dynamic import(stringLiteral) calls. Used for top-level module-scope patterns
+// like: const X = React.lazy(() => import('./X'))
+// where the import() is inside an anonymous arrow function that is never passed
+// to extractCallSites (since no named symbol is extracted for it).
+//
+// Description:
+//
+//	Walks at most MaxCallExpressionDepth levels deep. Emits
+//	Import{IsDynamic: true, IsModule: true} for each import(stringLiteral) found.
+//
+// Inputs:
+//   - node: The subtree root to scan. May be nil.
+//   - content: Raw source bytes for text extraction.
+//   - filePath: File path for Location.
+//
+// Outputs:
+//   - []Import: Any dynamic imports found. Nil if none.
+//
+// Limitations:
+//   - Only detects import(stringLiteral). Template literal and variable paths are ignored.
+//
+// Assumptions:
+//   - node is a top-level declaration subtree (lexical_declaration, variable_declaration,
+//     or expression_statement).
+//
+// Thread Safety: Safe for concurrent use.
+func (p *TypeScriptParser) scanForDynamicImports(node *sitter.Node, content []byte, filePath string) []Import {
+	if node == nil {
+		return nil
+	}
+	type entry struct {
+		node  *sitter.Node
+		depth int
+	}
+	stack := make([]entry, 0, 16)
+	stack = append(stack, entry{node, 0})
+	var dynImports []Import
+
+	for len(stack) > 0 {
+		e := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if e.node == nil || e.depth > MaxCallExpressionDepth {
+			continue
+		}
+		if e.node.Type() == tsNodeCallExpression {
+			funcNode := e.node.ChildByFieldName("function")
+			argsNode := e.node.ChildByFieldName("arguments")
+			if funcNode != nil && funcNode.Type() == "import" && argsNode != nil {
+				for i := 0; i < int(argsNode.ChildCount()); i++ {
+					arg := argsNode.Child(i)
+					if arg != nil && arg.Type() == tsNodeString {
+						importPath := p.extractStringContent(arg, content)
+						if importPath != "" {
+							dynImports = append(dynImports, Import{
+								Path:      importPath,
+								IsDynamic: true,
+								IsModule:  true,
+								Location: Location{
+									FilePath:  filePath,
+									StartLine: int(e.node.StartPoint().Row) + 1,
+									EndLine:   int(e.node.EndPoint().Row) + 1,
+									StartCol:  int(e.node.StartPoint().Column),
+									EndCol:    int(e.node.EndPoint().Column),
+								},
+							})
+							slog.Debug("IT-06e Bug 4: TS dynamic import() at module scope",
+								slog.String("file", filePath),
+								slog.String("path", importPath),
+							)
+						}
+						break
+					}
+				}
+			}
+		}
+		childCount := int(e.node.ChildCount())
+		for i := childCount - 1; i >= 0; i-- {
+			child := e.node.Child(i)
+			if child != nil {
+				stack = append(stack, entry{child, e.depth + 1})
+			}
+		}
+	}
+	return dynImports
 }
 
 // extractSingleCallSite extracts call information from a TypeScript call_expression node.

@@ -464,7 +464,12 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTo
 		slog.Info("Pre-filter enabled",
 			slog.Int("forced_mappings", len(pfCfg.ForcedMappings)),
 			slog.Int("negation_rules", len(pfCfg.NegationRules)),
-			slog.Int("confusion_pairs", len(pfCfg.ConfusionPairs)))
+			slog.Int("confusion_pairs", len(pfCfg.ConfusionPairs)),
+			slog.String("scoring_mode", pfCfg.ScoringMode))
+		// CB-62: Embedding warm-up happens synchronously on the first scored call
+		// in scoreHybrid (10s timeout). BadgerDB cache makes this ~100µs on restart;
+		// Ollama cold start ~300ms. No startup warm-up needed — specs aren't available
+		// until the first query arrives with tool definitions.
 	}
 
 	registry.Register(agent.StateExecute, trace.NewPhaseAdapter(phases.NewExecutePhase(executeOpts...)))

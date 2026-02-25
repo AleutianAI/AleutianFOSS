@@ -536,6 +536,10 @@ func (p *GoParser) processFunctionDecl(ctx context.Context, node *sitter.Node, c
 			typeRefs = append(typeRefs, extractGoReturnTypeRefs(returnTypeNode, content, filePath)...)
 		}
 	}
+	// IT-16: Extract type references from composite literals in function body (e.g., H{...}, Config{...})
+	if bodyNode != nil {
+		typeRefs = append(typeRefs, p.extractCompositeLiteralTypeRefs(ctx, bodyNode, content, filePath)...)
+	}
 	if len(typeRefs) > 0 {
 		if len(typeRefs) > MaxTypeReferencesPerSymbol {
 			typeRefs = typeRefs[:MaxTypeReferencesPerSymbol]
@@ -650,6 +654,10 @@ func (p *GoParser) processMethodDecl(ctx context.Context, node *sitter.Node, con
 		} else {
 			typeRefs = append(typeRefs, extractGoReturnTypeRefs(returnTypeNode, content, filePath)...)
 		}
+	}
+	// IT-16: Extract type references from composite literals in method body (e.g., H{...}, Config{...})
+	if bodyNode != nil {
+		typeRefs = append(typeRefs, p.extractCompositeLiteralTypeRefs(ctx, bodyNode, content, filePath)...)
 	}
 	if len(typeRefs) > 0 {
 		if len(typeRefs) > MaxTypeReferencesPerSymbol {
@@ -2016,6 +2024,151 @@ func (p *GoParser) extractCallSites(ctx context.Context, bodyNode *sitter.Node, 
 	)
 
 	return calls
+}
+
+// extractCompositeLiteralTypeRefs extracts type references from composite literal
+// expressions in a function/method body.
+//
+// Description:
+//
+//	Walks the body AST looking for composite_literal nodes (e.g., H{...},
+//	Config{...}, gin.H{...}). Extracts the type identifier from each and
+//	returns them as TypeReference entries. These feed into the graph builder's
+//	EdgeTypeReferences edges, making composite literal usages visible to
+//	find_references.
+//
+//	IT-16: Without this, types like gin.H that are primarily used via composite
+//	literals (not function calls) are invisible to find_references — the parser
+//	only extracted call_expression nodes from bodies.
+//
+// Inputs:
+//   - ctx: Context for cancellation.
+//   - bodyNode: The function/method body node from tree-sitter. Must not be nil.
+//   - content: Source file bytes.
+//   - filePath: Relative path for Location.
+//
+// Outputs:
+//   - []TypeReference: Type references found in composite literals.
+//
+// Thread Safety: Safe for concurrent use.
+func (p *GoParser) extractCompositeLiteralTypeRefs(ctx context.Context, bodyNode *sitter.Node, content []byte, filePath string) []TypeReference {
+	if bodyNode == nil {
+		return nil
+	}
+
+	if ctx.Err() != nil {
+		return nil
+	}
+
+	var refs []TypeReference
+	seen := make(map[string]bool)
+
+	type stackEntry struct {
+		node  *sitter.Node
+		depth int
+	}
+
+	stack := make([]stackEntry, 0, 64)
+	stack = append(stack, stackEntry{node: bodyNode, depth: 0})
+
+	nodeCount := 0
+	for len(stack) > 0 {
+		entry := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+
+		node := entry.node
+		if node == nil {
+			continue
+		}
+
+		if entry.depth > MaxCallExpressionDepth {
+			continue
+		}
+
+		nodeCount++
+		if nodeCount%100 == 0 {
+			if ctx.Err() != nil {
+				return refs
+			}
+		}
+
+		if len(refs) >= MaxTypeReferencesPerSymbol {
+			return refs
+		}
+
+		if node.Type() == "composite_literal" {
+			typeNode := node.ChildByFieldName("type")
+			if typeNode != nil {
+				var typeName string
+				switch typeNode.Type() {
+				case "type_identifier":
+					typeName = string(content[typeNode.StartByte():typeNode.EndByte()])
+				case "qualified_type":
+					// gin.H -> extract "H" (strip package qualifier)
+					nameNode := typeNode.ChildByFieldName("name")
+					if nameNode != nil {
+						typeName = string(content[nameNode.StartByte():nameNode.EndByte()])
+					}
+				case "generic_type":
+					// Result[T] -> extract "Result"
+					nameNode := typeNode.ChildByFieldName("type")
+					if nameNode != nil && nameNode.Type() == "type_identifier" {
+						typeName = string(content[nameNode.StartByte():nameNode.EndByte()])
+					}
+				case "slice_type", "map_type", "array_type":
+					// []Config{...} or map[string]H{...} — walk children for type_identifier
+					for j := 0; j < int(typeNode.ChildCount()); j++ {
+						child := typeNode.Child(j)
+						if child != nil && child.Type() == "type_identifier" {
+							name := string(content[child.StartByte():child.EndByte()])
+							if name != "" && !goTypeSkipList[name] && !seen[name] {
+								seen[name] = true
+								refs = append(refs, TypeReference{
+									Name: name,
+									Location: Location{
+										FilePath:  filePath,
+										StartLine: int(node.StartPoint().Row) + 1,
+										EndLine:   int(node.EndPoint().Row) + 1,
+										StartCol:  int(node.StartPoint().Column),
+										EndCol:    int(node.EndPoint().Column),
+									},
+								})
+							}
+						}
+					}
+					// Skip the main typeName path for container types
+					typeName = ""
+				}
+				if typeName != "" && !goTypeSkipList[typeName] && !seen[typeName] {
+					seen[typeName] = true
+					refs = append(refs, TypeReference{
+						Name: typeName,
+						Location: Location{
+							FilePath:  filePath,
+							StartLine: int(node.StartPoint().Row) + 1,
+							EndLine:   int(node.EndPoint().Row) + 1,
+							StartCol:  int(node.StartPoint().Column),
+							EndCol:    int(node.EndPoint().Column),
+						},
+					})
+				}
+			}
+		}
+
+		// Add children to stack (reverse order for left-to-right processing)
+		childCount := int(node.ChildCount())
+		for i := childCount - 1; i >= 0; i-- {
+			child := node.Child(i)
+			if child != nil {
+				stack = append(stack, stackEntry{
+					node:  child,
+					depth: entry.depth + 1,
+				})
+			}
+		}
+	}
+
+	return refs
 }
 
 // extractSingleCallSite extracts call information from a call_expression node.

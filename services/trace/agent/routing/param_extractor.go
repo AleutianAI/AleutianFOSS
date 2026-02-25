@@ -308,16 +308,27 @@ CONCEPTUAL vs LITERAL scope names:
   A conceptual description with no matching directory will silently return empty results.
 - RULE: If the scope name contains spaces or is an abstract concept, set package to ""
 
-"from X to Y" pattern (for get_call_chain, find_path):
-- "from X to Y" -> root/start = X (the first symbol), NOT Y
-- Direction is always DOWNSTREAM for "from X to Y" queries
-- "Trace the call chain from Scene.render to Engine._renderFrame" -> function_name = "render", direction = "downstream"
+"from X to Y" pattern (for get_call_chain AND find_path):
+- "from X to Y" -> the FIRST symbol (X) is the start, the SECOND (Y) is the target
+- For get_call_chain: function_name = X (the start), direction = "downstream"
+  Example: "Trace the call chain from Scene.render to Engine._renderFrame"
+           -> function_name = "render", direction = "downstream"
+- For find_path: from = X (the start), to = Y (the target)
+  Example: "Find the path from Scene.render to Engine._renderFrame"
+           -> from = "Scene.render", to = "Engine._renderFrame"
 - Strip package qualifiers from symbols: "gin.New" -> "New", "flask.Blueprint" -> "Blueprint"
   (the graph indexes symbols without package prefixes)
+- IMPORTANT: Use the ACTUAL parameter names listed in the Parameters section below,
+  not the example names above. get_call_chain uses "function_name"/"direction";
+  find_path uses "from"/"to".
 
 Symbol name extraction rules:
-- Strip leading package qualifiers: "gin.New" -> "New", "http.ListenAndServe" -> "ListenAndServe"
-- For Type.Method format, keep the dot: "Engine.ServeHTTP" -> "Engine.ServeHTTP"
+- Distinguishing package.func from Type.Method:
+  If the prefix is a known project/package name in lowercase (gin, flask, http, os, fmt),
+  strip it: "gin.New" -> "New", "http.ListenAndServe" -> "ListenAndServe"
+  If both parts are PascalCase or the prefix is a type name,
+  keep the dot: "Engine.ServeHTTP" -> "Engine.ServeHTTP", "Context.JSON" -> "Context.JSON"
+  When in doubt, keep the dot — ResolveFunctionWithFuzzy handles Type.Method resolution.
 - Multi-word concepts should use PascalCase if they map to a type: "resource transformation" -> "ResourceTransformation"
 - Algorithm names are NOT symbols: PageRank, BFS, DFS, Leiden, Tarjan, SCC — NEVER extract these as function_name or symbol targets
 

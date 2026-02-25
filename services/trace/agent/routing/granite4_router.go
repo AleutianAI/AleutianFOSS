@@ -459,14 +459,35 @@ func (r *Granite4Router) parseResponse(response string, availableTools []ToolSpe
 	}
 
 	if !toolValid {
-		// I-4: Log when tool fallback occurs for debugging
-		slog.Warn("Router model returned invalid tool, using fallback",
-			slog.String("model", r.config.Model),
-			slog.String("invalid_tool", result.Tool),
-		)
-		// Try to find closest match
-		result.Tool = r.findClosestTool(result.Tool, availableTools)
-		result.Confidence *= 0.8 // Reduce confidence for corrected tool
+		// CB-62 Rev 2: Try case-insensitive exact match first (typo correction).
+		corrected := r.findClosestTool(result.Tool, availableTools)
+		if corrected != result.Tool {
+			// Case-insensitive match found — simple correction, not a prefilter miss.
+			slog.Warn("Router model returned tool with wrong case, corrected",
+				slog.String("model", r.config.Model),
+				slog.String("original", result.Tool),
+				slog.String("corrected", corrected),
+			)
+			result.Tool = corrected
+			result.Confidence *= 0.8
+		} else {
+			// CB-62 Rev 2: Prefilter miss detected. The router model picked a tool
+			// that the prefilter excluded. Instead of falling back to tools[0]
+			// (which is a random wrong tool), signal the miss to the
+			// EscalatingRouter for recovery.
+			slog.Warn("Router model picked tool outside candidate set (prefilter miss)",
+				slog.String("model", r.config.Model),
+				slog.String("raw_pick", result.Tool),
+				slog.Float64("confidence", result.Confidence),
+			)
+			return &ToolSelection{
+				Tool:          result.Tool,
+				Confidence:    result.Confidence,
+				Reasoning:     result.Reasoning,
+				PrefilterMiss: true,
+				RawModelPick:  result.Tool,
+			}, nil
+		}
 	}
 
 	return &ToolSelection{
@@ -476,42 +497,30 @@ func (r *Granite4Router) parseResponse(response string, availableTools []ToolSpe
 	}, nil
 }
 
-// findClosestTool finds the closest matching tool name.
+// findClosestTool finds a case-insensitive exact match for a tool name.
 //
 // # Description
 //
-// Uses simple string matching to find a tool when the model returns
-// an invalid tool name. This provides some resilience to typos.
+// CB-62 Rev 2: Simplified to case-insensitive exact match only. The old
+// prefix/contains/tools[0] fallback chain was the root cause of IT-7144:
+// when the router correctly picked a tool not in the candidate set, the
+// fallback chain silently returned tools[0] (a random wrong tool).
+//
+// Now, if no case-insensitive match exists, the original name is returned
+// unchanged. The caller (parseResponse) uses the mismatch to detect a
+// prefilter miss and set PrefilterMiss=true for EscalatingRouter recovery.
 func (r *Granite4Router) findClosestTool(name string, tools []ToolSpec) string {
-	name = strings.ToLower(name)
+	nameLower := strings.ToLower(name)
 
-	// Try exact match (case-insensitive)
+	// Case-insensitive exact match only.
 	for _, t := range tools {
-		if strings.ToLower(t.Name) == name {
+		if strings.ToLower(t.Name) == nameLower {
 			return t.Name
 		}
 	}
 
-	// Try prefix match
-	for _, t := range tools {
-		if strings.HasPrefix(strings.ToLower(t.Name), name) {
-			return t.Name
-		}
-	}
-
-	// Try contains match
-	for _, t := range tools {
-		if strings.Contains(strings.ToLower(t.Name), name) ||
-			strings.Contains(name, strings.ToLower(t.Name)) {
-			return t.Name
-		}
-	}
-
-	// Fall back to first tool
-	if len(tools) > 0 {
-		return tools[0].Name
-	}
-
+	// No match — return original name unchanged.
+	// Caller detects corrected == original as "not found in set".
 	return name
 }
 

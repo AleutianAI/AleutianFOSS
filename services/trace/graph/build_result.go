@@ -99,6 +99,24 @@ type BuildStats struct {
 	// symbol node.
 	NamedImportEdgesResolved int
 
+	// CommonJSImportEdgesResolved is the number of EdgeTypeReferences edges
+	// created by the CommonJS import alias resolution pass (IT-06d Bug D).
+	// Each represents a "var X = require('./module')" statement where the
+	// imported module's exported class was found and linked.
+	CommonJSImportEdgesResolved int
+
+	// DynamicImportEdgesResolved is the number of EdgeTypeReferences edges
+	// created by the dynamic import() resolution pass (IT-06e Bug 4).
+	// Each represents an import('./module') call where the dynamically loaded
+	// module's exported class was found and linked to the importing file.
+	DynamicImportEdgesResolved int
+
+	// DecoratorArgEdgesResolved is the number of EdgeTypeReferences edges
+	// created by the decorator argument resolution pass (IT-06e Bug 5).
+	// Each represents a class name in a @Module({providers: [X]}) or
+	// @NgModule({imports: [X]}) decorator array that resolved to an in-project symbol.
+	DecoratorArgEdgesResolved int
+
 	// DurationMilli is the total build time in milliseconds.
 	// NOTE: For fast builds (< 1ms), this rounds to 0. Use DurationMicro for precision.
 	DurationMilli int64

@@ -56,9 +56,11 @@ tests:
       What prototypes extend the Application prototype?
     expected_state: COMPLETE
     reference_answer: |
-      The Application prototype in lib/application.js is extended with
-      EventEmitter.prototype and the internal proto module for routing,
-      middleware registration, and server lifecycle.
+      Implementations of 'Application' not found. The type 'Application'
+      exists but has no implementing or extending types. Express uses
+      prototype augmentation (EventEmitter.prototype mixin) rather than
+      class-based inheritance, so find_implementations correctly reports
+      no extends/implements edges.
     validations:
       - type: graph_tool_used
 
@@ -619,9 +621,10 @@ tests:
       What classes or prototypes extend or subclass the Layer constructor in Express?
     expected_state: COMPLETE
     reference_answer: |
-      Layer in lib/router/layer.js is the internal wrapper for route handlers
-      and middleware. It is instantiated by Router and Route but not subclassed
-      directly. The tool should find Layer and explain its usage pattern.
+      Implementations of 'Layer' not found. The type 'Layer' exists but
+      has no implementing or extending types. Layer is instantiated by
+      Router and Route but not subclassed — Express uses prototype-based
+      composition, not class inheritance.
     validations:
       - type: graph_tool_used
 
@@ -634,9 +637,10 @@ tests:
       What classes or prototypes extend the Route constructor in Express?
     expected_state: COMPLETE
     reference_answer: |
-      Route in lib/router/route.js represents a single route with per-method
-      handler stacks. HTTP methods (get, post, put, delete, etc.) are added
-      to Route.prototype dynamically. Route is not subclassed but used by Router.
+      Implementations of 'Route' not found. The type 'Route' exists but
+      has no implementing or extending types. Express adds HTTP methods
+      to Route.prototype dynamically rather than using class inheritance,
+      so find_implementations correctly reports no extends/implements edges.
     validations:
       - type: graph_tool_used
 

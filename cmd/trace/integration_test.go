@@ -57,6 +57,10 @@ func newTestServer(t *testing.T) *testServer {
 
 	gin.SetMode(gin.TestMode)
 
+	// Mark warmup complete so readiness checks pass in tests (no LLM in integration tests).
+	trace.MarkWarmupComplete()
+	t.Cleanup(trace.ResetWarmupStatus)
+
 	cfg := trace.DefaultServiceConfig()
 	svc := trace.NewService(cfg)
 	handlers := trace.NewHandlers(svc)

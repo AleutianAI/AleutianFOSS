@@ -44,6 +44,13 @@ type FindImportantParams struct {
 	// Default: "all"
 	Kind string
 
+	// Package filters results to a specific package or module scope.
+	// Uses matchesPackageScope() with 3 strategies: Package field match,
+	// FilePath segment match, and file stem match.
+	// IT-07: Added to match find_hotspots package filter capability.
+	// Default: "" (no filter)
+	Package string
+
 	// ExcludeTests filters out symbols from test and documentation files.
 	// Default: true
 	ExcludeTests bool
@@ -57,6 +64,7 @@ func (p FindImportantParams) ToMap() map[string]any {
 	return map[string]any{
 		"top":           p.Top,
 		"kind":          p.Kind,
+		"package":       p.Package,
 		"exclude_tests": p.ExcludeTests,
 	}
 }
@@ -171,6 +179,12 @@ func (t *findImportantTool) Definition() ToolDefinition {
 				Default:     "all",
 				Enum:        []any{"function", "type", "all"},
 			},
+			"package": {
+				Type:        ParamTypeString,
+				Description: "Filter results to a specific package or module (e.g., 'helpers', 'router'). Leave empty for project-wide results.",
+				Required:    false,
+				Default:     "",
+			},
 			"exclude_tests": {
 				Type:        ParamTypeBool,
 				Description: "Exclude symbols from test and documentation files (default: true)",
@@ -213,6 +227,7 @@ func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*R
 			attribute.String("tool", "find_important"),
 			attribute.Int("top", p.Top),
 			attribute.String("kind", p.Kind),
+			attribute.String("package", p.Package),
 			attribute.Bool("exclude_tests", p.ExcludeTests),
 		),
 	)
@@ -230,7 +245,7 @@ func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*R
 	// the only cost of requesting more is iterating a larger slice in the filter loop.
 	// Previous 5x multiplier was insufficient for projects like NestJS where
 	// Phase 4 reclassifies 576 integration/ files as non-production.
-	hasFilters := p.Kind != "all" || p.ExcludeTests
+	hasFilters := p.Kind != "all" || p.ExcludeTests || p.Package != ""
 	requestCount := p.Top
 	if hasFilters {
 		requestCount = p.Top * 10 // Request 10x when filtering (test+doc+kind)
@@ -296,7 +311,32 @@ func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*R
 		span.SetAttributes(attribute.Int("after_test_doc_filter", len(sourceOnly)))
 	}
 
-	// Phase 2: Filter by kind if needed
+	// Phase 2: Filter by package scope if specified.
+	// IT-07: Uses matchesPackageScope() with 3 strategies (Package field, FilePath
+	// segment, file stem) to match find_hotspots package filter capability.
+	if p.Package != "" {
+		var packageFiltered []graph.PageRankNode
+		for _, prn := range pageRankNodes {
+			if prn.Node == nil || prn.Node.Symbol == nil {
+				continue
+			}
+			if matchesPackageScope(prn.Node.Symbol, p.Package) {
+				packageFiltered = append(packageFiltered, prn)
+			}
+		}
+		t.logger.Info("IT-07: find_important package filter applied",
+			slog.String("package", p.Package),
+			slog.Int("before", len(pageRankNodes)),
+			slog.Int("after", len(packageFiltered)),
+		)
+		span.SetAttributes(attribute.Int("after_package_filter", len(packageFiltered)))
+		// CR-11: Unlike the test/doc filter, empty results ARE the correct answer
+		// for package filter — "no symbols found in that package" is accurate.
+		// Do NOT fall back to unfiltered results.
+		pageRankNodes = packageFiltered
+	}
+
+	// Phase 3: Filter by kind if needed
 	var filtered []graph.PageRankNode
 	if p.Kind == "all" {
 		filtered = pageRankNodes
@@ -316,7 +356,7 @@ func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*R
 		filtered = filtered[:p.Top]
 	}
 
-	// Phase 3: Re-assign ranks sequentially after filtering (XC-4 fix).
+	// Phase 4: Re-assign ranks sequentially after filtering (XC-4 fix).
 	// Without this, kind="function" results show ranks 12, 15, 18... instead of 1, 2, 3...
 	for i := range filtered {
 		filtered[i].Rank = i + 1
@@ -348,7 +388,7 @@ func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*R
 	output := t.buildOutput(filtered)
 
 	// Format text output
-	outputText := t.formatText(filtered)
+	outputText := t.formatText(filtered, p.Package)
 
 	return &Result{
 		Success:    true,
@@ -400,6 +440,14 @@ func (t *findImportantTool) parseParams(params map[string]any) (FindImportantPar
 				kind = "all"
 			}
 			p.Kind = kind
+		}
+	}
+
+	// Extract package (optional, default: "")
+	// IT-07: Package scope filter for find_important.
+	if pkgRaw, ok := params["package"]; ok {
+		if pkg, ok := parseStringParam(pkgRaw); ok {
+			p.Package = pkg
 		}
 	}
 
@@ -469,19 +517,29 @@ func (t *findImportantTool) buildOutput(nodes []graph.PageRankNode) FindImportan
 //   - Positive results: "Found N" prefix + exhaustive footer + "Do NOT use Grep" footer
 //
 // This matches the pattern used by find_hotspots and find_dead_code.
-func (t *findImportantTool) formatText(nodes []graph.PageRankNode) string {
+func (t *findImportantTool) formatText(nodes []graph.PageRankNode, packageFilter string) string {
 	var sb strings.Builder
 
+	// CR-12: Include package scope in output header when filter is active.
+	scopeLabel := ""
+	if packageFilter != "" {
+		scopeLabel = fmt.Sprintf(" in package '%s'", packageFilter)
+	}
+
 	if len(nodes) == 0 {
-		sb.WriteString("## GRAPH RESULT: No important symbols found\n\n")
-		sb.WriteString("No symbols with PageRank score > 0 exist in the graph.\n\n")
+		sb.WriteString(fmt.Sprintf("## GRAPH RESULT: No important symbols found%s\n\n", scopeLabel))
+		if packageFilter != "" {
+			sb.WriteString(fmt.Sprintf("No symbols matching package '%s' were found in the PageRank results.\n\n", packageFilter))
+		} else {
+			sb.WriteString("No symbols with PageRank score > 0 exist in the graph.\n\n")
+		}
 		sb.WriteString("---\n")
 		sb.WriteString("The graph has been fully indexed — these results are exhaustive.\n")
 		sb.WriteString("**Do NOT use Grep or Read to verify** — the graph already analyzed all source files.\n")
 		return sb.String()
 	}
 
-	sb.WriteString(fmt.Sprintf("Found %d most important symbols (PageRank):\n\n", len(nodes)))
+	sb.WriteString(fmt.Sprintf("Found %d most important symbols%s (PageRank):\n\n", len(nodes), scopeLabel))
 
 	for _, prn := range nodes {
 		if prn.Node == nil || prn.Node.Symbol == nil {

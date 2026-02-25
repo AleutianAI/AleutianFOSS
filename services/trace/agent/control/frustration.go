@@ -704,7 +704,7 @@ func initFrustrationMetrics() error {
 		var err error
 
 		violationsTotal, err = frustrationMeter.Int64Counter(
-			"codebuddy_violations_total",
+			"trace_violations_total",
 			metric.WithDescription("Total violations recorded by type"),
 		)
 		if err != nil {
@@ -713,7 +713,7 @@ func initFrustrationMetrics() error {
 		}
 
 		stuckTotal, err = frustrationMeter.Int64Counter(
-			"codebuddy_stuck_total",
+			"trace_stuck_total",
 			metric.WithDescription("Total stuck state entries by rule"),
 		)
 		if err != nil {

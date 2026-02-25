@@ -20,7 +20,7 @@ import (
 const CompactSchemaVersion = "1"
 
 // CompactSchemaName is the schema identifier.
-const CompactSchemaName = "codebuddy/compact/v1"
+const CompactSchemaName = "trace/compact/v1"
 
 // CompactKeyMapping maps short keys to full names.
 var CompactKeyMapping = map[string]string{

@@ -27,6 +27,7 @@ SSH_CONTROL_SOCKET="$HOME/.ssh/crs_test_multiplex_%h_%p_%r"
 # Model configuration
 OLLAMA_MODEL="gpt-oss:20b"
 ROUTER_MODEL="granite4:micro-h"
+PARAM_EXTRACTOR_MODEL="ministral-3:3b"
 
 # Project to analyze on remote
 PROJECT_TO_ANALYZE="${TEST_PROJECT_ROOT:-/Users/jin/GolandProjects/AleutianOrchestrator}"
@@ -1822,6 +1823,7 @@ main() {
         echo "Projects: ${#CRS_TESTS[@]} tests across multiple projects"
         echo "Main Agent: $OLLAMA_MODEL"
         echo "Router: $ROUTER_MODEL"
+        echo "ParamExtractor: $PARAM_EXTRACTOR_MODEL"
     else
         echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
         echo -e "${BLUE}  CRS Integration Tests - Remote GPU Mode${NC}"
@@ -1831,6 +1833,7 @@ main() {
         echo "Project: $PROJECT_TO_ANALYZE"
         echo "Main Agent: $OLLAMA_MODEL"
         echo "Router: $ROUTER_MODEL"
+        echo "ParamExtractor: $PARAM_EXTRACTOR_MODEL"
     fi
     echo ""
     echo "Output: $OUTPUT_FILE"
@@ -2086,7 +2089,7 @@ main() {
     echo -e "${BLUE}╠══════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${BLUE}║${NC}                                                                  ${BLUE}║${NC}"
     echo -e "${BLUE}║${NC}  Remote: $REMOTE_USER@$REMOTE_HOST:$REMOTE_PORT                             ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}  Models: $OLLAMA_MODEL / $ROUTER_MODEL               ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}  Models: $OLLAMA_MODEL / $ROUTER_MODEL / $PARAM_EXTRACTOR_MODEL  ${BLUE}║${NC}"
     echo -e "${BLUE}║${NC}                                                                  ${BLUE}║${NC}"
     echo -e "${BLUE}╠══════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${BLUE}║${NC}  RESULTS                                                         ${BLUE}║${NC}"

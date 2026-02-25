@@ -107,6 +107,18 @@ type ToolSelection struct {
 
 	// Duration is how long the routing decision took.
 	Duration time.Duration `json:"duration,omitempty"`
+
+	// PrefilterMiss is true when the router selected a tool that was NOT in the
+	// prefiltered candidate set. This means the prefilter incorrectly excluded
+	// the correct tool. The EscalatingRouter uses this flag to trigger recovery.
+	// CB-62 Rev 2.
+	PrefilterMiss bool `json:"prefilter_miss,omitempty"`
+
+	// RawModelPick is the tool name the router model originally returned,
+	// before any findClosestTool correction. Empty when the model's pick
+	// was in the candidate set. Used for observability and recovery.
+	// CB-62 Rev 2.
+	RawModelPick string `json:"raw_model_pick,omitempty"`
 }
 
 // IsConfident returns true if the selection confidence is above the threshold.
@@ -308,6 +320,19 @@ type RouterConfig struct {
 	// Recommended: 16384 (16K tokens) to minimize VRAM usage and allow main agent larger context.
 	// Note: On systems with limited VRAM (32GB), keeping router context low allows main agent 64K+ context.
 	NumCtx int `json:"num_ctx"`
+
+	// EscalationModel is the Ollama model used for escalation when the primary
+	// router's confidence is below EscalationThreshold. Empty string disables
+	// escalation. Example: "granite3.3:8b".
+	EscalationModel string `json:"escalation_model,omitempty"`
+
+	// EscalationThreshold is the minimum confidence from the primary router
+	// below which escalation to the larger model is triggered. Default: 0.7.
+	EscalationThreshold float64 `json:"escalation_threshold,omitempty"`
+
+	// EscalationTimeout is the maximum time for an escalation routing decision.
+	// Default: 3s.
+	EscalationTimeout time.Duration `json:"escalation_timeout,omitempty"`
 }
 
 // DefaultRouterConfig returns sensible defaults for the router.

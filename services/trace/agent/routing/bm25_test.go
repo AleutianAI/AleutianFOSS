@@ -99,11 +99,11 @@ func TestBuildBM25Index_IDFRareTermsScoreHigher(t *testing.T) {
 	idx := BuildBM25Index(specs)
 
 	findIDF := idx.idf["find"]
-	refsIDF := idx.idf["references"]
+	refsIDF := idx.idf["reference"] // stemmed: "references" → "reference"
 
-	// "references" in 1/3 docs; "find" in 3/3 docs → references must have higher IDF.
+	// "reference" in 1/3 docs; "find" in 3/3 docs → reference must have higher IDF.
 	if refsIDF <= findIDF {
-		t.Errorf("rare term 'references' (IDF %.4f) should score higher than common term 'find' (IDF %.4f)",
+		t.Errorf("rare term 'reference' (IDF %.4f) should score higher than common term 'find' (IDF %.4f)",
 			refsIDF, findIDF)
 	}
 }

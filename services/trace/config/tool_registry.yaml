@@ -528,11 +528,19 @@ tools:
 
   - name: find_circular_deps
     keywords:
-      - circular
-      - cycles
-      - circular dependencies
-      - dependency cycle
-    use_when: "User wants to find circular dependencies"
+      - circular imports
+      - import cycles
+      - package cycles
+      - module cycles
+      - circular package dependencies
+    use_when: >
+      User wants to find circular IMPORT or PACKAGE-LEVEL dependencies. Examples:
+      'Find circular imports', 'Are there package dependency cycles?', 'Module import cycles'.
+      This operates on package/module import relationships, NOT function-level call cycles.
+    avoid_when: >
+      NEVER use find_circular_deps when the query asks about circular call dependencies,
+      circular call chains, SCCs, or function-level cycles — use find_cycles instead.
+      "circular dependencies" without "import" or "package" qualifier = find_cycles.
     requires:
       - graph_initialized
 
@@ -901,15 +909,15 @@ tools:
   - name: find_weighted_criticality
     keywords:
       - critical functions
-      - most important
       - highest risk
       - weighted criticality
       - combined importance
       - risk assessment
-      - key functions
+      - crash risk
       - critical nodes
       - risky functions
       - high impact
+      - would break
     use_when: >
       User asks about the most critical or risky PRODUCTION functions that would cause
       the most damage if changed. Measures DominatorScore × PageRank (crash risk).

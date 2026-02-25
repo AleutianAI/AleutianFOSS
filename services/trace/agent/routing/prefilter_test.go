@@ -784,6 +784,221 @@ func TestPreFilter_IT06_NegationNotHijackedByForcedMappings(t *testing.T) {
 // Benchmarks
 // =============================================================================
 
+// =============================================================================
+// CB-62 Rev 2: Routing Encyclopedia Tests
+// =============================================================================
+
+func makeEncyclopediaConfig() *config.PreFilterConfig {
+	cfg := makeTestConfig()
+	cfg.RoutingEncyclopedia = []config.EncyclopediaEntry{
+		{
+			Tool:        "find_implementations",
+			Tier:        "boost",
+			BoostAmount: 0.25,
+			Intents: []config.IntentPattern{
+				{Pattern: "what .*extend"},
+				{Pattern: "classes extend"},
+				{Pattern: "extends the"},
+				{Pattern: "class hierarchy"},
+			},
+			AntiSignals: []string{"mock implementation", "test double"},
+			Reason:      "Class inheritance query",
+		},
+		{
+			Tool: "get_call_chain",
+			Tier: "force",
+			Intents: []config.IntentPattern{
+				{Pattern: "call chain from"},
+				{Pattern: "full call hierarchy"},
+			},
+			Reason: "Explicit call chain — unambiguous",
+		},
+		{
+			Tool: "find_path",
+			Tier: "hint",
+			Intents: []config.IntentPattern{
+				{Pattern: "shortest path between"},
+			},
+			Reason: "Path query hint",
+		},
+		{
+			Tool:        "find_references",
+			Tier:        "boost",
+			BoostAmount: 0.20,
+			Intents: []config.IntentPattern{
+				{Pattern: "where is .* referenced across"},
+				{Pattern: "all usages of"},
+			},
+			AntiSignals: []string{"no references", "not referenced", "unreferenced"},
+			Reason:      "Passive-voice reference query",
+		},
+		{
+			Tool: "find_dead_code",
+			Tier: "force",
+			Intents: []config.IntentPattern{
+				{Pattern: "no callers"},
+				{Pattern: "dead code"},
+				{Pattern: "unreferenced"},
+			},
+			Reason: "Dead code detection",
+		},
+	}
+	return cfg
+}
+
+func TestApplyEncyclopedia_ForceMatch(t *testing.T) {
+	cfg := makeEncyclopediaConfig()
+	pf := newTestPreFilter(cfg)
+
+	forcedTool, boosts, hints := pf.applyEncyclopedia("show the call chain from main to handler")
+
+	if forcedTool != "get_call_chain" {
+		t.Errorf("expected forced tool 'get_call_chain', got %q", forcedTool)
+	}
+	if boosts != nil {
+		t.Errorf("expected nil boosts on force, got %v", boosts)
+	}
+	if hints != nil {
+		t.Errorf("expected nil hints on force, got %v", hints)
+	}
+}
+
+func TestApplyEncyclopedia_BoostMatch(t *testing.T) {
+	cfg := makeEncyclopediaConfig()
+	pf := newTestPreFilter(cfg)
+
+	forcedTool, boosts, _ := pf.applyEncyclopedia("what classes extend the light base class")
+
+	if forcedTool != "" {
+		t.Errorf("expected no forced tool for boost, got %q", forcedTool)
+	}
+	if boosts["find_implementations"] != 0.25 {
+		t.Errorf("expected find_implementations boost 0.25, got %f", boosts["find_implementations"])
+	}
+}
+
+func TestApplyEncyclopedia_HintMatch(t *testing.T) {
+	cfg := makeEncyclopediaConfig()
+	pf := newTestPreFilter(cfg)
+
+	forcedTool, _, hints := pf.applyEncyclopedia("find the shortest path between function a and function b")
+
+	if forcedTool != "" {
+		t.Errorf("expected no forced tool for hint, got %q", forcedTool)
+	}
+	found := false
+	for _, h := range hints {
+		if h == "find_path" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'find_path' in hints, got %v", hints)
+	}
+}
+
+func TestApplyEncyclopedia_AntiSignalSuppresses(t *testing.T) {
+	cfg := makeEncyclopediaConfig()
+	pf := newTestPreFilter(cfg)
+
+	// "mock implementation" anti-signal should suppress find_implementations boost
+	_, boosts, _ := pf.applyEncyclopedia("what classes extend the mock implementation of handler")
+
+	if boosts["find_implementations"] != 0 {
+		t.Errorf("expected find_implementations boost suppressed by anti-signal, got %f", boosts["find_implementations"])
+	}
+}
+
+func TestApplyEncyclopedia_NoMatch(t *testing.T) {
+	cfg := makeEncyclopediaConfig()
+	pf := newTestPreFilter(cfg)
+
+	forcedTool, boosts, hints := pf.applyEncyclopedia("what is the performance of the system")
+
+	if forcedTool != "" {
+		t.Errorf("expected no forced tool, got %q", forcedTool)
+	}
+	if len(boosts) != 0 {
+		t.Errorf("expected empty boosts, got %v", boosts)
+	}
+	if len(hints) != 0 {
+		t.Errorf("expected empty hints, got %v", hints)
+	}
+}
+
+func TestApplyEncyclopedia_ForceWithAntiSignal(t *testing.T) {
+	cfg := makeEncyclopediaConfig()
+	pf := newTestPreFilter(cfg)
+
+	// "unreferenced" matches find_dead_code force, but also matches
+	// find_references anti-signal. find_dead_code has no anti-signal for
+	// "unreferenced", so it should force find_dead_code.
+	forcedTool, _, _ := pf.applyEncyclopedia("find unreferenced functions in the codebase")
+
+	if forcedTool != "find_dead_code" {
+		t.Errorf("expected forced tool 'find_dead_code', got %q", forcedTool)
+	}
+}
+
+func TestApplyEncyclopedia_ReferenceAntiSignalBlocksBoost(t *testing.T) {
+	cfg := makeEncyclopediaConfig()
+	pf := newTestPreFilter(cfg)
+
+	// "no references" should suppress find_references boost
+	_, boosts, _ := pf.applyEncyclopedia("functions with no references in the codebase")
+
+	if boosts["find_references"] != 0 {
+		t.Errorf("expected find_references boost suppressed by 'no references' anti-signal, got %f", boosts["find_references"])
+	}
+}
+
+func TestNarrowTools_EncyclopediaBoostIntegration(t *testing.T) {
+	cfg := makeEncyclopediaConfig()
+	cfg.ScoringMode = "embedding_primary"
+	pf := newTestPreFilter(cfg)
+	specs := makeTestSpecs(16)
+
+	result := pf.Filter(context.Background(), "what classes extend the base handler", specs, nil)
+
+	// The encyclopedia boost should have been applied
+	foundBoostRule := false
+	for _, rule := range result.AppliedRules {
+		if rule == "encyclopedia_boost:find_implementations" {
+			foundBoostRule = true
+		}
+	}
+	if !foundBoostRule {
+		t.Errorf("expected 'encyclopedia_boost:find_implementations' in applied rules, got %v", result.AppliedRules)
+	}
+}
+
+func TestNarrowTools_EncyclopediaForceIntegration(t *testing.T) {
+	cfg := makeEncyclopediaConfig()
+	pf := newTestPreFilter(cfg)
+	specs := makeTestSpecs(16)
+
+	// "full call hierarchy" matches the encyclopedia force for get_call_chain.
+	// But it also matches the existing forced_mapping for get_call_chain.
+	// Phase 0 (encyclopedia) runs first, so it should force via encyclopedia.
+	result := pf.Filter(context.Background(), "show the full call hierarchy of main", specs, nil)
+
+	if result.ForcedTool != "get_call_chain" {
+		t.Errorf("expected forced tool 'get_call_chain', got %q", result.ForcedTool)
+	}
+}
+
+func TestApplyEncyclopedia_EmptyEncyclopedia(t *testing.T) {
+	cfg := makeTestConfig()
+	// No encyclopedia entries
+	pf := newTestPreFilter(cfg)
+
+	forcedTool, boosts, hints := pf.applyEncyclopedia("what classes extend base")
+
+	if forcedTool != "" || len(boosts) != 0 || len(hints) != 0 {
+		t.Error("expected empty results from empty encyclopedia")
+	}
+}
+
 func BenchmarkPreFilter_55Tools(b *testing.B) {
 	cfg := makeTestConfig()
 	pf := newTestPreFilter(cfg)
@@ -833,5 +1048,231 @@ func BenchmarkConfusionPairs(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		pf.Filter(ctx, query, specs, nil)
+	}
+}
+
+// =============================================================================
+// CB-62: Scoring Mode Tests
+// =============================================================================
+
+// makeEmbeddingPrimaryConfig returns a config with embedding_primary scoring mode.
+func makeEmbeddingPrimaryConfig() *config.PreFilterConfig {
+	cfg := makeTestConfig()
+	cfg.ScoringMode = "embedding_primary"
+	cfg.ScoreFloor = 0.30
+	cfg.ScoreGapThreshold = 0.15
+	cfg.MaxCandidates = 20
+	return cfg
+}
+
+func TestScoreHybrid_EmbeddingPrimaryMode(t *testing.T) {
+	// In embedding_primary mode, when embeddings are unavailable (no Ollama),
+	// BM25 scores should NOT be used. Instead, scores should be nil (passthrough).
+	cfg := makeEmbeddingPrimaryConfig()
+
+	// Force unreachable Ollama endpoint so embeddings fail.
+	t.Setenv("EMBEDDING_SERVICE_URL", "http://localhost:1/api/embed")
+
+	pf := newTestPreFilter(cfg)
+	specs := makeTestSpecs(16)
+
+	scores := pf.scoreHybrid(context.Background(), "find callers of main", specs, nil)
+
+	// In embedding_primary mode, if embeddings are unavailable, scores should be nil
+	// (passthrough to router).
+	if scores != nil {
+		t.Errorf("expected nil scores in embedding_primary mode without embeddings, got %d scores", len(scores))
+	}
+}
+
+func TestScoreHybrid_HybridBackwardCompat(t *testing.T) {
+	// In hybrid mode, BM25-only fallback should still work when embeddings unavailable.
+	t.Setenv("EMBEDDING_SERVICE_URL", "http://localhost:1/api/embed")
+	cfg := makeTestConfig()
+	cfg.ScoringMode = "hybrid"
+	pf := newTestPreFilter(cfg)
+	specs := []ToolSpec{
+		{Name: "find_callers", Description: "Find callers", BestFor: []string{"callers", "who calls"}},
+		{Name: "find_callees", Description: "Find callees", BestFor: []string{"callees", "what does it call"}},
+		{Name: "answer", Description: "Answer", BestFor: []string{"answer"}},
+	}
+
+	scores := pf.scoreHybrid(context.Background(), "who calls parseconfig", specs, nil)
+
+	// In hybrid mode, BM25 should still produce scores even without embeddings
+	if len(scores) == 0 {
+		t.Error("expected non-empty scores in hybrid mode (BM25 fallback)")
+	}
+}
+
+func TestScoreHybrid_SynchronousWarmup(t *testing.T) {
+	// Verify warm-up blocks (not async): after scoreHybrid returns,
+	// the warmOnce should have completed.
+	t.Setenv("EMBEDDING_SERVICE_URL", "http://localhost:1/api/embed")
+	cfg := makeEmbeddingPrimaryConfig()
+	pf := newTestPreFilter(cfg)
+	specs := makeTestSpecs(16)
+
+	// Call scoreHybrid — this triggers warmOnce.Do synchronously
+	pf.scoreHybrid(context.Background(), "test query", specs, nil)
+
+	// warmOnce should have executed (we can't verify the internal state
+	// directly, but the fact that scoreHybrid returned means the sync
+	// warm-up completed or timed out — it didn't launch an async goroutine).
+	// Calling again should be a no-op.
+	pf.scoreHybrid(context.Background(), "test query 2", specs, nil)
+}
+
+// =============================================================================
+// CB-62: Adaptive Candidate Window Tests
+// =============================================================================
+
+func TestSelectCandidates_NilScores_Passthrough(t *testing.T) {
+	cfg := makeEmbeddingPrimaryConfig()
+	pf := newTestPreFilter(cfg)
+	specs := makeTestSpecs(55)
+
+	result := pf.selectCandidates(nil, specs)
+
+	if len(result) != len(specs) {
+		t.Errorf("expected passthrough (all %d specs), got %d", len(specs), len(result))
+	}
+}
+
+func TestSelectCandidates_EmptyScores_Passthrough(t *testing.T) {
+	cfg := makeEmbeddingPrimaryConfig()
+	pf := newTestPreFilter(cfg)
+	specs := makeTestSpecs(10)
+
+	result := pf.selectCandidates(map[string]float64{}, specs)
+
+	if len(result) != len(specs) {
+		t.Errorf("expected passthrough (all %d specs), got %d", len(specs), len(result))
+	}
+}
+
+func TestSelectCandidates_ScoreFloor(t *testing.T) {
+	cfg := makeEmbeddingPrimaryConfig()
+	cfg.ScoreFloor = 0.50
+	cfg.ScoreGapThreshold = 0.50 // high threshold so gap cutoff doesn't interfere
+	cfg.MinCandidates = 1
+	pf := newTestPreFilter(cfg)
+
+	specs := []ToolSpec{
+		{Name: "tool_a"}, {Name: "tool_b"}, {Name: "tool_c"},
+		{Name: "tool_d"}, {Name: "tool_e"},
+	}
+	scores := map[string]float64{
+		"tool_a": 0.90,
+		"tool_b": 0.70,
+		"tool_c": 0.40, // below floor
+		"tool_d": 0.30, // below floor
+		"tool_e": 0.10, // below floor
+	}
+
+	result := pf.selectCandidates(scores, specs)
+
+	resultNames := make(map[string]bool)
+	for _, s := range result {
+		resultNames[s.Name] = true
+	}
+
+	if !resultNames["tool_a"] || !resultNames["tool_b"] {
+		t.Errorf("expected tool_a and tool_b above floor to be included, got %v", resultNames)
+	}
+	if resultNames["tool_d"] || resultNames["tool_e"] {
+		t.Error("expected tool_d and tool_e below floor to be excluded")
+	}
+}
+
+func TestSelectCandidates_GapCutoff(t *testing.T) {
+	cfg := makeEmbeddingPrimaryConfig()
+	cfg.ScoreFloor = 0.10 // low floor to not interfere
+	cfg.ScoreGapThreshold = 0.20
+	cfg.MinCandidates = 2
+	cfg.MaxCandidates = 20
+	pf := newTestPreFilter(cfg)
+
+	specs := []ToolSpec{
+		{Name: "tool_a"}, {Name: "tool_b"}, {Name: "tool_c"},
+		{Name: "tool_d"}, {Name: "tool_e"},
+	}
+	//Scores: a=0.9, b=0.85, c=0.80, d=0.50 (gap=0.30 > 0.20), e=0.40
+	scores := map[string]float64{
+		"tool_a": 0.90,
+		"tool_b": 0.85,
+		"tool_c": 0.80,
+		"tool_d": 0.50, // gap from c to d = 0.30 > threshold 0.20
+		"tool_e": 0.40,
+	}
+
+	result := pf.selectCandidates(scores, specs)
+
+	resultNames := make(map[string]bool)
+	for _, s := range result {
+		resultNames[s.Name] = true
+	}
+
+	// Gap cutoff at index 3 (after tool_c, before tool_d)
+	if !resultNames["tool_a"] || !resultNames["tool_b"] || !resultNames["tool_c"] {
+		t.Error("expected tool_a, tool_b, tool_c to be included (above gap)")
+	}
+	if resultNames["tool_d"] || resultNames["tool_e"] {
+		t.Error("expected tool_d, tool_e to be excluded (below gap cutoff)")
+	}
+}
+
+func TestSelectCandidates_GapCutoff_NoGap(t *testing.T) {
+	cfg := makeEmbeddingPrimaryConfig()
+	cfg.ScoreFloor = 0.10
+	cfg.ScoreGapThreshold = 0.50 // very high threshold — no gap exceeds it
+	cfg.MinCandidates = 2
+	cfg.MaxCandidates = 20
+	pf := newTestPreFilter(cfg)
+
+	specs := []ToolSpec{
+		{Name: "tool_a"}, {Name: "tool_b"}, {Name: "tool_c"},
+		{Name: "tool_d"}, {Name: "tool_e"},
+	}
+	scores := map[string]float64{
+		"tool_a": 0.90,
+		"tool_b": 0.85,
+		"tool_c": 0.80,
+		"tool_d": 0.75,
+		"tool_e": 0.70,
+	}
+
+	result := pf.selectCandidates(scores, specs)
+
+	// No gap exceeds threshold → all above-floor tools included (up to MaxCandidates)
+	if len(result) != 5 {
+		t.Errorf("expected all 5 tools when no gap exceeds threshold, got %d", len(result))
+	}
+}
+
+func TestSelectCandidates_MinFloor(t *testing.T) {
+	cfg := makeEmbeddingPrimaryConfig()
+	cfg.ScoreFloor = 0.80
+	cfg.ScoreGapThreshold = 0.50
+	cfg.MinCandidates = 3
+	pf := newTestPreFilter(cfg)
+
+	specs := []ToolSpec{
+		{Name: "tool_a"}, {Name: "tool_b"}, {Name: "tool_c"},
+		{Name: "tool_d"}, {Name: "tool_e"},
+	}
+	//Only tool_a is above floor, but MinCandidates=3
+	scores := map[string]float64{
+		"tool_a": 0.90,
+		"tool_b": 0.70,
+		"tool_c": 0.60,
+		"tool_d": 0.50,
+		"tool_e": 0.40,
+	}
+
+	result := pf.selectCandidates(scores, specs)
+
+	if len(result) < cfg.MinCandidates {
+		t.Errorf("expected at least %d candidates (MinCandidates), got %d", cfg.MinCandidates, len(result))
 	}
 }

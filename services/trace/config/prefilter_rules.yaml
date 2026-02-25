@@ -1,10 +1,18 @@
-# Pre-filter rules for tool routing (CB-38).
-# Narrows 55+ tools to 5-10 candidates before the LLM router classifies.
-# See tickets/planned/cb_38_prefilter_tool_routing.md for design.
+# Pre-filter rules for tool routing (CB-38, CB-62).
+# Narrows 55+ tools to candidates before the LLM router classifies.
+#
+# CB-62: scoring_mode=embedding_primary uses pure embedding scoring.
+# BM25 is no longer in the scoring path. Forced mappings and confusion pairs
+# below are deterministic cheap insurance for unambiguous patterns and
+# genuine semantic overlap. Embeddings handle morphological variants,
+# misspellings, and synonyms naturally.
 
 enabled: true
 min_candidates: 3
-max_candidates: 10
+max_candidates: 20
+scoring_mode: embedding_primary
+score_gap_threshold: 0.15
+score_floor: 0.30
 negation_proximity: 3
 always_include:
   - answer
@@ -61,21 +69,28 @@ forced_mappings:
     tool: find_symbol
     reason: "Definition lookup — asking for declaration site, not call sites"
 
+  # CB-62 Rev 1: Re-added find_implementations forced mapping. Embeddings
+  # DO NOT reliably rank "extend" → find_implementations in the top 3-5
+  # candidates. The embedding model's cosine similarity for inheritance
+  # queries is too low, causing the prefilter gap cutoff to exclude
+  # find_implementations. Without this forced mapping, the router correctly
+  # picks find_implementations but the prefilter already excluded it,
+  # triggering the string-matching fallback to a random tool (find_loops).
   - patterns:
-      - "what calls .*"
-      - "who calls .*"
-      - "what invokes .*"
-      - "who invokes .*"
-    tool: find_callers
-    reason: "Active-voice caller query — subject is the callee, looking for callers"
-
-  - patterns:
-      - "what does .* call"
-      - "what does .* invoke"
-      - "what functions does .* call"
-      - "what methods does .* call"
-    tool: find_callees
-    reason: "Callee/dependency query — subject is the caller, looking for callees"
+      - "what .*extend"
+      - "classes extend"
+      - "extends the"
+      - "what implements"
+      - "classes implement"
+      - "what inherits"
+      - "inherits from"
+      - "subclass"
+      - "child class"
+      - "class hierarchy"
+      - "concrete types that"
+      - "types that implement"
+    tool: find_implementations
+    reason: "Class inheritance/interface implementation query"
 
 negation_rules:
   - negation_words: ["no", "not", "never", "zero", "without"]
@@ -146,17 +161,115 @@ confusion_pairs:
       - "dependency cycle"
     boost_amount: 2.0
 
-  # IT-11: "bridges between communities" → find_communities, not find_articulation_points
-  - tool_a: find_communities
-    tool_b: find_articulation_points
-    tool_a_patterns:
-      - "communit"
-      - "code cluster"
-      - "module boundar"
-      - "leiden"
-    tool_b_patterns:
-      - "single point of failure"
-      - "fragil"
-      - "cut vert"
-      - "bus factor"
-    boost_amount: 3.0
+  # CB-62: Removed confusion pairs that embeddings handle naturally:
+  # - find_callers/find_implementations (IT-16)
+  # - find_callees/find_cycles (IT-16)
+  # - find_communities/find_articulation_points (IT-11)
+
+# =============================================================================
+# CB-62 Rev 2: Routing Encyclopedia
+# =============================================================================
+#
+# Structured intent-to-tool mappings with tiered actions. Phase 0 of the
+# prefilter pipeline — runs BEFORE forced_mappings and negation_rules.
+#
+# Tiers:
+#   force  — deterministic. Skip the router entirely. Use for unambiguous queries.
+#   boost  — add score bonus. Ensures tool makes it into candidate set. Router decides.
+#   hint   — ensure in candidate set (min_candidates fill). No score change.
+#
+# Anti-signals: if ANY anti-signal matches, the entry is suppressed.
+#
+# Migration plan: entries here will gradually replace forced_mappings and
+# confusion_pairs. Both systems coexist during the transition.
+
+routing_encyclopedia:
+  - tool: find_implementations
+    tier: boost
+    boost_amount: 0.25
+    intents:
+      - pattern: "what .*extend"
+        description: "Classes extending a base"
+      - pattern: "classes extend"
+      - pattern: "extends the"
+      - pattern: "what implements"
+      - pattern: "classes implement"
+      - pattern: "what inherits"
+      - pattern: "inherits from"
+      - pattern: "subclass"
+      - pattern: "child class"
+      - pattern: "class hierarchy"
+      - pattern: "concrete types that"
+      - pattern: "types that implement"
+    anti_signals:
+      - "mock implementation"
+      - "stub implementation"
+      - "test double"
+    reason: "Class inheritance/interface implementation query"
+
+  - tool: get_call_chain
+    tier: force
+    intents:
+      - pattern: "call chain from"
+      - pattern: "call chain of"
+      - pattern: "full call hierarchy"
+      - pattern: "transitive callers"
+      - pattern: "transitive callees"
+    reason: "Explicit call chain request — unambiguous"
+
+  - tool: find_path
+    tier: force
+    intents:
+      - pattern: "shortest path between"
+      - pattern: "path from .* to"
+    reason: "Path query — unambiguous"
+
+  - tool: find_references
+    tier: boost
+    boost_amount: 0.20
+    intents:
+      - pattern: "where is .* referenced across"
+      - pattern: "where is .* referenced in"
+      - pattern: "where is .* referenced throughout"
+      - pattern: "how is .* referenced"
+      - pattern: "find all references to"
+      - pattern: "referenced across the codebase"
+      - pattern: "referenced throughout"
+      - pattern: "all usages of"
+      - pattern: "all uses of"
+    anti_signals:
+      - "no references"
+      - "not referenced"
+      - "never referenced"
+      - "zero references"
+      - "without references"
+      - "unreferenced"
+    conflict_with: find_dead_code
+    reason: "Passive-voice reference query"
+
+  - tool: find_symbol
+    tier: boost
+    boost_amount: 0.20
+    intents:
+      - pattern: "where is .* defined"
+      - pattern: "where is .* declared"
+      - pattern: "where is it defined"
+      - pattern: "find the definition of"
+      - pattern: "locate the .* definition"
+    reason: "Definition lookup"
+
+  - tool: find_dead_code
+    tier: force
+    intents:
+      - pattern: "no callers"
+      - pattern: "not called"
+      - pattern: "never called"
+      - pattern: "zero callers"
+      - pattern: "no references"
+      - pattern: "not referenced"
+      - pattern: "never referenced"
+      - pattern: "unreferenced"
+      - pattern: "dead code"
+      - pattern: "unused function"
+      - pattern: "unused method"
+    reason: "Negated caller/reference = dead code detection"

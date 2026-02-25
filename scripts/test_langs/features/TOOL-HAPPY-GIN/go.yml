@@ -714,9 +714,11 @@ tests:
       Where is the H type used across the Gin codebase?
     expected_state: COMPLETE
     reference_answer: |
-      The H type (alias for map[string]any) is used in JSON response helpers,
-      test files for constructing response maps, and example code. It appears
-      in Context methods like JSON and throughout test assertions.
+      The H type (alias for map[string]any) is defined in utils.go. In production
+      code it is referenced in 2 places: errors.go (Error.JSON method constructs
+      an H{} literal) and utils.go (MarshalXML receiver method). The remaining
+      ~45 usages are in test files (context_test.go, errors_test.go, gin_test.go,
+      middleware_test.go) which are excluded from the production graph.
     validations:
       - type: graph_tool_used
 

@@ -506,6 +506,66 @@ var delimiterSet = [256]bool{
 //	map[string]bool - Set of unique lowercase terms.
 //
 // Thread Safety: Safe for concurrent use (no shared state modified).
+
+// stemTerm applies minimal suffix stripping to normalize singular/plural
+// and verb forms for BM25 matching. This is a lightweight Porter-lite stemmer
+// that handles the most common English suffixes without a full stemming library.
+//
+// IT-16/ISSUE-01: Without stemming, "extend" (query) ≠ "extends" (keyword)
+// causes BM25 to miss find_implementations entirely. The prefilter then
+// excludes it from the candidate set, and the router's correct selection
+// gets rejected by the validation layer.
+//
+// Rules (applied in order, first match wins):
+//   - "ies" → "y" (dependencies → dependency)
+//   - "ches"/"shes"/"sses" → drop "es" (matches → match)
+//   - "ses" → drop "s" (analyses → analyse) — but not "sses" (already handled)
+//   - "es" → drop "es" only if stem ≥ 3 chars (classes → class)
+//   - "ing" → drop "ing" only if stem ≥ 3 chars (calling → call)
+//   - "ed" → drop "ed" only if stem ≥ 3 chars (called → call)
+//   - "s" → drop "s" only if stem ≥ 3 chars and not ending in "ss" (extends → extend)
+func stemTerm(word string) string {
+	n := len(word)
+	if n <= 3 {
+		return word
+	}
+
+	// "ies" → "y"
+	if n > 4 && strings.HasSuffix(word, "ies") {
+		return word[:n-3] + "y"
+	}
+	// "ches", "shes", "sses" → drop "es"
+	if n > 4 && (strings.HasSuffix(word, "ches") || strings.HasSuffix(word, "shes") || strings.HasSuffix(word, "sses")) {
+		return word[:n-2]
+	}
+	// "nces" → drop "s" only (references → reference, not referenc)
+	if n > 4 && strings.HasSuffix(word, "nces") {
+		return word[:n-1]
+	}
+	// "ses" → drop "s" (but not "sses", handled above)
+	if n > 4 && strings.HasSuffix(word, "ses") {
+		return word[:n-1]
+	}
+	// "es" → drop "es" if stem ≥ 3
+	if n > 4 && strings.HasSuffix(word, "es") {
+		return word[:n-2]
+	}
+	// "ing" → drop "ing" if stem ≥ 3
+	if n > 5 && strings.HasSuffix(word, "ing") {
+		return word[:n-3]
+	}
+	// "ed" → drop "ed" if stem ≥ 3
+	if n > 4 && strings.HasSuffix(word, "ed") {
+		return word[:n-2]
+	}
+	// "s" → drop "s" if stem ≥ 3 and not "ss"
+	if strings.HasSuffix(word, "s") && !strings.HasSuffix(word, "ss") && n > 3 {
+		return word[:n-1]
+	}
+
+	return word
+}
+
 func ExtractQueryTerms(query string) map[string]bool {
 	terms := make(map[string]bool)
 
@@ -525,7 +585,7 @@ func ExtractQueryTerms(query string) map[string]bool {
 		if wordBuilder.Len() >= 2 {
 			word := wordBuilder.String()
 			if !noiseWords[word] {
-				terms[word] = true
+				terms[stemTerm(word)] = true
 			}
 		}
 		wordBuilder.Reset()

@@ -912,6 +912,12 @@ type Import struct {
 	// Example: 'const foo = require("bar")' in JavaScript.
 	IsCommonJS bool `json:"is_commonjs,omitempty"`
 
+	// IsDynamic indicates this is a dynamic import() call inside a function body.
+	// Example: 'const X = React.lazy(() => import("./HeavyComponent"))' in JavaScript.
+	// When true, the import was detected inside an expression rather than at top level.
+	// Enables the builder's resolveDynamicImportEdges post-pass and analytics filtering.
+	IsDynamic bool `json:"is_dynamic,omitempty"`
+
 	// IsScript indicates this is a script import (HTML <script src>).
 	IsScript bool `json:"is_script,omitempty"`
 

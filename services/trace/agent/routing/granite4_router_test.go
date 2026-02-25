@@ -342,14 +342,20 @@ func TestGranite4Router_SelectTool_InvalidToolFallback(t *testing.T) {
 		t.Fatalf("SelectTool failed: %v", err)
 	}
 
-	// Should fall back to first tool
-	if selection.Tool != "find_symbol" {
-		t.Errorf("Tool = %s, want find_symbol (fallback)", selection.Tool)
+	// CB-62 Rev 2: Should return raw pick with PrefilterMiss=true
+	// instead of falling back to tools[0].
+	if selection.Tool != "nonexistent_tool" {
+		t.Errorf("Tool = %s, want nonexistent_tool (raw model pick preserved)", selection.Tool)
 	}
-
-	// Confidence should be reduced (0.9 * 0.8 = 0.72)
-	if selection.Confidence > 0.75 {
-		t.Errorf("Confidence = %.2f, expected reduced due to fallback", selection.Confidence)
+	if !selection.PrefilterMiss {
+		t.Error("expected PrefilterMiss=true for tool not in candidate set")
+	}
+	if selection.RawModelPick != "nonexistent_tool" {
+		t.Errorf("RawModelPick = %s, want nonexistent_tool", selection.RawModelPick)
+	}
+	// Confidence should NOT be reduced (no fallback correction).
+	if selection.Confidence != 0.9 {
+		t.Errorf("Confidence = %.2f, want 0.90 (no reduction for prefilter miss)", selection.Confidence)
 	}
 }
 

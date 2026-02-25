@@ -12,6 +12,7 @@ package tools
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
@@ -1071,6 +1072,168 @@ func TestFindImportantTool_ExcludeTests(t *testing.T) {
 			expectedRank := i + 1
 			if sym.Rank != expectedRank {
 				t.Errorf("result[%d].Rank = %d, want %d (sequential after filtering)", i, sym.Rank, expectedRank)
+			}
+		}
+	})
+}
+
+// TestFindImportantTool_PackageFilter verifies CR-11/CR-12: package scope filtering.
+func TestFindImportantTool_PackageFilter(t *testing.T) {
+	ctx := context.Background()
+	g := graph.NewGraph("/test")
+	idx := index.NewSymbolIndex()
+
+	// Create symbols in two packages: "core" and "util"
+	symbols := []*ast.Symbol{
+		{
+			ID: "core/handler.go:10:Handle", Name: "Handle",
+			Kind: ast.SymbolKindFunction, FilePath: "core/handler.go",
+			StartLine: 10, EndLine: 30, Package: "core", Exported: true, Language: "go",
+		},
+		{
+			ID: "core/router.go:10:Route", Name: "Route",
+			Kind: ast.SymbolKindFunction, FilePath: "core/router.go",
+			StartLine: 10, EndLine: 40, Package: "core", Exported: true, Language: "go",
+		},
+		{
+			ID: "util/helpers.go:10:FormatOutput", Name: "FormatOutput",
+			Kind: ast.SymbolKindFunction, FilePath: "util/helpers.go",
+			StartLine: 10, EndLine: 25, Package: "util", Exported: true, Language: "go",
+		},
+		{
+			ID: "util/strings.go:5:TrimSafe", Name: "TrimSafe",
+			Kind: ast.SymbolKindFunction, FilePath: "util/strings.go",
+			StartLine: 5, EndLine: 15, Package: "util", Exported: true, Language: "go",
+		},
+	}
+
+	for _, sym := range symbols {
+		g.AddNode(sym)
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("Failed to add symbol: %v", err)
+		}
+	}
+
+	// Create call edges so PageRank has non-zero scores
+	g.AddEdge("core/router.go:10:Route", "core/handler.go:10:Handle", graph.EdgeTypeCalls, ast.Location{
+		FilePath: "core/router.go", StartLine: 20,
+	})
+	g.AddEdge("core/handler.go:10:Handle", "util/helpers.go:10:FormatOutput", graph.EdgeTypeCalls, ast.Location{
+		FilePath: "core/handler.go", StartLine: 15,
+	})
+	g.AddEdge("util/helpers.go:10:FormatOutput", "util/strings.go:5:TrimSafe", graph.EdgeTypeCalls, ast.Location{
+		FilePath: "util/helpers.go", StartLine: 12,
+	})
+
+	g.Freeze()
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindImportantTool(analytics, idx)
+
+	t.Run("empty package returns all results", func(t *testing.T) {
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"exclude_tests": false,
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+		output := result.Output.(FindImportantOutput)
+		if output.ResultCount < 3 {
+			t.Errorf("empty package filter should return all results, got %d", output.ResultCount)
+		}
+	})
+
+	t.Run("package filter returns only matching symbols", func(t *testing.T) {
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"package":       "util",
+			"exclude_tests": false,
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+		output := result.Output.(FindImportantOutput)
+		if output.ResultCount == 0 {
+			t.Fatal("expected results for package 'util', got 0")
+		}
+		for _, sym := range output.Results {
+			if sym.Package != "util" {
+				t.Errorf("expected package 'util', got %q for symbol %s", sym.Package, sym.Name)
+			}
+		}
+	})
+
+	t.Run("package filter with no matches returns empty", func(t *testing.T) {
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"package":       "nonexistent",
+			"exclude_tests": false,
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+		output := result.Output.(FindImportantOutput)
+		// CR-11: empty results ARE the correct answer for a non-matching package
+		if output.ResultCount != 0 {
+			t.Errorf("expected 0 results for nonexistent package, got %d", output.ResultCount)
+		}
+	})
+
+	t.Run("package filter scope mentioned in output text", func(t *testing.T) {
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"package":       "core",
+			"exclude_tests": false,
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+		// CR-12: output text should mention the package scope
+		if !strings.Contains(result.OutputText, "package 'core'") {
+			t.Errorf("output text should mention package scope 'core', got:\n%s", result.OutputText)
+		}
+	})
+
+	t.Run("no-match package filter mentions scope in output text", func(t *testing.T) {
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"package":       "nonexistent",
+			"exclude_tests": false,
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		// CR-12: even empty results should mention the package scope
+		if !strings.Contains(result.OutputText, "nonexistent") {
+			t.Errorf("empty result output should mention package 'nonexistent', got:\n%s", result.OutputText)
+		}
+	})
+
+	t.Run("ranks are sequential after package filtering", func(t *testing.T) {
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"package":       "core",
+			"exclude_tests": false,
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		output := result.Output.(FindImportantOutput)
+		for i, sym := range output.Results {
+			expectedRank := i + 1
+			if sym.Rank != expectedRank {
+				t.Errorf("result[%d].Rank = %d, want %d", i, sym.Rank, expectedRank)
 			}
 		}
 	})

@@ -3134,3 +3134,63 @@ class ScatterPlot {
 		}
 	}
 }
+
+// =============================================================================
+// IT-06e Bug 4: Dynamic import() detection in TypeScript
+// =============================================================================
+
+// TestTypeScriptParser_DynamicImport verifies that import(stringLiteral) inside
+// a function body produces an Import entry with IsDynamic=true.
+func TestTypeScriptParser_DynamicImport(t *testing.T) {
+	parser := NewTypeScriptParser()
+	src := []byte(`
+const LazyComponent = React.lazy(() => import('./HeavyComponent'));
+const DynamicComp   = dynamic(() => import('./Component'), { ssr: false });
+`)
+	result, err := parser.Parse(context.Background(), src, "app.tsx")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	dynamicImports := make(map[string]Import)
+	for _, imp := range result.Imports {
+		if imp.IsDynamic {
+			dynamicImports[imp.Path] = imp
+		}
+	}
+
+	if _, ok := dynamicImports["./HeavyComponent"]; !ok {
+		t.Errorf("expected dynamic import for './HeavyComponent', got: %v", dynamicImports)
+	}
+	if _, ok := dynamicImports["./Component"]; !ok {
+		t.Errorf("expected dynamic import for './Component', got: %v", dynamicImports)
+	}
+
+	for path, imp := range dynamicImports {
+		if !imp.IsModule {
+			t.Errorf("dynamic import %q should have IsModule=true", path)
+		}
+	}
+}
+
+// TestTypeScriptParser_DynamicImport_ExternalCaptured verifies that dynamic imports
+// of external packages are also captured by the parser (path filtering is builder's job).
+func TestTypeScriptParser_DynamicImport_ExternalCaptured(t *testing.T) {
+	parser := NewTypeScriptParser()
+	src := []byte(`const x = import('lodash');`)
+	result, err := parser.Parse(context.Background(), src, "app.ts")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	var found bool
+	for _, imp := range result.Imports {
+		if imp.IsDynamic && imp.Path == "lodash" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected dynamic import for 'lodash' to be captured")
+	}
+}

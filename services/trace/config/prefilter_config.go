@@ -56,6 +56,17 @@ type PreFilterConfig struct {
 	// and a trigger keyword for negation detection to fire.
 	NegationProximity int `yaml:"negation_proximity"`
 
+	// ScoringMode controls Phase 3 scoring: "hybrid" (0.4 BM25 + 0.6 embedding)
+	// or "embedding_primary" (pure embedding, passthrough on fallback).
+	ScoringMode string `yaml:"scoring_mode"`
+
+	// ScoreGapThreshold is the minimum score drop between consecutive tools
+	// that triggers a cutoff. Tools below the gap are excluded. Default: 0.15.
+	ScoreGapThreshold float64 `yaml:"score_gap_threshold"`
+
+	// ScoreFloor is the minimum absolute score for inclusion. Default: 0.30.
+	ScoreFloor float64 `yaml:"score_floor"`
+
 	// AlwaysInclude lists tool names that must always be in the narrowed set.
 	AlwaysInclude []string `yaml:"always_include"`
 
@@ -67,6 +78,10 @@ type PreFilterConfig struct {
 
 	// ConfusionPairs resolve ambiguity between frequently confused tools.
 	ConfusionPairs []ConfusionPair `yaml:"confusion_pairs"`
+
+	// RoutingEncyclopedia maps user intent patterns to tools with tiered actions.
+	// CB-62 Rev 2: Replaces ad-hoc forced_mappings/confusion_pairs over time.
+	RoutingEncyclopedia []EncyclopediaEntry `yaml:"routing_encyclopedia"`
 }
 
 // ForcedMapping maps phrase patterns to a deterministic tool selection.
@@ -136,6 +151,59 @@ type ConfusionPair struct {
 	BoostAmount float64 `yaml:"boost_amount"`
 }
 
+// EncyclopediaEntry represents a single tool's intent-to-routing mapping.
+//
+// Description:
+//
+//	Maps user intent patterns to a tool with a tiered action:
+//	  - "force": deterministic selection, skip the router entirely.
+//	  - "boost": add boost_amount to the tool's embedding score.
+//	  - "hint": ensure the tool is in the candidate set (min_candidates fill).
+//
+//	Anti-signals suppress the entry when matched, preventing false positives.
+//	CB-62 Rev 2.
+//
+// Thread Safety: Immutable after loading; safe for concurrent use.
+type EncyclopediaEntry struct {
+	// Tool is the target tool name.
+	Tool string `yaml:"tool"`
+
+	// Tier is the action tier: "force", "boost", or "hint".
+	Tier string `yaml:"tier"`
+
+	// BoostAmount is the score bonus applied when tier=boost. Ignored for other tiers.
+	// Range [0.0, 0.30] to nudge without overriding embedding scores.
+	BoostAmount float64 `yaml:"boost_amount"`
+
+	// Intents are regex or substring patterns describing user intent.
+	Intents []IntentPattern `yaml:"intents"`
+
+	// AntiSignals suppress this entry when ANY anti-signal matches the query.
+	// Use specific phrases, not single words.
+	AntiSignals []string `yaml:"anti_signals"`
+
+	// ConflictWith names a tool that conflicts with this entry.
+	// Used for documentation and future conflict resolution.
+	ConflictWith string `yaml:"conflict_with,omitempty"`
+
+	// Reason explains why this mapping exists (for logging/tracing).
+	Reason string `yaml:"reason"`
+}
+
+// IntentPattern is a regex or substring pattern describing a user intent.
+//
+// Description:
+//
+//	Patterns containing ".*" are treated as regex; otherwise substring match.
+//	CB-62 Rev 2.
+type IntentPattern struct {
+	// Pattern is the matching pattern (regex if contains ".*", otherwise substring).
+	Pattern string `yaml:"pattern"`
+
+	// Description optionally explains what this pattern matches.
+	Description string `yaml:"description,omitempty"`
+}
+
 // =============================================================================
 // Defaults
 // =============================================================================
@@ -145,13 +213,25 @@ const (
 	DefaultMinCandidates = 3
 
 	// DefaultMaxCandidates is the default maximum candidate count.
-	DefaultMaxCandidates = 10
+	DefaultMaxCandidates = 20
 
 	// DefaultNegationProximity is the default maximum word distance for negation.
 	DefaultNegationProximity = 3
 
 	// DefaultBoostAmount is the default confusion pair boost.
 	DefaultBoostAmount = 3.0
+
+	// DefaultScoringMode is the default Phase 3 scoring strategy.
+	// "embedding_primary" uses pure embedding scoring with passthrough fallback.
+	DefaultScoringMode = "embedding_primary"
+
+	// DefaultScoreGapThreshold is the minimum score drop between consecutive
+	// tools that triggers a cutoff in the adaptive candidate window.
+	DefaultScoreGapThreshold = 0.15
+
+	// DefaultScoreFloor is the minimum absolute score for inclusion in the
+	// candidate set. Tools scoring below this are excluded.
+	DefaultScoreFloor = 0.30
 )
 
 // =============================================================================
@@ -268,6 +348,15 @@ func LoadPreFilterConfig(ctx context.Context, data []byte) (*PreFilterConfig, er
 	if cfg.NegationProximity <= 0 {
 		cfg.NegationProximity = DefaultNegationProximity
 	}
+	if cfg.ScoringMode == "" {
+		cfg.ScoringMode = DefaultScoringMode
+	}
+	if cfg.ScoreGapThreshold == 0 {
+		cfg.ScoreGapThreshold = DefaultScoreGapThreshold
+	}
+	if cfg.ScoreFloor == 0 {
+		cfg.ScoreFloor = DefaultScoreFloor
+	}
 
 	// Ensure min <= max
 	if cfg.MinCandidates > cfg.MaxCandidates {
@@ -291,8 +380,12 @@ func LoadPreFilterConfig(ctx context.Context, data []byte) (*PreFilterConfig, er
 		attribute.Int("forced_mappings", len(cfg.ForcedMappings)),
 		attribute.Int("negation_rules", len(cfg.NegationRules)),
 		attribute.Int("confusion_pairs", len(cfg.ConfusionPairs)),
+		attribute.Int("routing_encyclopedia", len(cfg.RoutingEncyclopedia)),
 		attribute.Int("min_candidates", cfg.MinCandidates),
 		attribute.Int("max_candidates", cfg.MaxCandidates),
+		attribute.String("scoring_mode", cfg.ScoringMode),
+		attribute.Float64("score_gap_threshold", cfg.ScoreGapThreshold),
+		attribute.Float64("score_floor", cfg.ScoreFloor),
 	)
 
 	slog.Info("pre-filter config loaded",
@@ -300,6 +393,8 @@ func LoadPreFilterConfig(ctx context.Context, data []byte) (*PreFilterConfig, er
 		slog.Int("forced_mappings", len(cfg.ForcedMappings)),
 		slog.Int("negation_rules", len(cfg.NegationRules)),
 		slog.Int("confusion_pairs", len(cfg.ConfusionPairs)),
+		slog.Int("routing_encyclopedia", len(cfg.RoutingEncyclopedia)),
+		slog.String("scoring_mode", cfg.ScoringMode),
 	)
 
 	return &cfg, nil
@@ -307,6 +402,14 @@ func LoadPreFilterConfig(ctx context.Context, data []byte) (*PreFilterConfig, er
 
 // validatePreFilterConfig checks all rules for consistency.
 func validatePreFilterConfig(cfg *PreFilterConfig) error {
+	// Validate scoring mode
+	switch cfg.ScoringMode {
+	case "hybrid", "embedding_primary":
+		// valid
+	default:
+		return fmt.Errorf("scoring_mode must be 'hybrid' or 'embedding_primary', got %q", cfg.ScoringMode)
+	}
+
 	// Validate forced mappings
 	for i, fm := range cfg.ForcedMappings {
 		if fm.Tool == "" {
@@ -346,6 +449,30 @@ func validatePreFilterConfig(cfg *PreFilterConfig) error {
 		}
 		if cp.ToolA == cp.ToolB {
 			return fmt.Errorf("confusion_pair[%d]: tool_a and tool_b must be different (%s)", i, cp.ToolA)
+		}
+	}
+
+	// Validate routing encyclopedia entries (CB-62 Rev 2)
+	for i, entry := range cfg.RoutingEncyclopedia {
+		if entry.Tool == "" {
+			return fmt.Errorf("routing_encyclopedia[%d]: tool must not be empty", i)
+		}
+		switch entry.Tier {
+		case "force", "boost", "hint":
+			// valid
+		default:
+			return fmt.Errorf("routing_encyclopedia[%d] (%s): tier must be 'force', 'boost', or 'hint', got %q", i, entry.Tool, entry.Tier)
+		}
+		if entry.Tier != "boost" && entry.BoostAmount > 0 {
+			return fmt.Errorf("routing_encyclopedia[%d] (%s): boost_amount is only valid for tier=boost, got tier=%q with boost_amount=%f", i, entry.Tool, entry.Tier, entry.BoostAmount)
+		}
+		if len(entry.Intents) == 0 {
+			return fmt.Errorf("routing_encyclopedia[%d] (%s): intents must not be empty", i, entry.Tool)
+		}
+		for j, intent := range entry.Intents {
+			if intent.Pattern == "" {
+				return fmt.Errorf("routing_encyclopedia[%d] (%s): intents[%d].pattern must not be empty", i, entry.Tool, j)
+			}
 		}
 	}
 

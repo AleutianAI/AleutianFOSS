@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -508,6 +509,21 @@ func (b *Builder) extractEdgesPhase(ctx context.Context, state *buildState, resu
 	// Runs after per-file extraction so the full symbol index is available.
 	b.resolveNamedImportEdges(ctx, state, results)
 
+	// IT-06d Bug D/E: Resolve CommonJS alias imports to EdgeTypeReferences.
+	// "var X = require('./module')" creates an edge from the alias variable to
+	// the exported class, making the importing file visible in find_references.
+	b.resolveCommonJSAliasImportEdges(ctx, state, results)
+
+	// IT-06e Bug 4: Resolve dynamic import() calls to EdgeTypeReferences.
+	// "React.lazy(() => import('./Component'))" creates an edge from the file's
+	// package symbol to the lazily loaded module's exported class.
+	b.resolveDynamicImportEdges(ctx, state, results)
+
+	// IT-06e Bug 5: Resolve decorator argument class references to EdgeTypeReferences.
+	// "@Module({ providers: [UserService] })" creates an edge from AppModule to
+	// UserService, making AppModule appear in find_references for UserService.
+	b.resolveDecoratorArgEdges(ctx, state, results)
+
 	// GR-41: Record call edge metrics after all edges extracted
 	recordCallEdgeMetrics(ctx,
 		state.result.Stats.CallEdgesResolved,
@@ -586,7 +602,7 @@ func (b *Builder) extractImportEdges(ctx context.Context, state *buildState, r *
 	// GR-41c: Find actual package symbol instead of fabricating fileSymbolID
 	sourceID := findPackageSymbolID(r)
 	if sourceID == "" {
-		slog.Warn("GR-41c: No package symbol found for import edges",
+		slog.Debug("GR-41c: No package symbol found for import edges (barrel file)",
 			slog.String("file", r.FilePath),
 			slog.Int("import_count", len(r.Imports)),
 		)
@@ -596,7 +612,7 @@ func (b *Builder) extractImportEdges(ctx context.Context, state *buildState, r *
 
 	// GR-41c: Verify sourceID exists in graph before using (I-1: use GetNode method)
 	if _, exists := state.graph.GetNode(sourceID); !exists {
-		slog.Warn("GR-41c: Package symbol not in graph",
+		slog.Debug("GR-41c: Package symbol not in graph",
 			slog.String("file", r.FilePath),
 			slog.String("source_id", sourceID),
 		)
@@ -1942,6 +1958,489 @@ func (b *Builder) resolveNamedImportEdges(ctx context.Context, state *buildState
 	}
 }
 
+// semanticNameFromImportPath derives a PascalCase class name from a CommonJS import path.
+//
+// Description:
+//
+//	IT-06d Bug D: For CommonJS require() paths like "./response" or "./router/index",
+//	derives the semantic class name used by emitSyntheticClassSymbols.
+//	This mirrors deriveSemanticTypeName in the JS parser.
+//
+//	Examples:
+//	  "./response"      → "Response"
+//	  "./route"         → "Route"
+//	  "./router/index"  → "Router" (index → parent directory)
+//	  "express"         → "" (external module, no slash)
+//
+// Inputs:
+//
+//	importPath - The raw import path string (e.g., "./response", "../utils").
+//
+// Outputs:
+//
+//	string - PascalCase name, or "" if it cannot be derived.
+//
+// Thread Safety: Pure function, safe for concurrent use.
+func semanticNameFromImportPath(importPath string) string {
+	// Only handle relative imports (local modules)
+	if !strings.HasPrefix(importPath, ".") {
+		return ""
+	}
+	// Strip leading ./
+	p := strings.TrimLeft(importPath, "./")
+	if p == "" {
+		return ""
+	}
+	// Strip JS/TS extensions
+	for _, ext := range []string{".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs"} {
+		p = strings.TrimSuffix(p, ext)
+	}
+	// Take the last path segment
+	parts := strings.Split(p, "/")
+	name := parts[len(parts)-1]
+	// For "index", use the parent directory segment (same as deriveSemanticTypeName)
+	if name == "index" && len(parts) >= 2 {
+		name = parts[len(parts)-2]
+	}
+	if name == "" {
+		return ""
+	}
+	// Capitalize first letter (PascalCase)
+	runes := []rune(name)
+	if len(runes) == 0 {
+		return ""
+	}
+	runes[0] = unicode.ToUpper(runes[0])
+	return string(runes)
+}
+
+// resolveCommonJSAliasImportEdges creates EdgeTypeReferences edges from CommonJS alias
+// variables to the exported class of the required module.
+//
+// Description:
+//
+//	IT-06d Bug D: CommonJS imports like `var res = require('./response')` are recorded as
+//	Import{IsCommonJS: true, Alias: "res", Path: "./response"}, but the call `Object.create(res)`
+//	at the top level of the file is never extracted as a call site (not inside a function body).
+//	Without an edge, find_references("Response") shows no results from express.js.
+//
+//	This pass creates a REFERENCES edge from the alias variable symbol (e.g., `res` in express.js)
+//	to the exported class of the required module (e.g., `Response` in response.js), making the
+//	importing file visible in find_references results.
+//
+//	Bug E: Also handles `var Route = require('./route')` → `new Route()` resolves correctly via
+//	resolveViaImportMap (buildImportNameMap fix), but this pass additionally creates a direct
+//	REFERENCES edge from the alias variable to the imported class as a belt-and-suspenders link.
+//
+// Inputs:
+//
+//	ctx     - Context for cancellation.
+//	state   - Build state with full symbol index.
+//	results - All parse results; JS/TS files only.
+//
+// Outputs:
+//
+//	None. Edges are added to state.graph; count recorded in state.result.Stats.
+//
+// Thread Safety: Modifies state.graph and state.result. Not safe for concurrent use.
+func (b *Builder) resolveCommonJSAliasImportEdges(ctx context.Context, state *buildState, results []*ast.ParseResult) {
+	_, span := tracer.Start(ctx, "GraphBuilder.resolveCommonJSAliasImportEdges")
+	defer span.End()
+
+	resolved := 0
+	skipped := 0
+
+	for _, r := range results {
+		if ctx.Err() != nil {
+			slog.Debug("IT-06d: context cancelled during CommonJS alias import resolution")
+			break
+		}
+		if r == nil {
+			continue
+		}
+		if r.Language != "javascript" && r.Language != "typescript" {
+			continue
+		}
+
+		for _, imp := range r.Imports {
+			// Only CommonJS whole-module imports: var X = require('./module')
+			// Destructured imports (const { a, b } = require('m')) also have IsCommonJS=true
+			// but each creates a separate Import with Alias=name and no Names slice.
+			// Both are valid here — we create edges for any relative CommonJS import with Alias.
+			if !imp.IsCommonJS || imp.Alias == "" {
+				continue
+			}
+			// Only local imports (relative paths)
+			if !strings.HasPrefix(imp.Path, ".") {
+				continue
+			}
+
+			// Find the alias variable symbol in the importing file.
+			var sourceID string
+			aliasSyms := state.symbolsByName[imp.Alias]
+			for _, sym := range aliasSyms {
+				if sym.FilePath == r.FilePath &&
+					(sym.Kind == ast.SymbolKindVariable || sym.Kind == ast.SymbolKindConstant) {
+					sourceID = sym.ID
+					break
+				}
+			}
+			// IT-06e Bug 2: exports.X = require('./m') creates no variable symbol named X.
+			// The alias is a property name on the exports object, not a local variable.
+			// Fall back to the file's package symbol so the REFERENCES edge is still created.
+			if sourceID == "" {
+				sourceID = findPackageSymbolID(r)
+				if sourceID == "" {
+					skipped++
+					continue
+				}
+				if _, exists := state.graph.GetNode(sourceID); !exists {
+					skipped++
+					continue
+				}
+			}
+
+			// Derive the semantic class name from the import path.
+			// e.g., "./response" → "Response", "./route" → "Route"
+			semanticName := semanticNameFromImportPath(imp.Path)
+			if semanticName == "" {
+				skipped++
+				continue
+			}
+
+			// Find class/function symbols with that name in the matching module file.
+			candidates := state.symbolsByName[semanticName]
+			found := false
+			for _, sym := range candidates {
+				if sym.Kind != ast.SymbolKindClass && sym.Kind != ast.SymbolKindFunction {
+					continue
+				}
+				if !matchesImportPath(sym.FilePath, imp.Path) {
+					continue
+				}
+
+				err := state.graph.AddEdge(sourceID, sym.ID, EdgeTypeReferences, imp.Location)
+				if err != nil {
+					if strings.Contains(err.Error(), "already exists") {
+						found = true
+						continue
+					}
+					state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+						FromID:   sourceID,
+						ToID:     sym.ID,
+						EdgeType: EdgeTypeReferences,
+						Err:      fmt.Errorf("IT-06d CommonJS alias import edge: %w", err),
+					})
+					continue
+				}
+
+				state.result.Stats.EdgesCreated++
+				state.result.Stats.CommonJSImportEdgesResolved++
+				resolved++
+				found = true
+
+				slog.Debug("IT-06d: CommonJS alias import edge created",
+					slog.String("from", sourceID),
+					slog.String("to", sym.ID),
+					slog.String("alias", imp.Alias),
+					slog.String("module", imp.Path),
+					slog.String("semantic_name", semanticName),
+				)
+			}
+			if !found {
+				skipped++
+			}
+		}
+	}
+
+	span.SetAttributes(
+		attribute.Int("resolved", resolved),
+		attribute.Int("skipped", skipped),
+	)
+
+	if resolved > 0 {
+		slog.Debug("IT-06d: CommonJS alias import resolution complete",
+			slog.Int("edges_created", resolved),
+			slog.Int("skipped", skipped),
+		)
+	}
+}
+
+// resolveDynamicImportEdges creates EdgeTypeReferences edges for dynamic import() calls.
+//
+// Description:
+//
+//	IT-06e Bug 4: Dynamic imports like React.lazy(() => import('./HeavyComponent')) produce
+//	Import{IsDynamic: true, Path: "./HeavyComponent"} entries in the ParseResult (added by
+//	the JS/TS parser's extractDynamicImports pass). These imports have no Alias because
+//	the outer variable name (e.g., LazyComponent) is too deeply nested to reliably extract
+//	during the AST walk.
+//
+//	This pass creates a REFERENCES edge from the importing file's package symbol to the
+//	exported class of the dynamically imported module. This makes the importing file appear
+//	in find_references results for lazily-loaded components.
+//
+//	Resolution strategy mirrors resolveCommonJSAliasImportEdges:
+//	1. Source = findPackageSymbolID(r) — the file-level package symbol.
+//	2. Target = semanticNameFromImportPath(imp.Path) → class/function in the matching module.
+//
+// Inputs:
+//
+//	ctx     - Context for cancellation.
+//	state   - Build state with full symbol index.
+//	results - All parse results; JS/TS files only.
+//
+// Outputs:
+//
+//	None. Edges added to state.graph; count in state.result.Stats.DynamicImportEdgesResolved.
+//
+// Thread Safety: Modifies state.graph and state.result. Not safe for concurrent use.
+func (b *Builder) resolveDynamicImportEdges(ctx context.Context, state *buildState, results []*ast.ParseResult) {
+	_, span := tracer.Start(ctx, "GraphBuilder.resolveDynamicImportEdges")
+	defer span.End()
+
+	resolved := 0
+	skipped := 0
+
+	for _, r := range results {
+		if ctx.Err() != nil {
+			slog.Debug("IT-06e Bug 4: context cancelled during dynamic import resolution")
+			break
+		}
+		if r == nil {
+			continue
+		}
+		if r.Language != "javascript" && r.Language != "typescript" {
+			continue
+		}
+
+		// Find the file-level package symbol once per file.
+		sourceID := findPackageSymbolID(r)
+		if sourceID == "" {
+			continue
+		}
+		if _, exists := state.graph.GetNode(sourceID); !exists {
+			continue
+		}
+
+		for _, imp := range r.Imports {
+			if !imp.IsDynamic {
+				continue
+			}
+			// Only local (relative) imports — external packages cannot be resolved.
+			if !strings.HasPrefix(imp.Path, ".") {
+				skipped++
+				continue
+			}
+
+			semanticName := semanticNameFromImportPath(imp.Path)
+			if semanticName == "" {
+				skipped++
+				continue
+			}
+
+			candidates := state.symbolsByName[semanticName]
+			found := false
+			for _, sym := range candidates {
+				if sym.Kind != ast.SymbolKindClass && sym.Kind != ast.SymbolKindFunction {
+					continue
+				}
+				if !matchesImportPath(sym.FilePath, imp.Path) {
+					continue
+				}
+
+				err := state.graph.AddEdge(sourceID, sym.ID, EdgeTypeReferences, imp.Location)
+				if err != nil {
+					if strings.Contains(err.Error(), "already exists") {
+						found = true
+						continue
+					}
+					state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+						FromID:   sourceID,
+						ToID:     sym.ID,
+						EdgeType: EdgeTypeReferences,
+						Err:      fmt.Errorf("IT-06e dynamic import edge: %w", err),
+					})
+					continue
+				}
+
+				state.result.Stats.EdgesCreated++
+				state.result.Stats.DynamicImportEdgesResolved++
+				resolved++
+				found = true
+
+				slog.Debug("IT-06e Bug 4: dynamic import edge created",
+					slog.String("from", sourceID),
+					slog.String("to", sym.ID),
+					slog.String("module", imp.Path),
+					slog.String("semantic_name", semanticName),
+				)
+			}
+			if !found {
+				skipped++
+			}
+		}
+	}
+
+	span.SetAttributes(
+		attribute.Int("resolved", resolved),
+		attribute.Int("skipped", skipped),
+	)
+
+	if resolved > 0 {
+		slog.Debug("IT-06e Bug 4: dynamic import resolution complete",
+			slog.Int("edges_created", resolved),
+			slog.Int("skipped", skipped),
+		)
+	}
+}
+
+// resolveDecoratorArgEdges creates EdgeTypeReferences edges for class names in decorator arrays.
+//
+// Description:
+//
+//	IT-06e Bug 5: Angular and NestJS use class decorators to wire together modules:
+//
+//	  @Module({ imports: [RouterModule, AuthModule], providers: [UserService] })
+//	  export class AppModule {}
+//
+//	  @NgModule({ imports: [CommonModule, FormsModule], providers: [AuthGuard] })
+//	  export class AppModule {}
+//
+//	The TypeScript parser correctly extracts decorator names and their argument identifiers
+//	into Metadata.Decorators and Metadata.DecoratorArgs. However, the graph builder's
+//	extractEdgesPhase never processes DecoratorArgs to create REFERENCES edges.
+//
+//	The class names in imports/controllers/providers arrays are all imported symbols
+//	(via ES6 named imports at the top of the file). They appear in importNameMap for
+//	the file. This pass uses resolveViaImportMap to find the in-project symbol and
+//	creates a REFERENCES edge from the decorated class to each referenced symbol.
+//
+//	This makes the module declaration file (AppModule) appear in find_references results
+//	for any service, controller, or sub-module it references.
+//
+// Inputs:
+//
+//	ctx     - Context for cancellation.
+//	state   - Build state with full symbol index and importNameMap.
+//	results - All parse results; TypeScript files only.
+//
+// Outputs:
+//
+//	None. Edges added to state.graph; count in state.result.Stats.DecoratorArgEdgesResolved.
+//
+// Thread Safety: Modifies state.graph and state.result. Not safe for concurrent use.
+func (b *Builder) resolveDecoratorArgEdges(ctx context.Context, state *buildState, results []*ast.ParseResult) {
+	_, span := tracer.Start(ctx, "GraphBuilder.resolveDecoratorArgEdges")
+	defer span.End()
+
+	resolved := 0
+	skipped := 0
+
+	for _, r := range results {
+		if ctx.Err() != nil {
+			slog.Debug("IT-06e Bug 5: context cancelled during decorator arg resolution")
+			break
+		}
+		if r == nil || r.Language != "typescript" {
+			continue
+		}
+
+		for _, sym := range r.Symbols {
+			if sym == nil || sym.Metadata == nil || len(sym.Metadata.DecoratorArgs) == 0 {
+				continue
+			}
+
+			// The decorated class is the source of the REFERENCES edges.
+			sourceID := sym.ID
+			if _, exists := state.graph.GetNode(sourceID); !exists {
+				skipped++
+				continue
+			}
+
+			for _, argIdentifiers := range sym.Metadata.DecoratorArgs {
+				for _, argName := range argIdentifiers {
+					if argName == "" {
+						continue
+					}
+					// Only PascalCase identifiers are class/module references.
+					// Skip lowercase names (e.g. option strings, boolean literals).
+					if len(argName) == 0 || argName[0] < 'A' || argName[0] > 'Z' {
+						skipped++
+						continue
+					}
+
+					// Try to resolve via the file's import name map first.
+					// This handles: import { UserService } from './user.service'
+					// then @Module({ providers: [UserService] })
+					resolvedID := b.resolveViaImportMap(state, argName, r.FilePath, nil)
+
+					// Fall back to a name-only lookup if the import map has no entry.
+					// This handles same-file references and re-exported symbols.
+					if resolvedID == "" {
+						candidates := state.symbolsByName[argName]
+						for _, candidate := range candidates {
+							if candidate.Kind == ast.SymbolKindClass || candidate.Kind == ast.SymbolKindFunction {
+								resolvedID = candidate.ID
+								break
+							}
+						}
+					}
+
+					if resolvedID == "" {
+						skipped++
+						continue
+					}
+
+					loc := ast.Location{
+						FilePath:  r.FilePath,
+						StartLine: sym.StartLine,
+						EndLine:   sym.EndLine,
+					}
+					err := state.graph.AddEdge(sourceID, resolvedID, EdgeTypeReferences, loc)
+					if err != nil {
+						if strings.Contains(err.Error(), "already exists") {
+							// Edge already exists (created by another pass). Count it in stats.
+							state.result.Stats.DecoratorArgEdgesResolved++
+							resolved++
+							continue
+						}
+						state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+							FromID:   sourceID,
+							ToID:     resolvedID,
+							EdgeType: EdgeTypeReferences,
+							Err:      fmt.Errorf("IT-06e decorator arg edge: %w", err),
+						})
+						continue
+					}
+
+					state.result.Stats.EdgesCreated++
+					state.result.Stats.DecoratorArgEdgesResolved++
+					resolved++
+
+					slog.Debug("IT-06e Bug 5: decorator arg edge created",
+						slog.String("from", sourceID),
+						slog.String("to", resolvedID),
+						slog.String("arg", argName),
+					)
+				}
+			}
+		}
+	}
+
+	span.SetAttributes(
+		attribute.Int("resolved", resolved),
+		attribute.Int("skipped", skipped),
+	)
+
+	if resolved > 0 {
+		slog.Debug("IT-06e Bug 5: decorator arg resolution complete",
+			slog.Int("edges_created", resolved),
+			slog.Int("skipped", skipped),
+		)
+	}
+}
+
 // buildImportNameMap builds the import name lookup table from fileImports.
 //
 // Description:
@@ -1951,12 +2450,33 @@ func (b *Builder) resolveNamedImportEdges(ctx context.Context, state *buildState
 //	Handles aliased imports (e.g., "merge as pd_merge"), skips wildcards
 //	and bare module imports (no Names).
 //
+//	IT-06d Bug E/D: Also processes CommonJS whole-module imports (Alias != "", Names empty)
+//	so that resolveViaImportMap can redirect bare-identifier calls (e.g., new Route()) to
+//	the cross-file class symbol instead of the same-file alias variable.
+//
 // Thread Safety: Must be called before edge extraction (single-threaded phase).
 func (b *Builder) buildImportNameMap(state *buildState) {
 	entries := 0
 	for filePath, imports := range state.fileImports {
 		for _, imp := range imports {
 			if imp.IsWildcard || len(imp.Names) == 0 {
+				// IT-06d Bug E/D: CommonJS whole-module imports: var X = require('./module')
+				// These have Alias set but Names empty. Include them so resolveViaImportMap
+				// can redirect bare calls (new Route()) to the actual cross-file class.
+				if imp.IsCommonJS && imp.Alias != "" {
+					if state.importNameMap[filePath] == nil {
+						state.importNameMap[filePath] = make(map[string]importEntry)
+					}
+					// Named imports (len(Names) > 0) take priority; only add if not present.
+					if _, exists := state.importNameMap[filePath][imp.Alias]; !exists {
+						state.importNameMap[filePath][imp.Alias] = importEntry{
+							ModulePath:   imp.Path,
+							OriginalName: imp.Alias,
+							Location:     imp.Location,
+						}
+						entries++
+					}
+				}
 				continue
 			}
 
@@ -2057,10 +2577,24 @@ func matchesImportPath(filePath string, importPath string) bool {
 		// Bare relative import ("from . import x") — no module path to match against.
 		return false
 	}
+	// IT-06d Bug E/D: JavaScript uses "./module" style (dot-slash) while Python uses
+	// ".module" style (dot only). After TrimLeft removes the leading dots, "./module"
+	// leaves "/module" (the slash remains). Strip the leading slash so pathFragment
+	// is just "module" in both cases.
+	stripped = strings.TrimLeft(stripped, "/")
+	if stripped == "" {
+		return false
+	}
 	pathFragment := strings.ReplaceAll(stripped, ".", "/")
 	// Handle both "merge.py" and "merge/__init__.py" (Python package)
 	normalized := strings.TrimSuffix(filePath, ".py")
 	normalized = strings.TrimSuffix(normalized, "/__init__")
+	// IT-06d Bug E/D: JavaScript/TypeScript relative imports omit the extension
+	// (e.g., require('./route') refers to lib/router/route.js). Strip JS/TS
+	// extensions so HasSuffix matching works across both languages.
+	for _, jsExt := range []string{".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs"} {
+		normalized = strings.TrimSuffix(normalized, jsExt)
+	}
 	// Must match at path boundary: either the entire path, or preceded by "/"
 	if normalized == pathFragment {
 		return true

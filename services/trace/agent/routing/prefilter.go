@@ -94,6 +94,22 @@ var (
 		Help:      "Latency of the BM25 scoring call",
 		Buckets:   []float64{0.0001, 0.0005, 0.001, 0.005, 0.01},
 	})
+
+	// CB-62: Embedding warm-up metrics.
+	prefilterWarmupLatency = promauto.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "trace",
+		Subsystem: "prefilter",
+		Name:      "warmup_latency_seconds",
+		Help:      "Time to complete synchronous embedding warm-up",
+		Buckets:   []float64{0.0001, 0.001, 0.01, 0.1, 0.3, 1.0, 3.0, 10.0},
+	})
+
+	prefilterWarmupSource = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "trace",
+		Subsystem: "prefilter",
+		Name:      "warmup_source_total",
+		Help:      "Source of warm-up vectors: badger_cache, ollama, timeout",
+	}, []string{"source"})
 )
 
 // =============================================================================
@@ -153,6 +169,10 @@ type PreFilter struct {
 
 	// compiledConfusionBPatterns holds pre-compiled tool_b_patterns per confusion pair.
 	compiledConfusionBPatterns [][]compiledPattern
+
+	// compiledEncyclopediaPatterns holds pre-compiled intent patterns per encyclopedia entry.
+	// CB-62 Rev 2.
+	compiledEncyclopediaPatterns [][]compiledPattern
 }
 
 // PreFilterResult contains the output of a pre-filter operation.
@@ -253,6 +273,16 @@ func NewPreFilter(registry *config.ToolRoutingRegistry, cfg *config.PreFilterCon
 		pf.compiledConfusionBPatterns[i] = compilePatterns(cp.ToolBPatterns, logger)
 	}
 
+	// CB-62 Rev 2: Pre-compile regex patterns for routing encyclopedia entries.
+	pf.compiledEncyclopediaPatterns = make([][]compiledPattern, len(cfg.RoutingEncyclopedia))
+	for i, entry := range cfg.RoutingEncyclopedia {
+		patterns := make([]string, len(entry.Intents))
+		for j, intent := range entry.Intents {
+			patterns[j] = intent.Pattern
+		}
+		pf.compiledEncyclopediaPatterns[i] = compilePatterns(patterns, logger)
+	}
+
 	return pf
 }
 
@@ -336,6 +366,39 @@ func (pf *PreFilter) Filter(ctx context.Context, query string, allSpecs []ToolSp
 		specIndex[spec.Name] = spec
 	}
 
+	// Phase 0: Routing Encyclopedia (CB-62 Rev 2)
+	encycForcedTool, encycBoosts, encycHints := pf.applyEncyclopedia(queryLower)
+	if encycForcedTool != "" {
+		// Validate forced tool exists in the available spec set
+		if _, exists := specIndex[encycForcedTool]; exists {
+			result.ForcedTool = encycForcedTool
+			result.ForcedReason = "routing_encyclopedia:force"
+			result.AppliedRules = append(result.AppliedRules, "encyclopedia_force:"+encycForcedTool)
+			result.NarrowedCount = 1
+			result.Duration = time.Since(start)
+
+			prefilterForcedTotal.WithLabelValues("encyclopedia_force", encycForcedTool).Inc()
+			prefilterRulesFired.WithLabelValues("encyclopedia_force").Inc()
+			prefilterLatency.Observe(result.Duration.Seconds())
+			prefilterNarrowedCount.Observe(1)
+
+			span.SetAttributes(
+				attribute.String("forced_tool", encycForcedTool),
+				attribute.String("forced_reason", "routing_encyclopedia:force"),
+				attribute.Int("original_count", result.OriginalCount),
+			)
+
+			pf.logger.Info("prefilter encyclopedia force selection",
+				slog.String("tool", encycForcedTool),
+				slog.String("query_preview", truncateForLog(query, 80)),
+			)
+			return result
+		}
+		pf.logger.Warn("prefilter encyclopedia forced tool not in spec set, skipping",
+			slog.String("tool", encycForcedTool),
+		)
+	}
+
 	// Phase 1: Forced mapping check
 	if tool, reason, matched := pf.checkForcedMappings(queryLower); matched {
 		// Validate forced tool exists in the available spec set
@@ -416,11 +479,41 @@ func (pf *PreFilter) Filter(ctx context.Context, query string, allSpecs []ToolSp
 		prefilterRulesFired.WithLabelValues("hybrid_scoring").Inc()
 	}
 
+	// Phase 3.5: Apply encyclopedia boosts (CB-62 Rev 2).
+	// Boosts are applied after embedding scoring to nudge tools into the
+	// candidate set without overriding the embedding model's signal.
+	if len(encycBoosts) > 0 && result.Scores != nil {
+		for tool, boost := range encycBoosts {
+			result.Scores[tool] += boost
+			result.AppliedRules = append(result.AppliedRules, "encyclopedia_boost:"+tool)
+		}
+		prefilterRulesFired.WithLabelValues("encyclopedia_boost").Inc()
+	}
+
 	// Phase 4: Confusion pair resolution
 	pf.resolveConfusionPairs(queryLower, result.Scores, result)
 
 	// Phase 5: Candidate selection
-	narrowed := pf.selectCandidates(result.Scores, allSpecs, specIndex)
+	narrowed := pf.selectCandidates(result.Scores, allSpecs)
+
+	// Phase 5.5: Ensure encyclopedia hints are in the candidate set (CB-62 Rev 2).
+	if len(encycHints) > 0 {
+		narrowedSet := make(map[string]bool, len(narrowed))
+		for _, s := range narrowed {
+			narrowedSet[s.Name] = true
+		}
+		for _, hint := range encycHints {
+			if !narrowedSet[hint] {
+				if spec, exists := specIndex[hint]; exists {
+					narrowed = append(narrowed, spec)
+					result.AppliedRules = append(result.AppliedRules, "encyclopedia_hint:"+hint)
+				}
+			}
+		}
+		if len(encycHints) > 0 {
+			prefilterRulesFired.WithLabelValues("encyclopedia_hint").Inc()
+		}
+	}
 	result.NarrowedSpecs = narrowed
 	result.NarrowedCount = len(narrowed)
 	result.Duration = time.Since(start)
@@ -595,20 +688,28 @@ func (pf *PreFilter) checkNegationRules(queryLower string) (tool string, reason 
 // Phase 3: Hybrid Scoring (IT-06c)
 // =============================================================================
 
-// scoreHybrid scores tools using BM25 + embedding similarity with UCB1
+// scoreHybrid scores tools using the configured scoring mode with UCB1
 // session penalty. Replaces the old scoreByKeywords substring counting.
 //
 // # Description
 //
-// Scoring pipeline:
-//  1. BM25 (always available, pure Go): IDF-weighted lexical scoring over
-//     each tool's keyword + use_when corpus. Normalized to [0,1].
-//  2. Embedding similarity (optional, requires Ollama): cosine similarity
-//     between the query embedding and pre-computed tool embeddings. [0,1].
-//  3. Hybrid blend: 0.4 × BM25 + 0.6 × embedding. Falls back to BM25-only
-//     (weight 1.0) if the embedder is not warmed or the Ollama call fails.
+// CB-62: Scoring mode is controlled by cfg.ScoringMode:
+//
+//   - "embedding_primary" (default): Pure embedding cosine similarity [0,1].
+//     BM25 is still computed for OTel span debugging but does NOT affect
+//     ranking. When embeddings are unavailable (Ollama dead), returns nil
+//     scores → selectCandidates passes ALL tools to the router.
+//   - "hybrid" (legacy): 0.4 × BM25 + 0.6 × embedding blend. Falls back to
+//     BM25-only if the embedder is not warmed or the Ollama call fails.
+//
+// Both modes apply UCB1 session penalty (step 4):
+//  1. BM25 scoring (computed in both modes; used only in hybrid mode).
+//  2. Embedding similarity (requires Ollama): cosine similarity [0,1].
+//  3. Mode switch: embedding_primary → pure embedding or nil passthrough;
+//     hybrid → 0.4 BM25 + 0.6 embedding blend.
 //  4. UCB1 session penalty: subtract 0.15 per prior selection of each tool
 //     in the current session, floored at 0. Encourages exploration.
+//     Skipped when scores are nil (passthrough mode).
 //
 // # Inputs
 //
@@ -619,7 +720,7 @@ func (pf *PreFilter) checkNegationRules(queryLower string) (tool string, reason 
 //
 // # Outputs
 //
-//   - map[string]float64: Tool name → blended score. Tools with zero score omitted.
+//   - map[string]float64: Tool name → score. Nil in passthrough mode (embeddings unavailable).
 func (pf *PreFilter) scoreHybrid(ctx context.Context, queryLower string, allSpecs []ToolSpec, sessionCounts map[string]int) map[string]float64 {
 	// --- Lazy corpus init (one-time, double-checked) ---
 	// On the first call that provides non-empty specs, build the BM25 index
@@ -651,44 +752,24 @@ func (pf *PreFilter) scoreHybrid(ctx context.Context, queryLower string, allSpec
 		}
 	}
 
-	// Kick off the one-time embedding warm-up outside the lock.
-	// warmOnce.Do is idempotent; only the goroutine that built the BM25 index
-	// above will have set specsForWarm, so subsequent calls are no-ops here.
+	// CB-62: Synchronous embedding warm-up with bounded timeout.
+	// Belt-and-suspenders: startup already warms, but this protects against
+	// edge cases where scoreHybrid is called before startup completes.
 	if specsForWarm != nil {
 		pf.warmOnce.Do(func() {
-			go func() {
-				warmCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-				if err := pf.embedder.Warm(warmCtx, specsForWarm); err != nil {
-					pf.logger.Warn("prefilter: embedding warm-up failed",
-						slog.String("error", err.Error()),
-					)
-				}
-			}()
+			warmCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			warmStart := time.Now()
+			if err := pf.embedder.Warm(warmCtx, specsForWarm); err != nil {
+				pf.logger.Warn("prefilter: embedding warm-up failed, will passthrough all tools",
+					slog.String("error", err.Error()),
+				)
+				prefilterWarmupSource.WithLabelValues("timeout").Inc()
+			} else {
+				prefilterWarmupSource.WithLabelValues("ollama").Inc()
+			}
+			prefilterWarmupLatency.Observe(time.Since(warmStart).Seconds())
 		})
-	}
-
-	// Capture the BM25 index pointer under a read lock.
-	// After lazy init above the pointer is stable (immutable BM25Index), but
-	// we still need the lock to publish the write from the init path to this
-	// reader under Go's memory model.
-	pf.bm25mu.RLock()
-	bm25idx := pf.bm25
-	pf.bm25mu.RUnlock()
-
-	// --- BM25 ---
-	bm25Start := time.Now()
-	bm25Scores := bm25idx.Score(queryLower)
-	prefilterBM25Latency.Observe(time.Since(bm25Start).Seconds())
-
-	// Fall back to legacy keyword counting only when the BM25 corpus is empty
-	// (service startup race: allSpecs arrived but BM25 hasn't been built yet).
-	// Do NOT fall back when BM25 has been built but returned zero scores —
-	// that correctly means the query has no lexical overlap with any tool, and
-	// legacy substring counting would reintroduce the pre-IT-06c routing bugs
-	// (e.g. "where is" matching find_symbol for any "where is X referenced" query).
-	if len(bm25Scores) == 0 && bm25idx.IsEmpty() {
-		bm25Scores = pf.scoreByKeywordsLegacy(queryLower, allSpecs)
 	}
 
 	// --- Embedding ---
@@ -696,47 +777,73 @@ func (pf *PreFilter) scoreHybrid(ctx context.Context, queryLower string, allSpec
 	embScores, _ := pf.embedder.Score(ctx, queryLower) // nil on graceful degradation
 	prefilterEmbeddingLatency.Observe(time.Since(embStart).Seconds())
 
-	// --- Blend ---
-	// BM25 scores are normalized to [0,1] (max=1.0 across all tools).
-	// Embedding scores are raw cosine similarities in [0,1] but are NOT
-	// re-normalized — the top tool does not necessarily reach 1.0. Tools
-	// typically cluster in the 0.4–0.9 cosine range, so the effective spread
-	// of the embedding signal is narrower than BM25. This is intentional:
-	// BM25 provides sharp lexical discrimination (term hits → 1.0 quickly)
-	// while embedding provides broader semantic context. The 0.4/0.6 weighting
-	// reflects that the embedding signal carries more semantic information but
-	// over a compressed range.
+	// --- Scoring mode switch (CB-62) ---
 	var scores map[string]float64
-	if embScores == nil {
-		// BM25-only mode: Ollama unavailable or not yet warmed.
-		scores = bm25Scores
-		prefilterHybridMethodTotal.WithLabelValues("bm25_only").Inc()
-	} else {
-		// Collect all tool names present in either score set.
-		allTools := make(map[string]struct{}, len(bm25Scores)+len(embScores))
-		for t := range bm25Scores {
-			allTools[t] = struct{}{}
+	if pf.cfg.ScoringMode == "embedding_primary" {
+		// CB-62: In embedding_primary mode, BM25 is never used for ranking.
+		// Skip BM25 computation entirely to avoid wasted CPU.
+		if embScores != nil {
+			// Normal path: pure embedding scoring.
+			scores = embScores
+			prefilterHybridMethodTotal.WithLabelValues("embedding_primary").Inc()
+		} else {
+			// Degraded path: Ollama unavailable.
+			// DO NOT use BM25 — it cannot handle typos, misspellings, or synonyms.
+			// Return nil scores → selectCandidates will passthrough ALL tools to
+			// the router. granite4:micro-h handles 55 tools at ~11K tokens fine.
+			scores = nil
+			prefilterHybridMethodTotal.WithLabelValues("passthrough").Inc()
+			pf.logger.Warn("prefilter: embeddings unavailable, passing all tools to router")
 		}
-		for t := range embScores {
-			allTools[t] = struct{}{}
+	} else {
+		// Legacy hybrid mode (backward compat): 0.4 BM25 + 0.6 embedding.
+		// BM25 is only computed in hybrid mode.
+		pf.bm25mu.RLock()
+		bm25idx := pf.bm25
+		pf.bm25mu.RUnlock()
+
+		bm25Start := time.Now()
+		bm25Scores := bm25idx.Score(queryLower)
+		prefilterBM25Latency.Observe(time.Since(bm25Start).Seconds())
+
+		// Fall back to legacy keyword counting only when the BM25 corpus is empty
+		// (service startup race: allSpecs arrived but BM25 hasn't been built yet).
+		if len(bm25Scores) == 0 && bm25idx.IsEmpty() {
+			bm25Scores = pf.scoreByKeywordsLegacy(queryLower, allSpecs)
 		}
 
-		scores = make(map[string]float64, len(allTools))
-		const alphaBM25 = 0.4
-		const alphaEmb = 0.6
-		for t := range allTools {
-			blended := alphaBM25*bm25Scores[t] + alphaEmb*embScores[t]
-			if blended > 0 {
-				scores[t] = blended
+		if embScores == nil {
+			// BM25-only mode: Ollama unavailable or not yet warmed.
+			scores = bm25Scores
+			prefilterHybridMethodTotal.WithLabelValues("bm25_only").Inc()
+		} else {
+			// Collect all tool names present in either score set.
+			allTools := make(map[string]struct{}, len(bm25Scores)+len(embScores))
+			for t := range bm25Scores {
+				allTools[t] = struct{}{}
 			}
+			for t := range embScores {
+				allTools[t] = struct{}{}
+			}
+
+			scores = make(map[string]float64, len(allTools))
+			const alphaBM25 = 0.4
+			const alphaEmb = 0.6
+			for t := range allTools {
+				blended := alphaBM25*bm25Scores[t] + alphaEmb*embScores[t]
+				if blended > 0 {
+					scores[t] = blended
+				}
+			}
+			prefilterHybridMethodTotal.WithLabelValues("hybrid").Inc()
 		}
-		prefilterHybridMethodTotal.WithLabelValues("hybrid").Inc()
 	}
 
 	// --- UCB1 session penalty (Option K) ---
 	// Tools used more often in this session get progressively penalized,
 	// encouraging the router to explore alternatives.
-	if sessionCounts != nil {
+	// CB-62: Skip when scores is nil (passthrough mode — no ranking to penalize).
+	if sessionCounts != nil && scores != nil {
 		const penaltyPerUse = 0.15
 		for tool, s := range scores {
 			n := sessionCounts[tool]
@@ -799,6 +906,16 @@ func (pf *PreFilter) scoreByKeywordsLegacy(queryLower string, allSpecs []ToolSpe
 //	scores - Current scores to modify in-place.
 //	result - PreFilterResult to append applied rules.
 func (pf *PreFilter) resolveConfusionPairs(queryLower string, scores map[string]float64, result *PreFilterResult) {
+	// CB-62: Scale boost for embedding_primary mode where scores are cosine [0,1].
+	// YAML boost_amount values (e.g., 3.0) were calibrated for the old hybrid blend
+	// where BM25 keyword counts could be large. In embedding_primary mode, a raw
+	// 3.0 boost on [0,1] scores completely overwhelms the ranking.
+	// Scale factor: 0.1 → a YAML boost of 3.0 becomes 0.30 on the [0,1] scale.
+	boostScale := 1.0
+	if pf.cfg.ScoringMode == "embedding_primary" {
+		boostScale = 0.1
+	}
+
 	for i, pair := range pf.cfg.ConfusionPairs {
 		if i >= len(pf.compiledConfusionAPatterns) || i >= len(pf.compiledConfusionBPatterns) {
 			break
@@ -807,12 +924,14 @@ func (pf *PreFilter) resolveConfusionPairs(queryLower string, scores map[string]
 		aMatched := matchCompiledPatterns(queryLower, pf.compiledConfusionAPatterns[i])
 		bMatched := matchCompiledPatterns(queryLower, pf.compiledConfusionBPatterns[i])
 
+		boost := pair.BoostAmount * boostScale
+
 		if aMatched && !bMatched {
-			scores[pair.ToolA] += pair.BoostAmount
+			scores[pair.ToolA] += boost
 			result.AppliedRules = append(result.AppliedRules, "confusion_pair_boost:"+pair.ToolA)
 			prefilterRulesFired.WithLabelValues("confusion_pair").Inc()
 		} else if bMatched && !aMatched {
-			scores[pair.ToolB] += pair.BoostAmount
+			scores[pair.ToolB] += boost
 			result.AppliedRules = append(result.AppliedRules, "confusion_pair_boost:"+pair.ToolB)
 			prefilterRulesFired.WithLabelValues("confusion_pair").Inc()
 		}
@@ -834,29 +953,34 @@ func matchCompiledPatterns(queryLower string, patterns []compiledPattern) bool {
 // Phase 5: Candidate Selection
 // =============================================================================
 
-// selectCandidates selects the top candidates by score with min/max bounds.
+// selectCandidates selects candidates using adaptive score-gap-based cutoff.
 //
 // Description:
 //
-//	Sorts tools by score, takes top MaxCandidates, ensures MinCandidates
-//	floor, and always includes tools from AlwaysInclude list.
+//	CB-62: Replaces fixed top-N selection with adaptive window:
+//	1. Passthrough: nil scores (embeddings unavailable) → return all specs to router.
+//	2. Sort by score descending.
+//	3. Score floor: drop tools below ScoreFloor (default 0.30).
+//	4. Gap cutoff: starting at MinCandidates, find first gap > ScoreGapThreshold
+//	   between consecutive scores. Cut there.
+//	5. Cap at MaxCandidates as safety valve.
+//	6. AlwaysInclude + MinCandidates fill (unchanged).
 //
 // Inputs:
 //
-//	scores - Tool scores from phases 3-4.
+//	scores - Tool scores from phases 3-4. Nil signals passthrough.
 //	allSpecs - All available tool specs (for filling to min).
-//	specIndex - Tool name to spec lookup.
 //
 // Outputs:
 //
 //	[]ToolSpec - The narrowed candidate set.
-func (pf *PreFilter) selectCandidates(scores map[string]float64, allSpecs []ToolSpec, specIndex map[string]ToolSpec) []ToolSpec {
-	// If no scores, return all specs (passthrough)
+func (pf *PreFilter) selectCandidates(scores map[string]float64, allSpecs []ToolSpec) []ToolSpec {
+	// Passthrough: no scores means embeddings unavailable, let router see everything.
 	if len(scores) == 0 {
 		return allSpecs
 	}
 
-	// Sort tools by score descending
+	// Sort tools by score descending.
 	type scoredTool struct {
 		name  string
 		score float64
@@ -872,22 +996,47 @@ func (pf *PreFilter) selectCandidates(scores map[string]float64, allSpecs []Tool
 		return sorted[i].name < sorted[j].name // Stable sort by name
 	})
 
-	// Take top MaxCandidates
-	max := pf.cfg.MaxCandidates
-	if len(sorted) < max {
-		max = len(sorted)
+	// Apply score floor: drop tools below ScoreFloor.
+	var aboveFloor []scoredTool
+	for _, st := range sorted {
+		if st.score >= pf.cfg.ScoreFloor {
+			aboveFloor = append(aboveFloor, st)
+		}
 	}
-	selected := make(map[string]bool, max)
-	for i := 0; i < max; i++ {
-		selected[sorted[i].name] = true
+	// Ensure at least MinCandidates (even if below floor).
+	if len(aboveFloor) < pf.cfg.MinCandidates && len(sorted) > len(aboveFloor) {
+		limit := pf.cfg.MinCandidates
+		if limit > len(sorted) {
+			limit = len(sorted)
+		}
+		aboveFloor = sorted[:limit]
 	}
 
-	// Always include required tools
+	// Find gap cutoff: starting at MinCandidates, scan for first gap > threshold.
+	cutoff := len(aboveFloor)
+	for i := pf.cfg.MinCandidates; i < len(aboveFloor); i++ {
+		gap := aboveFloor[i-1].score - aboveFloor[i].score
+		if gap > pf.cfg.ScoreGapThreshold {
+			cutoff = i
+			break
+		}
+	}
+	// Cap at MaxCandidates.
+	if cutoff > pf.cfg.MaxCandidates {
+		cutoff = pf.cfg.MaxCandidates
+	}
+
+	selected := make(map[string]bool, cutoff)
+	for i := 0; i < cutoff; i++ {
+		selected[aboveFloor[i].name] = true
+	}
+
+	// Always include required tools.
 	for _, name := range pf.cfg.AlwaysInclude {
 		selected[name] = true
 	}
 
-	// If below MinCandidates, fill from allSpecs by original order
+	// If below MinCandidates, fill from allSpecs by original order.
 	if len(selected) < pf.cfg.MinCandidates {
 		for _, spec := range allSpecs {
 			if len(selected) >= pf.cfg.MinCandidates {
@@ -897,7 +1046,7 @@ func (pf *PreFilter) selectCandidates(scores map[string]float64, allSpecs []Tool
 		}
 	}
 
-	// Build result preserving original order
+	// Build result preserving original order.
 	var result []ToolSpec
 	for _, spec := range allSpecs {
 		if selected[spec.Name] {
@@ -1005,6 +1154,84 @@ func (pf *PreFilter) FilterAgentSpecs(ctx context.Context, query string, allSpec
 		OriginalCount: pfResult.OriginalCount,
 		NarrowedCount: pfResult.NarrowedCount,
 	}
+}
+
+// =============================================================================
+// Phase 0: Routing Encyclopedia (CB-62 Rev 2)
+// =============================================================================
+
+// applyEncyclopedia runs Phase 0: Routing Encyclopedia matching.
+//
+// Description:
+//
+//	For each encyclopedia entry, checks if any intent pattern matches the query
+//	AND no anti-signal matches. Applies the entry's tier action:
+//	  - force: return the tool immediately (deterministic, skip router)
+//	  - boost: add boost_amount to the tool's embedding score
+//	  - hint:  ensure the tool is in the candidate set (min_candidates fill)
+//
+// Inputs:
+//
+//	queryLower - Lowercase query string.
+//
+// Outputs:
+//
+//	forcedTool - Non-empty if a tier=force entry matched.
+//	boosts     - Map of tool name → boost amount for tier=boost entries.
+//	hints      - List of tool names for tier=hint entries.
+func (pf *PreFilter) applyEncyclopedia(queryLower string) (string, map[string]float64, []string) {
+	if len(pf.cfg.RoutingEncyclopedia) == 0 {
+		return "", nil, nil
+	}
+
+	boosts := make(map[string]float64)
+	var hints []string
+
+	for i, entry := range pf.cfg.RoutingEncyclopedia {
+		if i >= len(pf.compiledEncyclopediaPatterns) {
+			break
+		}
+
+		// Check anti-signals first (cheap string contains).
+		if pf.matchesAntiSignals(queryLower, entry.AntiSignals) {
+			continue
+		}
+
+		// Check intent patterns.
+		if !matchCompiledPatterns(queryLower, pf.compiledEncyclopediaPatterns[i]) {
+			continue
+		}
+
+		switch entry.Tier {
+		case "force":
+			return entry.Tool, nil, nil
+		case "boost":
+			boosts[entry.Tool] += entry.BoostAmount
+		case "hint":
+			hints = append(hints, entry.Tool)
+		}
+	}
+
+	return "", boosts, hints
+}
+
+// matchesAntiSignals checks if any anti-signal is a substring of the query.
+//
+// Inputs:
+//
+//	queryLower  - Lowercase query string.
+//	antiSignals - List of anti-signal phrases to check.
+//
+// Outputs:
+//
+//	bool - True if any anti-signal matches.
+func (pf *PreFilter) matchesAntiSignals(queryLower string, antiSignals []string) bool {
+	for _, signal := range antiSignals {
+		if strings.Contains(queryLower, strings.ToLower(signal)) {
+			return true
+		}
+	}
+	return false
 }
 
 // =============================================================================

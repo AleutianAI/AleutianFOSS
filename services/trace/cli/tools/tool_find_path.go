@@ -22,7 +22,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
-	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
 )
@@ -120,8 +119,6 @@ type findPathTool struct {
 //
 // Limitations:
 //
-//   - Symbol names must match exactly (no fuzzy matching)
-//   - When multiple symbols share a name, uses first function/method found
 //   - Returns only one path even if multiple shortest paths exist
 //   - Path length is measured in hops, not weighted by call frequency
 //
@@ -203,9 +200,13 @@ func (t *findPathTool) Execute(ctx context.Context, params TypedParams) (*Result
 	)
 	defer span.End()
 
-	// Resolve symbol names to IDs using index
-	fromID, fromPackage := t.resolveSymbol(p.From)
-	toID, toPackage := t.resolveSymbol(p.To)
+	// Resolve symbol names to IDs using shared ResolveFunctionWithFuzzy pipeline.
+	// IT-17: Replaces primitive resolveSymbol() (GetByName + first-function heuristic)
+	// with the full 5-strategy pipeline: full-ID bypass, exact match, dot-notation,
+	// bare method fallback, and fuzzy search. This fixes dot-notation queries like
+	// "Scene.render" and ambiguous bare names that need fuzzy disambiguation.
+	fromID, fromPackage := t.resolveSymbolFuzzy(ctx, p.From)
+	toID, toPackage := t.resolveSymbolFuzzy(ctx, p.To)
 
 	// Handle not found cases
 	if fromID == "" {
@@ -350,37 +351,43 @@ func (t *findPathTool) parseParams(params map[string]any) (FindPathParams, error
 	return p, nil
 }
 
-// resolveSymbol resolves a symbol name to an ID.
-func (t *findPathTool) resolveSymbol(name string) (string, string) {
+// resolveSymbolFuzzy resolves a symbol name to an ID using the shared
+// ResolveFunctionWithFuzzy pipeline.
+//
+// IT-17: Replaces the primitive resolveSymbol() that used only GetByName with
+// a first-function heuristic. The shared pipeline provides 5 resolution strategies:
+// full-ID bypass, exact match with kind filtering, dot-notation (Type.Method),
+// bare method fallback, and fuzzy search.
+//
+// Uses KindFilterAny + WithBareMethodFallback to maximize resolution success
+// for path queries, which may target any symbol kind (not just callables).
+func (t *findPathTool) resolveSymbolFuzzy(ctx context.Context, name string) (string, string) {
 	if t.index == nil {
 		return "", ""
 	}
 
-	symbols := t.index.GetByName(name)
-
-	// Prefer function/method
-	for _, sym := range symbols {
-		if sym != nil && (sym.Kind == ast.SymbolKindFunction || sym.Kind == ast.SymbolKindMethod) {
-			// Log disambiguation when multiple symbols match
-			if len(symbols) > 1 {
-				t.logger.Info("multiple symbols matched, using first function",
-					slog.String("tool", "find_path"),
-					slog.String("symbol_name", name),
-					slog.String("selected_package", sym.Package),
-					slog.String("selected_id", sym.ID),
-					slog.Int("total_matches", len(symbols)),
-				)
-			}
-			return sym.ID, sym.Package
-		}
+	sym, fuzzy, err := ResolveFunctionWithFuzzy(ctx, t.index, name, t.logger,
+		WithKindFilter(KindFilterAny),
+		WithBareMethodFallback(),
+	)
+	if err != nil {
+		t.logger.Debug("find_path: symbol resolution failed",
+			slog.String("name", name),
+			slog.String("error", err.Error()),
+		)
+		return "", ""
 	}
 
-	// Fallback to any symbol
-	if len(symbols) > 0 && symbols[0] != nil {
-		return symbols[0].ID, symbols[0].Package
+	if fuzzy {
+		t.logger.Info("find_path: resolved via fuzzy match",
+			slog.String("query", name),
+			slog.String("resolved", sym.Name),
+			slog.String("id", sym.ID),
+			slog.String("package", sym.Package),
+		)
 	}
 
-	return "", ""
+	return sym.ID, sym.Package
 }
 
 // buildOutput creates the typed output struct.

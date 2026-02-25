@@ -1870,3 +1870,213 @@ func (p nopPage) IsNode() {}
 		t.Error("missing method 'IsNode'")
 	}
 }
+
+// TestGoParser_CompositeLiteralTypeRefs verifies that composite literal usages
+// (e.g., H{...}, Config{...}) produce TypeReference entries.
+// IT-16: Without this, types used only via composite literals are invisible
+// to find_references.
+func TestGoParser_CompositeLiteralTypeRefs(t *testing.T) {
+	t.Run("simple_composite_literal", func(t *testing.T) {
+		src := `package example
+
+type Config struct {
+	Name string
+}
+
+func NewConfig() Config {
+	return Config{Name: "default"}
+}
+`
+		parser := NewGoParser(WithParseOptions(ParseOptions{IncludePrivate: true}))
+		result, err := parser.Parse(context.Background(), []byte(src), "config.go")
+		if err != nil {
+			t.Fatalf("parse failed: %v", err)
+		}
+
+		fn := findSymbolByName(result.Symbols, "NewConfig")
+		if fn == nil {
+			t.Fatal("expected to find NewConfig")
+		}
+
+		// Config appears in return type AND in composite literal body
+		found := false
+		for _, ref := range fn.TypeReferences {
+			if ref.Name == "Config" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected TypeReference for 'Config' from composite literal, got: %v", fn.TypeReferences)
+		}
+	})
+
+	t.Run("qualified_composite_literal", func(t *testing.T) {
+		// Simulates gin.H{...} — the type_identifier inside qualified_type
+		// is "H" after stripping the package qualifier
+		src := `package example
+
+import "gin"
+
+type H map[string]any
+
+func handler() {
+	_ = H{"key": "value"}
+}
+`
+		parser := NewGoParser(WithParseOptions(ParseOptions{IncludePrivate: true}))
+		result, err := parser.Parse(context.Background(), []byte(src), "handler.go")
+		if err != nil {
+			t.Fatalf("parse failed: %v", err)
+		}
+
+		fn := findSymbolByName(result.Symbols, "handler")
+		if fn == nil {
+			t.Fatal("expected to find handler")
+		}
+
+		found := false
+		for _, ref := range fn.TypeReferences {
+			if ref.Name == "H" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected TypeReference for 'H' from composite literal, got: %v", fn.TypeReferences)
+		}
+	})
+
+	t.Run("builtin_types_excluded", func(t *testing.T) {
+		src := `package example
+
+func makeMap() {
+	_ = map[string]int{"a": 1}
+}
+`
+		parser := NewGoParser(WithParseOptions(ParseOptions{IncludePrivate: true}))
+		result, err := parser.Parse(context.Background(), []byte(src), "maps.go")
+		if err != nil {
+			t.Fatalf("parse failed: %v", err)
+		}
+
+		fn := findSymbolByName(result.Symbols, "makeMap")
+		if fn == nil {
+			t.Fatal("expected to find makeMap")
+		}
+
+		// map[string]int should not produce any TypeReferences (all builtins)
+		for _, ref := range fn.TypeReferences {
+			t.Errorf("unexpected TypeReference from builtin composite literal: %q", ref.Name)
+		}
+	})
+
+	t.Run("multiple_composite_literals_deduped", func(t *testing.T) {
+		src := `package example
+
+type Opts struct {
+	X int
+}
+
+func build() {
+	a := Opts{X: 1}
+	b := Opts{X: 2}
+	_ = a
+	_ = b
+}
+`
+		parser := NewGoParser(WithParseOptions(ParseOptions{IncludePrivate: true}))
+		result, err := parser.Parse(context.Background(), []byte(src), "build.go")
+		if err != nil {
+			t.Fatalf("parse failed: %v", err)
+		}
+
+		fn := findSymbolByName(result.Symbols, "build")
+		if fn == nil {
+			t.Fatal("expected to find build")
+		}
+
+		// Should have exactly 1 TypeReference for Opts (deduped)
+		optsCount := 0
+		for _, ref := range fn.TypeReferences {
+			if ref.Name == "Opts" {
+				optsCount++
+			}
+		}
+		if optsCount != 1 {
+			t.Errorf("expected 1 deduped TypeReference for 'Opts', got %d (refs: %v)", optsCount, fn.TypeReferences)
+		}
+	})
+
+	t.Run("nested_composite_literal", func(t *testing.T) {
+		src := `package example
+
+type Inner struct {
+	Val int
+}
+
+type Outer struct {
+	In Inner
+}
+
+func makeNested() Outer {
+	return Outer{In: Inner{Val: 42}}
+}
+`
+		parser := NewGoParser(WithParseOptions(ParseOptions{IncludePrivate: true}))
+		result, err := parser.Parse(context.Background(), []byte(src), "nested.go")
+		if err != nil {
+			t.Fatalf("parse failed: %v", err)
+		}
+
+		fn := findSymbolByName(result.Symbols, "makeNested")
+		if fn == nil {
+			t.Fatal("expected to find makeNested")
+		}
+
+		names := make(map[string]bool)
+		for _, ref := range fn.TypeReferences {
+			names[ref.Name] = true
+		}
+		if !names["Outer"] {
+			t.Error("expected TypeReference for 'Outer'")
+		}
+		if !names["Inner"] {
+			t.Error("expected TypeReference for 'Inner'")
+		}
+	})
+
+	t.Run("slice_of_structs_composite_literal", func(t *testing.T) {
+		src := `package example
+
+type Item struct {
+	Name string
+}
+
+func makeSlice() []Item {
+	return []Item{{Name: "a"}, {Name: "b"}}
+}
+`
+		parser := NewGoParser(WithParseOptions(ParseOptions{IncludePrivate: true}))
+		result, err := parser.Parse(context.Background(), []byte(src), "slice.go")
+		if err != nil {
+			t.Fatalf("parse failed: %v", err)
+		}
+
+		fn := findSymbolByName(result.Symbols, "makeSlice")
+		if fn == nil {
+			t.Fatal("expected to find makeSlice")
+		}
+
+		found := false
+		for _, ref := range fn.TypeReferences {
+			if ref.Name == "Item" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected TypeReference for 'Item' from []Item{...} composite literal, got: %v", fn.TypeReferences)
+		}
+	})
+}
