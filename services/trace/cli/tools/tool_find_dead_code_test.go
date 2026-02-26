@@ -290,7 +290,9 @@ func TestFindDeadCode_GraphMarkers(t *testing.T) {
 		}
 	})
 
-	t.Run("zero result has GRAPH RESULT header and exhaustive footer", func(t *testing.T) {
+	t.Run("nonexistent package fallback still has Found prefix and exhaustive footer", func(t *testing.T) {
+		// IT-Summary FIX-B: nonexistent package falls back to global results,
+		// so this is now a positive-result path (Found prefix, not GRAPH RESULT header).
 		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"package": "nonexistent_package_xyz",
 		}})
@@ -301,14 +303,15 @@ func TestFindDeadCode_GraphMarkers(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 
-		if !strings.Contains(result.OutputText, "## GRAPH RESULT") {
-			t.Error("expected '## GRAPH RESULT' header in zero-result output")
+		if !strings.HasPrefix(result.OutputText, "Found ") {
+			t.Errorf("expected OutputText to start with 'Found ' after fallback, got: %q",
+				result.OutputText[:min(80, len(result.OutputText))])
 		}
 		if !strings.Contains(result.OutputText, "these results are exhaustive") {
-			t.Error("expected 'these results are exhaustive' in zero-result output")
+			t.Error("expected 'these results are exhaustive' in fallback output")
 		}
 		if !strings.Contains(result.OutputText, "Do NOT use Grep or Read to verify") {
-			t.Error("expected 'Do NOT use Grep or Read to verify' in zero-result output")
+			t.Error("expected 'Do NOT use Grep or Read to verify' in fallback output")
 		}
 	})
 }
@@ -363,7 +366,7 @@ func TestFindDeadCode_PackageFilter(t *testing.T) {
 		}
 	})
 
-	t.Run("nonexistent package returns zero results", func(t *testing.T) {
+	t.Run("nonexistent package falls back to global results", func(t *testing.T) {
 		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"package": "nonexistent",
 		}})
@@ -379,8 +382,10 @@ func TestFindDeadCode_PackageFilter(t *testing.T) {
 			t.Fatalf("Output is not FindDeadCodeOutput, got %T", result.Output)
 		}
 
-		if output.DeadCodeCount != 0 {
-			t.Errorf("expected 0 dead code for nonexistent package, got %d", output.DeadCodeCount)
+		// IT-Summary FIX-B: when package filter matches nothing but global results
+		// exist, the tool drops the filter and returns global results.
+		if output.DeadCodeCount == 0 {
+			t.Error("expected fallback to global results for nonexistent package, got 0")
 		}
 	})
 }

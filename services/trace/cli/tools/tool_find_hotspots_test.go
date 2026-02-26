@@ -12,6 +12,7 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -197,9 +198,9 @@ func TestFindHotspots_GraphMarkers(t *testing.T) {
 		}
 	})
 
-	t.Run("zero result has GRAPH RESULT header and exhaustive footer", func(t *testing.T) {
-		// Filter by enum kind in a graph with no enum hotspots that have edges
-		// Use the analytics tool but request a package that doesn't exist
+	t.Run("nonexistent package fallback still has Found prefix and exhaustive footer", func(t *testing.T) {
+		// IT-Summary FIX-B: nonexistent package falls back to global results,
+		// so this is now a positive-result path (Found prefix, not GRAPH RESULT header).
 		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"package": "nonexistent_package_xyz",
 		}})
@@ -210,14 +211,15 @@ func TestFindHotspots_GraphMarkers(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 
-		if !strings.Contains(result.OutputText, "## GRAPH RESULT") {
-			t.Error("expected '## GRAPH RESULT' header in zero-result output")
+		if !strings.HasPrefix(result.OutputText, "Found ") {
+			t.Errorf("expected OutputText to start with 'Found ' after fallback, got: %q",
+				result.OutputText[:min(80, len(result.OutputText))])
 		}
 		if !strings.Contains(result.OutputText, "these results are exhaustive") {
-			t.Error("expected 'these results are exhaustive' in zero-result output")
+			t.Error("expected 'these results are exhaustive' in fallback output")
 		}
 		if !strings.Contains(result.OutputText, "Do NOT use Grep or Read to verify") {
-			t.Error("expected 'Do NOT use Grep or Read to verify' in zero-result output")
+			t.Error("expected 'Do NOT use Grep or Read to verify' in fallback output")
 		}
 	})
 }
@@ -404,7 +406,7 @@ func TestFindHotspots_PackageFilter(t *testing.T) {
 		}
 	})
 
-	t.Run("nonexistent package returns zero results with graph markers", func(t *testing.T) {
+	t.Run("nonexistent package falls back to global results", func(t *testing.T) {
 		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"package": "nonexistent",
 		}})
@@ -420,12 +422,16 @@ func TestFindHotspots_PackageFilter(t *testing.T) {
 			t.Fatalf("Output is not FindHotspotsOutput, got %T", result.Output)
 		}
 
-		if output.HotspotCount != 0 {
-			t.Errorf("expected 0 hotspots for nonexistent package, got %d", output.HotspotCount)
+		// IT-Summary FIX-B: when package filter matches nothing but global results
+		// exist, the tool drops the filter and returns global results.
+		if output.HotspotCount == 0 {
+			t.Error("expected fallback to global results for nonexistent package, got 0")
 		}
 
-		if !strings.Contains(result.OutputText, "## GRAPH RESULT") {
-			t.Error("expected GRAPH RESULT header for zero results")
+		// Fallback produces positive results, so should have "Found" prefix, not GRAPH RESULT header
+		if !strings.HasPrefix(result.OutputText, "Found ") {
+			t.Errorf("expected 'Found ' prefix after fallback, got: %q",
+				result.OutputText[:min(80, len(result.OutputText))])
 		}
 	})
 
@@ -648,4 +654,268 @@ func TestFindHotspots_DefinitionEnum(t *testing.T) {
 	if !ok {
 		t.Error("expected 'package' parameter in Definition")
 	}
+}
+
+// createTestGraphWithDunders builds a graph containing dunder methods and production
+// functions to test IT-43d Fix A (dunder filtering).
+func createTestGraphWithDunders(t *testing.T) (*graph.Graph, *index.SymbolIndex) {
+	t.Helper()
+
+	g := graph.NewGraph("/test")
+	idx := index.NewSymbolIndex()
+
+	symbols := []*ast.Symbol{
+		{
+			ID: "io/common.py:142:__enter__", Name: "__enter__",
+			Kind: ast.SymbolKindMethod, FilePath: "io/common.py",
+			StartLine: 142, EndLine: 150, Package: "io", Language: "python",
+		},
+		{
+			ID: "io/common.py:145:__exit__", Name: "__exit__",
+			Kind: ast.SymbolKindMethod, FilePath: "io/common.py",
+			StartLine: 145, EndLine: 155, Package: "io", Language: "python",
+		},
+		{
+			ID: "io/common.py:50:__init__", Name: "__init__",
+			Kind: ast.SymbolKindMethod, FilePath: "io/common.py",
+			StartLine: 50, EndLine: 80, Package: "io", Language: "python",
+		},
+		{
+			ID: "io/parsers.py:100:read_csv", Name: "read_csv",
+			Kind: ast.SymbolKindFunction, FilePath: "io/parsers.py",
+			StartLine: 100, EndLine: 200, Package: "io", Language: "python",
+		},
+		{
+			ID: "io/parsers.py:300:TextFileReader", Name: "TextFileReader",
+			Kind: ast.SymbolKindClass, FilePath: "io/parsers.py",
+			StartLine: 300, EndLine: 500, Package: "io", Language: "python",
+		},
+	}
+
+	for _, sym := range symbols {
+		g.AddNode(sym)
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("Failed to add symbol: %v", err)
+		}
+	}
+
+	// Give __enter__ high InDegree (simulating Strategy 3c inflation)
+	for i := 0; i < 20; i++ {
+		callerID := fmt.Sprintf("caller_%d.py:1:func_%d", i, i)
+		callerSym := &ast.Symbol{
+			ID: callerID, Name: fmt.Sprintf("func_%d", i),
+			Kind: ast.SymbolKindFunction, FilePath: fmt.Sprintf("caller_%d.py", i),
+			StartLine: 1, EndLine: 10, Package: "callers", Language: "python",
+		}
+		g.AddNode(callerSym)
+		g.AddEdge(callerID, "io/common.py:142:__enter__", graph.EdgeTypeCalls, ast.Location{
+			FilePath: callerSym.FilePath, StartLine: 5,
+		})
+		g.AddEdge(callerID, "io/common.py:145:__exit__", graph.EdgeTypeCalls, ast.Location{
+			FilePath: callerSym.FilePath, StartLine: 6,
+		})
+	}
+
+	// Give read_csv moderate InDegree (real production hotspot)
+	for i := 0; i < 10; i++ {
+		callerID := fmt.Sprintf("user_%d.py:1:user_func_%d", i, i)
+		callerSym := &ast.Symbol{
+			ID: callerID, Name: fmt.Sprintf("user_func_%d", i),
+			Kind: ast.SymbolKindFunction, FilePath: fmt.Sprintf("user_%d.py", i),
+			StartLine: 1, EndLine: 10, Package: "users", Language: "python",
+		}
+		g.AddNode(callerSym)
+		g.AddEdge(callerID, "io/parsers.py:100:read_csv", graph.EdgeTypeCalls, ast.Location{
+			FilePath: callerSym.FilePath, StartLine: 3,
+		})
+	}
+
+	// read_csv -> TextFileReader
+	g.AddEdge("io/parsers.py:100:read_csv", "io/parsers.py:300:TextFileReader", graph.EdgeTypeCalls, ast.Location{
+		FilePath: "io/parsers.py", StartLine: 150,
+	})
+
+	g.Freeze()
+	return g, idx
+}
+
+// TestFindHotspots_FiltersDunders verifies IT-43d Fix A: dunder methods
+// (__enter__, __exit__, __init__, etc.) are excluded from hotspot results.
+func TestFindHotspots_FiltersDunders(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithDunders(t)
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindHotspotsTool(analytics, idx)
+
+	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+		"top":           100,
+		"exclude_tests": false, // Disable test filter to isolate dunder filtering
+	}})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+
+	output, ok := result.Output.(FindHotspotsOutput)
+	if !ok {
+		t.Fatalf("Output is not FindHotspotsOutput, got %T", result.Output)
+	}
+
+	// Verify no dunder methods in results
+	for _, hs := range output.Hotspots {
+		if strings.HasPrefix(hs.Name, "__") && strings.HasSuffix(hs.Name, "__") {
+			t.Errorf("IT-43d: dunder method %q should be filtered from hotspot results", hs.Name)
+		}
+	}
+
+	// Verify production functions are still present
+	foundReadCSV := false
+	for _, hs := range output.Hotspots {
+		if hs.Name == "read_csv" {
+			foundReadCSV = true
+		}
+	}
+	if !foundReadCSV {
+		t.Error("expected read_csv in hotspot results after dunder filtering")
+	}
+}
+
+// createTestGraphWithTestFiles builds a graph where all high-scoring symbols
+// in a specific package are in test files, to test IT-43d Fix B.
+func createTestGraphWithTestFiles(t *testing.T) (*graph.Graph, *index.SymbolIndex) {
+	t.Helper()
+
+	g := graph.NewGraph("/test")
+	idx := index.NewSymbolIndex()
+
+	// Test file symbol with high connectivity (like "raises" in test_setitem.py)
+	testSym := &ast.Symbol{
+		ID: "tests/indexing/test_setitem.py:977:raises", Name: "raises",
+		Kind: ast.SymbolKindMethod, FilePath: "tests/indexing/test_setitem.py",
+		StartLine: 977, EndLine: 990, Package: "indexing", Language: "python",
+	}
+	g.AddNode(testSym)
+	if err := idx.Add(testSym); err != nil {
+		t.Fatalf("Failed to add symbol: %v", err)
+	}
+
+	// Production file symbol with lower connectivity
+	prodSym := &ast.Symbol{
+		ID: "core/other.py:10:process", Name: "process",
+		Kind: ast.SymbolKindFunction, FilePath: "core/other.py",
+		StartLine: 10, EndLine: 30, Package: "core", Language: "python",
+	}
+	g.AddNode(prodSym)
+	if err := idx.Add(prodSym); err != nil {
+		t.Fatalf("Failed to add symbol: %v", err)
+	}
+
+	// Give test symbol high InDegree
+	for i := 0; i < 15; i++ {
+		callerID := fmt.Sprintf("tests/indexing/test_case_%d.py:1:test_%d", i, i)
+		callerSym := &ast.Symbol{
+			ID: callerID, Name: fmt.Sprintf("test_%d", i),
+			Kind: ast.SymbolKindFunction, FilePath: fmt.Sprintf("tests/indexing/test_case_%d.py", i),
+			StartLine: 1, EndLine: 10, Package: "indexing", Language: "python",
+		}
+		g.AddNode(callerSym)
+		g.AddEdge(callerID, testSym.ID, graph.EdgeTypeCalls, ast.Location{
+			FilePath: callerSym.FilePath, StartLine: 5,
+		})
+	}
+
+	// Give production symbol moderate connectivity
+	for i := 0; i < 3; i++ {
+		callerID := fmt.Sprintf("core/caller_%d.py:1:caller_%d", i, i)
+		callerSym := &ast.Symbol{
+			ID: callerID, Name: fmt.Sprintf("caller_%d", i),
+			Kind: ast.SymbolKindFunction, FilePath: fmt.Sprintf("core/caller_%d.py", i),
+			StartLine: 1, EndLine: 10, Package: "core", Language: "python",
+		}
+		g.AddNode(callerSym)
+		g.AddEdge(callerID, prodSym.ID, graph.EdgeTypeCalls, ast.Location{
+			FilePath: callerSym.FilePath, StartLine: 3,
+		})
+	}
+
+	g.Freeze()
+	return g, idx
+}
+
+// TestFindHotspots_FiltersTestFiles verifies IT-43d Fix B: when all results
+// matching a package filter are from test files, the tool returns empty results
+// instead of leaking test infrastructure into hotspot output.
+func TestFindHotspots_FiltersTestFiles(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithTestFiles(t)
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindHotspotsTool(analytics, idx)
+
+	t.Run("package filter with only test results returns empty", func(t *testing.T) {
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"package":       "indexing",
+			"exclude_tests": true,
+			"top":           10,
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindHotspotsOutput)
+		if !ok {
+			t.Fatalf("Output is not FindHotspotsOutput, got %T", result.Output)
+		}
+
+		// IT-43d Fix B: should return 0 results, NOT leak test file "raises"
+		if output.HotspotCount != 0 {
+			for _, hs := range output.Hotspots {
+				t.Errorf("IT-43d: test file symbol %q (%s) leaked into hotspot results",
+					hs.Name, hs.File)
+			}
+		}
+
+		// Should have graph result markers for empty results
+		if !strings.Contains(result.OutputText, "No symbols with connectivity") ||
+			!strings.Contains(result.OutputText, "## GRAPH RESULT") {
+			t.Error("expected zero-result graph markers in output")
+		}
+	})
+
+	t.Run("without package filter returns production symbols", func(t *testing.T) {
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"exclude_tests": true,
+			"top":           10,
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output, ok := result.Output.(FindHotspotsOutput)
+		if !ok {
+			t.Fatalf("Output is not FindHotspotsOutput, got %T", result.Output)
+		}
+
+		// Should have production results (process, caller_*)
+		for _, hs := range output.Hotspots {
+			if strings.Contains(hs.File, "test") {
+				t.Errorf("test file symbol %q leaked without package filter", hs.Name)
+			}
+		}
+	})
 }

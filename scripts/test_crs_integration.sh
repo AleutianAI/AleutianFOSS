@@ -180,14 +180,18 @@ detect_language_from_tests() {
             lang="javascript"
         elif [ "$test_id" -ge 401 ] && [ "$test_id" -le 433 ]; then
             lang="typescript"
-        # Tool Happy Path ranges (5000-8139)
-        elif [ "$test_id" -ge 5000 ] && [ "$test_id" -le 5239 ]; then
+        # Tool Happy Path ranges — must match map_test_id_to_feature() ranges
+        # Go: Hugo=50xx, Badger=51xx, Gin=52xx-53xx
+        elif [ "$test_id" -ge 5000 ] && [ "$test_id" -le 5399 ]; then
             lang="go"
-        elif [ "$test_id" -ge 6000 ] && [ "$test_id" -le 6139 ]; then
+        # Python: Flask=60xx, Pandas=61xx-62xx
+        elif [ "$test_id" -ge 6000 ] && [ "$test_id" -le 6299 ]; then
             lang="python"
-        elif [ "$test_id" -ge 7000 ] && [ "$test_id" -le 7139 ]; then
+        # JavaScript: Express=70xx, BabylonJS=71xx-72xx
+        elif [ "$test_id" -ge 7000 ] && [ "$test_id" -le 7299 ]; then
             lang="javascript"
-        elif [ "$test_id" -ge 8000 ] && [ "$test_id" -le 8139 ]; then
+        # TypeScript: NestJS=80xx, Plottable=81xx-82xx
+        elif [ "$test_id" -ge 8000 ] && [ "$test_id" -le 8299 ]; then
             lang="typescript"
         fi
 
@@ -1765,7 +1769,14 @@ main() {
         for mf_feature in $MULTI_FEATURE_FILTERS; do
             FEATURE_FILTER="$mf_feature"
             if [ "$_first" = true ]; then
-                # First load: initializes CRS_TESTS arrays
+                # First load: initializes CRS_TESTS arrays.
+                # Clear hardcoded arrays BEFORE attempting YAML load so that
+                # a failure doesn't leave stale hardcoded tests that misalign
+                # CRS_TESTS and CRS_TEST_IDS when subsequent features merge.
+                CRS_TESTS=()
+                CRS_TEST_IDS=()
+                CRS_TEST_PROJECT_ROOTS=()
+                CRS_TEST_PROJECT_NAMES=()
                 if ! load_yaml_tests; then
                     echo -e "${YELLOW}Warning: failed to load $mf_feature${NC}"
                 fi

@@ -158,8 +158,12 @@ tests:
       Find circular call dependencies in this codebase
     expected_state: COMPLETE
     reference_answer: |
-      NestJS has circular dependencies in areas like the injector and module
-      system where modules can forward-reference each other.
+      Found 11 circular dependency cycles. The largest cycle has 22 nodes spanning
+      the dependency injection system: reflectCatchExceptions -> getFilterInstance
+      -> createConcreteContext -> exchangeKeysForValues -> instance ->
+      setInstanceByContextId -> cloneStaticInstance -> setInstanceByInquirerId
+      -> getStaticModuleToken -> getModuleId -> create -> cloneTransientInstance,
+      across packages/core/exceptions/, packages/core/helpers/, packages/core/injector/.
     validations:
       - type: graph_tool_used
 
@@ -890,9 +894,14 @@ tests:
       What is the longest circular dependency chain in this codebase?
     expected_state: COMPLETE
     reference_answer: |
-      The longest cycle involves the module system where DependenciesScanner,
-      ModuleCompiler, NestContainer, and Injector form a chain of mutual
-      dependencies through module import resolution and provider creation.
+      The longest circular dependency chain contains 22 nodes in the dependency
+      injection system: setInstanceByContextId -> cloneStaticInstance ->
+      setInstanceByInquirerId -> getStaticModuleToken -> getModuleId -> create
+      -> cloneTransientInstance -> reflectCatchExceptions -> getFilterInstance
+      -> createConcreteContext -> exchangeKeysForValues -> instance ->
+      reflectCallbackParamtypes -> reflectCallbackMetadata -> getMetadata,
+      spanning instance-wrapper.ts, module-token-factory.ts, base-exception-filter-context.ts,
+      external-context-creator.ts, module.ts, and context-utils.ts.
     validations:
       - type: graph_tool_used
 
@@ -922,9 +931,13 @@ tests:
       What functions have the lowest PageRank scores, indicating they are peripheral?
     expected_state: COMPLETE
     reference_answer: |
-      Lowest PageRank functions are leaf utility helpers, standalone decorator
-      factory functions in packages/common, and isolated test helpers that have
-      few or no incoming edges from the core call graph.
+      Found 4 most important symbols by PageRank (tool returns highest, not lowest).
+      Top results: listen (PageRank 0.000503) in http-server.interface.ts,
+      callback (PageRank 0.000488) in nats-client.interface.ts,
+      isFunction (PageRank 0.000476) in shared.utils.ts,
+      isUndefined (PageRank 0.000472) in shared.utils.ts.
+      The tool reports highest PageRank, not lowest — peripheral functions
+      are those NOT appearing in the results.
     validations:
       - type: graph_tool_used
 
@@ -1659,8 +1672,10 @@ tests:
       Search for Reflect.getMetadata
     expected_state: COMPLETE
     reference_answer: |
-      The Grep tool processes Reflect.getMetadata for
-      the NestJS framework codebase.
+      Searched the NestJS codebase for Reflect.getMetadata and found no occurrences.
+      The NestJS framework uses the reflect-metadata package but the literal
+      Reflect.getMetadata call does not appear in the source code within the
+      packages/ directory scope.
     validations:
       - type: graph_tool_used
 

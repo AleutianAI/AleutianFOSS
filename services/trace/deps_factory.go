@@ -513,6 +513,9 @@ func (f *DefaultDependenciesFactory) Create(session *agent.Session, query string
 		// Create CRS for this session
 		sessionCRS := crs.New(nil)
 		deps.CRS = sessionCRS
+		// CRS-00 Rev 2: Wire CRS to session so HasCRS() returns true
+		// and CRS-02 through CRS-06 features activate in execute.go.
+		session.SetCRS(sessionCRS)
 
 		// GR-36: Set up session restore infrastructure if enabled
 		var restoreResult *crs.RestoreResult
@@ -523,8 +526,40 @@ func (f *DefaultDependenciesFactory) Create(session *agent.Session, query string
 			}
 		}
 
-		// Create Bridge connecting activities to CRS
-		bridge := integration.NewBridge(sessionCRS, nil)
+		// Create Bridge connecting activities to CRS.
+		// CRS-WIRE-01: Wire journal to Bridge so coordinator-driven deltas
+		// (learned constraints, proof updates) are persisted.
+		var bridgeOpts []integration.BridgeOption
+		if deps.BadgerJournal != nil {
+			// Session restore path: persistent journal already created
+			bridgeOpts = append(bridgeOpts, integration.WithJournal(deps.BadgerJournal))
+			slog.Info("CRS-WIRE-01: Persistent journal wired to Bridge",
+				slog.String("session_id", session.ID),
+			)
+		} else {
+			// No session restore: create in-memory journal for within-session learning.
+			// Deltas won't survive restart but the coordinator's learning loop
+			// (CDCL clauses, constraint propagation) still works within this session.
+			memJournal, memErr := crs.NewBadgerJournal(crs.JournalConfig{
+				SessionID:     session.ID,
+				InMemory:      true,
+				SyncWrites:    false,
+				AllowDegraded: true,
+			})
+			if memErr == nil {
+				deps.BadgerJournal = memJournal
+				bridgeOpts = append(bridgeOpts, integration.WithJournal(memJournal))
+				registerPersistence(session.ID, nil, memJournal)
+				slog.Info("CRS-WIRE-01: In-memory journal wired to Bridge",
+					slog.String("session_id", session.ID),
+				)
+			} else {
+				slog.Debug("CRS-WIRE-01: In-memory journal creation failed, bridge runs without journal",
+					slog.String("error", memErr.Error()),
+				)
+			}
+		}
+		bridge := integration.NewBridge(sessionCRS, nil, bridgeOpts...)
 
 		// Create Coordinator with default configuration
 		coordConfig := integration.DefaultCoordinatorConfig()

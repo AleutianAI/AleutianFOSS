@@ -490,6 +490,14 @@ func (m *mockParamExtractor) IsEnabled() bool {
 	return m.enabled
 }
 
+func (m *mockParamExtractor) ResolveConceptualSymbol(
+	ctx context.Context,
+	query string,
+	candidates []agent.SymbolCandidate,
+) (string, error) {
+	return "", fmt.Errorf("not implemented in mock")
+}
+
 func TestEnhanceParamsWithLLM_NilExtractor(t *testing.T) {
 	phase := &ExecutePhase{}
 	deps := &Dependencies{ParamExtractor: nil}

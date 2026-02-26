@@ -563,6 +563,32 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 				slog.Info("IT-08e: LLM param extraction succeeded (parallel, speculative hit)",
 					slog.String("tool", hardForcing.Tool),
 				)
+				// IT-Summary FIX-D: For find_path, preserve regex-extracted dot-notation
+				// names (Type.Method) when the LLM stripped them to bare names.
+				// The 3b model over-generalizes "strip package qualifiers" and removes
+				// Type prefixes like "Engine." from "Engine.ServeHTTP". The regex
+				// extraction preserves these correctly.
+				if hardForcing.Tool == "find_path" {
+					if regexParams, ok := params.(tools.FindPathParams); ok {
+						if llmParams, ok := converted.(tools.FindPathParams); ok {
+							if strings.Contains(regexParams.From, ".") && !strings.Contains(llmParams.From, ".") {
+								slog.Info("IT-Summary FIX-D: preserving regex dot-notation for 'from'",
+									slog.String("regex", regexParams.From),
+									slog.String("llm", llmParams.From),
+								)
+								llmParams.From = regexParams.From
+							}
+							if strings.Contains(regexParams.To, ".") && !strings.Contains(llmParams.To, ".") {
+								slog.Info("IT-Summary FIX-D: preserving regex dot-notation for 'to'",
+									slog.String("regex", regexParams.To),
+									slog.String("llm", llmParams.To),
+								)
+								llmParams.To = regexParams.To
+							}
+							converted = llmParams
+						}
+					}
+				}
 				params = converted
 				paramErr = nil
 			} else {
@@ -581,6 +607,44 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 			slog.Debug("IT-08e: LLM param extraction unavailable, using regex",
 				slog.String("reason", llmResult.err.Error()),
 			)
+		}
+
+		// IT-12: Conceptual symbol resolution for tools with symbol name params.
+		// When IT-08e speculative LLM extraction provides names that don't exist
+		// in the codebase (e.g., "site_initialization" hallucinated for "call chain
+		// from site initialization to menu assembly"), search the symbol index for
+		// query keywords and ask the LLM to pick the best real symbol.
+		if paramErr == nil && params != nil &&
+			deps.SymbolIndex != nil && deps.ParamExtractor != nil && deps.ParamExtractor.IsEnabled() {
+			switch hardForcing.Tool {
+			case "get_call_chain":
+				if gccParams, ok := params.(tools.GetCallChainParams); ok && gccParams.FunctionName != "" {
+					resolved := resolveConceptualName(ctx, gccParams.FunctionName, deps.Query,
+						deps.SymbolIndex, deps.ParamExtractor, deps.GraphAnalytics)
+					if resolved != gccParams.FunctionName {
+						gccParams.FunctionName = resolved
+						params = gccParams
+					}
+				}
+			case "find_path":
+				if fpParams, ok := params.(tools.FindPathParams); ok {
+					if fpParams.From != "" {
+						resolved := resolveConceptualName(ctx, fpParams.From, deps.Query,
+							deps.SymbolIndex, deps.ParamExtractor, deps.GraphAnalytics)
+						if resolved != fpParams.From {
+							fpParams.From = resolved
+						}
+					}
+					if fpParams.To != "" {
+						resolved := resolveConceptualName(ctx, fpParams.To, deps.Query,
+							deps.SymbolIndex, deps.ParamExtractor, deps.GraphAnalytics)
+						if resolved != fpParams.To {
+							fpParams.To = resolved
+						}
+					}
+					params = fpParams
+				}
+			}
 		}
 
 		if paramErr != nil {
@@ -905,14 +969,19 @@ CRITICAL - DO NOT OUTPUT ANY XML OR TOOL CALLS:
 
 CRITICAL - DO NOT FABRICATE:
 - ONLY report data that appeared in tool results above
-- Do NOT use training knowledge about this library/framework
+- Do NOT use training knowledge about this library/framework — even correct facts
+  about the upstream project are FABRICATION if not in the tool results
 - Do NOT invent file paths, function names, line numbers, or call chains
+- Do NOT add line numbers unless the tool provided them
+- Do NOT claim "all references are in one file" unless the tool returned exactly one file
 - If tool returned "not found" or empty, say so — do NOT fill in from memory
 - If tool returned data for a different question, state what was returned honestly
+- Words from the user's QUERY are NOT data — do NOT use query terms as graph nodes
 
 DO:
 - Synthesize a clear answer from the tool results above
 - State "not found" if results are empty
+- List every file the tool returned, even if there are many
 - Be concise (2-3 paragraphs maximum)
 
 Provide your answer now:`
@@ -1303,6 +1372,13 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 		attribute.Float64("confidence", selection.Confidence),
 		attribute.Int64("routing_duration_ms", selection.Duration.Milliseconds()),
 	)
+
+	// CRS-WIRE-01: Emit EventToolSelected to Coordinator for awareness/constraint checking.
+	// This runs BEFORE circuit breaker checks so activities can update CRS state
+	// (e.g., Awareness detects cycles, Constraint checks pre-conditions) before
+	// the circuit breaker evaluates proof numbers.
+	p.emitCoordinatorEvent(ctx, deps, integration.EventToolSelected,
+		&agent.ToolInvocation{Tool: selection.Tool}, nil, "", crs.ErrorCategoryNone)
 
 	// Circuit breaker: Check if the tool path is disproven or has been called too many times.
 	// CRS-02: Prefer CRS proof status check when available, fall back to count-based check.
@@ -2744,7 +2820,23 @@ CRITICAL RULES FOR SYNTHESIS — VIOLATING THESE PRODUCES HARMFUL OUTPUT:
 5. If the tool returned data for a DIFFERENT question than what was asked (e.g., callee
    data when cycles were requested), say "The tool returned [what it returned], which
    does not directly answer the question about [what was asked]." Do NOT reinterpret
-   callee data as cycle analysis.`
+   callee data as cycle analysis.
+
+6. Your training knowledge about open-source libraries IS fabrication in this context.
+   Even if you know that Badger has "defaultLogger" or Flask has "JSONResponse" or
+   Pandas has "Series in pandas/core/series.py", those facts are NOT in the tool results
+   and MUST NOT appear in your answer. The user is analyzing THEIR version of the code —
+   it may differ from upstream. Only tool-returned data is trustworthy.
+
+7. When reporting reference locations, list ONLY the files returned by the tool.
+   Do NOT add line numbers unless the tool provided them. Do NOT claim "all references
+   are in one file" unless the tool returned exactly one file. List every file the tool
+   returned, even if there are many.
+
+8. Words from the user's QUERY are NOT data. If the query mentions "Table layout" and
+   the tool returned "not found", do NOT construct a path using "Table" as a node.
+   Query terms describe what to SEARCH for, not what was FOUND. A "not found" result
+   means the graph has no node matching that name — do not improvise one.`
 
 	// Append synthesis instruction as the last user message.
 	synthRequest.Messages = append(synthRequest.Messages, llm.Message{

@@ -330,10 +330,22 @@ func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*R
 			slog.Int("after", len(packageFiltered)),
 		)
 		span.SetAttributes(attribute.Int("after_package_filter", len(packageFiltered)))
-		// CR-11: Unlike the test/doc filter, empty results ARE the correct answer
-		// for package filter — "no symbols found in that package" is accurate.
-		// Do NOT fall back to unfiltered results.
-		pageRankNodes = packageFiltered
+		// IT-Summary FIX-B fallback: CR-11 originally said "do not fall back."
+		// But integration tests show the ParamExtractor (3b model) sets conceptual
+		// scope names ("materials", "write path") as package filters. These never
+		// match any real package/path, producing empty results when data exists.
+		// Drop the filter so the user gets useful output.
+		if len(packageFiltered) == 0 && len(pageRankNodes) > 0 {
+			t.logger.Info("IT-Summary FIX-B: package filter returned 0 results, dropping filter",
+				slog.String("tool", "find_important"),
+				slog.String("package_filter", p.Package),
+				slog.Int("pre_filter_count", len(pageRankNodes)),
+			)
+			p.Package = ""
+			// Keep pageRankNodes as-is (unscoped)
+		} else {
+			pageRankNodes = packageFiltered
+		}
 	}
 
 	// Phase 3: Filter by kind if needed

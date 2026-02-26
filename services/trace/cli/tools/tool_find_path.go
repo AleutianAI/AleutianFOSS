@@ -22,6 +22,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
 )
@@ -200,13 +201,27 @@ func (t *findPathTool) Execute(ctx context.Context, params TypedParams) (*Result
 	)
 	defer span.End()
 
-	// Resolve symbol names to IDs using shared ResolveFunctionWithFuzzy pipeline.
-	// IT-17: Replaces primitive resolveSymbol() (GetByName + first-function heuristic)
-	// with the full 5-strategy pipeline: full-ID bypass, exact match, dot-notation,
-	// bare method fallback, and fuzzy search. This fixes dot-notation queries like
-	// "Scene.render" and ambiguous bare names that need fuzzy disambiguation.
-	fromID, fromPackage := t.resolveSymbolFuzzy(ctx, p.From)
-	toID, toPackage := t.resolveSymbolFuzzy(ctx, p.To)
+	// IT-Summary FIX-C Step 1: Strip package qualifiers before resolution.
+	// ParamExtractor may pass "gin.New" even though the prompt says to strip —
+	// the tool must strip as a fallback safety net.
+	fromName := stripPackageQualifier(p.From)
+	toName := stripPackageQualifier(p.To)
+
+	// IT-12 Rev 3: Use multi-candidate resolution so we can retry with alternate
+	// From/To combinations if the first resolution produces no path.
+	fromCandidates := t.resolveSymbolCandidates(ctx, fromName, 3)
+	toCandidates := t.resolveSymbolCandidates(ctx, toName, 3)
+
+	var fromID, fromPackage string
+	if len(fromCandidates) > 0 {
+		fromID = fromCandidates[0].ID
+		fromPackage = fromCandidates[0].Package
+	}
+	var toID, toPackage string
+	if len(toCandidates) > 0 {
+		toID = toCandidates[0].ID
+		toPackage = toCandidates[0].Package
+	}
 
 	// Handle not found cases
 	if fromID == "" {
@@ -308,6 +323,47 @@ func (t *findPathTool) Execute(ctx context.Context, params TypedParams) (*Result
 		)
 	}
 
+	// IT-12 Rev 3: If no path found and we have alternative candidates,
+	// try other From/To combinations. Try alt-From with original To first,
+	// then original From with alt-To. Max 3 extra attempts total.
+	if pathResult.Length < 0 && (len(fromCandidates) > 1 || len(toCandidates) > 1) {
+		t.logger.Info("find_path: no path with primary candidates, trying alternatives",
+			slog.String("from", p.From),
+			slog.String("to", p.To),
+			slog.Int("from_candidates", len(fromCandidates)),
+			slog.Int("to_candidates", len(toCandidates)),
+		)
+		attempts := 0
+		found := false
+		for fi, fc := range fromCandidates {
+			for ti, tc := range toCandidates {
+				if fi == 0 && ti == 0 {
+					continue // Already tried
+				}
+				if attempts >= 3 {
+					break
+				}
+				attempts++
+				altResult, altErr := t.graph.ShortestPath(ctx, fc.ID, tc.ID)
+				if altErr == nil && altResult.Length >= 0 {
+					t.logger.Info("find_path: alternative candidates found path",
+						slog.String("from_id", fc.ID),
+						slog.String("to_id", tc.ID),
+						slog.Int("length", altResult.Length),
+					)
+					pathResult = altResult
+					fromID = fc.ID
+					toID = tc.ID
+					found = true
+					break
+				}
+			}
+			if found || attempts >= 3 {
+				break
+			}
+		}
+	}
+
 	// Build typed output
 	output := t.buildOutput(p.From, p.To, pathResult)
 
@@ -351,43 +407,38 @@ func (t *findPathTool) parseParams(params map[string]any) (FindPathParams, error
 	return p, nil
 }
 
-// resolveSymbolFuzzy resolves a symbol name to an ID using the shared
-// ResolveFunctionWithFuzzy pipeline.
+// resolveSymbolCandidates resolves a symbol name to multiple candidates using
+// the multi-candidate resolution pipeline.
 //
-// IT-17: Replaces the primitive resolveSymbol() that used only GetByName with
-// a first-function heuristic. The shared pipeline provides 5 resolution strategies:
-// full-ID bypass, exact match with kind filtering, dot-notation (Type.Method),
-// bare method fallback, and fuzzy search.
+// Description:
 //
-// Uses KindFilterAny + WithBareMethodFallback to maximize resolution success
-// for path queries, which may target any symbol kind (not just callables).
-func (t *findPathTool) resolveSymbolFuzzy(ctx context.Context, name string) (string, string) {
+//	IT-12 Rev 3: Wraps ResolveFunctionCandidates for use by find_path. Returns
+//	up to max candidates ranked callable-first, so the tool can retry with
+//	alternate From/To combinations when the primary pair produces no path.
+//
+// Inputs:
+//   - ctx: Context for timeout control. Must not be nil.
+//   - name: Symbol name to resolve. Must not be empty.
+//   - max: Maximum number of candidates to return.
+//
+// Outputs:
+//   - []*ast.Symbol: Ranked candidates, or nil on error.
+//
+// Thread Safety: Safe for concurrent use (read-only operations).
+func (t *findPathTool) resolveSymbolCandidates(ctx context.Context, name string, max int) []*ast.Symbol {
 	if t.index == nil {
-		return "", ""
+		return nil
 	}
-
-	sym, fuzzy, err := ResolveFunctionWithFuzzy(ctx, t.index, name, t.logger,
-		WithKindFilter(KindFilterAny),
-		WithBareMethodFallback(),
-	)
+	candidates, err := ResolveFunctionCandidates(ctx, t.index, name,
+		t.logger, max, WithKindFilter(KindFilterAny), WithBareMethodFallback())
 	if err != nil {
-		t.logger.Debug("find_path: symbol resolution failed",
+		t.logger.Debug("find_path: candidate resolution failed",
 			slog.String("name", name),
 			slog.String("error", err.Error()),
 		)
-		return "", ""
+		return nil
 	}
-
-	if fuzzy {
-		t.logger.Info("find_path: resolved via fuzzy match",
-			slog.String("query", name),
-			slog.String("resolved", sym.Name),
-			slog.String("id", sym.ID),
-			slog.String("package", sym.Package),
-		)
-	}
-
-	return sym.ID, sym.Package
+	return candidates
 }
 
 // buildOutput creates the typed output struct.
@@ -423,6 +474,57 @@ func (t *findPathTool) buildOutput(fromName, toName string, result *graph.PathRe
 	}
 
 	return output
+}
+
+// stripPackageQualifier removes known package/project/stdlib prefixes from
+// dot-notation symbol names while preserving Type.Method format.
+//
+// Description:
+//
+//	IT-Summary FIX-C Step 1: ParamExtractor may pass "gin.New" even though
+//	the prompt instructs it to strip package qualifiers. This function acts
+//	as a fallback safety net. If the prefix is a known project name or stdlib
+//	package (all lowercase), it is stripped. If both parts are PascalCase or
+//	the prefix is a type name (capitalized), the name is kept as-is for
+//	Type.Method resolution.
+//
+// Inputs:
+//   - name: Symbol name, possibly package-qualified (e.g., "gin.New").
+//
+// Outputs:
+//   - string: The name with package prefix stripped, or unchanged if the
+//     prefix is not a known package (e.g., "Engine.ServeHTTP" stays as-is).
+//
+// Thread Safety: This function is safe for concurrent use (pure function).
+func stripPackageQualifier(name string) string {
+	parts := strings.SplitN(name, ".", 2)
+	if len(parts) != 2 {
+		return name
+	}
+	// If the prefix is PascalCase (starts with uppercase), it's likely a type name
+	// (e.g., "Engine.ServeHTTP", "Context.JSON"), not a package qualifier.
+	// Only strip when the prefix matches a known package in lowercase form AND
+	// the original prefix is all lowercase (e.g., "gin.New", "http.Get").
+	if parts[0] != strings.ToLower(parts[0]) {
+		return name // Prefix has uppercase — treat as Type.Method
+	}
+	prefix := parts[0] // Already lowercase at this point
+	knownPrefixes := map[string]bool{
+		// Project names
+		"gin": true, "flask": true, "express": true, "hugo": true,
+		"nestjs": true, "pandas": true, "badger": true, "plottable": true,
+		"babylonjs": true, "babylon": true,
+		// Go stdlib
+		"http": true, "os": true, "fmt": true, "io": true,
+		"net": true, "path": true, "strings": true, "context": true,
+		"sync": true, "time": true, "math": true, "sort": true,
+		// Python stdlib
+		"numpy": true, "np": true, "pd": true,
+	}
+	if knownPrefixes[prefix] {
+		return parts[1]
+	}
+	return name // Keep Type.Method as-is
 }
 
 // formatText creates a human-readable text summary.

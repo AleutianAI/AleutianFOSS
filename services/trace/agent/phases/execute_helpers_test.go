@@ -2125,6 +2125,27 @@ func TestExtractPackageContextFromQuery(t *testing.T) {
 			query: "Find dead code specifically in the packages/common directory",
 			want:  "packages/common",
 		},
+		// IT-43c: Multi-word subsystem with capitalized project name prefix
+		{
+			name:  "IT-43c_pandas_indexing_and_selection",
+			query: "What are the hotspot functions in Pandas indexing and selection code?",
+			want:  "indexing",
+		},
+		{
+			name:  "IT-43c_pandas_indexing_code",
+			query: "What are the hotspot functions in Pandas indexing code?",
+			want:  "indexing",
+		},
+		{
+			name:  "IT-43c_flask_request_handling_module",
+			query: "Find hotspots in the Flask request handling module",
+			want:  "request",
+		},
+		{
+			name:  "IT-43c_express_routing_middleware_system",
+			query: "What are the hotspots in the Express routing middleware system?",
+			want:  "routing",
+		},
 	}
 
 	for _, tt := range tests {
@@ -2243,4 +2264,289 @@ func TestExtractFunctionNameFromQuery_WhereIsUsed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// =============================================================================
+// IT-12: Conceptual Symbol Resolution Helper Tests
+// =============================================================================
+
+// TestTokenizeQueryKeywords_ConceptualQuery tests keyword extraction from
+// conceptual queries that describe behavior rather than name functions.
+func TestTokenizeQueryKeywords_ConceptualQuery(t *testing.T) {
+	tests := []struct {
+		name     string
+		query    string
+		wantAny  []string // at least these keywords should be present
+		wantNone []string // these should NOT be present
+	}{
+		{
+			name:     "material shader query",
+			query:    "Show the call chain from assigning a material to a mesh through to shader compilation",
+			wantAny:  []string{"material", "mesh", "shader", "compilation", "assign", "assigning"},
+			wantNone: []string{"show", "the", "call", "chain", "from", "to"},
+		},
+		{
+			name:     "rendering pipeline query",
+			query:    "What is the rendering pipeline for scene objects?",
+			wantAny:  []string{"render", "rendering", "pipeline", "scene", "objects"},
+			wantNone: []string{"what", "the", "for"},
+		},
+		{
+			name:    "simple function name query",
+			query:   "What does render call?",
+			wantAny: []string{"render"},
+		},
+		{
+			name:    "strips punctuation",
+			query:   "How does the binding subsystem handle validation?",
+			wantAny: []string{"binding", "subsystem", "handle", "validation"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			keywords := tokenizeQueryKeywords(tt.query)
+			keywordSet := make(map[string]bool)
+			for _, k := range keywords {
+				keywordSet[k] = true
+			}
+
+			for _, want := range tt.wantAny {
+				if !keywordSet[want] {
+					t.Errorf("tokenizeQueryKeywords(%q) missing expected keyword %q (got: %v)",
+						tt.query, want, keywords)
+				}
+			}
+
+			for _, noWant := range tt.wantNone {
+				if keywordSet[noWant] {
+					t.Errorf("tokenizeQueryKeywords(%q) should not contain stop word %q (got: %v)",
+						tt.query, noWant, keywords)
+				}
+			}
+		})
+	}
+}
+
+// TestTokenizeQueryKeywords_EmptyQuery returns empty slice.
+func TestTokenizeQueryKeywords_EmptyQuery(t *testing.T) {
+	keywords := tokenizeQueryKeywords("")
+	if len(keywords) != 0 {
+		t.Errorf("tokenizeQueryKeywords('') = %v, want empty", keywords)
+	}
+}
+
+// TestSearchSymbolCandidates_FiltersNonCallable verifies that non-callable kinds
+// (imports, variables, fields, constants, properties, interfaces, types,
+// classes, structs) are filtered out, keeping only functions and methods.
+func TestSearchSymbolCandidates_FiltersNonCallable(t *testing.T) {
+	idx := index.NewSymbolIndex()
+	// Add a method (should be kept)
+	idx.Add(&ast.Symbol{
+		ID: "mesh.ts:10:setMaterial", Name: "setMaterial",
+		Kind: ast.SymbolKindMethod, FilePath: "mesh.ts",
+		StartLine: 10, EndLine: 20, Language: "typescript",
+	})
+	// Add a function (should be kept)
+	idx.Add(&ast.Symbol{
+		ID: "utils.ts:1:getMesh", Name: "getMesh",
+		Kind: ast.SymbolKindFunction, FilePath: "utils.ts",
+		StartLine: 1, EndLine: 10, Language: "typescript",
+	})
+	// Non-callable kinds (all should be filtered out)
+	idx.Add(&ast.Symbol{
+		ID: "imports.ts:1:material_import", Name: "material",
+		Kind: ast.SymbolKindImport, FilePath: "imports.ts",
+		StartLine: 1, EndLine: 1, Language: "typescript",
+	})
+	idx.Add(&ast.Symbol{
+		ID: "mesh.ts:5:meshType", Name: "Mesh",
+		Kind: ast.SymbolKindClass, FilePath: "mesh.ts",
+		StartLine: 5, EndLine: 100, Language: "typescript",
+	})
+	idx.Add(&ast.Symbol{
+		ID: "vars.ts:3:materialVar", Name: "materialColor",
+		Kind: ast.SymbolKindVariable, FilePath: "vars.ts",
+		StartLine: 3, EndLine: 3, Language: "typescript",
+	})
+	idx.Add(&ast.Symbol{
+		ID: "mesh.ts:1:MeshInterface", Name: "MeshInterface",
+		Kind: ast.SymbolKindInterface, FilePath: "mesh.ts",
+		StartLine: 1, EndLine: 10, Language: "typescript",
+	})
+	idx.Add(&ast.Symbol{
+		ID: "mesh.ts:1:MeshType", Name: "MeshType",
+		Kind: ast.SymbolKindType, FilePath: "mesh.ts",
+		StartLine: 1, EndLine: 10, Language: "go",
+	})
+	idx.Add(&ast.Symbol{
+		ID: "mesh.go:1:MeshStruct", Name: "MeshStruct",
+		Kind: ast.SymbolKindStruct, FilePath: "mesh.go",
+		StartLine: 1, EndLine: 10, Language: "go",
+	})
+
+	candidates := searchSymbolCandidates(context.Background(), idx, []string{"material", "mesh"}, 10)
+
+	// Only setMaterial (method) and getMesh (function) should remain
+	nonCallableKinds := map[string]bool{
+		"import": true, "variable": true, "class": true,
+		"interface": true, "type": true, "struct": true,
+	}
+	for _, c := range candidates {
+		if nonCallableKinds[c.Kind] {
+			t.Errorf("searchSymbolCandidates returned non-callable kind %q for %q", c.Kind, c.Name)
+		}
+	}
+
+	if len(candidates) != 2 {
+		t.Errorf("expected 2 candidates (setMaterial, getMesh), got %d: %v", len(candidates), candidates)
+	}
+}
+
+// TestSearchSymbolCandidates_NilIndex returns empty.
+func TestSearchSymbolCandidates_NilIndex(t *testing.T) {
+	candidates := searchSymbolCandidates(context.Background(), nil, []string{"material"}, 10)
+	if len(candidates) != 0 {
+		t.Errorf("searchSymbolCandidates(nil index) = %v, want empty", candidates)
+	}
+}
+
+// TestSearchSymbolCandidates_EmptyKeywords returns empty.
+func TestSearchSymbolCandidates_EmptyKeywords(t *testing.T) {
+	idx := index.NewSymbolIndex()
+	candidates := searchSymbolCandidates(context.Background(), idx, []string{}, 10)
+	if len(candidates) != 0 {
+		t.Errorf("searchSymbolCandidates(empty keywords) = %v, want empty", candidates)
+	}
+}
+
+// TestSearchSymbolCandidates_Deduplication verifies that symbols found by
+// multiple keywords are only returned once.
+func TestSearchSymbolCandidates_Deduplication(t *testing.T) {
+	idx := index.NewSymbolIndex()
+	idx.Add(&ast.Symbol{
+		ID: "mesh.ts:10:setMaterial", Name: "setMaterial",
+		Kind: ast.SymbolKindMethod, FilePath: "mesh.ts",
+		StartLine: 10, EndLine: 20, Language: "typescript",
+	})
+
+	// Search with keywords that would both match "setMaterial"
+	candidates := searchSymbolCandidates(context.Background(), idx, []string{"setMaterial", "material"}, 10)
+
+	nameCount := make(map[string]int)
+	for _, c := range candidates {
+		nameCount[c.Name]++
+	}
+
+	for name, count := range nameCount {
+		if count > 1 {
+			t.Errorf("searchSymbolCandidates returned duplicate candidate %q (%d times)", name, count)
+		}
+	}
+}
+
+// mockConceptualExtractor is a minimal ParamExtractor for testing resolveConceptualName.
+type mockConceptualExtractor struct {
+	enabled     bool
+	resolveFunc func(ctx context.Context, query string, candidates []agent.SymbolCandidate) (string, error)
+}
+
+func (m *mockConceptualExtractor) IsEnabled() bool { return m.enabled }
+func (m *mockConceptualExtractor) ExtractParams(_ context.Context, _ string, _ string,
+	_ []agent.ParamExtractorSchema, _ map[string]any) (map[string]any, error) {
+	return nil, nil
+}
+func (m *mockConceptualExtractor) ResolveConceptualSymbol(ctx context.Context, query string,
+	candidates []agent.SymbolCandidate) (string, error) {
+	if m.resolveFunc != nil {
+		return m.resolveFunc(ctx, query, candidates)
+	}
+	return "", nil
+}
+
+// TestResolveConceptualName_CallableAwareExit verifies IT-12 Rev 4: when a name
+// exists in the index but ONLY as non-callable kinds (struct, type, interface),
+// resolveConceptualName should NOT exit early and should continue to LLM resolution.
+func TestResolveConceptualName_CallableAwareExit(t *testing.T) {
+	ctx := context.Background()
+	idx := index.NewSymbolIndex()
+
+	// "Site" exists as a struct only (no callable matches)
+	siteStruct := &ast.Symbol{
+		ID:        "hugolib/site.go:91:Site",
+		Name:      "Site",
+		Kind:      ast.SymbolKindStruct,
+		FilePath:  "hugolib/site.go",
+		StartLine: 91,
+		EndLine:   200,
+		Package:   "hugolib",
+		Exported:  true,
+		Language:  "go",
+	}
+	// "newHugoSites" exists as a function (better for call chains)
+	newHugoSites := &ast.Symbol{
+		ID:        "hugolib/hugo_sites.go:20:newHugoSites",
+		Name:      "newHugoSites",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "hugolib/hugo_sites.go",
+		StartLine: 20,
+		EndLine:   50,
+		Package:   "hugolib",
+		Exported:  false,
+		Language:  "go",
+	}
+	for _, sym := range []*ast.Symbol{siteStruct, newHugoSites} {
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("Failed to add %s: %v", sym.ID, err)
+		}
+	}
+
+	t.Run("name_only_non_callable_continues_to_LLM", func(t *testing.T) {
+		// When "Site" is only a struct, resolveConceptualName should NOT return
+		// "Site" early. It should proceed to LLM resolution which picks "newHugoSites".
+		extractor := &mockConceptualExtractor{
+			enabled: true,
+			resolveFunc: func(_ context.Context, _ string, candidates []agent.SymbolCandidate) (string, error) {
+				// The LLM picks the best function from candidates
+				return "newHugoSites", nil
+			},
+		}
+		result := resolveConceptualName(ctx, "Site", "call chain from site initialization", idx, extractor)
+		if result == "Site" {
+			t.Errorf("IT-12 Rev 4: resolveConceptualName should NOT return 'Site' when only non-callable matches exist, got %q", result)
+		}
+		if result != "newHugoSites" {
+			t.Errorf("expected 'newHugoSites' from LLM resolution, got %q", result)
+		}
+	})
+
+	t.Run("name_with_callable_exits_early", func(t *testing.T) {
+		// Add a function named "Site" — now the name has callable matches
+		siteFunc := &ast.Symbol{
+			ID:        "hugolib/site.go:536:Site",
+			Name:      "Site",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "hugolib/site.go",
+			StartLine: 536,
+			EndLine:   540,
+			Package:   "hugolib",
+			Exported:  true,
+			Language:  "go",
+		}
+		if err := idx.Add(siteFunc); err != nil {
+			t.Fatalf("Failed to add %s: %v", siteFunc.ID, err)
+		}
+
+		extractor := &mockConceptualExtractor{
+			enabled: true,
+			resolveFunc: func(_ context.Context, _ string, _ []agent.SymbolCandidate) (string, error) {
+				t.Error("IT-12 Rev 4: ResolveConceptualSymbol should NOT be called when callable matches exist")
+				return "should_not_be_used", nil
+			},
+		}
+		result := resolveConceptualName(ctx, "Site", "call chain from site initialization", idx, extractor)
+		if result != "Site" {
+			t.Errorf("expected 'Site' (early exit because callable match exists), got %q", result)
+		}
+	})
 }

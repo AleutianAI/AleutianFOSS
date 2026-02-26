@@ -716,6 +716,46 @@ type ParamExtractor interface {
 
 	// IsEnabled returns true if the extractor is enabled.
 	IsEnabled() bool
+
+	// ResolveConceptualSymbol uses the LLM to pick the best symbol from candidates
+	// when the query uses conceptual descriptions instead of function names.
+	// IT-12: Called as a fallback when regex extraction + fuzzy resolution fail.
+	//
+	// Inputs:
+	//   - ctx: Context for cancellation/timeout.
+	//   - query: The user's natural language query.
+	//   - candidates: Symbol candidates found by keyword search of the index.
+	//
+	// Outputs:
+	//   - string: The best symbol name from the candidates.
+	//   - error: Non-nil if resolution fails.
+	ResolveConceptualSymbol(ctx context.Context, query string,
+		candidates []SymbolCandidate) (string, error)
+}
+
+// SymbolCandidate represents a symbol found by keyword search of the index.
+// IT-12: Used for conceptual symbol resolution when regex extraction
+// produces words that don't match any actual symbol.
+type SymbolCandidate struct {
+	// Name is the symbol name (e.g., "_setMaterial").
+	Name string
+
+	// Kind is the symbol kind (e.g., "method", "function").
+	Kind string
+
+	// FilePath is the file where the symbol is defined.
+	FilePath string
+
+	// Line is the line number where the symbol is defined.
+	Line int
+
+	// OutEdges is the number of outgoing call edges (functions this symbol calls).
+	// IT-12 Rev 4: Populated when graph is available. Zero means unknown or no edges.
+	OutEdges int
+
+	// InEdges is the number of incoming call edges (functions that call this symbol).
+	// IT-12 Rev 4: Populated when graph is available. Zero means unknown or no edges.
+	InEdges int
 }
 
 // ParamExtractorSchema describes a tool parameter for the LLM prompt.

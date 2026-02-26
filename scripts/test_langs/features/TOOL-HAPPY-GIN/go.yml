@@ -58,8 +58,10 @@ tests:
       What types implement the IRouter interface?
     expected_state: COMPLETE
     reference_answer: |
-      The IRouter interface is implemented by Engine and RouterGroup,
-      providing route registration and middleware chaining.
+      Found 2 implementations/subclasses of 'IRouter':
+      Interface: routergroup.go:27:IRouter
+        - RouterGroup (struct) in routergroup.go:55
+        - Engine (struct) in gin.go:92
     validations:
       - type: graph_tool_used
 
@@ -731,9 +733,9 @@ tests:
       Where is the responseWriter struct referenced in the codebase?
     expected_state: COMPLETE
     reference_answer: |
-      The responseWriter struct is referenced in response_writer.go where it is
-      defined and implements ResponseWriter, in Context where it wraps http.ResponseWriter,
-      and in Engine.ServeHTTP where it is initialized via writermem.reset.
+      The responseWriter struct is referenced only inside response_writer.go.
+      References at lines 57, 61, 67, 77, 84, 91, 98, 102, 106, 111, 124,
+      129, 136. The struct is defined at line 49 of the same file.
     validations:
       - type: graph_tool_used
 
@@ -748,9 +750,11 @@ tests:
       Show the call chain from gin.Default to Logger middleware execution
     expected_state: COMPLETE
     reference_answer: |
-      gin.Default -> gin.New -> Engine.Use(Logger(), Recovery()) ->
-      RouterGroup.Use to register middleware. At request time, the Logger
-      middleware runs via Context.Next in the handler chain.
+      Found 84 nodes in call chain for 'Default' (downstream), depth 5:
+      Default() [gin.go:236] calls debugPrintWARNINGDefault(), New(),
+      Use(), Logger(), Recovery(), With(). New() calls debugPrintWARNINGNew(),
+      allocateContext(), rebuild404Handlers(), rebuild405Handlers().
+      Logger() calls LoggerWithConfig(). Recovery() calls RecoveryWithWriter().
     validations:
       - type: graph_tool_used
 
@@ -890,9 +894,13 @@ tests:
       Are there any circular dependencies between gin, render, and binding packages?
     expected_state: COMPLETE
     reference_answer: |
-      The gin package depends on render and binding packages for response
-      writing and request parsing respectively. Render and binding do not
-      depend back on gin, forming a clean dependency DAG without cross-package cycles.
+      Found circular dependencies within the gin and binding packages, but no
+      cross-package cycle involving the render package. Detected 4 cycles:
+      (1) initQueryCache -> GetQueryArray -> GetQuery -> Query -> initQueryCache in context.go,
+      (2) Bind -> ShouldBindWith -> MustBindWith -> Bind in context.go,
+      (3) setByMultipartFormFile -> setArrayOfMultipartFormFiles -> setByMultipartFormFile in binding/multipart_form_mapping.go,
+      (4) BindUri -> ShouldBindUri -> BindUri in context.go.
+      The render package does not appear in any of the cycles.
     validations:
       - type: graph_tool_used
 
@@ -2051,8 +2059,10 @@ tests:
       What types implement the IRouter interface in Gin?
     expected_state: COMPLETE
     reference_answer: |
-      find_implementations tool was used and produced a CRS TraceStep with
-      match_count, total_implementations, and index_used metadata.
+      Found 2 implementations/subclasses of 'IRouter':
+      Interface: routergroup.go:27:IRouter
+        - Engine (struct) in gin.go:92
+        - RouterGroup (struct) in routergroup.go:55
     validations:
       - type: graph_tool_used
       - type: crs_trace_step_present
@@ -2210,8 +2220,11 @@ tests:
       What types implement the IRoutes interface in Gin?
     expected_state: COMPLETE
     reference_answer: |
-      find_implementations tool was used and produced a CRS TraceStep with
-      match_count, total_implementations, and index_used metadata.
+      Found 3 implementations/subclasses of 'IRoutes':
+      Interface: routergroup.go:33:IRoutes
+        - IRouter (interface) in routergroup.go:27
+        - Engine (struct) in gin.go:92
+        - RouterGroup (struct) in routergroup.go:55
     validations:
       - type: graph_tool_used
       - type: crs_trace_step_present

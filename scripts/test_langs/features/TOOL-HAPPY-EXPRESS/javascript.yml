@@ -164,8 +164,14 @@ tests:
       Find circular call dependencies in this codebase
     expected_state: COMPLETE
     reference_answer: |
-      Express has circular dependencies in areas like middleware dispatch where
-      next() callbacks can re-enter the router processing pipeline.
+      Found 1 cycle of 12 functions: error() [examples/error/index.js:20]
+      -> handle_error() [lib/router/layer.js:62] -> route() [lib/application.js:261]
+      -> map() [examples/route-map/index.js:14] -> set() [lib/response.js:776]
+      -> json() [lib/response.js:250] -> send() [lib/response.js:111]
+      -> sendOptionsResponse() [lib/router/index.js:651] -> handle()
+      [lib/router/index.js:136] -> handle() [lib/application.js:165]
+      -> lazyrouter() [lib/application.js:144] -> use() [lib/application.js:194]
+      -> error() (back to start).
     validations:
       - type: graph_tool_used
 
@@ -860,9 +866,11 @@ tests:
       Find any deprecated or unreachable methods in the application module
     expected_state: COMPLETE
     reference_answer: |
-      Dead code analysis of lib/application.js identifies methods with zero
-      incoming call edges that are not part of the public API surface,
-      potentially including internal helpers superseded by newer patterns.
+      Found 16 potentially dead code symbols in lib/application.js (out of 757
+      total codebase symbols). Includes import statements with no callers:
+      ./middleware/init, ./middleware/query, ./router, ./utils (multiple).
+      These are CommonJS require() imports that appear unreferenced in the
+      static call graph but are used at runtime via dynamic patterns.
     validations:
       - type: graph_tool_used
 
@@ -892,9 +900,10 @@ tests:
       Are there circular call dependencies between request and response modules?
     expected_state: COMPLETE
     reference_answer: |
-      Cycle analysis between lib/request.js and lib/response.js checks for
-      mutual dependencies where request processing references response
-      methods and vice versa through the shared app context.
+      No circular dependency between request and response modules. The only
+      cycle found involves functions in the response module (set, json, send)
+      and router/application modules, but no functions from lib/request.js
+      participate in the cycle.
     validations:
       - type: graph_tool_used
 

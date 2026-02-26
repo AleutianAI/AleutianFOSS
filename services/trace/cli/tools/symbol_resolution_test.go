@@ -12,6 +12,7 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"testing"
@@ -2317,5 +2318,254 @@ func TestResolveFunctionWithFuzzy_KindFilterAny_FuzzyPath(t *testing.T) {
 	if best.Kind != ast.SymbolKindClass {
 		t.Errorf("pickMostSignificantSymbol: expected class (significance=10), got %s %q",
 			best.Kind, best.Name)
+	}
+}
+
+// ─── IT-12 Rev 3: callableFirstRank and ResolveFunctionCandidates ───
+
+func TestCallableFirstRank_Ordering(t *testing.T) {
+	// Function/Method should rank lowest (highest priority = sort first)
+	if callableFirstRank(ast.SymbolKindFunction) != 0 {
+		t.Errorf("expected Function rank 0, got %d", callableFirstRank(ast.SymbolKindFunction))
+	}
+	if callableFirstRank(ast.SymbolKindMethod) != 0 {
+		t.Errorf("expected Method rank 0, got %d", callableFirstRank(ast.SymbolKindMethod))
+	}
+
+	// Property is next
+	if callableFirstRank(ast.SymbolKindProperty) != 1 {
+		t.Errorf("expected Property rank 1, got %d", callableFirstRank(ast.SymbolKindProperty))
+	}
+
+	// Types rank lower than callables
+	if callableFirstRank(ast.SymbolKindClass) <= callableFirstRank(ast.SymbolKindFunction) {
+		t.Error("Class should rank lower (higher value) than Function")
+	}
+	if callableFirstRank(ast.SymbolKindStruct) <= callableFirstRank(ast.SymbolKindMethod) {
+		t.Error("Struct should rank lower (higher value) than Method")
+	}
+	if callableFirstRank(ast.SymbolKindInterface) <= callableFirstRank(ast.SymbolKindClass) {
+		t.Error("Interface should rank lower (higher value) than Class")
+	}
+
+	// Variable/Field are lowest
+	if callableFirstRank(ast.SymbolKindVariable) <= callableFirstRank(ast.SymbolKindInterface) {
+		t.Error("Variable should rank lower than Interface")
+	}
+}
+
+func TestResolveFunctionCandidates_CallableFirst(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+	idx := index.NewSymbolIndex()
+
+	// Create a function and a type with the same name "Sites"
+	sitesFunc := &ast.Symbol{
+		ID:        "hugolib/hugo_sites.go:50:Sites",
+		Name:      "Sites",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "hugolib/hugo_sites.go",
+		StartLine: 50,
+		EndLine:   80,
+		Package:   "hugolib",
+		Exported:  true,
+		Language:  "go",
+	}
+	sitesType := &ast.Symbol{
+		ID:        "hugolib/hugo_sites.go:10:Sites",
+		Name:      "Sites",
+		Kind:      ast.SymbolKindType,
+		FilePath:  "hugolib/hugo_sites.go",
+		StartLine: 10,
+		EndLine:   15,
+		Package:   "hugolib",
+		Exported:  true,
+		Language:  "go",
+	}
+	sitesStruct := &ast.Symbol{
+		ID:        "hugolib/hugo_sites.go:20:Sites",
+		Name:      "Sites",
+		Kind:      ast.SymbolKindStruct,
+		FilePath:  "hugolib/hugo_sites.go",
+		StartLine: 20,
+		EndLine:   40,
+		Package:   "hugolib",
+		Exported:  true,
+		Language:  "go",
+	}
+
+	for _, sym := range []*ast.Symbol{sitesType, sitesStruct, sitesFunc} {
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("failed to add symbol %s: %v", sym.ID, err)
+		}
+	}
+
+	candidates, err := ResolveFunctionCandidates(ctx, idx, "Sites", logger, 3,
+		WithKindFilter(KindFilterAny))
+	if err != nil {
+		t.Fatalf("ResolveFunctionCandidates() error: %v", err)
+	}
+
+	if len(candidates) != 3 {
+		t.Fatalf("expected 3 candidates, got %d", len(candidates))
+	}
+
+	// First candidate should be the function (callable-first)
+	if candidates[0].Kind != ast.SymbolKindFunction {
+		t.Errorf("expected first candidate to be Function, got %s (ID: %s)",
+			candidates[0].Kind, candidates[0].ID)
+	}
+
+	// Last candidate should be the type (lowest callable rank)
+	if candidates[2].Kind != ast.SymbolKindType {
+		t.Errorf("expected last candidate to be Type, got %s (ID: %s)",
+			candidates[2].Kind, candidates[2].ID)
+	}
+}
+
+func TestResolveFunctionCandidates_MaxCandidates(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+	idx := index.NewSymbolIndex()
+
+	// Add 5 symbols with the same name
+	for i := 0; i < 5; i++ {
+		sym := &ast.Symbol{
+			ID:        fmt.Sprintf("pkg/file%d.go:%d:Process", i, i*10+1),
+			Name:      "Process",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  fmt.Sprintf("pkg/file%d.go", i),
+			StartLine: i*10 + 1,
+			EndLine:   i*10 + 10,
+			Package:   "pkg",
+			Exported:  true,
+			Language:  "go",
+		}
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("failed to add symbol %s: %v", sym.ID, err)
+		}
+	}
+
+	candidates, err := ResolveFunctionCandidates(ctx, idx, "Process", logger, 2,
+		WithKindFilter(KindFilterAny))
+	if err != nil {
+		t.Fatalf("ResolveFunctionCandidates() error: %v", err)
+	}
+
+	if len(candidates) != 2 {
+		t.Errorf("expected 2 candidates (max), got %d", len(candidates))
+	}
+}
+
+func TestResolveFunctionCandidates_SingleMatch(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+	idx := index.NewSymbolIndex()
+
+	sym := &ast.Symbol{
+		ID:        "main.go:1:main",
+		Name:      "main",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "main.go",
+		StartLine: 1,
+		EndLine:   10,
+		Package:   "main",
+		Exported:  false,
+		Language:  "go",
+	}
+	if err := idx.Add(sym); err != nil {
+		t.Fatalf("failed to add symbol: %v", err)
+	}
+
+	candidates, err := ResolveFunctionCandidates(ctx, idx, "main", logger, 3,
+		WithKindFilter(KindFilterAny))
+	if err != nil {
+		t.Fatalf("ResolveFunctionCandidates() error: %v", err)
+	}
+
+	if len(candidates) != 1 {
+		t.Fatalf("expected 1 candidate, got %d", len(candidates))
+	}
+	if candidates[0].ID != sym.ID {
+		t.Errorf("expected %q, got %q", sym.ID, candidates[0].ID)
+	}
+}
+
+func TestResolveFunctionCandidates_NilIndex(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+
+	_, err := ResolveFunctionCandidates(ctx, nil, "foo", logger, 3)
+	if err == nil {
+		t.Error("expected error for nil index")
+	}
+}
+
+func TestResolveFunctionCandidates_EmptyName(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+	idx := index.NewSymbolIndex()
+
+	_, err := ResolveFunctionCandidates(ctx, idx, "", logger, 3)
+	if err == nil {
+		t.Error("expected error for empty name")
+	}
+}
+
+func TestSnakeToPascal(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"resource_transformation", "ResourceTransformation"},
+		{"file_output", "FileOutput"},
+		{"hello_world_test", "HelloWorldTest"},
+		{"single", "single"},                // No underscores — unchanged
+		{"already_Pascal", "AlreadyPascal"}, // Mixed case
+		{"a_b_c", "ABC"},
+		{"_leading", "Leading"},   // Leading underscore
+		{"trailing_", "Trailing"}, // Trailing underscore
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			result := snakeToPascal(tt.input)
+			if result != tt.expected {
+				t.Errorf("snakeToPascal(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestResolveFunctionCandidates_SnakeCaseFallback(t *testing.T) {
+	ctx := context.Background()
+	logger := testLogger()
+	idx := index.NewSymbolIndex()
+
+	// Add a PascalCase symbol
+	sym := &ast.Symbol{
+		ID:        "hugolib/transform.go:10:ResourceTransformation",
+		Name:      "ResourceTransformation",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "hugolib/transform.go",
+		StartLine: 10,
+		EndLine:   30,
+		Language:  "go",
+	}
+	if err := idx.Add(sym); err != nil {
+		t.Fatalf("failed to add symbol: %v", err)
+	}
+
+	// Query with snake_case — should find the PascalCase symbol via fallback
+	candidates, err := ResolveFunctionCandidates(ctx, idx, "resource_transformation",
+		logger, 3, WithKindFilter(KindFilterAny))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(candidates) == 0 {
+		t.Fatal("expected at least 1 candidate from snake_case → PascalCase fallback")
+	}
+	if candidates[0].Name != "ResourceTransformation" {
+		t.Errorf("expected ResourceTransformation, got %s", candidates[0].Name)
 	}
 }

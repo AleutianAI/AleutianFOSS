@@ -156,9 +156,11 @@ tests:
       Find circular call dependencies in this codebase
     expected_state: COMPLETE
     reference_answer: |
-      Flask has limited call-graph cycles. The primary cycle is in
-      templating.py where template rendering functions mutually call
-      each other. This is a small codebase with simple call patterns.
+      Found 1 cycle of 3 functions in templating.py:
+      _get_source_explained() [src/flask/templating.py:67]
+      -> get_source() [src/flask/templating.py:60]
+      -> _get_source_fast() [src/flask/templating.py:91]
+      -> _get_source_explained() (back to start).
     validations:
       - type: graph_tool_used
 
@@ -874,9 +876,10 @@ tests:
       Find circular dependencies in the request and response handling code
     expected_state: COMPLETE
     reference_answer: |
-      Flask's request/response handling code does not contain function-level
-      call cycles. The flow is linear: request dispatch to handler to response.
-      The tool correctly finds no mutual recursion in this subsystem.
+      The only cycle found is in templating.py (_get_source_fast ->
+      get_source -> _get_source_explained -> _get_source_fast), not in
+      request/response handling. No circular dependencies exist between
+      request and response modules.
     validations:
       - type: graph_tool_used
 
@@ -889,9 +892,10 @@ tests:
       Are there any circular call dependencies in Flask's context and session code?
     expected_state: COMPLETE
     reference_answer: |
-      Flask's context and session code does not contain function-level call
-      cycles. While there are design-level dependencies between context and
-      session modules, these are import dependencies not call-graph cycles.
+      No circular call dependencies found in Flask's context and session code.
+      The only cycle detected in the entire Flask codebase is in templating.py:
+      _get_source_fast -> _get_source_explained -> get_source -> _get_source_fast
+      (3 nodes). This cycle is unrelated to the context and session modules.
     validations:
       - type: graph_tool_used
 

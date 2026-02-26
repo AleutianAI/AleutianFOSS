@@ -59,8 +59,12 @@ tests:
       What classes extend the Scale base class?
     expected_state: COMPLETE
     reference_answer: |
-      Scale subclasses include LinearScale, LogScale, CategoryScale,
-      ColorScale, TimeScale, and InterpolatedColorScale.
+      Found 4 implementations/subclasses of 'Scale':
+      Base class: src/scales/scale.ts:15:Scale
+        - Category (class) in src/scales/categoryScale.ts:16
+        - Color (class) in src/scales/colorScale.ts:46
+        - InterpolatedColor (class) in src/scales/interpolatedColorScale.ts:14
+        - QuantitativeScale (class) in src/scales/quantitativeScale.ts:16
     validations:
       - type: graph_tool_used
 
@@ -617,9 +621,11 @@ tests:
       What classes extend the Plot base class to implement specific chart types?
     expected_state: COMPLETE
     reference_answer: |
-      Plot in src/plots/plot.ts is extended by XYPlot (abstract intermediary),
-      LinePlot, AreaPlot, BarPlot, ScatterPlot, PiePlot, SegmentPlot,
-      RectanglePlot, and WaterfallPlot for different visualization types.
+      Found 2 implementations/subclasses of 'Plot':
+      Base class: src/plots/plot.ts:41:Plot
+        - Pie (class) in src/plots/piePlot.ts:29
+        - XYPlot (class) in src/plots/xyPlot.ts:16
+      Note: LinePlot, BarPlot, etc. are indirect subclasses via XYPlot.
     validations:
       - type: graph_tool_used
 
@@ -632,9 +638,11 @@ tests:
       What classes extend the Axis base class for different axis types?
     expected_state: COMPLETE
     reference_answer: |
-      Axis in src/axes/axis.ts is extended by NumericAxis for quantitative scales,
-      TimeAxis for time-based scales with multi-tier tick support, and
-      CategoryAxis for ordinal/band scale rendering.
+      Found 3 implementations/subclasses of 'Axis':
+      Base class: src/axes/axis.ts:21:Axis
+        - Category (class) in src/axes/categoryAxis.ts:21
+        - Numeric (class) in src/axes/numericAxis.ts:14
+        - Time (class) in src/axes/timeAxis.ts:68
     validations:
       - type: graph_tool_used
 
@@ -732,9 +740,11 @@ tests:
       Where is the Dataset class referenced in the codebase?
     expected_state: COMPLETE
     reference_answer: |
-      Dataset is referenced in Plot for data binding via addDataset/removeDataset,
-      in XYPlot for accessor-based data extraction, and in individual plot types
-      for computing data extents used in scale domain calculation.
+      Dataset class defined at src/core/dataset.ts:12. Referenced across
+      plot types: plot.ts, barPlot.ts, linePlot.ts, areaPlot.ts, piePlot.ts,
+      scatterPlot.ts, rectanglePlot.ts, stackedAreaPlot.ts, waterfallPlot.ts,
+      clusteredBarPlot.ts. Also referenced in symbolDrawer.ts and
+      memoize/signature.ts.
     validations:
       - type: graph_tool_used
 
@@ -749,9 +759,11 @@ tests:
       Show the call chain from a Scale domain change to plot re-rendering
     expected_state: COMPLETE
     reference_answer: |
-      Scale.domain setter -> _dispatchUpdate -> Plot._onDatasetUpdate or
-      _onScaleUpdate callback -> Component.render -> flush -> renderImmediately
-      to redraw the plot with the new scale mapping.
+      Found 40 nodes in call chain for 'render' (downstream), depth 5:
+      render() [xyPlot.ts:55] calls deferredRendering(), resetTransforms(),
+      render() [component.ts:293]. These call x(), y(), setDomains(),
+      reset(), applyTransform(), width(), height(), registerToRender().
+      Deeper calls reach _bindProperty(), range(), _updateYExtentsAndAutodomain().
     validations:
       - type: graph_tool_used
 
@@ -2209,8 +2221,9 @@ tests:
       What classes extend the Scale base class in Plottable?
     expected_state: COMPLETE
     reference_answer: |
-      find_implementations tool was used and produced a CRS TraceStep with
-      match_count, total_implementations, and index_used metadata.
+      Found 4 implementations/subclasses of 'Scale':
+      Base class: src/scales/scale.ts:15:Scale
+        - Category, Color, InterpolatedColor, QuantitativeScale
     validations:
       - type: graph_tool_used
       - type: crs_trace_step_present

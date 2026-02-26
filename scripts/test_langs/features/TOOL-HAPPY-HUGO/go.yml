@@ -57,10 +57,14 @@ tests:
       What types implement the Page interface?
     expected_state: COMPLETE
     reference_answer: |
-      The Page interface in resources/page/page.go has implementations including
-      pageState and pageWithOrdinal in hugolib/page.go, PageWithContext in
-      resources/page/page.go, nopPage in resources/page/page_nop.go, and
-      other page-related wrapper types.
+      Found 22 implementations/subclasses of 'Page':
+      Interface: resources/page/page.go:171:Page
+        - PageWithContext (struct) in resources/page/page.go:469
+        - pageWithOrdinal (struct) in hugolib/page.go:751
+        - pageState (struct) in hugolib/page.go:95
+        - nopPage (type) in resources/page/page_nop.go:60
+        - pageForShortcode, pageForRenderHooks, pageHeadingsFiltered, etc.
+      Also matches navigation/menu.go:81:Page interface.
     validations:
       - type: graph_tool_used
 
@@ -157,8 +161,12 @@ tests:
       Find circular call dependencies in this codebase
     expected_state: COMPLETE
     reference_answer: |
-      Hugo has circular dependencies in areas like page rendering where
-      pages reference site and site references pages.
+      Found multiple circular call dependency cycles. The largest cycle has 19 nodes
+      involving page content rendering: ContentWithoutSummary -> Summary -> fragmentsHTML
+      -> TableOfContents -> mustContentToC -> Fragments -> Content -> Render -> nodeContent
+      spanning hugolib/page__content.go, hugolib/page__per_output.go, and
+      markup/asciidocext/internal/converter.go. Additional cycles exist in the
+      page rendering and template execution paths.
     validations:
       - type: graph_tool_used
 
@@ -614,10 +622,18 @@ tests:
       What types implement the ResourceTransformation interface in the resources package?
     expected_state: COMPLETE
     reference_answer: |
-      ResourceTransformation in resources/transform.go is implemented by multiple
-      transformation types including minifyTransformation, buildTransformation,
-      babelTransformation, postcssTransformation, tailwindcssTransformation,
-      fingerprintTransformation, and toCSSTransformation in the resource_transformers packages.
+      Found 12 implementations/subclasses of 'ResourceTransformation':
+      Interface: resources/transform.go:92:ResourceTransformation
+        - executeAsTemplateTransform in resource_transformers/templates/
+        - minifyTransformation in resource_transformers/minifier/
+        - babelTransformation in resource_transformers/babel/
+        - buildTransformation in resource_transformers/js/
+        - postcssTransformation in resource_transformers/cssjs/
+        - toCSSTransformation in resource_transformers/tocss/scss/
+        - tailwindcssTransformation in resource_transformers/cssjs/
+        - fingerprintTransformation in resource_transformers/integrity/
+        - transform in resource_transformers/tocss/dartsass/
+        - transformerNotAvailable, resourceAdapter, testTransformation
     validations:
       - type: graph_tool_used
 
@@ -630,9 +646,18 @@ tests:
       What types implement the ProviderProvider interface in the markup/converter package?
     expected_state: COMPLETE
     reference_answer: |
-      ProviderProvider in markup/converter/converter.go is implemented by markup
-      providers for each supported format: goldmark (Markdown), pandoc, org (Org-mode),
-      rst (reStructuredText), and asciidocext (AsciiDoc).
+      Found 12 implementations/subclasses of 'ProviderProvider':
+      Interface: markup/converter/converter.go:45:ProviderProvider
+        - newConverter in markup/converter/converter.go:63
+        - provider in markup/rst/convert.go:33
+        - provide in markup/org/convert.go:31
+        - provider in markup/pandoc/convert.go:29
+        - provider in markup/asciidocext/convert.go:28
+        - provide in markup/goldmark/convert.go:53
+        - Exec in common/hexec/exec.go:124
+        - Exec in config/security/securityConfig.go:76
+        - Template in tpl/internal/go_templates/ (html and text)
+        - templateState, textTemplateWrapperWithLock in tpl/tplimpl/
     validations:
       - type: graph_tool_used
 
@@ -888,9 +913,12 @@ tests:
       Are there any circular call chains between the tpl and hugolib packages?
     expected_state: COMPLETE
     reference_answer: |
-      Cross-package cycles exist where hugolib calls tpl for template
-      execution, and tpl calls back into hugolib for page data access
-      during template rendering.
+      Found 20 circular call chains but none of the displayed cycles include
+      both the tpl and hugolib packages. The visible cycles are confined to
+      individual package clusters: hugolib/internal, resources/filecache,
+      herrors/hexec/hugofs/metadecoders/security, and tpl/tpl/internal.
+      No cross-package cycle between tpl and hugolib was found in the
+      returned data, though truncated cycles may exist.
     validations:
       - type: graph_tool_used
 

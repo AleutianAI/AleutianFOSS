@@ -1436,12 +1436,29 @@ func (b *Builder) resolveCallTarget(state *buildState, call ast.CallSite, caller
 			}
 		}
 
+		// IT-43d: Skip Strategy 3c/3d for dunder methods (__enter__, __exit__, etc.).
+		// Dunder methods are polymorphic — every class can define its own __enter__.
+		// Without type inference, Strategy 3c picks the first match by iteration
+		// order, creating false edges. Example: all 8064 `with` statements in pandas
+		// resolved to IOHandles.__enter__ (InDegree 8064, Score 16131).
+		//
+		// Self-qualified dunders (self.__enter__) already resolve correctly via
+		// Strategy 3a. The only cases reaching here are unresolvable (receiver type
+		// unknown), so returning "" (unresolved) is the honest answer.
+		//
+		// Known edge case: cross-class dunder calls where receiver != self/this
+		// will have no edge. This is acceptable — a missing edge is better than
+		// a false edge that inflates analytics.
+		isDunder := len(target) > 4 && strings.HasPrefix(target, "__") && strings.HasSuffix(target, "__")
+
 		// Sub-strategy 3c: Fallback — first method/property match (original behavior)
 		// R3-P1d: Include Property symbols so self.some_property resolves correctly.
-		for _, id := range candidates {
-			if sym, ok := state.symbolsByID[id]; ok {
-				if sym.Kind == ast.SymbolKindMethod || sym.Kind == ast.SymbolKindProperty {
-					return id
+		if !isDunder {
+			for _, id := range candidates {
+				if sym, ok := state.symbolsByID[id]; ok {
+					if sym.Kind == ast.SymbolKindMethod || sym.Kind == ast.SymbolKindProperty {
+						return id
+					}
 				}
 			}
 		}
@@ -1450,10 +1467,12 @@ func (b *Builder) resolveCallTarget(state *buildState, call ast.CallSite, caller
 		// When a callable is stored as a Variable (e.g., handler = _MergeOperation),
 		// method-style calls like obj.handler() won't match Method/Property in 3c.
 		// Accept Variable as last resort after Method/Property have been tried.
-		for _, id := range candidates {
-			if sym, ok := state.symbolsByID[id]; ok {
-				if sym.Kind == ast.SymbolKindVariable {
-					return id
+		if !isDunder {
+			for _, id := range candidates {
+				if sym, ok := state.symbolsByID[id]; ok {
+					if sym.Kind == ast.SymbolKindVariable {
+						return id
+					}
 				}
 			}
 		}

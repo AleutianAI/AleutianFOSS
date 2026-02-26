@@ -308,14 +308,46 @@ CONCEPTUAL vs LITERAL scope names:
   A conceptual description with no matching directory will silently return empty results.
 - RULE: If the scope name contains spaces or is an abstract concept, set package to ""
 
-"from X to Y" pattern (for get_call_chain AND find_path):
-- "from X to Y" -> the FIRST symbol (X) is the start, the SECOND (Y) is the target
+SINGLE-WORD CONCEPTUAL TRAPS — these look like package names but are NOT:
+- "write path" -> package="" (conceptual, no "write" package exists)
+- "read path" -> package="" (conceptual)
+- "transaction layer" -> package="" (conceptual)
+- "rendering pipeline" -> package="" (conceptual)
+- "materials subsystem" -> package="" (conceptual)
+- When in doubt about a SINGLE word like "materials", "rendering", "engine", "core":
+  these CAN be directories but may NOT match the Package metadata field.
+  Set package="" — empty is safe (returns global), a wrong literal silently returns zero.
+
+LANGUAGE-SPECIFIC PACKAGE RULES:
+- Go projects (gin, hugo, badger): Symbols have real Package metadata.
+  Literal directory names ("table", "hugolib", "tpl") work as package filters.
+- JS/TS projects (babylonjs, express, nestjs, plottable): Symbols have Package="".
+  Package filters ALWAYS return empty for JS/TS. For subsystem scoping in JS/TS,
+  set package to "" (empty) and let the tool use path-based filtering from context.
+- Python projects (flask, pandas): Symbols have Package="".
+  Same rule as JS/TS — use package="" for all Python scope queries.
+- RULE: For JS/TS/Python projects, ALWAYS set package to "" (empty string).
+  Only Go projects support non-empty package filters.
+
+"from X to Y" pattern — CRITICAL EXTRACTION ORDER (for get_call_chain AND find_path):
+- The word IMMEDIATELY AFTER "from" is the START symbol (X)
+- The word IMMEDIATELY AFTER "to" is the END symbol (Y)
+- NEVER reverse the order. NEVER swap X and Y.
 - For get_call_chain: function_name = X (the start), direction = "downstream"
+  ALWAYS use direction = "downstream" for "from X to Y" queries.
+  NEVER set direction = "upstream" for "from...to" — the user is asking what X leads to.
   Example: "Trace the call chain from Scene.render to Engine._renderFrame"
            -> function_name = "render", direction = "downstream"
+  Example: "Show the call chain from the main function to the page rendering logic"
+           -> function_name = "main", direction = "downstream" (NOT upstream)
 - For find_path: from = X (the start), to = Y (the target)
   Example: "Find the path from Scene.render to Engine._renderFrame"
            -> from = "Scene.render", to = "Engine._renderFrame"
+  Example: "Find the shortest path from gin.New to adding a route"
+           -> from = "New", to = "addRoute" (strip "gin." prefix)
+  NOTE: find_path accepts Type.Method format (e.g., "Engine.ServeHTTP") because it resolves
+  both endpoints separately. get_call_chain accepts bare function name only (e.g., "render")
+  because it traces from a single starting point.
 - Strip package qualifiers from symbols: "gin.New" -> "New", "flask.Blueprint" -> "Blueprint"
   (the graph indexes symbols without package prefixes)
 - IMPORTANT: Use the ACTUAL parameter names listed in the Parameters section below,
@@ -403,6 +435,210 @@ func (e *ParamExtractor) parseResponse(response string) (map[string]any, error) 
 	}
 
 	return result, nil
+}
+
+// ResolveConceptualSymbol uses the LLM to pick the best symbol from candidates
+// when the query uses conceptual descriptions instead of function names.
+//
+// # Description
+//
+// IT-12: When regex-based extraction produces words like "assigning" that
+// don't match any symbol in the index, this method searches the index for
+// keywords from the query, collects candidate symbols, and asks the LLM
+// to pick the best starting point. This gives the LLM actual codebase
+// knowledge it otherwise lacks.
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation/timeout. Must not be nil.
+//   - query: The user's natural language query.
+//   - candidates: Symbol candidates found by keyword search of the index.
+//
+// # Outputs
+//
+//   - string: The best symbol name from the candidates.
+//   - error: Non-nil if resolution fails (extractor disabled, no candidates,
+//     LLM returns invalid name).
+//
+// # Thread Safety
+//
+// Safe for concurrent use.
+func (e *ParamExtractor) ResolveConceptualSymbol(
+	ctx context.Context,
+	query string,
+	candidates []agent.SymbolCandidate,
+) (string, error) {
+	if !e.config.Enabled {
+		return "", fmt.Errorf("conceptual resolution disabled: extractor not enabled")
+	}
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("conceptual resolution failed: no candidates provided")
+	}
+
+	ctx, span := tracer.Start(ctx, "ParamExtractor.ResolveConceptualSymbol")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("extractor.model", e.config.Model),
+		attribute.Int("candidates.count", len(candidates)),
+		attribute.String("query_preview", truncate(query, 100)),
+	)
+
+	startTime := time.Now()
+
+	// Apply timeout
+	if e.config.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, e.config.Timeout)
+		defer cancel()
+	}
+
+	// Build focused prompt
+	var sb strings.Builder
+	sb.WriteString(`You are a symbol resolution assistant. The user described a code concept in natural language. Below are real symbols from the codebase that match keywords in the query. Pick the single symbol that is the BEST starting point for tracing call chains.
+
+Rules:
+- Pick a function/method that IMPLEMENTS the behavior, not a simple accessor or getter
+- Prefer functions with MORE call edges — they are richer starting points for call chain analysis
+- Prefer internal/private methods (prefixed with _ or containing verbs like set, process, handle, apply, build, compile) over public accessors — they have richer call chains
+- For "assigning X": pick _setX or applyX over a bare property named X
+- For "rendering": pick render() or _render() over a getRender accessor
+- For "initialization": pick Build, New, Init, or Setup over a getter named after the thing being initialized
+- If the query says "from X to Y", pick the symbol closest to X (the starting point)
+- Return ONLY the symbol name, nothing else
+
+`)
+	sb.WriteString("Available symbols:\n")
+	cap := len(candidates)
+	if cap > 50 {
+		cap = 50
+	}
+	// IT-12 Rev 4: Show edge counts when available to help the LLM pick
+	// high-connectivity symbols (better starting points for path/chain queries).
+	hasEdgeInfo := false
+	for i := 0; i < cap; i++ {
+		if candidates[i].OutEdges > 0 || candidates[i].InEdges > 0 {
+			hasEdgeInfo = true
+			break
+		}
+	}
+	for i := 0; i < cap; i++ {
+		c := candidates[i]
+		if hasEdgeInfo {
+			sb.WriteString(fmt.Sprintf("  - %s (%s) in %s:%d [%d calls out, %d calls in]\n",
+				c.Name, c.Kind, c.FilePath, c.Line, c.OutEdges, c.InEdges))
+		} else {
+			sb.WriteString(fmt.Sprintf("  - %s (%s) in %s:%d\n", c.Name, c.Kind, c.FilePath, c.Line))
+		}
+	}
+
+	messages := []datatypes.Message{
+		{Role: "system", Content: sb.String()},
+		{Role: "user", Content: fmt.Sprintf("Query: %s\n\nBest starting symbol:", query)},
+	}
+
+	opts := providers.ChatOptions{
+		Temperature: 0.1,
+		MaxTokens:   64, // Only need a symbol name
+		NumCtx:      e.config.NumCtx,
+		KeepAlive:   e.config.KeepAlive,
+		Model:       e.config.Model,
+	}
+
+	response, err := e.chatClient.Chat(ctx, messages, opts)
+	if err != nil {
+		duration := time.Since(startTime)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "chat failed")
+		RecordParamExtractionLatency(e.config.Model, "conceptual_error", duration.Seconds())
+		RecordParamExtractionTotal(e.config.Model, "conceptual_error")
+		return "", fmt.Errorf("conceptual resolution chat failed: %w", err)
+	}
+
+	duration := time.Since(startTime)
+
+	// Parse: response should be just a symbol name, but small LLMs often include
+	// extra context like "material (method) in file.ts:614". Clean up the response.
+	symbolName := strings.TrimSpace(response)
+
+	// Strip markdown formatting (backticks, bold)
+	symbolName = strings.Trim(symbolName, "`*")
+
+	// Validate it's actually in our candidate list (exact match on full response)
+	for _, c := range candidates {
+		if c.Name == symbolName {
+			span.SetAttributes(attribute.String("resolved_symbol", symbolName))
+			RecordParamExtractionLatency(e.config.Model, "conceptual_success", duration.Seconds())
+			RecordParamExtractionTotal(e.config.Model, "conceptual_success")
+			e.logger.Info("IT-12: conceptual symbol resolution succeeded",
+				slog.String("resolved", symbolName),
+				slog.Duration("duration", duration),
+			)
+			return symbolName, nil
+		}
+	}
+
+	// Try extracting just the first token (before any space, paren, or comma).
+	// Handles: "material (method) in file.ts:614" → "material"
+	firstToken := symbolName
+	for _, sep := range []string{" ", "(", ",", "\t", "\n"} {
+		if idx := strings.Index(firstToken, sep); idx > 0 {
+			firstToken = firstToken[:idx]
+		}
+	}
+	firstToken = strings.Trim(firstToken, "`*\"'")
+
+	if firstToken != symbolName {
+		for _, c := range candidates {
+			if c.Name == firstToken {
+				span.SetAttributes(attribute.String("resolved_symbol", c.Name))
+				RecordParamExtractionLatency(e.config.Model, "conceptual_success", duration.Seconds())
+				RecordParamExtractionTotal(e.config.Model, "conceptual_success")
+				e.logger.Info("IT-12: conceptual symbol resolution succeeded (first-token match)",
+					slog.String("llm_response", symbolName),
+					slog.String("resolved", c.Name),
+					slog.Duration("duration", duration),
+				)
+				return c.Name, nil
+			}
+		}
+	}
+
+	// Try partial match (LLM might return "Type.Method" when candidate is just "Method")
+	for _, c := range candidates {
+		if strings.HasSuffix(symbolName, "."+c.Name) || strings.HasSuffix(symbolName, c.Name) {
+			span.SetAttributes(attribute.String("resolved_symbol", c.Name))
+			RecordParamExtractionLatency(e.config.Model, "conceptual_success", duration.Seconds())
+			RecordParamExtractionTotal(e.config.Model, "conceptual_success")
+			e.logger.Info("IT-12: conceptual symbol resolution succeeded (partial match)",
+				slog.String("llm_response", symbolName),
+				slog.String("resolved", c.Name),
+				slog.Duration("duration", duration),
+			)
+			return c.Name, nil
+		}
+	}
+
+	// Try matching any candidate name that appears anywhere in the response.
+	// Handles: "The best symbol is _setMaterial because..." → "_setMaterial"
+	for _, c := range candidates {
+		if strings.Contains(symbolName, c.Name) && len(c.Name) > 2 {
+			span.SetAttributes(attribute.String("resolved_symbol", c.Name))
+			RecordParamExtractionLatency(e.config.Model, "conceptual_success", duration.Seconds())
+			RecordParamExtractionTotal(e.config.Model, "conceptual_success")
+			e.logger.Info("IT-12: conceptual symbol resolution succeeded (contains match)",
+				slog.String("llm_response", symbolName),
+				slog.String("resolved", c.Name),
+				slog.Duration("duration", duration),
+			)
+			return c.Name, nil
+		}
+	}
+
+	span.SetAttributes(attribute.String("llm_response", symbolName))
+	RecordParamExtractionLatency(e.config.Model, "conceptual_mismatch", duration.Seconds())
+	RecordParamExtractionTotal(e.config.Model, "conceptual_mismatch")
+	return "", fmt.Errorf("LLM returned '%s' which is not in candidate list", symbolName)
 }
 
 // logParamDiff logs differences between regex and LLM extraction results.

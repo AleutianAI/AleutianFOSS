@@ -2809,3 +2809,520 @@ class Child(Parent):
 		}
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IT-43a: Implicit Dunder Method Extraction Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+const pythonDunderTestSource = `
+class Container:
+    def __init__(self):
+        self.data = {}
+        self.items = []
+
+    def __getitem__(self, key):
+        return self.data[key]
+
+    def __setitem__(self, key, value):
+        self.data[key] = value
+
+    def __delitem__(self, key):
+        del self.data[key]
+
+    def __iter__(self):
+        return iter(self.items)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+    def process(self):
+        val = self.data["x"]
+        self.data["y"] = 42
+        del self.data["z"]
+
+    def iterate_items(self):
+        for item in self.items:
+            print(item)
+
+    def use_context(self):
+        with open("file.txt") as f:
+            f.read()
+
+    def nested_subscript(self):
+        val = self.data["a"]["b"]
+
+    def subscript_on_call(self):
+        val = self.get_data()[0]
+
+    def augmented_subscript(self):
+        self.data["count"] += 1
+
+    def get_data(self):
+        return self.data
+`
+
+func TestPythonParser_ImplicitDunderCalls_Subscript(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonDunderTestSource), "container.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find the process method
+	method := findMethodInClass(t, result, "Container", "process")
+	if method == nil {
+		t.Fatal("process method not found")
+	}
+
+	calls := callsByTarget(method.Calls)
+
+	// self.data["x"] → __getitem__
+	if !calls["__getitem__"] {
+		t.Errorf("expected __getitem__ call, got: %v", callTargetNames(method.Calls))
+	}
+	// self.data["y"] = 42 → __setitem__
+	if !calls["__setitem__"] {
+		t.Errorf("expected __setitem__ call, got: %v", callTargetNames(method.Calls))
+	}
+	// del self.data["z"] → __delitem__
+	if !calls["__delitem__"] {
+		t.Errorf("expected __delitem__ call, got: %v", callTargetNames(method.Calls))
+	}
+
+	// Verify receivers are "self" for self.data[...] subscripts
+	for _, call := range method.Calls {
+		if call.Target == "__getitem__" || call.Target == "__setitem__" || call.Target == "__delitem__" {
+			if call.Receiver != "self" {
+				t.Errorf("dunder call %s should have Receiver='self', got %q", call.Target, call.Receiver)
+			}
+			if !call.IsMethod {
+				t.Errorf("dunder call %s should have IsMethod=true", call.Target)
+			}
+		}
+	}
+}
+
+func TestPythonParser_ImplicitDunderCalls_ForIteration(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonDunderTestSource), "container.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	method := findMethodInClass(t, result, "Container", "iterate_items")
+	if method == nil {
+		t.Fatal("iterate_items method not found")
+	}
+
+	calls := callsByTarget(method.Calls)
+
+	// for item in self.items: → __iter__
+	if !calls["__iter__"] {
+		t.Errorf("expected __iter__ call, got: %v", callTargetNames(method.Calls))
+	}
+
+	// Verify receiver is "self" for self.items
+	for _, call := range method.Calls {
+		if call.Target == "__iter__" {
+			if call.Receiver != "self" {
+				t.Errorf("__iter__ should have Receiver='self', got %q", call.Receiver)
+			}
+			if !call.IsMethod {
+				t.Error("__iter__ should have IsMethod=true")
+			}
+		}
+	}
+}
+
+func TestPythonParser_ImplicitDunderCalls_WithStatement(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonDunderTestSource), "container.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	method := findMethodInClass(t, result, "Container", "use_context")
+	if method == nil {
+		t.Fatal("use_context method not found")
+	}
+
+	calls := callsByTarget(method.Calls)
+
+	// with open("file.txt") as f: → __enter__ and __exit__
+	if !calls["__enter__"] {
+		t.Errorf("expected __enter__ call, got: %v", callTargetNames(method.Calls))
+	}
+	if !calls["__exit__"] {
+		t.Errorf("expected __exit__ call, got: %v", callTargetNames(method.Calls))
+	}
+}
+
+func TestPythonParser_ImplicitDunderCalls_NestedSubscript(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonDunderTestSource), "container.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	method := findMethodInClass(t, result, "Container", "nested_subscript")
+	if method == nil {
+		t.Fatal("nested_subscript method not found")
+	}
+
+	// self.data["a"]["b"] → two __getitem__ calls
+	getitemCount := 0
+	for _, call := range method.Calls {
+		if call.Target == "__getitem__" {
+			getitemCount++
+		}
+	}
+
+	if getitemCount < 2 {
+		t.Errorf("expected at least 2 __getitem__ calls for nested subscript, got %d: %v",
+			getitemCount, callTargetNames(method.Calls))
+	}
+}
+
+func TestPythonParser_ImplicitDunderCalls_AugmentedSubscript(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonDunderTestSource), "container.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	method := findMethodInClass(t, result, "Container", "augmented_subscript")
+	if method == nil {
+		t.Fatal("augmented_subscript method not found")
+	}
+
+	calls := callsByTarget(method.Calls)
+
+	// self.data["count"] += 1 → __getitem__ AND __setitem__
+	if !calls["__getitem__"] {
+		t.Errorf("expected __getitem__ for augmented assignment, got: %v", callTargetNames(method.Calls))
+	}
+	if !calls["__setitem__"] {
+		t.Errorf("expected __setitem__ for augmented assignment, got: %v", callTargetNames(method.Calls))
+	}
+}
+
+func TestPythonParser_ImplicitDunderCalls_NoFalseEdgesOnLiterals(t *testing.T) {
+	source := `
+class Foo:
+    def bar(self):
+        x = [1, 2, 3][0]
+        y = {"a": 1}["a"]
+        z = (1, 2, 3)[0]
+`
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	method := findMethodInClass(t, result, "Foo", "bar")
+	if method == nil {
+		t.Fatal("bar method not found")
+	}
+
+	// Subscripts on list/dict/tuple literals should NOT generate dunder calls
+	for _, call := range method.Calls {
+		if call.Target == "__getitem__" {
+			t.Errorf("unexpected __getitem__ on literal subscript: receiver=%q", call.Receiver)
+		}
+	}
+}
+
+func TestPythonParser_ImplicitDunderCalls_ForOnLiteral(t *testing.T) {
+	source := `
+class Foo:
+    def bar(self):
+        for x in [1, 2, 3]:
+            pass
+        for y in self.items:
+            pass
+`
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	method := findMethodInClass(t, result, "Foo", "bar")
+	if method == nil {
+		t.Fatal("bar method not found")
+	}
+
+	// for x in [1,2,3] should NOT generate __iter__
+	// for y in self.items SHOULD generate __iter__
+	iterCount := 0
+	for _, call := range method.Calls {
+		if call.Target == "__iter__" {
+			iterCount++
+			if call.Receiver != "self" {
+				t.Errorf("__iter__ should have Receiver='self', got %q", call.Receiver)
+			}
+		}
+	}
+
+	if iterCount != 1 {
+		t.Errorf("expected exactly 1 __iter__ call (for self.items), got %d: %v",
+			iterCount, callTargetNames(method.Calls))
+	}
+}
+
+// ── Helpers ──
+
+func findMethodInClass(t *testing.T, result *ParseResult, className, methodName string) *Symbol {
+	t.Helper()
+	for _, sym := range result.Symbols {
+		if sym.Name == className {
+			for _, child := range sym.Children {
+				if child.Name == methodName {
+					return child
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func callsByTarget(calls []CallSite) map[string]bool {
+	m := make(map[string]bool)
+	for _, c := range calls {
+		m[c.Target] = true
+	}
+	return m
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IT-43b: @property Access Edge Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+const pythonPropertyTestSource = `
+class DataModel:
+    def __init__(self):
+        self._name = "default"
+        self._count = 0
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def count(self) -> int:
+        return self._count
+
+    def display(self):
+        print(self.name)
+        print(self.count)
+
+    def process(self):
+        n = self.name
+        c = self.count
+        self.update()
+
+    def update(self):
+        self._name = "updated"
+
+    def method_calls_method(self):
+        self.update()
+        self.name
+`
+
+func TestPythonParser_PropertyAccess_SelfDot(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonPropertyTestSource), "model.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The display method accesses self.name and self.count (both @property)
+	method := findMethodInClass(t, result, "DataModel", "display")
+	if method == nil {
+		t.Fatal("display method not found")
+	}
+
+	calls := callsByTarget(method.Calls)
+
+	if !calls["name"] {
+		t.Errorf("expected call edge to @property 'name', got: %v", callTargetNames(method.Calls))
+	}
+	if !calls["count"] {
+		t.Errorf("expected call edge to @property 'count', got: %v", callTargetNames(method.Calls))
+	}
+
+	// Verify receiver is "self" and IsMethod is true
+	for _, call := range method.Calls {
+		if call.Target == "name" || call.Target == "count" {
+			if call.Receiver != "self" {
+				t.Errorf("property call %s should have Receiver='self', got %q", call.Target, call.Receiver)
+			}
+			if !call.IsMethod {
+				t.Errorf("property call %s should have IsMethod=true", call.Target)
+			}
+		}
+	}
+}
+
+func TestPythonParser_PropertyAccess_NotConfusedWithMethodCall(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonPropertyTestSource), "model.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// method_calls_method() calls self.update() (a method call, NOT a property)
+	// and accesses self.name (a property)
+	method := findMethodInClass(t, result, "DataModel", "method_calls_method")
+	if method == nil {
+		t.Fatal("method_calls_method not found")
+	}
+
+	calls := callsByTarget(method.Calls)
+
+	// self.update() should be extracted as a normal method call
+	if !calls["update"] {
+		t.Errorf("expected call to update(), got: %v", callTargetNames(method.Calls))
+	}
+
+	// self.name should be extracted as a property access
+	if !calls["name"] {
+		t.Errorf("expected property access edge to 'name', got: %v", callTargetNames(method.Calls))
+	}
+
+	// self.update() is a regular call — should only appear once from extractCallSites
+	// self.name should appear from property access edges
+	updateCount := 0
+	nameCount := 0
+	for _, call := range method.Calls {
+		if call.Target == "update" {
+			updateCount++
+		}
+		if call.Target == "name" {
+			nameCount++
+		}
+	}
+
+	if updateCount != 1 {
+		t.Errorf("expected exactly 1 call to update(), got %d", updateCount)
+	}
+	if nameCount < 1 {
+		t.Errorf("expected at least 1 property access to name, got %d", nameCount)
+	}
+}
+
+func TestPythonParser_PropertyAccess_NotConfusedWithPlainAttribute(t *testing.T) {
+	source := `
+class Foo:
+    @property
+    def name(self):
+        return self._name
+
+    def bar(self):
+        x = self._name
+        y = self.name
+        z = self.other_attr
+`
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	method := findMethodInClass(t, result, "Foo", "bar")
+	if method == nil {
+		t.Fatal("bar method not found")
+	}
+
+	// self.name → should have property edge (name is @property)
+	// self._name → should NOT have property edge (not a property)
+	// self.other_attr → should NOT have property edge (not a property)
+	nameEdges := 0
+	privateNameEdges := 0
+	otherAttrEdges := 0
+	for _, call := range method.Calls {
+		switch call.Target {
+		case "name":
+			nameEdges++
+		case "_name":
+			privateNameEdges++
+		case "other_attr":
+			otherAttrEdges++
+		}
+	}
+
+	if nameEdges == 0 {
+		t.Error("expected property access edge for self.name")
+	}
+	if privateNameEdges > 0 {
+		t.Error("self._name should NOT create a property edge")
+	}
+	if otherAttrEdges > 0 {
+		t.Error("self.other_attr should NOT create a property edge")
+	}
+}
+
+func TestPythonParser_PropertyAccess_DedupMultipleAccesses(t *testing.T) {
+	source := `
+class Foo:
+    @property
+    def name(self):
+        return self._name
+
+    def bar(self):
+        x = self.name
+        y = self.name
+        z = self.name
+`
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	method := findMethodInClass(t, result, "Foo", "bar")
+	if method == nil {
+		t.Fatal("bar method not found")
+	}
+
+	// Three accesses to self.name should produce exactly 1 property edge (deduped)
+	nameCount := 0
+	for _, call := range method.Calls {
+		if call.Target == "name" {
+			nameCount++
+		}
+	}
+
+	if nameCount != 1 {
+		t.Errorf("expected exactly 1 property edge for name (deduped), got %d", nameCount)
+	}
+}
+
+func TestPythonParser_PropertyAccess_ExistingTestSource(t *testing.T) {
+	// The existing pythonTestSource has a User class with @property display_name
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonTestSource), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify display_name is extracted as a property
+	propFound := false
+	for _, sym := range result.Symbols {
+		if sym.Name == "User" {
+			for _, child := range sym.Children {
+				if child.Name == "display_name" && child.Kind == SymbolKindProperty {
+					propFound = true
+				}
+			}
+		}
+	}
+
+	if !propFound {
+		t.Error("expected display_name to be extracted as SymbolKindProperty")
+	}
+}

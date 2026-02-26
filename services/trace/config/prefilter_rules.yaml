@@ -18,6 +18,13 @@ always_include:
   - answer
 
 forced_mappings:
+  # IT-12 Rev 4: "call chain from X to Y" is two-endpoint → find_path.
+  # Must appear before get_call_chain so the more specific pattern matches first.
+  - patterns:
+      - "call chain from .* to"
+    tool: find_path
+    reason: "Two-endpoint call chain query"
+
   - patterns:
       - "call chain from"
       - "call chain of"
@@ -206,6 +213,15 @@ routing_encyclopedia:
       - "stub implementation"
       - "test double"
     reason: "Class inheritance/interface implementation query"
+
+  # IT-12 Rev 4: "call chain from X to Y" is a two-endpoint query → find_path.
+  # This entry MUST appear before get_call_chain so the more specific pattern
+  # matches first. Single-endpoint "call chain from X" still hits get_call_chain.
+  - tool: find_path
+    tier: force
+    intents:
+      - pattern: "call chain from .* to"
+    reason: "Two-endpoint call chain query — route to find_path"
 
   - tool: get_call_chain
     tier: force

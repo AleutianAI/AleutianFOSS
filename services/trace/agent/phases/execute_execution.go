@@ -635,6 +635,20 @@ func (p *ExecutePhase) recordTraceStep(deps *Dependencies, inv *agent.ToolInvoca
 	}
 
 	deps.Session.RecordTraceStep(step)
+
+	// CRS-WIRE-01: Also record in CRS for execution counting.
+	// This feeds CountToolExecutions() which the circuit breaker uses as fallback
+	// when no proof data exists for a tool path. Without this, the count-based
+	// circuit breaker never fires because stepData is never populated.
+	if deps.Session.HasCRS() {
+		stepRecord := crs.TraceStepToStepRecord(step, deps.Session.ID)
+		if err := deps.Session.GetCRS().RecordStep(context.Background(), stepRecord); err != nil {
+			slog.Debug("CRS step recording failed",
+				slog.String("tool", inv.Tool),
+				slog.String("error", err.Error()),
+			)
+		}
+	}
 }
 
 // extractSymbolsFromResult extracts symbol IDs from a tool result.
@@ -2127,6 +2141,18 @@ func (p *ExecutePhase) extractToolParameters(
 					)
 					funcName = resolvedFunc
 				}
+			}
+		}
+
+		// IT-12: Conceptual symbol resolution fallback.
+		// When the extracted function name doesn't resolve (e.g., "assigning" from
+		// "call chain from assigning a material to shader compilation"), search the
+		// symbol index for keywords and use the LLM to pick the best starting symbol.
+		if deps != nil && deps.SymbolIndex != nil && deps.ParamExtractor != nil {
+			resolved := resolveConceptualName(goCtx, funcName, query,
+				deps.SymbolIndex, deps.ParamExtractor, deps.GraphAnalytics)
+			if resolved != funcName {
+				funcName = resolved
 			}
 		}
 

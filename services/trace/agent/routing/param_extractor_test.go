@@ -12,11 +12,14 @@ package routing
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
 
+	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/providers"
 )
 
 // =============================================================================
@@ -245,4 +248,183 @@ func containsHelper(s, substr string) bool {
 // testLogger returns a logger suitable for testing.
 func testLogger() *slog.Logger {
 	return slog.Default()
+}
+
+// =============================================================================
+// IT-12: ResolveConceptualSymbol Tests
+// =============================================================================
+
+// mockChatClient implements providers.ChatClient for testing.
+type mockChatClient struct {
+	response string
+	err      error
+}
+
+func (m *mockChatClient) Chat(ctx context.Context, messages []datatypes.Message, opts providers.ChatOptions) (string, error) {
+	if m.err != nil {
+		return "", m.err
+	}
+	return m.response, nil
+}
+
+func TestResolveConceptualSymbol_PicksCorrectSymbol(t *testing.T) {
+	mock := &mockChatClient{response: "_setMaterial"}
+	config := DefaultParamExtractorConfig()
+	config.Timeout = 0 // No timeout in tests
+
+	extractor, err := NewParamExtractor(mock, config)
+	if err != nil {
+		t.Fatalf("NewParamExtractor: %v", err)
+	}
+
+	candidates := []agent.SymbolCandidate{
+		{Name: "_setMaterial", Kind: "method", FilePath: "meshes/abstractMesh.ts", Line: 100},
+		{Name: "getMaterial", Kind: "method", FilePath: "meshes/abstractMesh.ts", Line: 200},
+		{Name: "Mesh", Kind: "class", FilePath: "meshes/mesh.ts", Line: 1},
+	}
+
+	result, err := extractor.ResolveConceptualSymbol(context.Background(),
+		"Show the call chain from assigning a material to a mesh through to shader compilation",
+		candidates)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "_setMaterial" {
+		t.Errorf("got %q, want %q", result, "_setMaterial")
+	}
+}
+
+func TestResolveConceptualSymbol_ValidatesCandidateList(t *testing.T) {
+	mock := &mockChatClient{response: "nonExistentSymbol"}
+	config := DefaultParamExtractorConfig()
+	config.Timeout = 0
+
+	extractor, err := NewParamExtractor(mock, config)
+	if err != nil {
+		t.Fatalf("NewParamExtractor: %v", err)
+	}
+
+	candidates := []agent.SymbolCandidate{
+		{Name: "_setMaterial", Kind: "method", FilePath: "mesh.ts", Line: 100},
+		{Name: "getMaterial", Kind: "method", FilePath: "mesh.ts", Line: 200},
+	}
+
+	_, err = extractor.ResolveConceptualSymbol(context.Background(),
+		"assigning a material", candidates)
+	if err == nil {
+		t.Error("expected error when LLM returns symbol not in candidate list")
+	}
+}
+
+func TestResolveConceptualSymbol_PartialMatch(t *testing.T) {
+	// LLM returns "AbstractMesh._setMaterial" but candidate is just "_setMaterial"
+	mock := &mockChatClient{response: "AbstractMesh._setMaterial"}
+	config := DefaultParamExtractorConfig()
+	config.Timeout = 0
+
+	extractor, err := NewParamExtractor(mock, config)
+	if err != nil {
+		t.Fatalf("NewParamExtractor: %v", err)
+	}
+
+	candidates := []agent.SymbolCandidate{
+		{Name: "_setMaterial", Kind: "method", FilePath: "mesh.ts", Line: 100},
+	}
+
+	result, err := extractor.ResolveConceptualSymbol(context.Background(),
+		"assigning a material", candidates)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "_setMaterial" {
+		t.Errorf("got %q, want %q (partial match)", result, "_setMaterial")
+	}
+}
+
+func TestResolveConceptualSymbol_VerboseResponse(t *testing.T) {
+	// LLM returns "material (method) in packages/dev/core/src/Meshes/abstractMesh.ts:614"
+	// instead of just "material". IT-12: real failure from ministral-3:3b.
+	mock := &mockChatClient{response: "material (method) in packages/dev/core/src/Meshes/abstractMesh.ts:614"}
+	config := DefaultParamExtractorConfig()
+	config.Timeout = 0
+
+	extractor, err := NewParamExtractor(mock, config)
+	if err != nil {
+		t.Fatalf("NewParamExtractor: %v", err)
+	}
+
+	candidates := []agent.SymbolCandidate{
+		{Name: "material", Kind: "method", FilePath: "abstractMesh.ts", Line: 614},
+		{Name: "_setMaterial", Kind: "method", FilePath: "abstractMesh.ts", Line: 100},
+		{Name: "Mesh", Kind: "class", FilePath: "mesh.ts", Line: 1},
+	}
+
+	result, err := extractor.ResolveConceptualSymbol(context.Background(),
+		"assigning a material to a mesh", candidates)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "material" {
+		t.Errorf("got %q, want %q (first-token match)", result, "material")
+	}
+}
+
+func TestResolveConceptualSymbol_Disabled(t *testing.T) {
+	mock := &mockChatClient{response: "_setMaterial"}
+	config := DefaultParamExtractorConfig()
+	config.Enabled = false
+	config.Timeout = 0
+
+	extractor, err := NewParamExtractor(mock, config)
+	if err != nil {
+		t.Fatalf("NewParamExtractor: %v", err)
+	}
+
+	candidates := []agent.SymbolCandidate{
+		{Name: "_setMaterial", Kind: "method", FilePath: "mesh.ts", Line: 100},
+	}
+
+	_, err = extractor.ResolveConceptualSymbol(context.Background(),
+		"assigning a material", candidates)
+	if err == nil {
+		t.Error("expected error when extractor is disabled")
+	}
+}
+
+func TestResolveConceptualSymbol_NoCandidates(t *testing.T) {
+	mock := &mockChatClient{response: "anything"}
+	config := DefaultParamExtractorConfig()
+	config.Timeout = 0
+
+	extractor, err := NewParamExtractor(mock, config)
+	if err != nil {
+		t.Fatalf("NewParamExtractor: %v", err)
+	}
+
+	_, err = extractor.ResolveConceptualSymbol(context.Background(),
+		"assigning a material", []agent.SymbolCandidate{})
+	if err == nil {
+		t.Error("expected error with empty candidates")
+	}
+}
+
+func TestResolveConceptualSymbol_ChatError(t *testing.T) {
+	mock := &mockChatClient{err: fmt.Errorf("connection refused")}
+	config := DefaultParamExtractorConfig()
+	config.Timeout = 0
+
+	extractor, err := NewParamExtractor(mock, config)
+	if err != nil {
+		t.Fatalf("NewParamExtractor: %v", err)
+	}
+
+	candidates := []agent.SymbolCandidate{
+		{Name: "_setMaterial", Kind: "method", FilePath: "mesh.ts", Line: 100},
+	}
+
+	_, err = extractor.ResolveConceptualSymbol(context.Background(),
+		"assigning a material", candidates)
+	if err == nil {
+		t.Error("expected error when chat fails")
+	}
 }

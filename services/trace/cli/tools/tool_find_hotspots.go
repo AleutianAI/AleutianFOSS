@@ -303,6 +303,34 @@ func (t *findHotspotsTool) Execute(ctx context.Context, params TypedParams) (*Re
 		attribute.String("trace_action", traceStep.Action),
 	)
 
+	// IT-43d Fix A: Filter dunder methods from hotspot results.
+	// Dunder methods (__enter__, __exit__, __getitem__, etc.) are implicitly
+	// called by Python syntax. The graph builder's Strategy 3c collapses all
+	// unresolvable dunder calls to the first definition found, creating
+	// artificial super-hotspots (e.g., __enter__ with InDegree 8064 in pandas).
+	// Dunder methods are infrastructure, not domain-specific hotspots.
+	var nonDunder []graph.HotspotNode
+	dundarFiltered := 0
+	for _, hs := range hotspots {
+		if hs.Node == nil || hs.Node.Symbol == nil {
+			continue
+		}
+		name := hs.Node.Symbol.Name
+		if len(name) > 4 && strings.HasPrefix(name, "__") && strings.HasSuffix(name, "__") {
+			dundarFiltered++
+			continue
+		}
+		nonDunder = append(nonDunder, hs)
+	}
+	if dundarFiltered > 0 {
+		t.logger.Debug("IT-43d: filtered dunder methods from hotspots",
+			slog.String("tool", "find_hotspots"),
+			slog.Int("dunder_filtered", dundarFiltered),
+			slog.Int("remaining", len(nonDunder)),
+		)
+	}
+	hotspots = nonDunder
+
 	// Filter by kind if needed
 	var filtered []graph.HotspotNode
 	if p.Kind == "all" {
@@ -319,6 +347,7 @@ func (t *findHotspotsTool) Execute(ctx context.Context, params TypedParams) (*Re
 	}
 
 	// IT-07 Bug 3 / IT-08 Run 3: Filter by package using boundary-aware matching
+	packageFilterApplied := false
 	if p.Package != "" {
 		var pkgFiltered []graph.HotspotNode
 		for _, hs := range filtered {
@@ -329,8 +358,26 @@ func (t *findHotspotsTool) Execute(ctx context.Context, params TypedParams) (*Re
 				pkgFiltered = append(pkgFiltered, hs)
 			}
 		}
-		filtered = pkgFiltered
+
+		// IT-Summary FIX-B fallback: If package filter returns 0 results but we had
+		// candidates before filtering, the package name is likely conceptual (e.g.,
+		// "write path", "materials subsystem") or the top-N global hotspots don't
+		// include any from that directory. Drop the filter and return global results
+		// so the user gets useful output instead of an empty "no hotspots" message.
+		if len(pkgFiltered) == 0 && len(filtered) > 0 {
+			t.logger.Info("IT-Summary FIX-B: package filter returned 0 results, dropping filter",
+				slog.String("tool", "find_hotspots"),
+				slog.String("package_filter", p.Package),
+				slog.Int("pre_filter_count", len(filtered)),
+			)
+			// Keep filtered as-is (unscoped results); clear package for output text
+			p.Package = ""
+		} else {
+			filtered = pkgFiltered
+			packageFilterApplied = true
+		}
 	}
+	_ = packageFilterApplied // Used for future scope-aware output
 
 	// IT-07 Phase 3: Filter out test and documentation file symbols
 	if p.ExcludeTests {
@@ -350,10 +397,12 @@ func (t *findHotspotsTool) Execute(ctx context.Context, params TypedParams) (*Re
 				nonTestFiltered = append(nonTestFiltered, hs)
 			}
 		}
-		if len(nonTestFiltered) > 0 {
-			filtered = nonTestFiltered
-		}
-		// If ALL results are from test/doc files, keep them rather than returning empty.
+		// IT-43d Fix B: Always apply the test filter, even if it removes all results.
+		// Returning zero production hotspots is more accurate than returning test
+		// infrastructure artifacts (e.g., test helper "raises" with InDegree 5807).
+		// The previous fallback kept test results when all were filtered out,
+		// which produced misleading "hotspot" output from test files.
+		filtered = nonTestFiltered
 	}
 
 	// IT-07 Phase 3: Re-sort by requested dimension
@@ -378,7 +427,10 @@ func (t *findHotspotsTool) Execute(ctx context.Context, params TypedParams) (*Re
 		filtered = filtered[:p.Top]
 	}
 
-	span.SetAttributes(attribute.Int("filtered_hotspots", len(filtered)))
+	span.SetAttributes(
+		attribute.Int("filtered_hotspots", len(filtered)),
+		attribute.Int("dunder_filtered", dundarFiltered),
+	)
 
 	// Structured logging for edge cases
 	if len(hotspots) > 0 && len(filtered) == 0 {

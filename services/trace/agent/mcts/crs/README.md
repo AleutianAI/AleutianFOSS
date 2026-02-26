@@ -171,7 +171,7 @@ func main() {
 
     // ... do work with crsInstance ...
 
-    // Apply some deltas during the session
+    // Option A: Direct Apply + manual journal append
     delta := &crs.ProofDelta{
         Updates: map[string]crs.ProofNumber{
             "node1": {Proof: 10, Status: crs.ProofStatusExpanded},
@@ -180,11 +180,16 @@ func main() {
     if _, err := crsInstance.Apply(ctx, delta); err != nil {
         log.Printf("Apply failed: %v", err)
     }
-
-    // Record to journal for crash recovery
     if err := journal.Append(ctx, delta); err != nil {
         log.Printf("Journal append failed: %v", err)
     }
+
+    // Option B: Via Bridge (recommended — handles Apply + journal automatically)
+    // bridge := integration.NewBridge(crsInstance, nil, integration.WithJournal(journal))
+    // bridge.RunActivity(ctx, activity, input)
+    //   → activity.Execute() → delta
+    //   → crs.Apply(delta)        (automatic)
+    //   → journal.Append(delta)   (automatic)
 
     // Shutdown and save state
     if err := ShutdownSession(ctx, crsInstance, journal, pm, projectHash); err != nil {
@@ -258,12 +263,50 @@ func HandleRestoreError(err error) {
 }
 ```
 
+## Execute Loop Integration (CRS-WIRE-01)
+
+CRS receives data from the execute phase through three paths:
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+│  Execute Loop                                                               │
+│       │                                                                     │
+│       ├──→ PATH 1: Execution Counting                                       │
+│       │    recordTraceStep() → TraceStepToStepRecord() → CRS.RecordStep()  │
+│       │    Feeds: CountToolExecutions() → circuit breaker count fallback    │
+│       │                                                                     │
+│       ├──→ PATH 2: Proof Numbers                                            │
+│       │    updateProofNumber() → CRS.UpdateProofNumber()                   │
+│       │    Feeds: CheckCircuitBreaker() → proof-based decisions            │
+│       │                                                                     │
+│       └──→ PATH 3: Learning Loop                                            │
+│            emitCoordinatorEvent() → Coordinator.HandleEvent()              │
+│              → Activities analyze outcome → produce Delta                  │
+│              → Bridge.Apply(delta) → CRS indexes updated                   │
+│              → Journal.Append(delta) → persisted for recovery              │
+│            Feeds: Learned constraints, CDCL clauses, session restore       │
+│                                                                              │
+│  Events emitted: ToolSelected, ToolExecuted, ToolFailed,                   │
+│                  CircuitBreaker, SemanticRepetition, CycleDetected,        │
+│                  GraphRefreshed                                             │
+│                                                                              │
+│  Journal modes:                                                             │
+│    enableSessionRestore=true  → persistent (disk, survives restart)        │
+│    enableSessionRestore=false → in-memory (within-session learning only)   │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+For the full data flow documentation, see `docs/opensource/trace/mcts/02_crs_state_management.md`, section "Execute Loop Integration: How CRS Gets Its Data".
+
 ## Key Components
 
 | File | Description |
 |------|-------------|
 | `crs.go` | Core CRS implementation with Apply/Snapshot |
 | `journal.go` | BadgerJournal WAL with Backup/Restore |
+| `trace_recorder.go` | TraceStep recording and TraceStepToStepRecord bridge |
 | `persistence.go` | PersistenceManager for disk backup/restore |
 | `hash.go` | Project hash utilities |
 | `types.go` | Delta types, indexes, constraints |

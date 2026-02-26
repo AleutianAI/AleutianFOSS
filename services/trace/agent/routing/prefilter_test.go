@@ -66,6 +66,12 @@ func makeTestConfig() *config.PreFilterConfig {
 		NegationProximity: 3,
 		AlwaysInclude:     []string{"answer"},
 		ForcedMappings: []config.ForcedMapping{
+			// IT-12 Rev 4: Two-endpoint pattern must come before get_call_chain.
+			{
+				Patterns: []string{"call chain from .* to"},
+				Tool:     "find_path",
+				Reason:   "Two-endpoint call chain query",
+			},
 			{
 				Patterns: []string{"call chain from", "call chain of", "full call hierarchy"},
 				Tool:     "get_call_chain",
@@ -192,13 +198,26 @@ func TestPreFilter_ForcedMapping_Exact(t *testing.T) {
 	pf := newTestPreFilter(makeTestConfig())
 	specs := makeTestSpecs(16)
 
+	// IT-12 Rev 4: "call chain from X to Y" is a two-endpoint query → find_path.
 	result := pf.Filter(context.Background(), "show the call chain from main to handler", specs, nil)
 
-	if result.ForcedTool != "get_call_chain" {
-		t.Errorf("expected forced tool 'get_call_chain', got %q", result.ForcedTool)
+	if result.ForcedTool != "find_path" {
+		t.Errorf("expected forced tool 'find_path', got %q", result.ForcedTool)
 	}
 	if result.ForcedReason == "" {
 		t.Error("expected a forced reason")
+	}
+}
+
+func TestPreFilter_ForcedMapping_SingleEndpoint(t *testing.T) {
+	pf := newTestPreFilter(makeTestConfig())
+	specs := makeTestSpecs(16)
+
+	// Single-endpoint "call chain from X" (no "to") → get_call_chain.
+	result := pf.Filter(context.Background(), "show the call chain from main", specs, nil)
+
+	if result.ForcedTool != "get_call_chain" {
+		t.Errorf("expected forced tool 'get_call_chain', got %q", result.ForcedTool)
 	}
 }
 
@@ -804,6 +823,16 @@ func makeEncyclopediaConfig() *config.PreFilterConfig {
 			AntiSignals: []string{"mock implementation", "test double"},
 			Reason:      "Class inheritance query",
 		},
+		// IT-12 Rev 4: Two-endpoint "call chain from X to Y" → find_path.
+		// Must appear BEFORE get_call_chain so the more specific pattern matches first.
+		{
+			Tool: "find_path",
+			Tier: "force",
+			Intents: []config.IntentPattern{
+				{Pattern: "call chain from .* to"},
+			},
+			Reason: "Two-endpoint call chain — route to find_path",
+		},
 		{
 			Tool: "get_call_chain",
 			Tier: "force",
@@ -850,16 +879,29 @@ func TestApplyEncyclopedia_ForceMatch(t *testing.T) {
 	cfg := makeEncyclopediaConfig()
 	pf := newTestPreFilter(cfg)
 
+	// IT-12 Rev 4: "call chain from X to Y" → find_path (two-endpoint).
 	forcedTool, boosts, hints := pf.applyEncyclopedia("show the call chain from main to handler")
 
-	if forcedTool != "get_call_chain" {
-		t.Errorf("expected forced tool 'get_call_chain', got %q", forcedTool)
+	if forcedTool != "find_path" {
+		t.Errorf("expected forced tool 'find_path', got %q", forcedTool)
 	}
 	if boosts != nil {
 		t.Errorf("expected nil boosts on force, got %v", boosts)
 	}
 	if hints != nil {
 		t.Errorf("expected nil hints on force, got %v", hints)
+	}
+}
+
+func TestApplyEncyclopedia_ForceMatch_SingleEndpoint(t *testing.T) {
+	cfg := makeEncyclopediaConfig()
+	pf := newTestPreFilter(cfg)
+
+	// Single-endpoint "call chain from X" → get_call_chain.
+	forcedTool, _, _ := pf.applyEncyclopedia("show the call chain from main")
+
+	if forcedTool != "get_call_chain" {
+		t.Errorf("expected forced tool 'get_call_chain', got %q", forcedTool)
 	}
 }
 
@@ -1030,7 +1072,7 @@ func BenchmarkForcedMapping(b *testing.B) {
 	pf := newTestPreFilter(cfg)
 	specs := makeTestSpecs(16)
 	ctx := context.Background()
-	query := "show the call chain from main to handler"
+	query := "show the call chain from main"
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

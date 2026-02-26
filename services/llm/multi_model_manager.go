@@ -335,7 +335,7 @@ func (m *MultiModelManager) Chat(ctx context.Context, model string,
 	if params.NumCtx != nil {
 		numCtx = *params.NumCtx
 	}
-	slog.Info("CB-31d MultiModelManager.Chat CALLED",
+	slog.Debug("CB-31d MultiModelManager.Chat CALLED",
 		slog.String("model", model),
 		slog.Int("num_messages", len(messages)),
 		slog.Int("num_ctx", numCtx),
@@ -412,7 +412,7 @@ func (m *MultiModelManager) Chat(ctx context.Context, model string,
 	}
 	m.mu.Unlock()
 
-	slog.Info("CB-31d MultiModelManager.Chat SUCCEEDED",
+	slog.Debug("CB-31d MultiModelManager.Chat SUCCEEDED",
 		slog.String("model", model),
 		slog.Int("response_len", len(chatResp.Message.Content)),
 	)

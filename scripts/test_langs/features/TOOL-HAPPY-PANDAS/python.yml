@@ -60,8 +60,13 @@ tests:
       What classes extend the Index base class?
     expected_state: COMPLETE
     reference_answer: |
-      The Index base class in core/indexes/base.py is extended by RangeIndex,
-      MultiIndex, DatetimeIndex, TimedeltaIndex, PeriodIndex, and CategoricalIndex.
+      Found 5 implementations/subclasses of 'Index':
+      Base class: pandas/core/indexes/base.py:314:Index
+        - ExtensionIndex (class) in pandas/core/indexes/extension.py:139
+        - MultiIndex (class) in pandas/core/indexes/multi.py:198
+        - RangeIndex (class) in pandas/core/indexes/range.py:78
+        - MyIndex (class) in pandas/tests/arithmetic/test_object.py:368
+        - CustomIndex (class) in pandas/tests/indexes/test_subclass.py:14
     validations:
       - type: graph_tool_used
 
@@ -158,8 +163,14 @@ tests:
       Find circular call dependencies in this codebase
     expected_state: COMPLETE
     reference_answer: |
-      Pandas has circular dependencies in areas like DataFrame/Series interop
-      where Series methods create DataFrames and DataFrame methods create Series.
+      Found 20 distinct circular call dependency cycles. The largest cycle contains
+      378 nodes spanning the core data manipulation pipeline: set_option -> __setattr__
+      -> apply_groupwise -> _python_apply_general -> _unbox_scalar ->
+      _get_nearest_indexer -> where -> abs -> searchsorted -> get_loc -> fillna
+      -> sanitize_array -> _sanitize_column -> isetitem, traversing
+      pandas/_config/config.py, pandas/core/groupby/, pandas/core/indexes/,
+      pandas/core/generic.py, pandas/core/internals/, pandas/core/dtypes/cast.py,
+      and pandas/core/construction.py.
     validations:
       - type: graph_tool_used
 
@@ -615,9 +626,12 @@ tests:
       What classes extend ExtensionArray in Pandas?
     expected_state: COMPLETE
     reference_answer: |
-      ExtensionArray in pandas/core/arrays/base.py is extended by BooleanArray,
-      IntegerArray, FloatingArray, ArrowExtensionArray, StringArray, IntervalArray,
-      SparseArray, and other custom array backends for different data types.
+      Found 10 implementations/subclasses of 'ExtensionArray':
+      Base class: pandas/core/arrays/base.py:112:ExtensionArray
+        - ExtensionArraySupportsAnyAll in base.py:2845
+        - BaseStringArray in string_.py:408
+        - FloatAttrArray, DateArray, JSONArray, ListArray (test extensions)
+        - DummyArray, MyEA, UuidExtensionArray (test types)
     validations:
       - type: graph_tool_used
 
@@ -630,9 +644,15 @@ tests:
       What classes subclass ExtensionDtype to define custom Pandas data types?
     expected_state: COMPLETE
     reference_answer: |
-      ExtensionDtype in pandas/core/dtypes/base.py is subclassed by BooleanDtype,
-      Int8Dtype through Int64Dtype, Float32Dtype, Float64Dtype, StringDtype,
-      ArrowDtype, CategoricalDtype, IntervalDtype, PeriodDtype, and DatetimeTZDtype.
+      Found 13 implementations/subclasses of 'ExtensionDtype':
+      Base class: pandas/core/dtypes/base.py:46:ExtensionDtype
+        - StorageExtensionDtype in base.py:454
+        - PandasExtensionDtype in dtypes.py:114
+        - NumpyEADtype in dtypes.py:1508
+        - BaseMaskedDtype in dtypes.py:1607
+        - SparseDtype in dtypes.py:1704
+        - FloatAttrDtype, DateDtype, DecimalDtype, JSONDtype, ListDtype,
+          DummyDtype, UuidDtype (test/extension types)
     validations:
       - type: graph_tool_used
 
@@ -885,9 +905,14 @@ tests:
       Are there circular call dependencies in the Pandas dtype inference system?
     expected_state: COMPLETE
     reference_answer: |
-      Cycles may exist between dtype inference in core/dtypes/cast.py and
-      array construction in core/arrays, where dtype detection triggers
-      array creation which in turn validates and potentially re-infers dtypes.
+      Yes, circular call dependencies exist in the dtype inference system.
+      A 378-node cycle includes dtype inference functions: maybe_cast_to_integer_array
+      -> _ensure_nanosecond_dtype -> maybe_cast_to_datetime -> _try_cast ->
+      construct_1d_arraylike_from_scalar -> _ensure_dtype_type -> _maybe_promote
+      -> _maybe_promote_cached -> maybe_promote -> sanitize_masked_array ->
+      sanitize_array in pandas/core/dtypes/cast.py and pandas/core/construction.py.
+      These functions form part of the larger 378-node cycle connecting dtype
+      inference, index operations, and DataFrame construction.
     validations:
       - type: graph_tool_used
 
@@ -2063,8 +2088,10 @@ tests:
       What types implement or extend the Index class in Pandas?
     expected_state: COMPLETE
     reference_answer: |
-      find_implementations tool was used and produced a CRS TraceStep with
-      match_count, total_implementations, and index_used metadata.
+      Found 5 implementations/subclasses of 'Index':
+      Base class: pandas/core/indexes/base.py:314:Index
+        - ExtensionIndex, MultiIndex, RangeIndex (production)
+        - MyIndex, CustomIndex (test types)
     validations:
       - type: graph_tool_used
       - type: crs_trace_step_present
@@ -2222,8 +2249,11 @@ tests:
       What classes extend the ExtensionArray base class in Pandas?
     expected_state: COMPLETE
     reference_answer: |
-      find_implementations tool was used and produced a CRS TraceStep with
-      match_count, total_implementations, and index_used metadata.
+      Found 10 implementations/subclasses of 'ExtensionArray':
+      Base class: pandas/core/arrays/base.py:112:ExtensionArray
+        - ExtensionArraySupportsAnyAll, BaseStringArray (production)
+        - FloatAttrArray, DateArray, JSONArray, ListArray, DummyArray,
+          MyEA, UuidExtensionArray, DummyArray (test types)
     validations:
       - type: graph_tool_used
       - type: crs_trace_step_present

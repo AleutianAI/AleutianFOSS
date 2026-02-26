@@ -14,6 +14,7 @@ package phases
 // as part of CB-30c Phase 2 decomposition.
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -23,7 +24,10 @@ import (
 	"unicode"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
 )
 
 // -----------------------------------------------------------------------------
@@ -319,6 +323,43 @@ func extractPackageContextFromQuery(query string) string {
 		}
 	}
 
+	// Pattern 1.5 (IT-43c): "in/within <Capitalized> <word>... <scope_keyword>"
+	// When Pattern 1 skips a capitalized word (project name) and there are more
+	// words after it ending with a scope keyword, extract the first package-like
+	// word after the project name.
+	// Example: "in Pandas indexing and selection code" → "indexing"
+	for i := 0; i < len(words)-2; i++ {
+		if !isPrep(words[i]) {
+			continue
+		}
+		// Check if next word is capitalized (project name)
+		if i+1 >= len(originalWords) {
+			continue
+		}
+		origNext := strings.Trim(originalWords[i+1], "?,.()")
+		if len(origNext) == 0 || !unicode.IsUpper(rune(origNext[0])) {
+			continue
+		}
+		nextLower := strings.Trim(words[i+1], "?,.()")
+		if articles[nextLower] || skipGeneric[nextLower] {
+			continue
+		}
+		// Scan forward from i+2 to find a scope keyword
+		for j := i + 3; j < len(words); j++ {
+			scopeWord := strings.Trim(words[j], "?,.()")
+			if scopeKeywords[scopeWord] {
+				// Take the first package-like word between project name and scope keyword
+				for k := i + 2; k < j; k++ {
+					candidate := strings.Trim(words[k], "?,.()")
+					if isPackageLikeName(candidate) && !skipGeneric[candidate] {
+						return candidate
+					}
+				}
+				break
+			}
+		}
+	}
+
 	// Pattern 2: "in/within the <package> [<extra_words>...] <scope_keyword>"
 	// Article-mediated. Handles single-word ("in the render package") and
 	// multi-word ("in the value log subsystem", "in the Engine class").
@@ -340,14 +381,26 @@ func extractPackageContextFromQuery(query string) string {
 		for j := i + 3; j < len(words); j++ {
 			scopeWord := strings.Trim(words[j], "?,.()")
 			if scopeKeywords[scopeWord] {
-				// IT-08d: When multiple words between article and scope keyword,
+				// IT-08d/IT-43c: When multiple words between article and scope keyword,
 				// check if first word is capitalized (project name).
-				// "in the Flask helpers module" → "Flask" capitalized → use words[j-1]="helpers"
+				// "in the Flask helpers module" → "Flask" capitalized → first lowercase = "helpers"
+				// "in the Pandas indexing and selection code" → "Pandas" capitalized → first lowercase = "indexing"
 				// "in the value log subsystem" → "value" lowercase → use words[i+2]="value"
 				if j > i+3 && i+2 < len(originalWords) {
 					origFirst := strings.Trim(originalWords[i+2], "?,.()")
 					if len(origFirst) > 0 && unicode.IsUpper(rune(origFirst[0])) {
-						// First word is a proper noun — prefer word before scope keyword
+						// IT-43c: First word is a proper noun (project name like "Pandas", "Flask").
+						// Find the first lowercase, package-like word after it instead of
+						// taking the word before the scope keyword.
+						// "in the Pandas indexing and selection code" → "indexing" (not "selection")
+						// "in the Flask helpers module" → "helpers"
+						for k := i + 3; k < j; k++ {
+							candidate := strings.Trim(words[k], "?,.()")
+							if isPackageLikeName(candidate) && !skipGeneric[candidate] {
+								return candidate
+							}
+						}
+						// Fallback: word before scope keyword (original behavior)
 						moduleCandidate := strings.Trim(words[j-1], "?,.()")
 						if isPackageLikeName(moduleCandidate) && !skipGeneric[moduleCandidate] {
 							return moduleCandidate
@@ -727,6 +780,165 @@ func extractFunctionNameCandidates(query string) []string {
 	}
 
 	return candidates
+}
+
+// resolveConceptualName attempts IT-12 conceptual symbol resolution on a
+// hallucinated symbol name. It searches the symbol index for query keywords,
+// collects candidates, and asks the LLM to pick the best real symbol.
+//
+// Returns the resolved name on success, or the original name unchanged on failure.
+func resolveConceptualName(
+	ctx context.Context,
+	name string,
+	query string,
+	idx *index.SymbolIndex,
+	extractor agent.ParamExtractor,
+	analytics ...*graph.GraphAnalytics,
+) string {
+	if idx == nil || extractor == nil || !extractor.IsEnabled() || name == "" {
+		return name
+	}
+
+	// A resolvable name contains ":" (full ID) or is dot-notation (Type.Method).
+	isDotNotation := strings.Contains(name, ".") && !strings.Contains(name, "/")
+
+	// Dot-notation names like "Table.layout" also need resolution — the LLM
+	// hallucinated a compound form that doesn't exist in the index.
+	if strings.Contains(name, ":") {
+		return name // Already a full ID
+	}
+
+	// Try resolving via the index — if it succeeds, the name is real.
+	// IT-12 Rev 4: Only exit early if at least one match is a callable kind
+	// (function/method). If all matches are types/structs/interfaces, continue
+	// to LLM resolution which will find a better function-level starting point
+	// for call chain queries. For example, "Site" in Hugo matches a struct and
+	// a getter method, but the user asking about "site initialization" needs
+	// a function like "newHugoSites" or "NewSite".
+	if !isDotNotation {
+		syms := idx.GetByName(name)
+		if len(syms) > 0 {
+			hasCallable := false
+			for _, sym := range syms {
+				if sym.Kind == ast.SymbolKindFunction || sym.Kind == ast.SymbolKindMethod {
+					hasCallable = true
+					break
+				}
+			}
+			if hasCallable {
+				return name // Name exists in index with callable symbols
+			}
+			slog.Debug("IT-12 Rev 4: name exists but only as non-callable kinds, continuing resolution",
+				slog.String("name", name),
+				slog.Int("matches", len(syms)),
+			)
+		}
+	} else {
+		// For dot-notation, try the full form and the part after the dot
+		syms := idx.GetByName(name)
+		if len(syms) > 0 {
+			return name
+		}
+		parts := strings.SplitN(name, ".", 2)
+		if len(parts) == 2 {
+			syms = idx.GetByName(parts[1])
+			if len(syms) > 0 {
+				return parts[1] // Use the method name part
+			}
+		}
+	}
+
+	// Name not found — apply conceptual resolution.
+	// IT-12 Rev 2: Use the hallucinated name itself as the primary keyword source
+	// (e.g., "Table.layout" → ["table", "layout"]). This ensures that when find_path
+	// resolves From and To independently, each gets a DIFFERENT candidate pool.
+	// Previously, both used tokenizeQueryKeywords(query) on the full query, producing
+	// identical candidates and causing the LLM to pick the same symbol for both.
+	// We combine name-derived keywords with query keywords for broader coverage,
+	// but name keywords come first for priority.
+	nameForKeywords := strings.ReplaceAll(name, ".", " ")
+	nameForKeywords = strings.ReplaceAll(nameForKeywords, "_", " ")
+	nameKeywords := tokenizeQueryKeywords(nameForKeywords)
+	queryKeywords := tokenizeQueryKeywords(query)
+
+	// IT-12 Rev 4: Search name-derived keywords first. Only add query keywords
+	// if name keywords produce fewer than 3 candidates. This prevents "menu assembly"
+	// from being diluted by query keywords like "site" which pull in unrelated
+	// symbols and cause the LLM to pick the wrong candidate for both endpoints.
+	var symCandidates []agent.SymbolCandidate
+	if len(nameKeywords) > 0 {
+		symCandidates = searchSymbolCandidates(ctx, idx, nameKeywords, 25)
+	}
+	if len(symCandidates) < 3 {
+		// Not enough from name alone — add query keywords for broader coverage.
+		seen := make(map[string]bool)
+		for _, kw := range nameKeywords {
+			seen[kw] = true
+		}
+		var extraKeywords []string
+		for _, kw := range queryKeywords {
+			if !seen[kw] {
+				extraKeywords = append(extraKeywords, kw)
+				seen[kw] = true
+			}
+		}
+		if len(extraKeywords) > 0 {
+			extraCandidates := searchSymbolCandidates(ctx, idx, extraKeywords, 25)
+			symCandidates = append(symCandidates, extraCandidates...)
+		}
+	}
+	if len(nameKeywords) == 0 {
+		// Name had no usable keywords — use query keywords directly.
+		symCandidates = searchSymbolCandidates(ctx, idx, queryKeywords, 25)
+	}
+	if len(symCandidates) == 0 {
+		return name
+	}
+
+	// IT-12 Rev 4: Annotate candidates with edge counts from the graph.
+	// This gives the LLM a strong signal: Build (47 calls out) vs Site (1 call out).
+	// Functions with more edges are better starting points for path/chain queries.
+	var ga *graph.GraphAnalytics
+	if len(analytics) > 0 {
+		ga = analytics[0]
+	}
+	if ga != nil {
+		for i := range symCandidates {
+			syms := idx.GetByName(symCandidates[i].Name)
+			for _, sym := range syms {
+				if sym.FilePath == symCandidates[i].FilePath && sym.StartLine == symCandidates[i].Line {
+					if node, ok := ga.GetNode(sym.ID); ok {
+						symCandidates[i].OutEdges = len(node.Outgoing)
+						symCandidates[i].InEdges = len(node.Incoming)
+					}
+					break
+				}
+			}
+		}
+	}
+
+	// IT-12 Rev 2: Include the specific hallucinated concept in the query
+	// so the LLM knows which endpoint to resolve (e.g., "Table layout" vs
+	// "Axis rendering" for a find_path query).
+	resolveQuery := fmt.Sprintf("Resolve the concept '%s' from: %s", name, query)
+	resolved, err := extractor.ResolveConceptualSymbol(ctx, resolveQuery, symCandidates)
+	if err != nil {
+		slog.Warn("IT-12: conceptual symbol resolution failed",
+			slog.String("hallucinated", name),
+			slog.String("error", err.Error()),
+		)
+		return name
+	}
+	if resolved == "" {
+		return name
+	}
+
+	slog.Info("IT-12: conceptual symbol resolution replaced hallucinated name",
+		slog.String("hallucinated", name),
+		slog.String("resolved", resolved),
+		slog.Int("candidates", len(symCandidates)),
+	)
+	return resolved
 }
 
 // extractDestinationCandidates extracts function name candidates from the
@@ -1941,4 +2153,156 @@ func parseInt(s string) int {
 		return 0
 	}
 	return n
+}
+
+// -----------------------------------------------------------------------------
+// Conceptual Symbol Resolution Helpers (IT-12)
+// -----------------------------------------------------------------------------
+
+// tokenizeQueryKeywords extracts meaningful search keywords from a natural
+// language query, stripping stop words and common query phrases.
+//
+// # Description
+//
+// IT-12: Used for conceptual symbol resolution. When a user asks about
+// "assigning a material to a mesh through to shader compilation", this
+// extracts ["material", "mesh", "shader", "compilation"] as search terms
+// for the symbol index.
+//
+// # Inputs
+//
+//   - query: The user's natural language query.
+//
+// # Outputs
+//
+//   - []string: Meaningful keywords for index search. May be empty.
+//
+// # Thread Safety
+//
+// Safe for concurrent use (stateless function).
+func tokenizeQueryKeywords(query string) []string {
+	stopWords := map[string]bool{
+		"the": true, "a": true, "an": true, "to": true, "from": true,
+		"in": true, "of": true, "for": true, "and": true, "or": true,
+		"is": true, "are": true, "was": true, "were": true, "be": true,
+		"this": true, "that": true, "these": true, "those": true,
+		"show": true, "find": true, "get": true, "list": true,
+		"what": true, "how": true, "where": true, "which": true,
+		"call": true, "chain": true, "through": true, "between": true,
+		"codebase": true, "code": true, "function": true, "method": true,
+		"class": true, "type": true, "any": true, "all": true,
+		"circular": true, "dependency": true, "dependencies": true,
+	}
+
+	words := strings.Fields(strings.ToLower(query))
+	var keywords []string
+	seen := make(map[string]bool)
+
+	for _, w := range words {
+		// Strip punctuation
+		w = strings.Trim(w, ".,;:!?()[]{}\"'")
+		if len(w) < 3 || stopWords[w] || seen[w] {
+			continue
+		}
+		// Strip -ing suffix to get root form for better index matching.
+		// "assigning" → "assign", "rendering" → "render"
+		// Keep both the root and the full word as keywords.
+		if strings.HasSuffix(w, "ing") && len(w) > 6 {
+			root := strings.TrimSuffix(w, "ing")
+			if !seen[root] {
+				keywords = append(keywords, root)
+				seen[root] = true
+			}
+		}
+		if !seen[w] {
+			keywords = append(keywords, w)
+			seen[w] = true
+		}
+	}
+
+	return keywords
+}
+
+// searchSymbolCandidates searches the symbol index for symbols matching
+// query keywords and returns deduplicated candidates filtered to callable kinds.
+//
+// # Description
+//
+// IT-12: Used for conceptual symbol resolution. Searches the index for
+// each keyword and collects candidate symbols, filtering out non-callable
+// kinds (imports, variables, fields, constants, properties).
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation.
+//   - idx: The symbol index to search. Must not be nil.
+//   - keywords: Keywords to search for.
+//   - maxPerKeyword: Maximum results per keyword search.
+//
+// # Outputs
+//
+//   - []agent.SymbolCandidate: Deduplicated candidate symbols. May be empty.
+//
+// # Thread Safety
+//
+// Safe for concurrent use.
+func searchSymbolCandidates(
+	ctx context.Context,
+	idx *index.SymbolIndex,
+	keywords []string,
+	maxPerKeyword int,
+) []agent.SymbolCandidate {
+	if idx == nil || len(keywords) == 0 {
+		return nil
+	}
+
+	// Non-callable kinds to filter out. Interfaces, types, classes, and structs
+	// are excluded because they have no call edges — picking one as a starting
+	// point for get_call_chain or find_path produces empty/shallow results (IT-12).
+	// For conceptual resolution we always want functions/methods as starting points.
+	nonCallableKinds := map[ast.SymbolKind]bool{
+		ast.SymbolKindImport:    true,
+		ast.SymbolKindVariable:  true,
+		ast.SymbolKindField:     true,
+		ast.SymbolKindConstant:  true,
+		ast.SymbolKindProperty:  true,
+		ast.SymbolKindInterface: true,
+		ast.SymbolKindType:      true,
+		ast.SymbolKindClass:     true,
+		ast.SymbolKindStruct:    true,
+	}
+
+	seen := make(map[string]bool)
+	var candidates []agent.SymbolCandidate
+
+	for _, kw := range keywords {
+		results, err := idx.Search(ctx, kw, maxPerKeyword)
+		if err != nil {
+			continue
+		}
+		slog.Debug("IT-12: searchSymbolCandidates keyword result",
+			slog.String("keyword", kw),
+			slog.Int("raw_hits", len(results)),
+		)
+		for _, sym := range results {
+			if seen[sym.ID] {
+				continue
+			}
+			seen[sym.ID] = true
+
+			// Filter to callable kinds
+			if nonCallableKinds[sym.Kind] {
+				continue
+			}
+
+			candidates = append(candidates, agent.SymbolCandidate{
+				Name:     sym.Name,
+				Kind:     sym.Kind.String(),
+				FilePath: sym.FilePath,
+				Line:     sym.StartLine,
+			})
+		}
+	}
+
+	return candidates
 }

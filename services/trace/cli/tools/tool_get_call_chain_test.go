@@ -1895,3 +1895,233 @@ func createTestGraphWithExternalCallees(t *testing.T) (*graph.Graph, *index.Symb
 	g.Freeze()
 	return g, idx
 }
+
+// =============================================================================
+// IT-12 Rev 3: Multi-candidate retry on depth-0
+// =============================================================================
+
+// TestGetCallChain_RetriesOnDepthZero verifies that when the first candidate
+// (e.g., a Type) produces depth 0, the tool retries with the next candidate
+// (e.g., a Function with call edges) and returns the richer result.
+func TestGetCallChain_RetriesOnDepthZero(t *testing.T) {
+	ctx := context.Background()
+
+	g := graph.NewGraph("/test-retry")
+	idx := index.NewSymbolIndex()
+
+	// "Sites" TYPE — no call edges (pickMostSignificantSymbol would pick this)
+	sitesType := &ast.Symbol{
+		ID:        "hugolib/hugo_sites.go:10:Sites",
+		Name:      "Sites",
+		Kind:      ast.SymbolKindType,
+		FilePath:  "hugolib/hugo_sites.go",
+		StartLine: 10,
+		EndLine:   15,
+		Package:   "hugolib",
+		Exported:  true,
+		Language:  "go",
+	}
+	// "Sites" FUNCTION — has call edges
+	sitesFunc := &ast.Symbol{
+		ID:        "hugolib/hugo_sites.go:50:Sites",
+		Name:      "Sites",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "hugolib/hugo_sites.go",
+		StartLine: 50,
+		EndLine:   80,
+		Package:   "hugolib",
+		Exported:  true,
+		Language:  "go",
+	}
+	// Callee of Sites function
+	siteInit := &ast.Symbol{
+		ID:        "hugolib/site.go:20:siteInit",
+		Name:      "siteInit",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "hugolib/site.go",
+		StartLine: 20,
+		EndLine:   40,
+		Package:   "hugolib",
+		Exported:  false,
+		Language:  "go",
+	}
+
+	g.AddNode(sitesType)
+	g.AddNode(sitesFunc)
+	g.AddNode(siteInit)
+	for _, sym := range []*ast.Symbol{sitesType, sitesFunc, siteInit} {
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("Failed to add %s: %v", sym.ID, err)
+		}
+	}
+
+	// Only the Sites FUNCTION has call edges
+	g.AddEdge(sitesFunc.ID, siteInit.ID, graph.EdgeTypeCalls, ast.Location{
+		FilePath: sitesFunc.FilePath, StartLine: 60,
+	})
+	g.Freeze()
+
+	tool := NewGetCallChainTool(g, idx)
+	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+		"function_name": "Sites",
+		"direction":     "downstream",
+	}})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+
+	output, ok := result.Output.(GetCallChainOutput)
+	if !ok {
+		t.Fatalf("Output is not GetCallChainOutput, got %T", result.Output)
+	}
+
+	// IT-12 Rev 3: The callable-first ranking should try Sites FUNCTION first
+	// (or retry with it if Type was tried first), producing depth > 0.
+	if output.Depth == 0 {
+		t.Errorf("expected depth > 0 after retry (Sites function has callees), got depth 0")
+	}
+	if output.NodeCount < 2 {
+		t.Errorf("expected at least 2 nodes (Sites → siteInit), got %d", output.NodeCount)
+	}
+	if output.EdgeCount < 1 {
+		t.Errorf("expected at least 1 edge, got %d", output.EdgeCount)
+	}
+}
+
+// TestGetCallChain_RetriesOnDepthOne verifies IT-12 Rev 4: when the first candidate
+// produces depth=1 with only 1 edge (shallow), and a better candidate exists with
+// deeper traversal, the tool retries and uses the deeper result.
+//
+// Setup: Two functions named "Init" — a short-path function (sorted first by
+// callableFirstRank tiebreaker: shorter path) with depth=1, and a longer-path
+// function with depth=3. The retry should kick in because depth <= 1.
+func TestGetCallChain_RetriesOnDepthOne(t *testing.T) {
+	ctx := context.Background()
+
+	g := graph.NewGraph("/test-retry-depth1")
+	idx := index.NewSymbolIndex()
+
+	// "Init" function with shorter path (sorted first) — has 1 edge (shallow, depth=1)
+	initShallow := &ast.Symbol{
+		ID:        "a/init.go:10:Init",
+		Name:      "Init",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "a/init.go",
+		StartLine: 10,
+		EndLine:   15,
+		Package:   "a",
+		Exported:  true,
+		Language:  "go",
+	}
+	// "Init" function with longer path (sorted second) — has deep call chain (depth=3)
+	initDeep := &ast.Symbol{
+		ID:        "pkg/init.go:20:Init",
+		Name:      "Init",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "pkg/init.go",
+		StartLine: 20,
+		EndLine:   50,
+		Package:   "pkg",
+		Exported:  true,
+		Language:  "go",
+	}
+	// Callees of initDeep forming a chain
+	step1 := &ast.Symbol{
+		ID:        "pkg/init.go:60:loadConfig",
+		Name:      "loadConfig",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "pkg/init.go",
+		StartLine: 60,
+		EndLine:   80,
+		Package:   "pkg",
+		Language:  "go",
+	}
+	step2 := &ast.Symbol{
+		ID:        "pkg/init.go:90:buildSite",
+		Name:      "buildSite",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "pkg/init.go",
+		StartLine: 90,
+		EndLine:   110,
+		Package:   "pkg",
+		Language:  "go",
+	}
+	step3 := &ast.Symbol{
+		ID:        "pkg/init.go:120:assembleMenus",
+		Name:      "assembleMenus",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "pkg/init.go",
+		StartLine: 120,
+		EndLine:   140,
+		Package:   "pkg",
+		Language:  "go",
+	}
+	// Single callee of initShallow (makes it depth=1)
+	wrapSite := &ast.Symbol{
+		ID:        "a/site.go:30:WrapSite",
+		Name:      "WrapSite",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "a/site.go",
+		StartLine: 30,
+		EndLine:   40,
+		Package:   "a",
+		Language:  "go",
+	}
+
+	allSyms := []*ast.Symbol{initShallow, initDeep, step1, step2, step3, wrapSite}
+	for _, sym := range allSyms {
+		g.AddNode(sym)
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("Failed to add %s: %v", sym.ID, err)
+		}
+	}
+
+	// initShallow → WrapSite (depth=1, 1 edge — shallow)
+	g.AddEdge(initShallow.ID, wrapSite.ID, graph.EdgeTypeCalls, ast.Location{
+		FilePath: initShallow.FilePath, StartLine: 12,
+	})
+	// initDeep → loadConfig → buildSite → assembleMenus (depth=3, 3 edges — deep)
+	g.AddEdge(initDeep.ID, step1.ID, graph.EdgeTypeCalls, ast.Location{
+		FilePath: initDeep.FilePath, StartLine: 25,
+	})
+	g.AddEdge(step1.ID, step2.ID, graph.EdgeTypeCalls, ast.Location{
+		FilePath: step1.FilePath, StartLine: 65,
+	})
+	g.AddEdge(step2.ID, step3.ID, graph.EdgeTypeCalls, ast.Location{
+		FilePath: step2.FilePath, StartLine: 95,
+	})
+	g.Freeze()
+
+	tool := NewGetCallChainTool(g, idx)
+	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+		"function_name": "Init",
+		"direction":     "downstream",
+	}})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+
+	output, ok := result.Output.(GetCallChainOutput)
+	if !ok {
+		t.Fatalf("Output is not GetCallChainOutput, got %T", result.Output)
+	}
+
+	// IT-12 Rev 4: The first candidate (shorter path "a/init.go") produces depth=1,
+	// 1 edge. With the widened threshold (depth <= 1), the tool should retry with
+	// the second candidate ("pkg/init.go") which has depth=3, 3 edges.
+	if output.Depth < 2 {
+		t.Errorf("IT-12 Rev 4: expected depth >= 2 after depth-1 retry, got %d", output.Depth)
+	}
+	if output.NodeCount < 4 {
+		t.Errorf("expected at least 4 nodes (Init→loadConfig→buildSite→assembleMenus), got %d", output.NodeCount)
+	}
+	if output.EdgeCount < 3 {
+		t.Errorf("expected at least 3 edges, got %d", output.EdgeCount)
+	}
+}

@@ -359,7 +359,7 @@ func ClassifyFiles(hg *HierarchicalGraph, opts FileClassificationOptions) (*File
 				fc.stats.NonProductionFiles++
 				reclassified++
 				if callerPurityFailed && ratio >= 0.10 {
-					slog.Info("GR-60c: Phase 6 caller purity reclassified file",
+					slog.Debug("GR-60c: Phase 6 caller purity reclassified file",
 						slog.String("file", filePath),
 						slog.Int("prod_in", prodIn),
 						slog.Int("orig_in", origIn),
@@ -369,7 +369,7 @@ func ClassifyFiles(hg *HierarchicalGraph, opts FileClassificationOptions) (*File
 				}
 			} else if pass == 0 && strings.Contains(strings.ToLower(filePath), "test") {
 				// GR-60c diagnostic: log test-path files that survive Phase 6
-				slog.Info("GR-60c: Phase 6 kept test-path file as production",
+				slog.Debug("GR-60c: Phase 6 kept test-path file as production",
 					slog.String("file", filePath),
 					slog.Int("prod_in", prodIn),
 					slog.Int("prod_out", prodOut),

@@ -1,0 +1,188 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "title": "LLM Request Rate by Provider",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "drawStyle": "bars",
+            "stacking": { "mode": "normal" }
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(trace_llm_calls_total[5m])) by (provider)",
+          "legendFormat": "{{provider}}"
+        }
+      ]
+    },
+    {
+      "title": "LLM Latency P50/P95/P99 by Provider",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(trace_llm_call_duration_seconds_bucket[5m])) by (le, provider))",
+          "legendFormat": "{{provider}} P50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(trace_llm_call_duration_seconds_bucket[5m])) by (le, provider))",
+          "legendFormat": "{{provider}} P95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(trace_llm_call_duration_seconds_bucket[5m])) by (le, provider))",
+          "legendFormat": "{{provider}} P99"
+        }
+      ]
+    },
+    {
+      "title": "LLM Error Rate by Provider",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "value": null, "color": "green" },
+              { "value": 0.05, "color": "red" }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(trace_llm_calls_total{status=\"error\"}[5m])) by (provider) / sum(rate(trace_llm_calls_total[5m])) by (provider)",
+          "legendFormat": "{{provider}}"
+        }
+      ]
+    },
+    {
+      "title": "Token Usage by Provider and Direction",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "stacking": { "mode": "normal" }
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(trace_llm_tokens_total[5m])) by (provider, direction)",
+          "legendFormat": "{{provider}} {{direction}}"
+        }
+      ]
+    },
+    {
+      "title": "Active LLM Requests by Provider",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "targets": [
+        {
+          "expr": "trace_llm_active_requests",
+          "legendFormat": "{{provider}}"
+        }
+      ]
+    },
+    {
+      "title": "Chat Client Request Rate by Provider",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(trace_chat_calls_total[5m])) by (provider)",
+          "legendFormat": "{{provider}}"
+        }
+      ]
+    },
+    {
+      "title": "LLM Errors by Type",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(trace_llm_errors_total[5m])) by (provider, error_type)",
+          "legendFormat": "{{provider}} {{error_type}}"
+        }
+      ]
+    },
+    {
+      "title": "Chat Client Latency P50/P95/P99",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(trace_chat_call_duration_seconds_bucket[5m])) by (le, provider))",
+          "legendFormat": "{{provider}} P50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(trace_chat_call_duration_seconds_bucket[5m])) by (le, provider))",
+          "legendFormat": "{{provider}} P95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(trace_chat_call_duration_seconds_bucket[5m])) by (le, provider))",
+          "legendFormat": "{{provider}} P99"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["trace", "llm", "providers"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "Trace LLM Providers",
+  "uid": "trace-llm-providers",
+  "version": 1
+}

@@ -883,10 +883,11 @@ tests:
       What are the shortest circular call chains in Badger?
     expected_state: COMPLETE
     reference_answer: |
-      The shortest cycles involve two-function mutual calls such as
-      iterator operations that call back into table lookup methods
-      and level controller methods that reference each other during
-      compaction scheduling.
+      Found 12 circular dependency cycles. The first reported cycle contains
+      113 nodes starting with addTable in level_handler.go and traversing
+      many functions across the project. The tool returns cycles largest-first
+      with truncation, so shorter cycles were detected but their details
+      were not fully displayed in the output.
     validations:
       - type: graph_tool_used
 

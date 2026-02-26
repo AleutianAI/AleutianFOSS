@@ -81,6 +81,7 @@ type Bridge struct {
 	mu            sync.RWMutex
 	crs           crs.CRS
 	traceRecorder *crs.TraceRecorder
+	journal       crs.Journal
 	config        *BridgeConfig
 	logger        *slog.Logger
 
@@ -149,6 +150,30 @@ type BridgeOption func(*Bridge)
 func WithTraceRecorder(recorder *crs.TraceRecorder) BridgeOption {
 	return func(b *Bridge) {
 		b.traceRecorder = recorder
+	}
+}
+
+// WithJournal sets the delta journal for persistence.
+//
+// Description:
+//
+//	When provided, the Bridge will append each successfully applied delta
+//	to the journal for crash recovery. Journal write failures are logged
+//	but do not block activity execution.
+//
+// Inputs:
+//
+//	journal - The delta journal. May be nil (disables journaling).
+//
+// Example:
+//
+//	journal, _ := crs.NewBadgerJournal(journalConfig)
+//	bridge := integration.NewBridge(crsInstance, config,
+//	    integration.WithJournal(journal),
+//	)
+func WithJournal(journal crs.Journal) BridgeOption {
+	return func(b *Bridge) {
+		b.journal = journal
 	}
 }
 
@@ -319,6 +344,7 @@ func (b *Bridge) runActivityOnce(
 		} else {
 			b.mu.Lock()
 			b.deltasApplied++
+			journal := b.journal
 			b.mu.Unlock()
 
 			b.logger.Debug("delta applied",
@@ -326,6 +352,19 @@ func (b *Bridge) runActivityOnce(
 				slog.Int64("generation", metrics.NewGeneration),
 				slog.Int("entries_modified", metrics.EntriesModified),
 			)
+
+			// CRS-WIRE-01: Persist delta to journal for crash recovery.
+			// Only coordinator-driven deltas are journaled (learned constraints,
+			// proof updates). Analytics deltas bypass journal since they are
+			// regenerated from source on graph rebuild.
+			if journal != nil {
+				if jErr := journal.Append(ctx, delta); jErr != nil {
+					b.logger.Warn("journal append failed",
+						slog.String("activity", activity.Name()),
+						slog.String("error", jErr.Error()),
+					)
+				}
+			}
 		}
 	}
 
@@ -574,6 +613,33 @@ func (b *Bridge) TraceRecorder() *crs.TraceRecorder {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.traceRecorder
+}
+
+// SetJournal sets or replaces the delta journal.
+//
+// Description:
+//
+//	Allows setting the journal after construction.
+//	Useful when the journal is created after the Bridge.
+//
+// Inputs:
+//
+//	journal - The delta journal. May be nil (disables journaling).
+//
+// Thread Safety: Safe for concurrent use.
+func (b *Bridge) SetJournal(journal crs.Journal) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.journal = journal
+}
+
+// Journal returns the current journal, or nil if not set.
+//
+// Thread Safety: Safe for concurrent use.
+func (b *Bridge) Journal() crs.Journal {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.journal
 }
 
 // Stats returns bridge statistics.

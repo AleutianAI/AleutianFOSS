@@ -268,22 +268,25 @@ func (t *getCallChainTool) Execute(ctx context.Context, params TypedParams) (*Re
 	)
 	defer span.End()
 
-	// IT-05: Use shared symbol resolution (IT-00a directive)
+	// IT-12 Rev 3: Use multi-candidate resolution so we can retry if the first
+	// candidate produces depth 0 (e.g., a type with the same name as a function).
 	// KindFilterAny because get_call_chain should accept classes, structs, etc. —
 	// the graph's BFS only follows EdgeTypeCalls edges, so non-callable symbols
-	// simply return an empty traversal (harmless).
+	// simply return an empty traversal (harmless). The callable-first ranking
+	// ensures we try functions/methods before types.
 	var symbolID string
+	var candidates []*ast.Symbol
 	if t.index != nil {
-		sym, _, err := ResolveFunctionWithFuzzy(ctx, t.index, p.FunctionName, t.logger,
-			WithKindFilter(KindFilterAny), WithBareMethodFallback())
-		if err == nil {
-			symbolID = sym.ID
-		} else {
-			// CR-1: Log resolution failure for debuggability
+		var resolveErr error
+		candidates, resolveErr = ResolveFunctionCandidates(ctx, t.index, p.FunctionName,
+			t.logger, 3, WithKindFilter(KindFilterAny), WithBareMethodFallback())
+		if resolveErr != nil {
 			t.logger.Debug("get_call_chain: symbol resolution failed",
 				slog.String("function_name", p.FunctionName),
-				slog.String("error", err.Error()),
+				slog.String("error", resolveErr.Error()),
 			)
+		} else if len(candidates) > 0 {
+			symbolID = candidates[0].ID
 		}
 	}
 
@@ -409,6 +412,42 @@ func (t *getCallChainTool) Execute(ctx context.Context, params TypedParams) (*Re
 			TraceStep: &errStep,
 			Duration:  time.Since(start),
 		}, nil
+	}
+
+	// IT-12 Rev 3+4: If traversal produced shallow results and we have
+	// alternative candidates, retry with the next candidate. This handles:
+	// - Rev 3: Type resolved but a function with the same name has call edges
+	// - Rev 4: Depth=1 single-edge results (e.g., Site→WrapSite) that are too
+	//   shallow for multi-hop queries like "from X to Y"
+	// Graph traversals for disconnected/shallow nodes return immediately, so
+	// retry cost is negligible.
+	if (traversal.Depth <= 1 || len(traversal.Edges) <= 1) && len(candidates) > 1 {
+		t.logger.Info("get_call_chain: shallow result, trying alternative candidates",
+			slog.String("function_name", p.FunctionName),
+			slog.String("first_candidate", symbolID),
+			slog.Int("alternatives", len(candidates)-1),
+		)
+		for _, altCandidate := range candidates[1:] {
+			var altTraversal *graph.TraversalResult
+			var altErr error
+			if p.Direction == "upstream" {
+				altTraversal, altErr = t.graph.GetReverseCallGraph(ctx, altCandidate.ID, graph.WithMaxDepth(p.MaxDepth))
+			} else {
+				altTraversal, altErr = t.graph.GetCallGraph(ctx, altCandidate.ID, graph.WithMaxDepth(p.MaxDepth))
+			}
+			if altErr == nil && len(altTraversal.Edges) > 0 {
+				t.logger.Info("get_call_chain: alternative candidate produced results",
+					slog.String("function_name", p.FunctionName),
+					slog.String("alt_candidate", altCandidate.ID),
+					slog.String("alt_kind", altCandidate.Kind.String()),
+					slog.Int("edges", len(altTraversal.Edges)),
+					slog.Int("depth", altTraversal.Depth),
+				)
+				symbolID = altCandidate.ID
+				traversal = altTraversal
+				break
+			}
+		}
 	}
 
 	// Build depth map once (used by both buildOutput and formatText)

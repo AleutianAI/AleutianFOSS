@@ -423,6 +423,291 @@ func ResolveFunctionWithFuzzy(
 	return selectedMatch, true, nil
 }
 
+// callableFirstRank returns a sort key that prioritizes callable symbols.
+// Lower value = higher priority.
+//
+// Description:
+//
+//	IT-12 Rev 3: When graph traversal tools resolve a name, callable symbols
+//	(functions, methods) are most likely to have call edges. Types and classes
+//	may have edges in some languages (e.g., Python __init__) but are secondary.
+//	This ranking ensures that when multiple symbols share a name, the tool
+//	tries callables first before falling back to types.
+//
+// Inputs:
+//   - kind: The symbol kind to rank.
+//
+// Outputs:
+//   - int: Sort key where lower = higher priority.
+//     Function/Method = 0, Property = 1, Enum = 2, Class/Struct = 3,
+//     Interface/Type = 4, Everything else = 5.
+//
+// Thread Safety: This function is safe for concurrent use (pure function).
+func callableFirstRank(kind ast.SymbolKind) int {
+	switch kind {
+	case ast.SymbolKindFunction, ast.SymbolKindMethod:
+		return 0
+	case ast.SymbolKindProperty:
+		return 1
+	case ast.SymbolKindEnum:
+		return 2
+	case ast.SymbolKindClass, ast.SymbolKindStruct:
+		return 3
+	case ast.SymbolKindInterface, ast.SymbolKindType:
+		return 4
+	default:
+		return 5
+	}
+}
+
+// ResolveFunctionCandidates returns up to maxCandidates symbols matching
+// the given name, ranked with callable kinds (function/method) first.
+//
+// Description:
+//
+//	IT-12 Rev 3: When graph traversal tools resolve a name to a type that has
+//	0 call edges, they need alternative candidates to retry with. This function
+//	provides ranked alternatives so tools can iterate until a useful result.
+//
+//	Uses the same resolution strategies as ResolveFunctionWithFuzzy (exact match,
+//	dot-notation, bare method, fuzzy) but collects ALL matching symbols instead
+//	of picking one, then sorts by callableFirstRank(). Within the same callable
+//	rank, uses kindSignificance as tiebreaker (non-test files, shorter paths).
+//
+// Inputs:
+//   - ctx: Context for timeout control. Must not be nil.
+//   - idx: Symbol index to search. Must not be nil.
+//   - name: Symbol name to resolve. Must not be empty.
+//   - logger: Logger for debugging. Must not be nil.
+//   - maxCandidates: Maximum number of candidates to return (must be >= 1).
+//   - opts: Optional configuration (WithKindFilter, WithBareMethodFallback).
+//
+// Outputs:
+//   - []*ast.Symbol: Ranked candidates, callable-first. May be empty if no matches.
+//   - error: Non-nil if index is nil or name is empty.
+//
+// Thread Safety: This function is safe for concurrent use.
+//
+// Example:
+//
+//	candidates, err := ResolveFunctionCandidates(ctx, idx, "Sites", logger, 3,
+//	    WithKindFilter(KindFilterAny), WithBareMethodFallback())
+//	for _, c := range candidates {
+//	    result := graph.GetCallGraph(ctx, c.ID)
+//	    if len(result.Edges) > 0 { /* use this candidate */ break }
+//	}
+func ResolveFunctionCandidates(
+	ctx context.Context,
+	idx *index.SymbolIndex,
+	name string,
+	logger *slog.Logger,
+	maxCandidates int,
+	opts ...ResolveFuzzyOpt,
+) ([]*ast.Symbol, error) {
+	if idx == nil {
+		return nil, fmt.Errorf("symbol index is nil")
+	}
+	if name == "" {
+		return nil, fmt.Errorf("name must not be empty")
+	}
+	if maxCandidates < 1 {
+		maxCandidates = 1
+	}
+
+	// Apply options
+	cfg := resolveFuzzyConfig{
+		kindFilter:         KindFilterCallable,
+		bareMethodFallback: false,
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	// Collect all candidate symbols from multiple resolution strategies.
+	// Use a map to deduplicate by ID.
+	seen := make(map[string]bool)
+	var allCandidates []*ast.Symbol
+
+	addCandidate := func(sym *ast.Symbol) {
+		if sym != nil && !seen[sym.ID] {
+			seen[sym.ID] = true
+			allCandidates = append(allCandidates, sym)
+		}
+	}
+
+	// Step 0: Full-ID bypass
+	if strings.Contains(name, ":") {
+		if sym, ok := idx.GetByID(name); ok {
+			addCandidate(sym)
+		}
+	}
+
+	// Step 1: Exact match — collect ALL matching symbols (not just the best)
+	exactMatches := idx.GetByName(name)
+	for _, sym := range exactMatches {
+		if matchesKindFilter(sym, cfg.kindFilter) {
+			addCandidate(sym)
+		}
+	}
+	// If KindFilterAny, also add unfiltered matches (already covered above)
+
+	// Step 2: Dot-notation
+	if strings.Contains(name, ".") {
+		parts := strings.SplitN(name, ".", 2)
+		typeName, methodName := parts[0], parts[1]
+		if sym, err := resolveTypeDotMethod(ctx, idx, typeName, methodName, logger); err == nil {
+			if matchesKindFilter(sym, cfg.kindFilter) {
+				addCandidate(sym)
+			}
+		}
+
+		// Step 3: Bare method fallback
+		if cfg.bareMethodFallback {
+			bareMatches := idx.GetByName(methodName)
+			for _, sym := range bareMatches {
+				if matchesKindFilter(sym, cfg.kindFilter) {
+					addCandidate(sym)
+				}
+			}
+		}
+	}
+
+	// Step 4: Fuzzy search (only if we have fewer than maxCandidates)
+	if len(allCandidates) < maxCandidates {
+		searchCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+
+		fuzzyMatches, err := idx.Search(searchCtx, name, 20)
+		if err == nil {
+			for _, sym := range fuzzyMatches {
+				if matchesKindFilter(sym, cfg.kindFilter) {
+					addCandidate(sym)
+				}
+			}
+		}
+	}
+
+	// IT-Summary FIX-C Step 2: Snake case → PascalCase fallback.
+	// If all strategies returned empty and the name contains underscores,
+	// try converting to PascalCase (e.g., "resource_transformation" → "ResourceTransformation").
+	// ParamExtractor may produce snake_case from multi-word conceptual queries.
+	if len(allCandidates) == 0 && strings.Contains(name, "_") {
+		pascalName := snakeToPascal(name)
+		if pascalName != name {
+			logger.Info("ResolveFunctionCandidates: trying snake_case → PascalCase fallback",
+				slog.String("original", name),
+				slog.String("pascal", pascalName),
+			)
+			pascalMatches := idx.GetByName(pascalName)
+			for _, sym := range pascalMatches {
+				if matchesKindFilter(sym, cfg.kindFilter) {
+					addCandidate(sym)
+				}
+			}
+			// Also try dot-notation and fuzzy on pascal name
+			if len(allCandidates) == 0 && strings.Contains(pascalName, ".") {
+				parts := strings.SplitN(pascalName, ".", 2)
+				if sym, err := resolveTypeDotMethod(ctx, idx, parts[0], parts[1], logger); err == nil {
+					if matchesKindFilter(sym, cfg.kindFilter) {
+						addCandidate(sym)
+					}
+				}
+			}
+			if len(allCandidates) == 0 {
+				searchCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+				defer cancel()
+				fuzzyMatches, err := idx.Search(searchCtx, pascalName, 10)
+				if err == nil {
+					for _, sym := range fuzzyMatches {
+						if matchesKindFilter(sym, cfg.kindFilter) {
+							addCandidate(sym)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if len(allCandidates) == 0 {
+		return nil, nil
+	}
+
+	// Filter out overload stubs when real implementations exist
+	allCandidates = filterOutOverloadStubs(allCandidates)
+
+	// Sort: callable-first rank as primary key, then kindSignificance as tiebreaker
+	// (within same callable rank, prefer higher significance, non-test, shorter path).
+	sortCandidatesCallableFirst(allCandidates)
+
+	// Limit to maxCandidates
+	if len(allCandidates) > maxCandidates {
+		allCandidates = allCandidates[:maxCandidates]
+	}
+
+	logger.Info("ResolveFunctionCandidates: ranked candidates",
+		slog.String("query", name),
+		slog.Int("candidates", len(allCandidates)),
+		slog.Int("max", maxCandidates),
+	)
+	for i, c := range allCandidates {
+		logger.Debug("ResolveFunctionCandidates: candidate",
+			slog.Int("rank", i),
+			slog.String("name", c.Name),
+			slog.String("kind", c.Kind.String()),
+			slog.String("file", c.FilePath),
+			slog.String("id", c.ID),
+		)
+	}
+
+	return allCandidates, nil
+}
+
+// sortCandidatesCallableFirst sorts candidates by callable-first rank, then
+// by kindSignificance (descending), then non-test preference, then shorter path.
+//
+// Thread Safety: NOT safe for concurrent use. Caller must not share the slice.
+func sortCandidatesCallableFirst(candidates []*ast.Symbol) {
+	if len(candidates) <= 1 {
+		return
+	}
+
+	// Simple insertion sort — candidates slice is small (typically <20).
+	for i := 1; i < len(candidates); i++ {
+		key := candidates[i]
+		j := i - 1
+		for j >= 0 && candidateLess(key, candidates[j]) {
+			candidates[j+1] = candidates[j]
+			j--
+		}
+		candidates[j+1] = key
+	}
+}
+
+// candidateLess returns true if a should sort before b.
+// Primary: lower callableFirstRank. Secondary: higher kindSignificance.
+// Tertiary: non-test before test. Quaternary: shorter file path.
+func candidateLess(a, b *ast.Symbol) bool {
+	aRank := callableFirstRank(a.Kind)
+	bRank := callableFirstRank(b.Kind)
+	if aRank != bRank {
+		return aRank < bRank
+	}
+
+	aSig := kindSignificance(a.Kind)
+	bSig := kindSignificance(b.Kind)
+	if aSig != bSig {
+		return aSig > bSig // Higher significance first
+	}
+
+	aTest := isTestFile(a.FilePath)
+	bTest := isTestFile(b.FilePath)
+	if aTest != bTest {
+		return !aTest // Non-test first
+	}
+
+	return len(a.FilePath) < len(b.FilePath) // Shorter path first
+}
+
 // ResolveMultipleFunctionsWithFuzzy resolves multiple function names,
 // using fuzzy matching as fallback for each.
 //
@@ -1030,6 +1315,43 @@ func filterOutOverloadStubs(symbols []*ast.Symbol) []*ast.Symbol {
 	}
 
 	return nonOverloads
+}
+
+// snakeToPascal converts a snake_case name to PascalCase.
+//
+// Description:
+//
+//	IT-Summary FIX-C Step 2: ParamExtractor may produce snake_case from
+//	multi-word conceptual queries (e.g., "resource transformation" →
+//	"resource_transformation"). Many codebases use PascalCase for type
+//	and interface names ("ResourceTransformation"). This function converts
+//	so the resolver can find the symbol.
+//
+// Inputs:
+//   - name: A snake_case name (e.g., "resource_transformation").
+//
+// Outputs:
+//   - string: PascalCase version (e.g., "ResourceTransformation").
+//     Returns the input unchanged if it contains no underscores.
+//
+// Thread Safety: This function is safe for concurrent use (pure function).
+func snakeToPascal(name string) string {
+	if !strings.Contains(name, "_") {
+		return name
+	}
+	parts := strings.Split(name, "_")
+	var sb strings.Builder
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		// Capitalize first letter, keep rest as-is
+		sb.WriteString(strings.ToUpper(part[:1]))
+		if len(part) > 1 {
+			sb.WriteString(part[1:])
+		}
+	}
+	return sb.String()
 }
 
 // isTestFile returns true if the file path looks like a test or benchmark file.

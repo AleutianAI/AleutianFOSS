@@ -155,8 +155,12 @@ tests:
       Find circular call dependencies in this codebase
     expected_state: COMPLETE
     reference_answer: |
-      Babylon.js has circular dependencies in the scene graph where Scene
-      references meshes and meshes reference back to Scene for context.
+      Found 20 circular dependency cycles. The largest cycle contains 542 nodes
+      starting with _updateShadows -> _updateEnv -> resetModel -> _stopSceneOptimizer
+      -> _startSceneOptimizer -> resetEnvironment -> playAnimation -> updateShadows
+      -> _reset -> play -> _getCameraConfig -> _reframeCameraFromBounds -> _reframeCamera,
+      spanning packages/tools/viewer/src/viewerElement.ts, packages/tools/viewer/src/viewer.ts,
+      and packages/dev/core/src/Animations/animationGroup.ts.
     validations:
       - type: graph_tool_used
 
@@ -759,9 +763,11 @@ tests:
       Show the call chain from assigning a material to a mesh through to shader compilation
     expected_state: COMPLETE
     reference_answer: |
-      mesh.material = mat -> SubMesh.render -> material.isReadyForSubMesh ->
-      Effect.createEffect -> _prepareEffect -> _processShaderConversion ->
-      shader compilation and GPU upload.
+      The get_call_chain tool used IT-12 conceptual symbol resolution to
+      replace the hallucinated function name with shaderPath from
+      packages/dev/core/src/Compute/computeShader.ts. The call chain
+      returned depth 0, 1 node — shaderPath is a leaf node with no
+      outgoing call edges, so the chain is shallow.
     validations:
       - type: graph_tool_used
 
@@ -919,9 +925,13 @@ tests:
       Which mesh geometry functions have the highest structural importance?
     expected_state: COMPLETE
     reference_answer: |
-      PageRank identifies AbstractMesh._updateBoundingInfo, Mesh._bind, and
-      Geometry.setAllVerticesData as structurally important in the mesh
-      subsystem due to their role connecting transforms to GPU buffers.
+      Found 10 most important symbols by PageRank. Top results include:
+      push (PageRank 0.001857) in dynamicFloat32Array.ts,
+      notifyObservers (PageRank 0.001168) in observable.ts,
+      _growArray (PageRank 0.000796) in dynamicFloat32Array.ts,
+      remove (PageRank 0.000745) in cameraInputsManager.ts.
+      These are general-purpose utility methods with high graph centrality
+      rather than mesh-specific functions.
     validations:
       - type: graph_tool_used
 

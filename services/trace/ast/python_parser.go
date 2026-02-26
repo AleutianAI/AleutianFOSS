@@ -628,6 +628,13 @@ func (p *PythonParser) processClass(ctx context.Context, node *sitter.Node, cont
 		p.extractClassMembers(ctx, bodyNode, content, filePath, sym)
 	}
 
+	// IT-43b: After all methods are known, add @property access edges.
+	// When self.X is accessed (attribute, not call) and X is a @property in this
+	// class, create a call edge from the accessing method to the property getter.
+	if bodyNode != nil {
+		p.addPropertyAccessEdges(ctx, bodyNode, content, filePath, sym)
+	}
+
 	// GR-40a M-1: For ABC classes, only mark as interface if they have @abstractmethod
 	if isABC && !isTypingProtocol {
 		if p.hasAbstractMethod(ctx, sym) {
@@ -928,6 +935,11 @@ func (p *PythonParser) processFunction(ctx context.Context, node *sitter.Node, c
 	// GR-41: Extract call sites from function/method body
 	if bodyNode != nil {
 		sym.Calls = p.extractCallSites(ctx, bodyNode, content, filePath)
+		// IT-43a: Extract implicit dunder method calls from subscript, for, with nodes.
+		dunders := p.extractImplicitDunderCalls(ctx, bodyNode, content, filePath)
+		if len(dunders) > 0 {
+			sym.Calls = append(sym.Calls, dunders...)
+		}
 	}
 
 	// IT-06 Bug 9: Set type annotation references
@@ -2081,6 +2093,561 @@ func (p *PythonParser) extractSingleCallSite(node *sitter.Node, content []byte, 
 	}
 
 	return call
+}
+
+// addPropertyAccessEdges scans class method bodies for self.X attribute accesses
+// where X is a known @property method in the same class, and adds call edges.
+//
+// Description:
+//
+//	After all class members are extracted, this function identifies @property methods
+//	by checking for SymbolKindProperty in the class children. Then it re-walks each
+//	non-property method's function body in the AST to find self.X accesses that are
+//	NOT part of a call expression (i.e., property access, not self.X() method call).
+//	For each match, it appends a CallSite to the method's Calls slice.
+//
+// Inputs:
+//   - ctx: Context for cancellation.
+//   - classBody: The block node of the class definition.
+//   - content: Source file content bytes.
+//   - filePath: Path to the source file.
+//   - classSym: The class symbol with Children already populated.
+//
+// Thread Safety: Safe for concurrent use.
+func (p *PythonParser) addPropertyAccessEdges(ctx context.Context, classBody *sitter.Node, content []byte, filePath string, classSym *Symbol) {
+	if classSym == nil || len(classSym.Children) == 0 {
+		return
+	}
+
+	// Collect property names
+	propertyNames := make(map[string]bool)
+	for _, child := range classSym.Children {
+		if child.Kind == SymbolKindProperty {
+			propertyNames[child.Name] = true
+		}
+	}
+
+	if len(propertyNames) == 0 {
+		return
+	}
+
+	// Build a map from method name → *Symbol for non-property methods
+	methodMap := make(map[string]*Symbol)
+	for _, child := range classSym.Children {
+		if child.Kind == SymbolKindMethod || child.Kind == SymbolKindFunction {
+			methodMap[child.Name] = child
+		}
+	}
+
+	if len(methodMap) == 0 {
+		return
+	}
+
+	// Walk the class body to find function_definition nodes, then scan each for
+	// self.<property> attribute accesses that are NOT inside a call node.
+	for i := 0; i < int(classBody.ChildCount()); i++ {
+		child := classBody.Child(i)
+		if child == nil {
+			continue
+		}
+
+		var funcDefNode *sitter.Node
+		switch child.Type() {
+		case "function_definition":
+			funcDefNode = child
+		case "decorated_definition":
+			// Find the function_definition inside the decorated_definition
+			for j := 0; j < int(child.ChildCount()); j++ {
+				sub := child.Child(j)
+				if sub != nil && sub.Type() == "function_definition" {
+					funcDefNode = sub
+					break
+				}
+			}
+		}
+
+		if funcDefNode == nil {
+			continue
+		}
+
+		// Get the method name
+		nameNode := funcDefNode.ChildByFieldName("name")
+		if nameNode == nil {
+			continue
+		}
+		methodName := string(content[nameNode.StartByte():nameNode.EndByte()])
+
+		// Skip properties themselves — don't create self-referential edges
+		if propertyNames[methodName] {
+			continue
+		}
+
+		method, ok := methodMap[methodName]
+		if !ok {
+			continue
+		}
+
+		// Find the body block
+		var bodyBlock *sitter.Node
+		for j := 0; j < int(funcDefNode.ChildCount()); j++ {
+			sub := funcDefNode.Child(j)
+			if sub != nil && sub.Type() == "block" {
+				bodyBlock = sub
+				break
+			}
+		}
+
+		if bodyBlock == nil {
+			continue
+		}
+
+		// Scan for self.<property> attribute accesses
+		propCalls := p.findPropertyAccesses(ctx, bodyBlock, content, filePath, propertyNames)
+		if len(propCalls) > 0 {
+			method.Calls = append(method.Calls, propCalls...)
+		}
+	}
+}
+
+// findPropertyAccesses walks an AST node looking for self.<name> attribute accesses
+// where <name> is in the propertyNames set and the access is NOT part of a call.
+//
+// Thread Safety: Safe for concurrent use.
+func (p *PythonParser) findPropertyAccesses(ctx context.Context, node *sitter.Node, content []byte, filePath string, propertyNames map[string]bool) []CallSite {
+	if node == nil {
+		return nil
+	}
+
+	var calls []CallSite
+	// IT-43b review fix: Dedup property accesses by name within a single method.
+	// Multiple `self.name` accesses should produce one edge, not N.
+	seen := make(map[string]bool)
+
+	type stackEntry struct {
+		node   *sitter.Node
+		inCall bool // true when inside a call node's function child
+		depth  int
+	}
+
+	stack := make([]stackEntry, 0, 64)
+	stack = append(stack, stackEntry{node: node, depth: 0})
+
+	nodeCount := 0
+	for len(stack) > 0 {
+		entry := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+
+		n := entry.node
+		if n == nil || entry.depth > MaxCallExpressionDepth {
+			continue
+		}
+
+		nodeCount++
+		if nodeCount%100 == 0 && ctx.Err() != nil {
+			return calls
+		}
+
+		nType := n.Type()
+
+		if nType == "attribute" && !entry.inCall {
+			// Check if this is self.<property>
+			objectNode := n.ChildByFieldName("object")
+			attrNode := n.ChildByFieldName("attribute")
+
+			if objectNode != nil && attrNode != nil {
+				obj := string(content[objectNode.StartByte():objectNode.EndByte()])
+				attr := string(content[attrNode.StartByte():attrNode.EndByte()])
+
+				if obj == "self" && propertyNames[attr] && !seen[attr] {
+					seen[attr] = true
+					calls = append(calls, CallSite{
+						Target:   attr,
+						Receiver: "self",
+						IsMethod: true,
+						Location: Location{
+							FilePath:  filePath,
+							StartLine: int(n.StartPoint().Row) + 1,
+							EndLine:   int(n.EndPoint().Row) + 1,
+							StartCol:  int(n.StartPoint().Column),
+							EndCol:    int(n.EndPoint().Column),
+						},
+					})
+				}
+			}
+			// Still process children
+		}
+
+		// For call nodes, mark the function child as inCall so we don't
+		// treat self.method() as a property access
+		if nType == "call" {
+			funcChild := n.ChildByFieldName("function")
+			argsChild := n.ChildByFieldName("arguments")
+			if funcChild != nil {
+				stack = append(stack, stackEntry{node: funcChild, inCall: true, depth: entry.depth + 1})
+			}
+			if argsChild != nil {
+				stack = append(stack, stackEntry{node: argsChild, inCall: entry.inCall, depth: entry.depth + 1})
+			}
+			// Push remaining children
+			for i := int(n.ChildCount()) - 1; i >= 0; i-- {
+				child := n.Child(i)
+				if child != nil && child != funcChild && child != argsChild {
+					stack = append(stack, stackEntry{node: child, inCall: entry.inCall, depth: entry.depth + 1})
+				}
+			}
+			continue
+		}
+
+		// Default: push children
+		for i := int(n.ChildCount()) - 1; i >= 0; i-- {
+			child := n.Child(i)
+			if child != nil {
+				stack = append(stack, stackEntry{node: child, inCall: entry.inCall, depth: entry.depth + 1})
+			}
+		}
+	}
+
+	return calls
+}
+
+// extractImplicitDunderCalls extracts implicit dunder method calls from Python syntax.
+//
+// Description:
+//
+//	Python syntax sugar like obj[key], for x in obj, and with obj invokes dunder
+//	methods (__getitem__, __iter__, __enter__/__exit__) without an explicit call node.
+//	This function walks the AST looking for these implicit invocations and creates
+//	CallSite entries so the graph builder can create edges.
+//
+// Inputs:
+//   - ctx: Context for cancellation. Checked every 100 nodes.
+//   - bodyNode: The block node representing the function body. May be nil.
+//   - content: The source file content bytes.
+//   - filePath: Path to the source file for location data.
+//
+// Outputs:
+//   - []CallSite: Extracted implicit dunder call sites. Empty slice if none found.
+//
+// Limitations:
+//   - Does not extract binary operator dunders (__add__, __eq__, etc.) — requires type info
+//   - Does not detect __call__ (indistinguishable from regular function call)
+//   - Subscript on list/dict/tuple literals are skipped to reduce false edges
+//
+// Thread Safety: Safe for concurrent use.
+func (p *PythonParser) extractImplicitDunderCalls(ctx context.Context, bodyNode *sitter.Node, content []byte, filePath string) []CallSite {
+	if bodyNode == nil {
+		return nil
+	}
+
+	if ctx.Err() != nil {
+		return nil
+	}
+
+	calls := make([]CallSite, 0, 8)
+
+	type stackEntry struct {
+		node     *sitter.Node
+		depth    int
+		isDelLHS bool // true when node is the child of a delete_statement
+		isSetLHS bool // true when node is the LHS of an assignment
+	}
+
+	stack := make([]stackEntry, 0, 64)
+	stack = append(stack, stackEntry{node: bodyNode, depth: 0})
+
+	nodeCount := 0
+	for len(stack) > 0 {
+		entry := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+
+		node := entry.node
+		if node == nil {
+			continue
+		}
+
+		if entry.depth > MaxCallExpressionDepth {
+			continue
+		}
+
+		nodeCount++
+		if nodeCount%100 == 0 {
+			if ctx.Err() != nil {
+				return calls
+			}
+		}
+
+		if len(calls) >= MaxCallSitesPerSymbol {
+			return calls
+		}
+
+		nodeType := node.Type()
+
+		switch nodeType {
+		case "subscript":
+			// IT-43a: obj[key] → __getitem__, obj[key] = val → __setitem__, del obj[key] → __delitem__
+			target := "__getitem__"
+			if entry.isSetLHS {
+				target = "__setitem__"
+			} else if entry.isDelLHS {
+				target = "__delitem__"
+			}
+
+			// Extract receiver from the subscript value (the object being subscripted)
+			valueNode := node.ChildByFieldName("value")
+			if valueNode == nil && node.ChildCount() > 0 {
+				valueNode = node.Child(0)
+			}
+
+			if valueNode != nil {
+				// Skip subscripts on list/dict/tuple literals to reduce false edges
+				vType := valueNode.Type()
+				if vType == "list" || vType == "dictionary" || vType == "tuple" || vType == "set" {
+					break
+				}
+
+				receiver, isMethod := p.extractImplicitReceiver(valueNode, content)
+				if receiver != "" {
+					calls = append(calls, CallSite{
+						Target:   target,
+						Receiver: receiver,
+						IsMethod: isMethod,
+						Location: Location{
+							FilePath:  filePath,
+							StartLine: int(node.StartPoint().Row) + 1,
+							EndLine:   int(node.EndPoint().Row) + 1,
+							StartCol:  int(node.StartPoint().Column),
+							EndCol:    int(node.EndPoint().Column),
+						},
+					})
+				}
+			}
+
+		case "for_statement":
+			// IT-43a: for x in obj: → __iter__ on the iterable
+			// Tree-sitter for_statement has fields: left, right, body
+			// "right" is the iterable expression
+			rightNode := node.ChildByFieldName("right")
+			if rightNode != nil {
+				// Skip iteration over literals
+				rType := rightNode.Type()
+				if rType != "list" && rType != "dictionary" && rType != "tuple" && rType != "set" && rType != "string" {
+					receiver, isMethod := p.extractImplicitReceiver(rightNode, content)
+					if receiver != "" {
+						calls = append(calls, CallSite{
+							Target:   "__iter__",
+							Receiver: receiver,
+							IsMethod: isMethod,
+							Location: Location{
+								FilePath:  filePath,
+								StartLine: int(node.StartPoint().Row) + 1,
+								EndLine:   int(node.EndPoint().Row) + 1,
+								StartCol:  int(node.StartPoint().Column),
+								EndCol:    int(node.EndPoint().Column),
+							},
+						})
+					}
+				}
+			}
+
+		case "with_statement":
+			// IT-43a: with obj as x: → __enter__ and __exit__
+			// Tree-sitter with_statement has a with_clause containing with_item(s)
+			p.extractWithStatementDunders(node, content, filePath, &calls)
+
+		case "assignment":
+			// Check if LHS is a subscript — this means __setitem__
+			// Push children with isSetLHS flag for the LHS
+			lhs := node.ChildByFieldName("left")
+			rhs := node.ChildByFieldName("right")
+			if lhs != nil && lhs.Type() == "subscript" {
+				stack = append(stack, stackEntry{node: lhs, depth: entry.depth + 1, isSetLHS: true})
+			} else if lhs != nil {
+				stack = append(stack, stackEntry{node: lhs, depth: entry.depth + 1})
+			}
+			if rhs != nil {
+				stack = append(stack, stackEntry{node: rhs, depth: entry.depth + 1})
+			}
+			// Skip default child push below
+			continue
+
+		case "augmented_assignment":
+			// obj[key] += val → __getitem__ then __setitem__
+			lhs := node.ChildByFieldName("left")
+			rhs := node.ChildByFieldName("right")
+			if lhs != nil && lhs.Type() == "subscript" {
+				// Both get and set
+				stack = append(stack, stackEntry{node: lhs, depth: entry.depth + 1})                 // __getitem__
+				stack = append(stack, stackEntry{node: lhs, depth: entry.depth + 1, isSetLHS: true}) // __setitem__
+			} else if lhs != nil {
+				stack = append(stack, stackEntry{node: lhs, depth: entry.depth + 1})
+			}
+			if rhs != nil {
+				stack = append(stack, stackEntry{node: rhs, depth: entry.depth + 1})
+			}
+			continue
+
+		case "delete_statement":
+			// del obj[key] → __delitem__
+			childCount := int(node.ChildCount())
+			for i := 0; i < childCount; i++ {
+				child := node.Child(i)
+				if child != nil {
+					stack = append(stack, stackEntry{node: child, depth: entry.depth + 1, isDelLHS: true})
+				}
+			}
+			continue
+		}
+
+		// Default: push all children
+		childCount := int(node.ChildCount())
+		for i := childCount - 1; i >= 0; i-- {
+			child := node.Child(i)
+			if child != nil {
+				stack = append(stack, stackEntry{
+					node:  child,
+					depth: entry.depth + 1,
+				})
+			}
+		}
+	}
+
+	return calls
+}
+
+// extractImplicitReceiver extracts the receiver name from an expression node
+// used as the target of an implicit dunder call (subscript, iteration, etc.).
+//
+// Returns the receiver name and whether this is a method call (has a dot).
+// For "self.data" → ("self", true), for "items" → ("items", false),
+// for "self" → ("self", false).
+//
+// Thread Safety: Safe for concurrent use.
+func (p *PythonParser) extractImplicitReceiver(node *sitter.Node, content []byte) (string, bool) {
+	if node == nil {
+		return "", false
+	}
+
+	switch node.Type() {
+	case "identifier":
+		name := string(content[node.StartByte():node.EndByte()])
+		return name, false
+
+	case "attribute":
+		// obj.attr — use the object as receiver
+		objectNode := node.ChildByFieldName("object")
+		if objectNode != nil {
+			receiver := string(content[objectNode.StartByte():objectNode.EndByte()])
+			return receiver, true
+		}
+
+	case "call":
+		// result of a function call: func()[key] — extract the function name
+		funcNode := node.ChildByFieldName("function")
+		if funcNode == nil && node.ChildCount() > 0 {
+			funcNode = node.Child(0)
+		}
+		if funcNode != nil {
+			name := string(content[funcNode.StartByte():funcNode.EndByte()])
+			if len(name) <= 50 {
+				return name, false
+			}
+		}
+	}
+
+	// For complex expressions, extract the full text (truncated)
+	text := string(content[node.StartByte():node.EndByte()])
+	if len(text) > 50 {
+		text = text[:50]
+	}
+	if text != "" {
+		return text, false
+	}
+
+	return "", false
+}
+
+// extractWithStatementDunders extracts __enter__ and __exit__ calls from a with statement.
+//
+// Thread Safety: Safe for concurrent use.
+func (p *PythonParser) extractWithStatementDunders(node *sitter.Node, content []byte, filePath string, calls *[]CallSite) {
+	// Walk the with_statement to find with_item or with_clause nodes
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child == nil {
+			continue
+		}
+
+		switch child.Type() {
+		case "with_clause":
+			// with_clause contains with_item(s)
+			for j := 0; j < int(child.ChildCount()); j++ {
+				item := child.Child(j)
+				if item != nil && item.Type() == "with_item" {
+					p.extractWithItemDunders(item, content, filePath, calls)
+				}
+			}
+		case "with_item":
+			p.extractWithItemDunders(child, content, filePath, calls)
+		default:
+			// Some tree-sitter versions put the expression directly as a child
+			// e.g., "with open(f) as fp:" — the call node is a direct child
+			if child.Type() == "as_pattern" {
+				// as_pattern contains the value expression
+				valueNode := child.ChildByFieldName("value")
+				if valueNode == nil && child.ChildCount() > 0 {
+					valueNode = child.Child(0)
+				}
+				if valueNode != nil {
+					p.emitEnterExitCalls(valueNode, content, filePath, calls)
+				}
+			}
+		}
+	}
+}
+
+// extractWithItemDunders extracts __enter__/__exit__ from a single with_item.
+//
+// Thread Safety: Safe for concurrent use.
+func (p *PythonParser) extractWithItemDunders(item *sitter.Node, content []byte, filePath string, calls *[]CallSite) {
+	// with_item: value [as pattern]
+	valueNode := item.ChildByFieldName("value")
+	if valueNode == nil && item.ChildCount() > 0 {
+		valueNode = item.Child(0)
+	}
+	if valueNode != nil {
+		p.emitEnterExitCalls(valueNode, content, filePath, calls)
+	}
+}
+
+// emitEnterExitCalls creates __enter__ and __exit__ CallSites for a context expression.
+//
+// Thread Safety: Safe for concurrent use.
+func (p *PythonParser) emitEnterExitCalls(valueNode *sitter.Node, content []byte, filePath string, calls *[]CallSite) {
+	receiver, isMethod := p.extractImplicitReceiver(valueNode, content)
+	if receiver == "" {
+		return
+	}
+
+	loc := Location{
+		FilePath:  filePath,
+		StartLine: int(valueNode.StartPoint().Row) + 1,
+		EndLine:   int(valueNode.EndPoint().Row) + 1,
+		StartCol:  int(valueNode.StartPoint().Column),
+		EndCol:    int(valueNode.EndPoint().Column),
+	}
+
+	*calls = append(*calls, CallSite{
+		Target:   "__enter__",
+		Receiver: receiver,
+		IsMethod: isMethod,
+		Location: loc,
+	})
+	*calls = append(*calls, CallSite{
+		Target:   "__exit__",
+		Receiver: receiver,
+		IsMethod: isMethod,
+		Location: loc,
+	})
 }
 
 // Compile-time interface compliance check.
