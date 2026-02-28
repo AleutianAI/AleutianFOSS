@@ -499,11 +499,12 @@ func (e *ParamExtractor) ResolveConceptualSymbol(
 
 Rules:
 - Pick a function/method that IMPLEMENTS the behavior, not a simple accessor or getter
-- Prefer functions with MORE call edges — they are richer starting points for call chain analysis
-- Prefer internal/private methods (prefixed with _ or containing verbs like set, process, handle, apply, build, compile) over public accessors — they have richer call chains
+- CRITICAL: If the query mentions a specific domain noun (like "menu", "table", "axis", "user"), ALWAYS prefer symbols whose NAME CONTAINS that noun, even if they have fewer call edges. "assembleMenus" is ALWAYS better for "menu assembly" than "Build"
+- When NO candidate name contains the domain noun, THEN prefer functions with the most call edges as a tiebreaker
+- Prefer internal/private methods over public accessors — they have richer call chains
 - For "assigning X": pick _setX or applyX over a bare property named X
 - For "rendering": pick render() or _render() over a getRender accessor
-- For "initialization": pick Build, New, Init, or Setup over a getter named after the thing being initialized
+- For "initialization": pick Build, New, Init, or Setup over a getter
 - If the query says "from X to Y", pick the symbol closest to X (the starting point)
 - Return ONLY the symbol name, nothing else
 
@@ -532,6 +533,19 @@ Rules:
 		}
 	}
 
+	// IT-12 Rev 5c: Log the candidate list as presented to the LLM for debugging.
+	// Exact tier counts are logged by the caller in resolveConceptualName().
+	var candidatePreview strings.Builder
+	for i := 0; i < cap && i < 15; i++ {
+		c := candidates[i]
+		candidatePreview.WriteString(fmt.Sprintf("[%d] %s (%s, %d out, %d in) ", i+1, c.Name, c.Kind, c.OutEdges, c.InEdges))
+	}
+	e.logger.Info("IT-12: candidates presented to LLM",
+		slog.Int("total_candidates", len(candidates)),
+		slog.Int("shown_to_llm", cap),
+		slog.String("top_15", candidatePreview.String()),
+	)
+
 	messages := []datatypes.Message{
 		{Role: "system", Content: sb.String()},
 		{Role: "user", Content: fmt.Sprintf("Query: %s\n\nBest starting symbol:", query)},
@@ -556,6 +570,12 @@ Rules:
 	}
 
 	duration := time.Since(startTime)
+
+	// IT-12 Rev 5c: Log raw LLM response for debugging.
+	e.logger.Info("IT-12: LLM raw response for conceptual resolution",
+		slog.String("raw_response", response),
+		slog.Duration("duration", duration),
+	)
 
 	// Parse: response should be just a symbol name, but small LLMs often include
 	// extra context like "material (method) in file.ts:614". Clean up the response.

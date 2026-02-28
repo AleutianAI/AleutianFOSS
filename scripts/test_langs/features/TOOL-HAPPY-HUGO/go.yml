@@ -777,19 +777,26 @@ tests:
       - type: graph_tool_used
 
   - id: 5051
-    name: hugo_get_call_chain_c
+    name: hugo_find_path_build_to_render
     category: TOOL_HAPPY_PATH
     description: >
-      get_call_chain tool against Hugo (test C). Target: menu assembly.
+      find_path tool against Hugo (test C). Target: Build to page rendering.
+      Tests the rendering pipeline path which uses direct function calls
+      visible to the static parser (no template dispatch or closure patterns).
     query: |
-      Show the call chain from site initialization to menu assembly
+      Show the call chain from Build to page rendering
     expected_state: COMPLETE
     reference_answer: |
-      HugoSites.Build -> site.assemble -> assembleMenus -> navigation
-      package helpers that iterate pages and construct the menu tree
-      from front matter and site configuration.
+      Build -> render -> Site.render -> renderPages -> renderAndWritePage
+      -> renderForTemplate. This is the core rendering pipeline where Build
+      orchestrates site rendering, which dispatches to per-page rendering
+      and finally template execution.
     validations:
       - type: graph_tool_used
+    debug_inspect:
+      - Build
+      - render
+      - renderPages
 
   # -- Additional find_path tests (52-53) -- expected_state: COMPLETE --
 

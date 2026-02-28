@@ -346,7 +346,14 @@ func (t *findHotspotsTool) Execute(ctx context.Context, params TypedParams) (*Re
 		}
 	}
 
-	// IT-07 Bug 3 / IT-08 Run 3: Filter by package using boundary-aware matching
+	// IT-07 Bug 3 / IT-08 Run 3: Filter by package using boundary-aware matching.
+	//
+	// HISTORY (read before modifying — same pattern as find_important):
+	// - FIX-B previously fell back to global results when filter returned 0.
+	// - IT-Summary Round 2: Removed fallback (CR-11 principle). If the package
+	//   filter returns 0, that IS the answer. Conceptual scope names that don't
+	//   match real paths are an upstream problem (extractPackageContextFromQuery),
+	//   not a tool-layer problem. Falling back silently gives wrong-scope data.
 	packageFilterApplied := false
 	if p.Package != "" {
 		var pkgFiltered []graph.HotspotNode
@@ -359,23 +366,15 @@ func (t *findHotspotsTool) Execute(ctx context.Context, params TypedParams) (*Re
 			}
 		}
 
-		// IT-Summary FIX-B fallback: If package filter returns 0 results but we had
-		// candidates before filtering, the package name is likely conceptual (e.g.,
-		// "write path", "materials subsystem") or the top-N global hotspots don't
-		// include any from that directory. Drop the filter and return global results
-		// so the user gets useful output instead of an empty "no hotspots" message.
-		if len(pkgFiltered) == 0 && len(filtered) > 0 {
-			t.logger.Info("IT-Summary FIX-B: package filter returned 0 results, dropping filter",
-				slog.String("tool", "find_hotspots"),
-				slog.String("package_filter", p.Package),
-				slog.Int("pre_filter_count", len(filtered)),
-			)
-			// Keep filtered as-is (unscoped results); clear package for output text
-			p.Package = ""
-		} else {
-			filtered = pkgFiltered
-			packageFilterApplied = true
-		}
+		t.logger.Info("IT-07: find_hotspots package filter applied",
+			slog.String("package", p.Package),
+			slog.Int("before", len(filtered)),
+			slog.Int("after", len(pkgFiltered)),
+		)
+		// CR-11: Unconditionally apply filter. Empty result = "no hotspots
+		// found in that scope." Do NOT fall back to global results.
+		filtered = pkgFiltered
+		packageFilterApplied = true
 	}
 	_ = packageFilterApplied // Used for future scope-aware output
 

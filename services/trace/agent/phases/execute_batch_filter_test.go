@@ -899,6 +899,42 @@ func TestExtractPathSymbolsFromQuery(t *testing.T) {
 			wantTo:   "AnalyzeBeaconSessionData",
 			wantOk:   true,
 		},
+		// IT-R2b Fix 1: Dot-notation names must be captured intact.
+		{
+			name:     "dot_notation_both",
+			query:    "path from Engine.runRenderLoop to Scene.render",
+			wantFrom: "Engine.runRenderLoop",
+			wantTo:   "Scene.render",
+			wantOk:   true,
+		},
+		{
+			name:     "dot_notation_from_only",
+			query:    "from Camera.update to rendering",
+			wantFrom: "Camera.update",
+			wantTo:   "",
+			wantOk:   false,
+		},
+		{
+			name:     "single_word_still_works",
+			query:    "from main to parseConfig",
+			wantFrom: "main",
+			wantTo:   "parseConfig",
+			wantOk:   true,
+		},
+		{
+			name:     "quoted_dot_notation",
+			query:    "from 'Scene.constructor' to render",
+			wantFrom: "Scene.constructor",
+			wantTo:   "render",
+			wantOk:   true,
+		},
+		{
+			name:     "trailing_dot_stripped",
+			query:    "find path from Engine.runRenderLoop.",
+			wantFrom: "Engine.runRenderLoop",
+			wantTo:   "",
+			wantOk:   false,
+		},
 	}
 
 	for _, tt := range tests {

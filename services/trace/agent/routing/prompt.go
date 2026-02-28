@@ -243,19 +243,25 @@ CALLEES (downstream dependencies):
 - "What does X call?"
 → Tool: find_callees
 
-**IMPORTANT vs WEIGHTED_CRITICALITY (full disambiguation):**
+**IMPORTANT vs WEIGHTED_CRITICALITY vs COMMUNITIES (full disambiguation):**
 
 IMPORTANT (PageRank centrality — recursive influence):
 - "Most important functions by PageRank"
 - "Highest structural importance"
 - "Most influential functions"
 - "Lowest PageRank / peripheral functions"
+- "Which Context methods are the most important by PageRank?" ← find_important (NOT find_weighted_criticality)
+- "What are the most important functions in the groupby module?" ← find_important (NOT find_weighted_criticality)
+- "Which functions act as the most important bridges between subsystems?" ← find_important (NOT find_communities)
 → Tool: find_important
 
 WEIGHTED CRITICALITY (risk/crash assessment):
 - "What production code would break the most if changed?"
 - "Highest-risk functions for stability"
+- "Which functions would cause crashes if modified?"
 → Tool: find_weighted_criticality
+
+KEY RULE: If the query contains "most important" or "PageRank", it is ALWAYS find_important, even when it also mentions a package, module, subsystem, or "bridges". The word "bridges" without "communities" does NOT mean find_communities.
 
 ## Current Context
 {{- if .Context}}

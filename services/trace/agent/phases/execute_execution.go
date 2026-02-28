@@ -1501,20 +1501,26 @@ func (p *ExecutePhase) extractToolParameters(
 		}, nil
 
 	case "find_important":
-		// Extract "top N", "kind", and "exclude_tests" from query (same as find_hotspots)
+		// Extract "top N", "kind", "package", and "exclude_tests" from query (same as find_hotspots).
 		// Defaults: top=10, kind="all", exclude_tests=true
+		// IT-Summary Round 2: Package was never wired here (FIX-6 gap). Without this,
+		// p.Package is always "" and the Phase 2 filter in Execute() never fires.
+		// This caused 9 test regressions (7160, 7161, 5260, 5261, 5060, 5061, 8060, 6161, 8160).
 		top := extractTopNFromQuery(query, 10)
 		kind := extractKindFromQuery(query)
 		excludeTests := extractExcludeTestsFromQuery(query)
+		pkg := extractPackageContextFromQuery(query)
 		slog.Debug("GR-Phase1: extracted find_important params",
 			slog.String("tool", toolName),
 			slog.Int("top", top),
 			slog.String("kind", kind),
 			slog.Bool("exclude_tests", excludeTests),
+			slog.String("package", pkg),
 		)
 		return tools.FindImportantParams{
 			Top:          top,
 			Kind:         kind,
+			Package:      pkg,
 			ExcludeTests: excludeTests,
 		}, nil
 
@@ -2443,6 +2449,7 @@ func convertMapToTypedParams(toolName string, params map[string]any) (tools.Type
 		return tools.FindImportantParams{
 			Top:          getIntParam(params, "top", 10),
 			Kind:         getStringParam(params, "kind", "all"),
+			Package:      getStringParam(params, "package", ""),
 			ExcludeTests: getBoolParam(params, "exclude_tests", true),
 		}, nil
 

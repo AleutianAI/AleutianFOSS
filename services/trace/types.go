@@ -1157,3 +1157,133 @@ type DebugHistoryEntry struct {
 	// DurationMs is how long the query took to process.
 	DurationMs int64 `json:"duration_ms"`
 }
+
+// =============================================================================
+// Graph Inspect/Export Types (GR-64)
+// =============================================================================
+
+// InspectNodeRequest is the query params for GET /v1/trace/debug/graph/inspect.
+type InspectNodeRequest struct {
+	// GraphID is the graph to query. Optional, uses first cached if not specified.
+	GraphID string `form:"graph_id"`
+
+	// Name is the symbol name to look up. Required.
+	Name string `form:"name" binding:"required"`
+
+	// Kind filters results to a specific symbol kind (e.g., "function", "struct").
+	// Optional, returns all kinds if not specified.
+	Kind string `form:"kind"`
+
+	// Limit is the maximum number of edges per direction. Default: 50.
+	Limit int `form:"limit"`
+}
+
+// InspectNodeResponse is the response for GET /v1/trace/debug/graph/inspect.
+type InspectNodeResponse struct {
+	// Matches contains the matching nodes with their edges.
+	Matches []InspectNodeMatch `json:"matches"`
+
+	// Truncated indicates if any match had its edge list truncated.
+	Truncated bool `json:"truncated"`
+}
+
+// InspectNodeMatch represents a single matching node in an inspect response.
+type InspectNodeMatch struct {
+	// NodeID is the unique node identifier.
+	NodeID string `json:"node_id"`
+
+	// Symbol is the symbol information.
+	Symbol *SymbolInfo `json:"symbol"`
+
+	// Outgoing contains edges from this node to other nodes.
+	Outgoing []InspectEdge `json:"outgoing"`
+
+	// Incoming contains edges from other nodes to this node.
+	Incoming []InspectEdge `json:"incoming"`
+}
+
+// InspectEdge represents an edge in an inspect response.
+type InspectEdge struct {
+	// PeerID is the ID of the node on the other end of the edge.
+	PeerID string `json:"peer_id"`
+
+	// PeerName is the name of the peer symbol.
+	PeerName string `json:"peer_name"`
+
+	// PeerKind is the kind of the peer symbol.
+	PeerKind string `json:"peer_kind"`
+
+	// EdgeType is the relationship type (e.g., "calls", "implements").
+	EdgeType string `json:"edge_type"`
+
+	// Location is where the relationship is expressed in code.
+	Location *ast.Location `json:"location,omitempty"`
+}
+
+// =============================================================================
+// Snapshot Types (GR-65)
+// =============================================================================
+
+// SaveSnapshotRequest is the request body for POST /v1/trace/debug/graph/snapshot.
+type SaveSnapshotRequest struct {
+	// GraphID is the graph to snapshot. Optional, uses first cached if not specified.
+	GraphID string `json:"graph_id"`
+
+	// Label is an optional human-readable label for the snapshot.
+	Label string `json:"label"`
+}
+
+// SaveSnapshotResponse is the response for POST /v1/trace/debug/graph/snapshot.
+type SaveSnapshotResponse struct {
+	// SnapshotID is the unique identifier for the saved snapshot.
+	SnapshotID string `json:"snapshot_id"`
+
+	// GraphHash is the deterministic hash of the graph structure.
+	GraphHash string `json:"graph_hash"`
+
+	// NodeCount is the number of nodes in the snapshot.
+	NodeCount int `json:"node_count"`
+
+	// EdgeCount is the number of edges in the snapshot.
+	EdgeCount int `json:"edge_count"`
+
+	// CompressedSize is the size of the compressed snapshot in bytes.
+	CompressedSize int64 `json:"compressed_size"`
+}
+
+// ListSnapshotsResponse is the response for GET /v1/trace/debug/graph/snapshots.
+type ListSnapshotsResponse struct {
+	// Snapshots contains the snapshot metadata entries.
+	Snapshots []*graph.SnapshotMetadata `json:"snapshots"`
+}
+
+// LoadSnapshotResponse is the response for GET /v1/trace/debug/graph/snapshot/:id.
+type LoadSnapshotResponse struct {
+	// Metadata is the snapshot metadata.
+	Metadata *graph.SnapshotMetadata `json:"metadata"`
+
+	// NodeCount is the number of nodes in the loaded graph.
+	NodeCount int `json:"node_count"`
+
+	// EdgeCount is the number of edges in the loaded graph.
+	EdgeCount int `json:"edge_count"`
+
+	// GraphHash is the hash of the loaded graph (should match metadata).
+	GraphHash string `json:"graph_hash"`
+}
+
+// SnapshotDiffRequest is the query params for GET /v1/trace/debug/graph/snapshot/diff.
+type SnapshotDiffRequest struct {
+	// Base is the base snapshot ID for comparison.
+	Base string `form:"base" binding:"required"`
+
+	// Target is the target snapshot ID for comparison.
+	Target string `form:"target" binding:"required"`
+}
+
+// SnapshotDiffResponse is the response for GET /v1/trace/debug/graph/snapshot/diff.
+// The actual diff data is in graph.SnapshotDiff, embedded directly.
+type SnapshotDiffResponse struct {
+	// Diff contains the snapshot comparison results.
+	Diff *graph.SnapshotDiff `json:"diff"`
+}

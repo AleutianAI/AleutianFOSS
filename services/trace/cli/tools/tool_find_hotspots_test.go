@@ -198,9 +198,9 @@ func TestFindHotspots_GraphMarkers(t *testing.T) {
 		}
 	})
 
-	t.Run("nonexistent package fallback still has Found prefix and exhaustive footer", func(t *testing.T) {
-		// IT-Summary FIX-B: nonexistent package falls back to global results,
-		// so this is now a positive-result path (Found prefix, not GRAPH RESULT header).
+	t.Run("nonexistent package returns empty results", func(t *testing.T) {
+		// CR-11 restored: When package filter matches nothing, that IS the correct
+		// answer. Do NOT fall back to global results — that gives wrong-scope data.
 		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"package": "nonexistent_package_xyz",
 		}})
@@ -211,15 +211,12 @@ func TestFindHotspots_GraphMarkers(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 
-		if !strings.HasPrefix(result.OutputText, "Found ") {
-			t.Errorf("expected OutputText to start with 'Found ' after fallback, got: %q",
-				result.OutputText[:min(80, len(result.OutputText))])
+		output, ok := result.Output.(FindHotspotsOutput)
+		if !ok {
+			t.Fatalf("Output is not FindHotspotsOutput, got %T", result.Output)
 		}
-		if !strings.Contains(result.OutputText, "these results are exhaustive") {
-			t.Error("expected 'these results are exhaustive' in fallback output")
-		}
-		if !strings.Contains(result.OutputText, "Do NOT use Grep or Read to verify") {
-			t.Error("expected 'Do NOT use Grep or Read to verify' in fallback output")
+		if output.HotspotCount != 0 {
+			t.Errorf("expected 0 results for nonexistent package, got %d", output.HotspotCount)
 		}
 	})
 }
@@ -406,7 +403,9 @@ func TestFindHotspots_PackageFilter(t *testing.T) {
 		}
 	})
 
-	t.Run("nonexistent package falls back to global results", func(t *testing.T) {
+	t.Run("nonexistent package returns empty results", func(t *testing.T) {
+		// CR-11 restored: When package filter matches nothing, that IS the correct
+		// answer. Do NOT fall back to global results — that gives wrong-scope data.
 		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"package": "nonexistent",
 		}})
@@ -422,16 +421,8 @@ func TestFindHotspots_PackageFilter(t *testing.T) {
 			t.Fatalf("Output is not FindHotspotsOutput, got %T", result.Output)
 		}
 
-		// IT-Summary FIX-B: when package filter matches nothing but global results
-		// exist, the tool drops the filter and returns global results.
-		if output.HotspotCount == 0 {
-			t.Error("expected fallback to global results for nonexistent package, got 0")
-		}
-
-		// Fallback produces positive results, so should have "Found" prefix, not GRAPH RESULT header
-		if !strings.HasPrefix(result.OutputText, "Found ") {
-			t.Errorf("expected 'Found ' prefix after fallback, got: %q",
-				result.OutputText[:min(80, len(result.OutputText))])
+		if output.HotspotCount != 0 {
+			t.Errorf("expected 0 results for nonexistent package, got %d", output.HotspotCount)
 		}
 	})
 

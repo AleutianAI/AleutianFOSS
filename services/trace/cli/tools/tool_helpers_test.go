@@ -25,7 +25,8 @@ func TestIsGenericWord(t *testing.T) {
 			"function", "functions", "method", "methods",
 			"module", "modules", "package", "packages",
 			"variable", "variables", "constant", "constants",
-			"prototype", "prototypes", "constructor", "constructors",
+			"prototype", "prototypes",
+			// IT-R2b Fix 2: "constructor"/"constructors" removed — valid JS/TS symbol name
 			"object", "objects", "property", "properties",
 			"field", "fields", "parameter", "parameters",
 			"argument", "arguments", "enum", "enums",

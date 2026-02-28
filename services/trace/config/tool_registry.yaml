@@ -612,6 +612,12 @@ tools:
     avoid_when: >
       User just wants connection counts (use find_hotspots for degree-based ranking).
       User asks about crash risk or production criticality (use find_weighted_criticality).
+      NEVER use find_weighted_criticality when the query says 'most important',
+      'important by PageRank', or 'important functions in [module]' — these are
+      find_important queries even when a package/module scope is mentioned.
+      NEVER use find_communities when the query says 'important bridges between
+      subsystems' — this is a find_important query. Only use find_communities
+      when the word 'community' or 'communities' appears in the query.
     requires:
       - graph_initialized
 
@@ -908,16 +914,14 @@ tools:
 
   - name: find_weighted_criticality
     keywords:
-      - critical functions
       - highest risk
       - weighted criticality
-      - combined importance
       - risk assessment
       - crash risk
-      - critical nodes
       - risky functions
-      - high impact
       - would break
+      - production criticality
+      - crash impact
     use_when: >
       User asks about the most critical or risky PRODUCTION functions that would cause
       the most damage if changed. Measures DominatorScore × PageRank (crash risk).

@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -223,6 +224,36 @@ func (t *findPathTool) Execute(ctx context.Context, params TypedParams) (*Result
 		toPackage = toCandidates[0].Package
 	}
 
+	// IT-R2b Fix 3: Guard against from==to (produces useless 0-hop self-reference).
+	// When both endpoints resolve to the same symbol, try alternate candidates.
+	if fromID != "" && toID != "" && fromID == toID {
+		t.logger.Info("find_path: from==to after primary resolution, trying alternates",
+			slog.String("from_name", p.From),
+			slog.String("to_name", p.To),
+			slog.String("same_id", fromID),
+		)
+		// Try next to-candidate first (from is usually more specific)
+		swapped := false
+		for i := 1; i < len(toCandidates); i++ {
+			if toCandidates[i].ID != fromID {
+				toID = toCandidates[i].ID
+				toPackage = toCandidates[i].Package
+				swapped = true
+				break
+			}
+		}
+		// If no alternate to-candidate, try next from-candidate
+		if !swapped {
+			for i := 1; i < len(fromCandidates); i++ {
+				if fromCandidates[i].ID != toID {
+					fromID = fromCandidates[i].ID
+					fromPackage = fromCandidates[i].Package
+					break
+				}
+			}
+		}
+	}
+
 	// Handle not found cases
 	if fromID == "" {
 		output := FindPathOutput{
@@ -314,13 +345,15 @@ func (t *findPathTool) Execute(ctx context.Context, params TypedParams) (*Result
 
 	// Structured logging for edge cases
 	if pathResult.Length < 0 {
-		t.logger.Debug("no path found between symbols",
-			slog.String("tool", "find_path"),
+		t.logger.Info("find_path: no path found — running chain diagnostic",
 			slog.String("from", p.From),
 			slog.String("to", p.To),
 			slog.String("from_id", fromID),
 			slog.String("to_id", toID),
 		)
+		// IT-12 Rev 5e diagnostic: trace outgoing edges from the "from" node
+		// link-by-link to find where the expected call chain breaks.
+		t.logChainDiagnostic(ctx, fromID, toID)
 	}
 
 	// IT-12 Rev 3: If no path found and we have alternative candidates,
@@ -339,6 +372,10 @@ func (t *findPathTool) Execute(ctx context.Context, params TypedParams) (*Result
 			for ti, tc := range toCandidates {
 				if fi == 0 && ti == 0 {
 					continue // Already tried
+				}
+				// IT-R2b Fix 4: Skip same-symbol combinations.
+				if fc.ID == tc.ID {
+					continue
 				}
 				if attempts >= 3 {
 					break
@@ -438,7 +475,120 @@ func (t *findPathTool) resolveSymbolCandidates(ctx context.Context, name string,
 		)
 		return nil
 	}
+
+	// IT-R2c Fix A: Re-rank ALTERNATE candidates by graph edge count.
+	// Preserves primary candidate from symbol resolution (type-prefix disambiguation)
+	// and only re-ranks candidates[1:] by connectivity. Previous version sorted ALL
+	// candidates which overrode type-prefix match (e.g., Buffer.update over Camera.update).
+	if t.graph != nil && len(candidates) > 2 {
+		sort.SliceStable(candidates[1:], func(i, j int) bool {
+			nodeI, okI := t.graph.GetNode(candidates[1+i].ID)
+			nodeJ, okJ := t.graph.GetNode(candidates[1+j].ID)
+			edgesI, edgesJ := 0, 0
+			if okI {
+				edgesI = len(nodeI.Outgoing) + len(nodeI.Incoming)
+			}
+			if okJ {
+				edgesJ = len(nodeJ.Outgoing) + len(nodeJ.Incoming)
+			}
+			return edgesI > edgesJ
+		})
+	}
+
 	return candidates
+}
+
+// logChainDiagnostic traces outgoing edges from the "from" node via BFS up to
+// 4 hops, logging each hop's outgoing edge names. This reveals where the expected
+// call chain breaks (e.g., Build → assemble → render → renderPages).
+//
+// Also checks: does the "to" node have ANY incoming edges at all? If not, it's
+// completely disconnected (parser didn't link any callers to it).
+//
+// This is a debug diagnostic — only called when find_path returns no path.
+func (t *findPathTool) logChainDiagnostic(_ context.Context, fromID, toID string) {
+	// Check "to" node reachability
+	if toNode, ok := t.graph.GetNode(toID); ok {
+		t.logger.Info("find_path diagnostic: TO node edges",
+			slog.String("to_id", toID),
+			slog.String("to_name", toNode.Symbol.Name),
+			slog.Int("incoming_edges", len(toNode.Incoming)),
+			slog.Int("outgoing_edges", len(toNode.Outgoing)),
+		)
+		if len(toNode.Incoming) > 0 {
+			var callers []string
+			for i, e := range toNode.Incoming {
+				if i >= 10 {
+					callers = append(callers, fmt.Sprintf("...and %d more", len(toNode.Incoming)-10))
+					break
+				}
+				if callerNode, ok := t.graph.GetNode(e.FromID); ok {
+					callers = append(callers, fmt.Sprintf("%s (%s)", callerNode.Symbol.Name, callerNode.Symbol.FilePath))
+				} else {
+					callers = append(callers, e.FromID)
+				}
+			}
+			t.logger.Info("find_path diagnostic: TO node callers",
+				slog.String("to_name", toNode.Symbol.Name),
+				slog.Any("callers", callers),
+			)
+		}
+	}
+
+	// BFS from "from" node — log first 3 hops of outgoing edges
+	if fromNode, ok := t.graph.GetNode(fromID); ok {
+		t.logger.Info("find_path diagnostic: FROM node edges",
+			slog.String("from_id", fromID),
+			slog.String("from_name", fromNode.Symbol.Name),
+			slog.Int("outgoing_edges", len(fromNode.Outgoing)),
+		)
+
+		// Hop 1: direct callees of "from"
+		var hop1Names []string
+		for i, e := range fromNode.Outgoing {
+			if i >= 20 {
+				hop1Names = append(hop1Names, fmt.Sprintf("...and %d more", len(fromNode.Outgoing)-20))
+				break
+			}
+			if targetNode, ok := t.graph.GetNode(e.ToID); ok {
+				hop1Names = append(hop1Names, targetNode.Symbol.Name)
+			} else {
+				hop1Names = append(hop1Names, e.ToID)
+			}
+		}
+		t.logger.Info("find_path diagnostic: hop 1 (direct callees)",
+			slog.String("from", fromNode.Symbol.Name),
+			slog.Any("callees", hop1Names),
+		)
+
+		// Hop 2: callees of callees (only for first 5 hop-1 nodes to limit output)
+		for i, e := range fromNode.Outgoing {
+			if i >= 5 {
+				break
+			}
+			hop1Node, ok := t.graph.GetNode(e.ToID)
+			if !ok {
+				continue
+			}
+			var hop2Names []string
+			for j, e2 := range hop1Node.Outgoing {
+				if j >= 15 {
+					hop2Names = append(hop2Names, fmt.Sprintf("...and %d more", len(hop1Node.Outgoing)-15))
+					break
+				}
+				if targetNode, ok := t.graph.GetNode(e2.ToID); ok {
+					hop2Names = append(hop2Names, targetNode.Symbol.Name)
+				} else {
+					hop2Names = append(hop2Names, e2.ToID)
+				}
+			}
+			t.logger.Info("find_path diagnostic: hop 2",
+				slog.String("via", hop1Node.Symbol.Name),
+				slog.Int("outgoing", len(hop1Node.Outgoing)),
+				slog.Any("callees", hop2Names),
+			)
+		}
+	}
 }
 
 // buildOutput creates the typed output struct.

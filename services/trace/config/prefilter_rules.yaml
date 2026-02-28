@@ -168,6 +168,47 @@ confusion_pairs:
       - "dependency cycle"
     boost_amount: 2.0
 
+  # IT-Summary Round 2: find_important vs find_weighted_criticality.
+  # "most important" / "PageRank" → find_important (centrality ranking).
+  # "most critical" / "crash risk" / "would break" → find_weighted_criticality (risk assessment).
+  # Without this pair, "most important by PageRank" can match find_weighted_criticality's
+  # "critical functions" keyword. Tests affected: 5260, 6161.
+  - tool_a: find_important
+    tool_b: find_weighted_criticality
+    tool_a_patterns:
+      - "most important"
+      - "pagerank"
+      - "structural importance"
+      - "influential"
+      - "centrality"
+      - "peripheral"
+      - "least important"
+      - "lowest pagerank"
+    tool_b_patterns:
+      - "crash risk"
+      - "would break"
+      - "highest risk"
+      - "stability"
+      - "production criticality"
+    boost_amount: 3.0
+
+  # IT-Summary Round 2: find_important vs find_communities for "bridges".
+  # "important bridges between subsystems" → find_important (PageRank centrality).
+  # "bridges between communities" → find_communities (community boundary analysis).
+  # The word "bridges" alone is ambiguous. "communities" is the deciding factor.
+  # Test affected: 5061.
+  - tool_a: find_important
+    tool_b: find_communities
+    tool_a_patterns:
+      - "important.*bridges"
+      - "bridges between subsystems"
+      - "bridges between modules"
+    tool_b_patterns:
+      - "bridges between communities"
+      - "community bridges"
+      - "cross-community"
+    boost_amount: 3.0
+
   # CB-62: Removed confusion pairs that embeddings handle naturally:
   # - find_callers/find_implementations (IT-16)
   # - find_callees/find_cycles (IT-16)

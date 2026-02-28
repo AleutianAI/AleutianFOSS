@@ -266,17 +266,16 @@ func (t *findDeadCodeTool) Execute(ctx context.Context, params TypedParams) (*Re
 		}
 	}
 
-	// IT-Summary FIX-B fallback: If package filter returns 0 results but we had
-	// candidates before filtering, the package name is likely conceptual.
-	// Drop the filter so the user gets useful output.
-	if p.Package != "" && len(pkgScoped) == 0 && len(deadCode) > 0 {
-		t.logger.Info("IT-Summary FIX-B: package filter returned 0 results, dropping filter",
+	// CR-11 restored: If package filter returns 0 results, that IS the correct
+	// answer. Do NOT fall back to global results — that gives wrong-scope data.
+	// FIX-B previously fell back here, but the real fix is upstream in
+	// extractPackageContextFromQuery() sending valid scope names.
+	if p.Package != "" && len(pkgScoped) == 0 {
+		t.logger.Info("CR-11: package filter returned 0 results, returning empty (no fallback)",
 			slog.String("tool", "find_dead_code"),
 			slog.String("package_filter", p.Package),
 			slog.Int("raw_count", len(deadCode)),
 		)
-		pkgScoped = deadCode
-		p.Package = ""
 	}
 
 	// Phase 2: Filter by exported status

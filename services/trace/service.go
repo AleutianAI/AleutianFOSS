@@ -115,6 +115,10 @@ type Service struct {
 	// lspManagers holds LSP managers per graph (graphID -> manager)
 	lspManagers map[string]*lsp.Manager
 	lspMu       sync.RWMutex
+
+	// snapshotMgr is the optional graph snapshot manager (GR-65).
+	// Nil if BadgerDB is not configured.
+	snapshotMgr *graph.SnapshotManager
 }
 
 // CachedPlan holds a change plan and its associated graph ID.
@@ -164,6 +168,20 @@ func NewService(config ServiceConfig) *Service {
 // SetLibraryDocProvider sets the library documentation provider.
 func (s *Service) SetLibraryDocProvider(p cbcontext.LibraryDocProvider) {
 	s.libDocProvider = p
+}
+
+// SetSnapshotManager sets the graph snapshot manager for persistence (GR-65).
+//
+// Description:
+//
+//	Configures the service to support graph snapshot persistence via BadgerDB.
+//	Must be called before any snapshot-related endpoints are used.
+//
+// Inputs:
+//
+//	mgr - The snapshot manager. Can be nil to disable snapshots.
+func (s *Service) SetSnapshotManager(mgr *graph.SnapshotManager) {
+	s.snapshotMgr = mgr
 }
 
 // Init initializes a code graph for a project.

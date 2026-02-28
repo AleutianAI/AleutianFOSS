@@ -1172,7 +1172,12 @@ func TestFindImportantTool_PackageFilter(t *testing.T) {
 		}
 	})
 
-	t.Run("nonexistent package falls back to global results", func(t *testing.T) {
+	t.Run("nonexistent package returns empty results", func(t *testing.T) {
+		// CR-11 (restored by IT-Summary Round 2): When package filter matches
+		// nothing, that IS the correct answer. Do NOT fall back to global results.
+		// FIX-B previously overrode this to return global results, which silently
+		// gave wrong-scope data to the LLM (9 test regressions). The fix belongs
+		// upstream in extractPackageContextFromQuery(), not in a tool-layer fallback.
 		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"package":       "nonexistent",
 			"exclude_tests": false,
@@ -1184,10 +1189,8 @@ func TestFindImportantTool_PackageFilter(t *testing.T) {
 			t.Fatalf("Execute() failed: %s", result.Error)
 		}
 		output := result.Output.(FindImportantOutput)
-		// IT-Summary FIX-B: when package filter matches nothing but global results
-		// exist, the tool drops the filter and returns all results (4 symbols).
-		if output.ResultCount == 0 {
-			t.Error("expected fallback to global results for nonexistent package, got 0")
+		if output.ResultCount != 0 {
+			t.Errorf("expected 0 results for nonexistent package, got %d", output.ResultCount)
 		}
 	})
 
@@ -1208,7 +1211,9 @@ func TestFindImportantTool_PackageFilter(t *testing.T) {
 		}
 	})
 
-	t.Run("no-match package fallback output does not mention cleared package", func(t *testing.T) {
+	t.Run("no-match package output mentions scope in output text", func(t *testing.T) {
+		// CR-11 restored: Empty result for non-matching package should still
+		// mention the package scope in output text so the LLM knows what was searched.
 		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"package":       "nonexistent",
 			"exclude_tests": false,
@@ -1216,15 +1221,9 @@ func TestFindImportantTool_PackageFilter(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
 		}
-		// IT-Summary FIX-B: p.Package is cleared on fallback, so output text
-		// should NOT mention "nonexistent" — it returns unscoped global results.
-		if strings.Contains(result.OutputText, "nonexistent") {
-			t.Errorf("fallback output should not mention cleared package 'nonexistent', got:\n%s", result.OutputText)
-		}
-		// Should have positive results with "Found" prefix
-		if !strings.HasPrefix(result.OutputText, "Found ") {
-			t.Errorf("expected 'Found ' prefix after fallback, got: %q",
-				result.OutputText[:min(80, len(result.OutputText))])
+		output := result.Output.(FindImportantOutput)
+		if output.ResultCount != 0 {
+			t.Errorf("expected 0 results for nonexistent package, got %d", output.ResultCount)
 		}
 	})
 

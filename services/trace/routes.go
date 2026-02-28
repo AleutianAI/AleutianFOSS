@@ -125,6 +125,19 @@ func RegisterRoutes(rg *gin.RouterGroup, handlers *Handlers) {
 		{
 			debug.GET("/graph/stats", handlers.HandleGetGraphStats)
 			debug.GET("/cache", handlers.HandleGetCacheStats)
+
+			// GR-64: Graph inspection and export
+			debug.GET("/graph/inspect", handlers.HandleInspectNode)
+			debug.GET("/graph/export", handlers.HandleExportGraph)
+
+			// GR-66: Snapshot comparison (must be registered before :id wildcard)
+			debug.GET("/graph/snapshot/diff", handlers.HandleDiffSnapshots)
+
+			// GR-65: Graph snapshot persistence
+			debug.POST("/graph/snapshot", handlers.HandleSaveSnapshot)
+			debug.GET("/graph/snapshots", handlers.HandleListSnapshots)
+			debug.GET("/graph/snapshot/:id", handlers.HandleLoadSnapshot)
+			debug.DELETE("/graph/snapshot/:id", handlers.HandleDeleteSnapshot)
 		}
 
 		// =================================================================

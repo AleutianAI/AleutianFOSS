@@ -9,12 +9,14 @@ package phases
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
 )
 
@@ -2547,6 +2549,435 @@ func TestResolveConceptualName_CallableAwareExit(t *testing.T) {
 		result := resolveConceptualName(ctx, "Site", "call chain from site initialization", idx, extractor)
 		if result != "Site" {
 			t.Errorf("expected 'Site' (early exit because callable match exists), got %q", result)
+		}
+	})
+}
+
+func TestExpandConceptSynonyms(t *testing.T) {
+	t.Run("expands initialization to verb forms", func(t *testing.T) {
+		result := expandConceptSynonyms([]string{"site", "initialization"})
+		// Should contain original keywords plus synonyms
+		has := make(map[string]bool)
+		for _, kw := range result {
+			has[kw] = true
+		}
+		if !has["site"] {
+			t.Error("missing original keyword 'site'")
+		}
+		if !has["initialization"] {
+			t.Error("missing original keyword 'initialization'")
+		}
+		for _, expected := range []string{"init", "new", "build", "setup", "create"} {
+			if !has[expected] {
+				t.Errorf("missing synonym %q for 'initialization'", expected)
+			}
+		}
+	})
+
+	t.Run("no duplicates in output", func(t *testing.T) {
+		result := expandConceptSynonyms([]string{"build", "creation"})
+		seen := make(map[string]int)
+		for _, kw := range result {
+			seen[kw]++
+			if seen[kw] > 1 {
+				t.Errorf("duplicate keyword %q in result", kw)
+			}
+		}
+		// "build" appears in input and in "creation" synonyms — should only appear once
+		if seen["build"] != 1 {
+			t.Errorf("expected 'build' exactly once, got %d", seen["build"])
+		}
+	})
+
+	t.Run("no expansion for unknown words", func(t *testing.T) {
+		result := expandConceptSynonyms([]string{"menu", "frobnicator"})
+		if len(result) != 2 {
+			t.Errorf("expected 2 keywords (no expansion), got %d: %v", len(result), result)
+		}
+	})
+
+	t.Run("empty input returns empty", func(t *testing.T) {
+		result := expandConceptSynonyms(nil)
+		if len(result) != 0 {
+			t.Errorf("expected empty result, got %v", result)
+		}
+	})
+}
+
+// TestExtractDomainNouns verifies that extractDomainNouns correctly identifies
+// tokens that are NOT concept synonym keys (i.e., domain-specific nouns).
+func TestExtractDomainNouns(t *testing.T) {
+	tests := []struct {
+		name   string
+		tokens []string
+		want   []string
+	}{
+		{
+			name:   "menu assembly - menu is domain noun",
+			tokens: []string{"menu", "assembly"},
+			want:   []string{"menu"},
+		},
+		{
+			name:   "site initialization - site is domain noun",
+			tokens: []string{"site", "initialization"},
+			want:   []string{"site"},
+		},
+		{
+			name:   "axis rendering - axis is domain noun",
+			tokens: []string{"axis", "rendering"},
+			want:   []string{"axis"},
+		},
+		{
+			name:   "error handling - error is domain noun",
+			tokens: []string{"error", "handling"},
+			want:   []string{"error"},
+		},
+		{
+			name:   "initialization only - all concept keys",
+			tokens: []string{"initialization"},
+			want:   nil,
+		},
+		{
+			name:   "shader compilation - shader is domain noun",
+			tokens: []string{"shader", "compilation"},
+			want:   []string{"shader"},
+		},
+		{
+			name:   "page rendering - render stripped from rendering is concept root",
+			tokens: []string{"page", "render"},
+			want:   []string{"page"},
+		},
+		{
+			name:   "page rendering full tokens - both forms filtered",
+			tokens: []string{"page", "rendering", "render"},
+			want:   []string{"page"},
+		},
+		{
+			name:   "handl stripped from handling is concept root",
+			tokens: []string{"error", "handl"},
+			want:   []string{"error"},
+		},
+		{
+			name:   "empty input returns empty",
+			tokens: nil,
+			want:   nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractDomainNouns(tt.tokens)
+			if len(got) != len(tt.want) {
+				t.Errorf("extractDomainNouns(%v) = %v, want %v", tt.tokens, got, tt.want)
+				return
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("extractDomainNouns(%v)[%d] = %q, want %q", tt.tokens, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestExtractConceptValues verifies that concept synonym values are extracted
+// for concept keys found in name tokens (including -ing reconstituted forms).
+func TestExtractConceptValues(t *testing.T) {
+	t.Run("rendering token produces render in values", func(t *testing.T) {
+		values := extractConceptValues([]string{"page", "rendering"})
+		has := make(map[string]bool)
+		for _, v := range values {
+			has[v] = true
+		}
+		if !has["render"] {
+			t.Errorf("expected 'render' in concept values, got %v", values)
+		}
+	})
+
+	t.Run("render token reconstitutes to rendering key", func(t *testing.T) {
+		values := extractConceptValues([]string{"page", "render"})
+		has := make(map[string]bool)
+		for _, v := range values {
+			has[v] = true
+		}
+		if !has["render"] {
+			t.Errorf("expected 'render' in concept values via rendering key, got %v", values)
+		}
+	})
+
+	t.Run("assembly token produces assemble in values", func(t *testing.T) {
+		values := extractConceptValues([]string{"menu", "assembly"})
+		has := make(map[string]bool)
+		for _, v := range values {
+			has[v] = true
+		}
+		if !has["assemble"] {
+			t.Errorf("expected 'assemble' in concept values, got %v", values)
+		}
+	})
+
+	t.Run("no concept tokens returns empty", func(t *testing.T) {
+		values := extractConceptValues([]string{"page", "menu"})
+		if len(values) != 0 {
+			t.Errorf("expected empty concept values for non-concept tokens, got %v", values)
+		}
+	})
+
+	t.Run("no duplicates", func(t *testing.T) {
+		// Both "rendering" and "render" map to the same key's values
+		values := extractConceptValues([]string{"rendering", "render"})
+		seen := make(map[string]int)
+		for _, v := range values {
+			seen[v]++
+			if seen[v] > 1 {
+				t.Errorf("duplicate value %q in concept values", v)
+			}
+		}
+	})
+}
+
+// TestCandidateTier verifies three-tier assignment based on domain noun and concept value matching.
+func TestCandidateTier(t *testing.T) {
+	tests := []struct {
+		name          string
+		candidate     agent.SymbolCandidate
+		domainNouns   []string
+		conceptValues []string
+		wantTier      int
+	}{
+		{
+			name:          "renderPages with page+render → tier 0 (domain+concept)",
+			candidate:     agent.SymbolCandidate{Name: "renderPages"},
+			domainNouns:   []string{"page"},
+			conceptValues: []string{"render", "draw", "paint"},
+			wantTier:      0,
+		},
+		{
+			name:          "assembleMenus with menu+assemble → tier 0 (domain+concept)",
+			candidate:     agent.SymbolCandidate{Name: "assembleMenus"},
+			domainNouns:   []string{"menu"},
+			conceptValues: []string{"assemble", "build", "compose"},
+			wantTier:      0,
+		},
+		{
+			name:          "Page with page but no concept match → tier 1 (domain only)",
+			candidate:     agent.SymbolCandidate{Name: "Page"},
+			domainNouns:   []string{"page"},
+			conceptValues: []string{"render", "draw", "paint"},
+			wantTier:      1,
+		},
+		{
+			name:          "menuEntries with menu but no concept match → tier 1 (domain only)",
+			candidate:     agent.SymbolCandidate{Name: "menuEntries"},
+			domainNouns:   []string{"menu"},
+			conceptValues: []string{"assemble", "build"},
+			wantTier:      1,
+		},
+		{
+			name:          "Build with menu domain noun → tier 2 (no domain match)",
+			candidate:     agent.SymbolCandidate{Name: "Build"},
+			domainNouns:   []string{"menu"},
+			conceptValues: []string{"assemble", "build"},
+			wantTier:      2,
+		},
+		{
+			name:          "Render with page domain noun → tier 2 (no domain match)",
+			candidate:     agent.SymbolCandidate{Name: "Render"},
+			domainNouns:   []string{"page"},
+			conceptValues: []string{"render", "draw"},
+			wantTier:      2,
+		},
+		{
+			name:          "empty domain nouns → tier 2 (no regression)",
+			candidate:     agent.SymbolCandidate{Name: "assembleMenus"},
+			domainNouns:   nil,
+			conceptValues: []string{"assemble"},
+			wantTier:      2,
+		},
+		{
+			name:          "short noun log does not boost catalogBuilder",
+			candidate:     agent.SymbolCandidate{Name: "catalogBuilder"},
+			domainNouns:   []string{"log"},
+			conceptValues: []string{"build"},
+			wantTier:      2,
+		},
+		{
+			name:          "short noun api does not boost apiHandler",
+			candidate:     agent.SymbolCandidate{Name: "apiHandler"},
+			domainNouns:   []string{"api"},
+			conceptValues: []string{"handle"},
+			wantTier:      2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := candidateTier(tt.candidate, tt.domainNouns, tt.conceptValues)
+			if got != tt.wantTier {
+				t.Errorf("candidateTier(%q, domainNouns=%v, conceptValues=%v) = %d, want %d",
+					tt.candidate.Name, tt.domainNouns, tt.conceptValues, got, tt.wantTier)
+			}
+		})
+	}
+}
+
+// TestResolveConceptualName_DomainNounBoosting verifies the end-to-end behavior
+// of domain noun boosting in resolveConceptualName. assembleMenus (8 edges, contains
+// "menu") must rank above Build (55 edges, synonym-only match) for "menu assembly".
+func TestResolveConceptualName_DomainNounBoosting(t *testing.T) {
+	ctx := context.Background()
+	idx := index.NewSymbolIndex()
+
+	// assembleMenus: a method with 8 edges — contains "menu" domain noun
+	assembleMenus := &ast.Symbol{
+		ID:        "hugolib/menu.go:50:assembleMenus",
+		Name:      "assembleMenus",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "hugolib/menu.go",
+		StartLine: 50,
+		EndLine:   100,
+		Package:   "hugolib",
+		Exported:  false,
+		Language:  "go",
+	}
+	// Build: a function with 55 edges — matches via "build" synonym of "assembly"
+	build := &ast.Symbol{
+		ID:        "hugolib/hugo_sites.go:100:Build",
+		Name:      "Build",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "hugolib/hugo_sites.go",
+		StartLine: 100,
+		EndLine:   200,
+		Package:   "hugolib",
+		Exported:  true,
+		Language:  "go",
+	}
+	for _, sym := range []*ast.Symbol{assembleMenus, build} {
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("Failed to add %s: %v", sym.ID, err)
+		}
+	}
+
+	t.Run("domain_noun_beats_high_edge_count", func(t *testing.T) {
+		// The mock extractor returns the FIRST candidate's name,
+		// simulating positional bias in small LLMs.
+		extractor := &mockConceptualExtractor{
+			enabled: true,
+			resolveFunc: func(_ context.Context, _ string, candidates []agent.SymbolCandidate) (string, error) {
+				if len(candidates) == 0 {
+					return "", nil
+				}
+				// Return the first candidate (simulates positional bias)
+				return candidates[0].Name, nil
+			},
+		}
+		result := resolveConceptualName(ctx, "menu assembly", "Show the call chain from site initialization to menu assembly", idx, extractor)
+		if result != "assembleMenus" {
+			t.Errorf("IT-12 Rev 5: domain noun boosting should rank assembleMenus above Build for 'menu assembly', got %q", result)
+		}
+	})
+
+	t.Run("no_domain_noun_uses_edge_count", func(t *testing.T) {
+		// "initialization" is all concept keys → no domain nouns → pure edge count sort.
+		// Inject graph analytics so Build (55 edges) ranks above Init (15 edges).
+		idx2 := index.NewSymbolIndex()
+		buildSym2 := &ast.Symbol{
+			ID:        "hugolib/hugo_sites.go:100:Build",
+			Name:      "Build",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "hugolib/hugo_sites.go",
+			StartLine: 100,
+			EndLine:   200,
+			Package:   "hugolib",
+			Exported:  true,
+			Language:  "go",
+		}
+		initSym := &ast.Symbol{
+			ID:        "hugolib/hugo_sites.go:10:Init",
+			Name:      "Init",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "hugolib/hugo_sites.go",
+			StartLine: 10,
+			EndLine:   20,
+			Package:   "hugolib",
+			Exported:  true,
+			Language:  "go",
+		}
+		for _, sym := range []*ast.Symbol{buildSym2, initSym} {
+			if err := idx2.Add(sym); err != nil {
+				t.Fatalf("Failed to add %s: %v", sym.ID, err)
+			}
+		}
+
+		// Build a graph with edge counts: Build gets 55 edges, Init gets 15.
+		g := graph.NewGraph("/project")
+		// Add all nodes first (need dummy targets for edges).
+		for _, sym := range []*ast.Symbol{buildSym2, initSym} {
+			if _, err := g.AddNode(sym); err != nil {
+				t.Fatalf("AddNode %s: %v", sym.ID, err)
+			}
+		}
+		// Add dummy target nodes for edges.
+		dummySymbols := make([]*ast.Symbol, 55)
+		for i := range dummySymbols {
+			dummySymbols[i] = &ast.Symbol{
+				ID:        fmt.Sprintf("hugolib/dummy.go:%d:dummy%d", i+1, i),
+				Name:      fmt.Sprintf("dummy%d", i),
+				Kind:      ast.SymbolKindFunction,
+				FilePath:  "hugolib/dummy.go",
+				StartLine: i + 1,
+				EndLine:   i + 2,
+				Package:   "hugolib",
+				Language:  "go",
+			}
+			if _, err := g.AddNode(dummySymbols[i]); err != nil {
+				t.Fatalf("AddNode dummy%d: %v", i, err)
+			}
+		}
+		// Build: 47 outgoing + 8 incoming = 55 total
+		for i := 0; i < 47; i++ {
+			if err := g.AddEdge(buildSym2.ID, dummySymbols[i].ID, graph.EdgeTypeCalls, ast.Location{}); err != nil {
+				t.Fatalf("AddEdge out %d: %v", i, err)
+			}
+		}
+		for i := 47; i < 55; i++ {
+			if err := g.AddEdge(dummySymbols[i].ID, buildSym2.ID, graph.EdgeTypeCalls, ast.Location{}); err != nil {
+				t.Fatalf("AddEdge in %d: %v", i, err)
+			}
+		}
+		// Init: 12 outgoing + 3 incoming = 15 total
+		for i := 0; i < 12; i++ {
+			if err := g.AddEdge(initSym.ID, dummySymbols[i].ID, graph.EdgeTypeCalls, ast.Location{}); err != nil {
+				t.Fatalf("AddEdge init out %d: %v", i, err)
+			}
+		}
+		for i := 12; i < 15; i++ {
+			if err := g.AddEdge(dummySymbols[i].ID, initSym.ID, graph.EdgeTypeCalls, ast.Location{}); err != nil {
+				t.Fatalf("AddEdge init in %d: %v", i, err)
+			}
+		}
+		g.Freeze()
+		hg, err := graph.WrapGraph(g)
+		if err != nil {
+			t.Fatalf("WrapGraph: %v", err)
+		}
+		ga := graph.NewGraphAnalytics(hg)
+
+		extractor := &mockConceptualExtractor{
+			enabled: true,
+			resolveFunc: func(_ context.Context, _ string, candidates []agent.SymbolCandidate) (string, error) {
+				if len(candidates) == 0 {
+					return "", nil
+				}
+				// Return first candidate (simulates positional bias)
+				return candidates[0].Name, nil
+			},
+		}
+		// "initialization" → all concept keys → domainNouns = [] → all tier 1 → pure edge count
+		// Build (55 edges) should be sorted above Init (15 edges)
+		result := resolveConceptualName(ctx, "initialization", "call chain from initialization", idx2, extractor, ga)
+		if result != "Build" {
+			t.Errorf("IT-12 Rev 5: with no domain nouns, edge-count sort should pick Build (55 edges) over Init (15 edges), got %q", result)
 		}
 	})
 }

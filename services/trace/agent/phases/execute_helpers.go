@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +27,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/config"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
 )
@@ -858,8 +860,38 @@ func resolveConceptualName(
 	// but name keywords come first for priority.
 	nameForKeywords := strings.ReplaceAll(name, ".", " ")
 	nameForKeywords = strings.ReplaceAll(nameForKeywords, "_", " ")
-	nameKeywords := tokenizeQueryKeywords(nameForKeywords)
+	nameTokens := tokenizeQueryKeywords(nameForKeywords)
+	nameKeywords := expandConceptSynonyms(nameTokens)
 	queryKeywords := tokenizeQueryKeywords(query)
+
+	// IT-12 Rev 5e: Extract domain nouns and concept values early so we can
+	// generate compound search keywords BEFORE the candidate search.
+	// Without this, searching for "render" in Hugo returns 25 exact-match
+	// Render methods, and "renderPages" (a prefix match) gets truncated.
+	domainNouns := extractDomainNouns(nameTokens)
+	conceptValues := extractConceptValues(nameTokens)
+
+	// IT-12 Rev 5e: Generate compound keywords from conceptValue+domainNoun.
+	// e.g., domainNouns=["page"], conceptValues=["render","draw",...] →
+	// compound keywords: ["renderpage", "drawpage", "paintpage", ...].
+	// Searching for "renderpage" finds "renderPages" via prefix match,
+	// which individual keyword "render" misses when exact Render matches
+	// consume all 25 slots.
+	if len(domainNouns) > 0 && len(conceptValues) > 0 {
+		seen := make(map[string]bool)
+		for _, kw := range nameKeywords {
+			seen[strings.ToLower(kw)] = true
+		}
+		for _, cv := range conceptValues {
+			for _, dn := range domainNouns {
+				compound := cv + dn // e.g., "render" + "page" → "renderpage"
+				if !seen[compound] {
+					seen[compound] = true
+					nameKeywords = append(nameKeywords, compound)
+				}
+			}
+		}
+	}
 
 	// IT-12 Rev 4: Search name-derived keywords first. Only add query keywords
 	// if name keywords produce fewer than 3 candidates. This prevents "menu assembly"
@@ -916,6 +948,43 @@ func resolveConceptualName(
 			}
 		}
 	}
+
+	// IT-12 Rev 5c: Log domain nouns and tier breakdown for debugging.
+	// domainNouns and conceptValues were extracted before candidate search (Rev 5e).
+	tier0Count, tier1Count := 0, 0
+	for _, c := range symCandidates {
+		switch candidateTier(c, domainNouns, conceptValues) {
+		case 0:
+			tier0Count++
+		case 1:
+			tier1Count++
+		}
+	}
+	slog.Info("IT-12: domain noun extraction",
+		slog.String("hallucinated", name),
+		slog.Any("name_tokens", nameTokens),
+		slog.Any("domain_nouns", domainNouns),
+		slog.Any("concept_values", conceptValues),
+		slog.Int("total_candidates", len(symCandidates)),
+		slog.Int("tier0_count", tier0Count),
+		slog.Int("tier1_count", tier1Count),
+		slog.Int("tier2_count", len(symCandidates)-tier0Count-tier1Count),
+	)
+
+	// IT-12 Rev 5d: Three-tier sort — domain noun + concept matches first, then
+	// domain noun only, then everything else. Within each tier, sort by edge count.
+	// This ensures "renderPages" (page + render) ranks above "Page" (page only)
+	// which ranks above "Render" (synonym-only).
+	sort.Slice(symCandidates, func(i, j int) bool {
+		tierI := candidateTier(symCandidates[i], domainNouns, conceptValues)
+		tierJ := candidateTier(symCandidates[j], domainNouns, conceptValues)
+		if tierI != tierJ {
+			return tierI < tierJ // lower tier = better
+		}
+		totalI := symCandidates[i].OutEdges + symCandidates[i].InEdges
+		totalJ := symCandidates[j].OutEdges + symCandidates[j].InEdges
+		return totalI > totalJ
+	})
 
 	// IT-12 Rev 2: Include the specific hallucinated concept in the query
 	// so the LLM knows which endpoint to resolve (e.g., "Table layout" vs
@@ -1018,10 +1087,14 @@ func isValidFunctionName(s string) bool {
 		"extends", "extend", "implements", "implement", "subclass", "subclasses",
 		"superclass", "superclasses", "derivative", "derivatives",
 		"parent", "parents", "child", "children",
-		// Programming construct nouns (aligned with genericWords)
+		// Programming construct nouns (mostly aligned with genericWords in tool_helpers.go)
 		"classes", "class", "interface", "interfaces", "structs", "struct",
 		"base", "abstract", "derive", "derives", "inherit", "inherits",
 		"type", "types", "enum", "enums",
+		// IT-R2b: "constructor"/"constructors" removed from genericWords (tool_helpers.go)
+		// but kept here — bare "constructor" in NL queries ("from constructor to X") is
+		// genuinely ambiguous. The LLM/param-extractor path uses ValidateSymbolName
+		// (which no longer blocks it), so qualified "Scene.constructor" still works.
 		"prototype", "prototypes", "constructor", "constructors",
 		"object", "objects", "property", "properties", "field", "fields",
 		"variable", "variables", "constant", "constants",
@@ -1623,12 +1696,14 @@ var (
 	numberRegex = regexp.MustCompile(`\b(\d+)\b`)
 
 	// pathFromRegex matches "from X" patterns, optionally with quotes.
-	// Examples: "from main", "from 'funcA'", "from \"funcB\"".
-	pathFromRegex = regexp.MustCompile(`(?i)\bfrom\s+['"]?(\w+)['"]?`)
+	// IT-R2b Fix 1: Changed \w+ to [\w.]+ to capture dot-notation names.
+	// "from Engine.runRenderLoop" → captures "Engine.runRenderLoop" (not just "Engine").
+	// The dot is essential for Type.Method resolution downstream.
+	pathFromRegex = regexp.MustCompile(`(?i)\bfrom\s+['"]?([\w.]+)['"]?`)
 
 	// pathToRegex matches "to X" patterns, optionally with quotes.
-	// Examples: "to parseConfig", "to 'funcB'".
-	pathToRegex = regexp.MustCompile(`(?i)\bto\s+['"]?(\w+)['"]?`)
+	// IT-R2b Fix 1: Changed \w+ to [\w.]+ to capture dot-notation names.
+	pathToRegex = regexp.MustCompile(`(?i)\bto\s+['"]?([\w.]+)['"]?`)
 )
 
 // extractTopNFromQuery extracts a "top N" value from queries like "top 5 hotspots".
@@ -1840,13 +1915,14 @@ func extractPathSymbolsFromQuery(query string) (from, to string, ok bool) {
 	// "from X to Y" provides strong context — the words after "from"/"to" are
 	// symbol names even if lowercase (e.g., "main", "init").
 	if fromMatches := pathFromRegex.FindStringSubmatch(query); len(fromMatches) > 1 {
-		candidate := fromMatches[1]
+		// IT-R2b: Trim trailing dots — [\w.]+ can capture "Engine." at sentence boundaries.
+		candidate := strings.TrimRight(fromMatches[1], ".")
 		if isValidFunctionName(candidate) {
 			from = candidate
 		}
 	}
 	if toMatches := pathToRegex.FindStringSubmatch(query); len(toMatches) > 1 {
-		candidate := toMatches[1]
+		candidate := strings.TrimRight(toMatches[1], ".")
 		if isValidFunctionName(candidate) {
 			to = candidate
 		}
@@ -2221,6 +2297,208 @@ func tokenizeQueryKeywords(query string) []string {
 	}
 
 	return keywords
+}
+
+// getConceptSynonyms returns the concept synonym mappings loaded from
+// config/concept_synonyms.yaml. Uses sync.Once internally for thread safety.
+//
+// To modify the synonym mappings, edit services/trace/config/concept_synonyms.yaml.
+// See that file's header comments for editing guidelines and testing instructions.
+func getConceptSynonyms() map[string][]string {
+	return config.MustLoadConceptSynonyms()
+}
+
+// expandConceptSynonyms takes tokenized keywords and expands conceptual nouns
+// into their function name verb equivalents using config/concept_synonyms.yaml.
+// For example, ["site", "initialization"] expands to include "init", "new",
+// "build", "setup", etc.
+//
+// This ensures that when a user says "site initialization", the search finds
+// functions like Build, NewSite, initSite — not just the Site struct getter.
+//
+// To modify the mappings, edit services/trace/config/concept_synonyms.yaml.
+//
+// # Thread Safety
+//
+// Safe for concurrent use (config loaded via sync.Once).
+func expandConceptSynonyms(keywords []string) []string {
+	synonymMap := getConceptSynonyms()
+	seen := make(map[string]bool, len(keywords))
+	expanded := make([]string, 0, len(keywords)*2)
+	for _, kw := range keywords {
+		if seen[kw] {
+			continue
+		}
+		seen[kw] = true
+		expanded = append(expanded, kw)
+		if synonyms, ok := synonymMap[kw]; ok {
+			for _, syn := range synonyms {
+				if !seen[syn] {
+					seen[syn] = true
+					expanded = append(expanded, syn)
+				}
+			}
+		}
+	}
+	return expanded
+}
+
+// extractDomainNouns identifies domain-specific nouns from a hallucinated name
+// by removing tokens that are concept synonym keys.
+//
+// Description:
+//
+//	When a user says "menu assembly", "assembly" is a concept synonym key (maps
+//	to verbs like assemble, build, compose). "menu" is NOT a concept key — it's
+//	a domain noun describing WHAT is being assembled. Domain nouns are strong
+//	signals for candidate ranking: assembleMenus contains "menu" and should rank
+//	above Build which only matches via the "build" synonym.
+//
+// Inputs:
+//   - nameTokens: Lowercased tokens from the hallucinated name (output of
+//     tokenizeQueryKeywords). Must not contain concept-synonym-expanded tokens —
+//     pass the pre-expansion tokenization.
+//
+// Outputs:
+//   - []string: Lowercased domain nouns. Returns nil if all tokens are concept keys
+//     or input is empty.
+//
+// Limitations:
+//   - Only checks top-level concept synonym keys and their -ing-stripped roots.
+//     A token that is a synonym VALUE (e.g., "build" under the "builder" key) is
+//     treated as a domain noun.
+//   - Short domain nouns (3 chars, e.g., "log") may false-positive on substring
+//     matching in candidateTier. Mitigated by tokenizeQueryKeywords filtering
+//     tokens < 3 chars, but 3-char tokens pass through.
+//
+// Assumptions:
+//   - nameTokens are already lowercased (tokenizeQueryKeywords lowercases).
+//   - Concept synonyms YAML is loadable (panics via MustLoadConceptSynonyms if not).
+//
+// Thread Safety:
+//
+//	Safe for concurrent use (config loaded via sync.Once).
+func extractDomainNouns(nameTokens []string) []string {
+	synonymMap := getConceptSynonyms()
+	var nouns []string
+	for _, token := range nameTokens {
+		lower := strings.ToLower(token)
+		if _, isConceptKey := synonymMap[lower]; isConceptKey {
+			continue
+		}
+		// Check if this is an -ing-stripped root of a concept key.
+		// tokenizeQueryKeywords strips -ing from words > 6 chars, producing
+		// roots like "render" from "rendering". If the -ing form is a concept
+		// key, this root should also be treated as a concept token, not a domain noun.
+		if _, isConceptKeyIng := synonymMap[lower+"ing"]; isConceptKeyIng {
+			continue
+		}
+		nouns = append(nouns, lower)
+	}
+	return nouns
+}
+
+// extractConceptValues returns the synonym values (verb forms) for any concept
+// keys found among the name tokens. For example, if nameTokens contains
+// "rendering" (a concept key), this returns its values: ["render", "draw", "paint", ...].
+// Also checks -ing reconstituted forms: if "render" is a token and "rendering"
+// is a concept key, the values for "rendering" are included.
+//
+// Thread Safety: Safe for concurrent use (config loaded via sync.Once).
+func extractConceptValues(nameTokens []string) []string {
+	synonymMap := getConceptSynonyms()
+	seen := make(map[string]bool)
+	var values []string
+	for _, token := range nameTokens {
+		lower := strings.ToLower(token)
+		// Check if the token itself is a concept key.
+		if syns, ok := synonymMap[lower]; ok {
+			for _, s := range syns {
+				if !seen[s] {
+					seen[s] = true
+					values = append(values, s)
+				}
+			}
+		}
+		// Check -ing reconstituted form (e.g., "render" → "rendering").
+		if syns, ok := synonymMap[lower+"ing"]; ok {
+			for _, s := range syns {
+				if !seen[s] {
+					seen[s] = true
+					values = append(values, s)
+				}
+			}
+		}
+	}
+	return values
+}
+
+// candidateTier assigns a sort tier to a symbol candidate based on whether
+// its name contains domain nouns and/or concept synonym values from the query.
+//
+// Description:
+//
+//	Three-tier ranking:
+//	  Tier 0: candidate name contains BOTH a domain noun AND a concept synonym
+//	          value. e.g., renderPages contains "page" (domain noun) AND "render"
+//	          (synonym value for "rendering"). This is the strongest signal.
+//	  Tier 1: candidate name contains a domain noun but NO concept synonym value.
+//	          e.g., Page, pageState contain "page" but not "render"/"draw"/etc.
+//	  Tier 2: candidate name matches neither. e.g., Build, Render.
+//
+//	When domainNouns is empty, all candidates get tier 2 (no regression from
+//	pre-Rev 5 behavior — pure edge-count sort).
+//
+// Inputs:
+//   - c: Symbol candidate to classify. Only c.Name is read.
+//   - domainNouns: Lowercased domain nouns from extractDomainNouns. May be nil/empty.
+//   - conceptValues: Lowercased concept synonym values (verb forms like "render",
+//     "build", "init"). May be nil/empty.
+//
+// Outputs:
+//   - int: 0 (domain noun + concept match), 1 (domain noun only), or 2 (neither).
+//     Lower is better.
+//
+// Limitations:
+//   - Uses substring matching (strings.Contains), not word-boundary matching.
+//     A domain noun "log" would match "catalogBuilder". Mitigated by skipping
+//     nouns shorter than 4 characters (see Rev 5a Fix #3).
+//
+// Assumptions:
+//   - domainNouns and conceptValues are already lowercased.
+//   - Candidate Name uses camelCase or PascalCase (standard for most languages).
+//
+// Thread Safety:
+//
+//	Safe for concurrent use (no shared mutable state).
+func candidateTier(c agent.SymbolCandidate, domainNouns []string, conceptValues []string) int {
+	if len(domainNouns) == 0 {
+		return 2
+	}
+	lowerName := strings.ToLower(c.Name)
+	hasDomainNoun := false
+	for _, noun := range domainNouns {
+		if len(noun) < 4 {
+			continue // Skip short nouns — too many false positives via substring
+		}
+		if strings.Contains(lowerName, noun) {
+			hasDomainNoun = true
+			break
+		}
+	}
+	if !hasDomainNoun {
+		return 2
+	}
+	// Domain noun matched. Check if candidate also contains a concept synonym value.
+	for _, cv := range conceptValues {
+		if len(cv) < 4 {
+			continue
+		}
+		if strings.Contains(lowerName, cv) {
+			return 0 // Best: domain noun + concept synonym
+		}
+	}
+	return 1 // Domain noun only
 }
 
 // searchSymbolCandidates searches the symbol index for symbols matching

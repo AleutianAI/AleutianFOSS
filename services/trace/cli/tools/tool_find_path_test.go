@@ -331,3 +331,179 @@ func TestFindPath_PackageQualifiedSymbol(t *testing.T) {
 		t.Errorf("expected path length 1, got %d", output.Length)
 	}
 }
+
+// =============================================================================
+// IT-R2b: from==to guard tests
+// =============================================================================
+
+// TestFindPath_FromEqualsToGuard verifies that when both from and to resolve to
+// the same symbol, the tool tries alternate candidates instead of returning a
+// useless 0-hop self-reference.
+func TestFindPath_FromEqualsToGuard(t *testing.T) {
+	ctx := context.Background()
+
+	g := graph.NewGraph("/test-from-eq-to")
+	idx := index.NewSymbolIndex()
+
+	// Two symbols named "render" in different files
+	renderA := &ast.Symbol{
+		ID:        "src/engine.ts:10:render",
+		Name:      "render",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "src/engine.ts",
+		StartLine: 10,
+		EndLine:   30,
+		Package:   "engine",
+		Exported:  true,
+		Language:  "typescript",
+	}
+	renderB := &ast.Symbol{
+		ID:        "src/scene.ts:20:render",
+		Name:      "render",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "src/scene.ts",
+		StartLine: 20,
+		EndLine:   50,
+		Package:   "scene",
+		Exported:  true,
+		Language:  "typescript",
+	}
+
+	g.AddNode(renderA)
+	g.AddNode(renderB)
+	for _, sym := range []*ast.Symbol{renderA, renderB} {
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("Failed to add %s: %v", sym.ID, err)
+		}
+	}
+
+	// renderA → renderB (connected)
+	g.AddEdge(renderA.ID, renderB.ID, graph.EdgeTypeCalls, ast.Location{
+		FilePath: renderA.FilePath, StartLine: 15,
+	})
+	g.Freeze()
+
+	tool := NewFindPathTool(g, idx)
+
+	// Both "from" and "to" are "render" — without the guard, both resolve to
+	// the same symbol (renderA, which has more edges). The guard should swap
+	// the to-candidate to renderB.
+	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+		"from": "render",
+		"to":   "render",
+	}})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+
+	output, ok := result.Output.(FindPathOutput)
+	if !ok {
+		t.Fatalf("Output is not FindPathOutput, got %T", result.Output)
+	}
+
+	// The guard should find a path between the two different render symbols
+	if !output.Found {
+		t.Error("expected Found=true — from==to guard should swap to alternate candidate")
+	}
+	if output.Length < 1 {
+		t.Errorf("expected path length >= 1, got %d", output.Length)
+	}
+}
+
+// TestFindPath_RetryLoopSkipsSameID verifies that the retry loop skips
+// combinations where fromCandidate.ID == toCandidate.ID.
+func TestFindPath_RetryLoopSkipsSameID(t *testing.T) {
+	ctx := context.Background()
+
+	g := graph.NewGraph("/test-retry-skip-same")
+	idx := index.NewSymbolIndex()
+
+	// "Init" TYPE — no edges, primary candidate for both
+	initType := &ast.Symbol{
+		ID:        "src/types.ts:5:Init",
+		Name:      "Init",
+		Kind:      ast.SymbolKindType,
+		FilePath:  "src/types.ts",
+		StartLine: 5,
+		EndLine:   10,
+		Package:   "core",
+		Exported:  true,
+		Language:  "typescript",
+	}
+	// "Init" FUNCTION — connected to "Setup"
+	initFunc := &ast.Symbol{
+		ID:        "src/init.ts:20:Init",
+		Name:      "Init",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "src/init.ts",
+		StartLine: 20,
+		EndLine:   40,
+		Package:   "core",
+		Exported:  true,
+		Language:  "typescript",
+	}
+	setup := &ast.Symbol{
+		ID:        "src/setup.ts:10:Setup",
+		Name:      "Setup",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "src/setup.ts",
+		StartLine: 10,
+		EndLine:   30,
+		Package:   "core",
+		Exported:  true,
+		Language:  "typescript",
+	}
+
+	g.AddNode(initType)
+	g.AddNode(initFunc)
+	g.AddNode(setup)
+	for _, sym := range []*ast.Symbol{initType, initFunc, setup} {
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("Failed to add %s: %v", sym.ID, err)
+		}
+	}
+
+	// initFunc → setup has a path
+	g.AddEdge(initFunc.ID, setup.ID, graph.EdgeTypeCalls, ast.Location{
+		FilePath: initFunc.FilePath, StartLine: 25,
+	})
+	g.Freeze()
+
+	tool := NewFindPathTool(g, idx)
+	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+		"from": "Init",
+		"to":   "Setup",
+	}})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+
+	output, ok := result.Output.(FindPathOutput)
+	if !ok {
+		t.Fatalf("Output is not FindPathOutput, got %T", result.Output)
+	}
+
+	// Should find the path via initFunc → setup
+	if !output.Found {
+		t.Error("expected Found=true — retry should find path via Init function")
+	}
+}
+
+// =============================================================================
+// IT-R2b: Constructor is no longer a generic word
+// =============================================================================
+
+func TestFindPath_ConstructorNotGeneric(t *testing.T) {
+	// "constructor" was previously in genericWords and would be rejected.
+	// After IT-R2b Fix 2, it should pass validation.
+	err := ValidateSymbolName("constructor", "from", "'main', 'handleRequest'")
+	if err != nil {
+		t.Errorf("ValidateSymbolName(\"constructor\") should pass after IT-R2b Fix 2, got: %v", err)
+	}
+}

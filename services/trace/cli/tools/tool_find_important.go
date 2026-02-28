@@ -314,6 +314,24 @@ func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*R
 	// Phase 2: Filter by package scope if specified.
 	// IT-07: Uses matchesPackageScope() with 3 strategies (Package field, FilePath
 	// segment, file stem) to match find_hotspots package filter capability.
+	//
+	// HISTORY (read before modifying):
+	// - FIX-6 (original): Added this filter phase. Package param added to struct,
+	//   Definition(), parseParams(). BUT never wired into execute_execution.go
+	//   extractToolParameters() or convertMapToTypedParams(). So p.Package was
+	//   ALWAYS "" and this block never executed. FIX-6 was incorrectly marked DONE.
+	// - CR-11: Said "no matches = correct answer, return empty." Correct principle.
+	// - FIX-B: Overrode CR-11 with fallback to global results, arguing the param
+	//   extractor sends conceptual names ("materials") that can't match. But the
+	//   real bug was upstream: Package was never populated. FIX-B was solving a
+	//   phantom problem and broke CR-11's correct behavior.
+	// - IT-Summary Round 2: Discovered Package was never wired. Fixed upstream in
+	//   execute_execution.go. Restored CR-11 behavior here (no fallback).
+	//
+	// RULE: If the package filter returns 0 results, that IS the correct answer.
+	// Do NOT fall back to global results — that silently gives wrong-scope data
+	// to the LLM. If conceptual scope names ("materials", "write path") don't
+	// match, the fix belongs in extractPackageContextFromQuery(), not here.
 	if p.Package != "" {
 		var packageFiltered []graph.PageRankNode
 		for _, prn := range pageRankNodes {
@@ -330,22 +348,9 @@ func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*R
 			slog.Int("after", len(packageFiltered)),
 		)
 		span.SetAttributes(attribute.Int("after_package_filter", len(packageFiltered)))
-		// IT-Summary FIX-B fallback: CR-11 originally said "do not fall back."
-		// But integration tests show the ParamExtractor (3b model) sets conceptual
-		// scope names ("materials", "write path") as package filters. These never
-		// match any real package/path, producing empty results when data exists.
-		// Drop the filter so the user gets useful output.
-		if len(packageFiltered) == 0 && len(pageRankNodes) > 0 {
-			t.logger.Info("IT-Summary FIX-B: package filter returned 0 results, dropping filter",
-				slog.String("tool", "find_important"),
-				slog.String("package_filter", p.Package),
-				slog.Int("pre_filter_count", len(pageRankNodes)),
-			)
-			p.Package = ""
-			// Keep pageRankNodes as-is (unscoped)
-		} else {
-			pageRankNodes = packageFiltered
-		}
+		// CR-11: Unconditionally apply filter. Empty result = "no important
+		// symbols found in that scope." Do NOT fall back to global results.
+		pageRankNodes = packageFiltered
 	}
 
 	// Phase 3: Filter by kind if needed
