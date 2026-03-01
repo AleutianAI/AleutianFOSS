@@ -1289,7 +1289,7 @@ func initPinnedMetrics() error {
 		var err error
 
 		pinnedQuerySet, err = meter.Int64Counter(
-			"codebuddy_pinned_query_set_total",
+			"trace_pinned_query_set_total",
 			metric.WithDescription("Number of times original query was set"),
 		)
 		if err != nil {
@@ -1298,7 +1298,7 @@ func initPinnedMetrics() error {
 		}
 
 		pinnedPlanSet, err = meter.Int64Counter(
-			"codebuddy_pinned_plan_set_total",
+			"trace_pinned_plan_set_total",
 			metric.WithDescription("Number of times plan was set"),
 		)
 		if err != nil {
@@ -1307,7 +1307,7 @@ func initPinnedMetrics() error {
 		}
 
 		pinnedStepUpdate, err = meter.Int64Counter(
-			"codebuddy_pinned_step_update_total",
+			"trace_pinned_step_update_total",
 			metric.WithDescription("Number of plan step status updates"),
 		)
 		if err != nil {
@@ -1316,7 +1316,7 @@ func initPinnedMetrics() error {
 		}
 
 		pinnedFindingAdded, err = meter.Int64Counter(
-			"codebuddy_pinned_finding_added_total",
+			"trace_pinned_finding_added_total",
 			metric.WithDescription("Number of findings added"),
 		)
 		if err != nil {
@@ -1325,7 +1325,7 @@ func initPinnedMetrics() error {
 		}
 
 		pinnedConstraintAdd, err = meter.Int64Counter(
-			"codebuddy_pinned_constraint_added_total",
+			"trace_pinned_constraint_added_total",
 			metric.WithDescription("Number of constraints added"),
 		)
 		if err != nil {
@@ -1334,7 +1334,7 @@ func initPinnedMetrics() error {
 		}
 
 		pinnedCacheHits, err = meter.Int64Counter(
-			"codebuddy_pinned_cache_hits_total",
+			"trace_pinned_cache_hits_total",
 			metric.WithDescription("Number of render cache hits"),
 		)
 		if err != nil {
@@ -1343,7 +1343,7 @@ func initPinnedMetrics() error {
 		}
 
 		pinnedCacheMisses, err = meter.Int64Counter(
-			"codebuddy_pinned_cache_misses_total",
+			"trace_pinned_cache_misses_total",
 			metric.WithDescription("Number of render cache misses"),
 		)
 		if err != nil {
@@ -1352,7 +1352,7 @@ func initPinnedMetrics() error {
 		}
 
 		pinnedTruncations, err = meter.Int64Counter(
-			"codebuddy_pinned_truncation_total",
+			"trace_pinned_truncation_total",
 			metric.WithDescription("Number of times pinned block was truncated"),
 		)
 		if err != nil {
@@ -1361,7 +1361,7 @@ func initPinnedMetrics() error {
 		}
 
 		pinnedCompressions, err = meter.Int64Counter(
-			"codebuddy_pinned_compression_total",
+			"trace_pinned_compression_total",
 			metric.WithDescription("Number of times pinned block was compressed"),
 		)
 		if err != nil {
@@ -1370,7 +1370,7 @@ func initPinnedMetrics() error {
 		}
 
 		pinnedTokensFreed, err = meter.Int64Counter(
-			"codebuddy_pinned_tokens_freed_total",
+			"trace_pinned_tokens_freed_total",
 			metric.WithDescription("Total tokens freed via compression"),
 		)
 		if err != nil {

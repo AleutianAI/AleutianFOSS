@@ -48,6 +48,18 @@ type FindExtractableRegionsParams struct {
 	Top int
 }
 
+// ToolName returns the tool name for TypedParams interface.
+func (p FindExtractableRegionsParams) ToolName() string { return "find_extractable_regions" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p FindExtractableRegionsParams) ToMap() map[string]any {
+	return map[string]any{
+		"min_size": p.MinSize,
+		"max_size": p.MaxSize,
+		"top":      p.Top,
+	}
+}
+
 // FindExtractableRegionsOutput contains the structured result.
 type FindExtractableRegionsOutput struct {
 	// Regions is the list of extractable SESE regions.
@@ -203,9 +215,9 @@ func (t *findExtractableRegionsTool) Definition() ToolDefinition {
 }
 
 // Execute runs the find_extractable_regions tool.
-func (t *findExtractableRegionsTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findExtractableRegionsTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
 		return &Result{
 			Success: false,

@@ -10,7 +10,7 @@
 
 // Package ast provides types and interfaces for language-agnostic AST parsing.
 //
-// This package defines the core data structures used throughout the Code Buddy
+// This package defines the core data structures used throughout the Trace
 // service for representing parsed code symbols, their locations, and relationships.
 // All parser implementations (Go, Python, TypeScript, etc.) produce output
 // conforming to these types.
@@ -448,6 +448,13 @@ type Symbol struct {
 	// Used by the graph builder to create EdgeTypeCalls edges.
 	// See GR-41: Call Edge Extraction for find_callers/find_callees.
 	Calls []CallSite `json:"calls,omitempty"`
+
+	// TypeReferences contains type identifiers referenced in this symbol's type annotations.
+	// Populated for functions/methods (parameter types, return types) and variables (type annotations).
+	// Used by the graph builder to create EdgeTypeReferences edges.
+	// IT-06 Bug 9: Enables graph-based discovery of type usage across the codebase.
+	// Primitives and language-specific constructs (e.g., str, int, Optional, List) are excluded.
+	TypeReferences []TypeReference `json:"type_references,omitempty"`
 }
 
 // MethodSignature represents a method's signature for interface implementation detection.
@@ -532,6 +539,15 @@ type CallSite struct {
 	//   - "s" for s.Initialize()
 	//   - "ctx" for ctx.Done()
 	Receiver string `json:"receiver,omitempty"`
+
+	// FunctionArgs lists identifiers passed as callback/HOF arguments.
+	// Only populated when a call passes identifiers that may reference other functions.
+	// IT-03a C-1: Enables EdgeTypeReferences from caller to callback arguments.
+	//
+	// Examples:
+	//   - ["middleware"] for app.use(middleware)
+	//   - ["LoggingInterceptor"] for UseInterceptors(LoggingInterceptor)
+	FunctionArgs []string `json:"function_args,omitempty"`
 }
 
 // Validate checks if the CallSite has valid field values.
@@ -551,6 +567,33 @@ func (c *CallSite) Validate() error {
 	return nil
 }
 
+// TypeReference represents a type identifier referenced in a symbol's type annotations.
+//
+// Description:
+//
+//	TypeReference captures a type name used in a function parameter annotation,
+//	return type annotation, or variable type annotation. These enable the graph
+//	builder to create EdgeTypeReferences edges for type-usage relationships.
+//
+// IT-06 Bug 9: Without these, the graph only has call edges — type annotations
+// like "def foo(x: Series) -> DataFrame" produce no edges, so types referenced
+// only via annotations are invisible to find_references.
+//
+// Thread Safety: TypeReference is immutable after creation and safe for concurrent read.
+type TypeReference struct {
+	// Name is the type identifier as it appears in source code.
+	// This is the unqualified name (e.g., "Series", not "pandas.Series").
+	// Primitives and language constructs are excluded at extraction time.
+	Name string `json:"name"`
+
+	// Location is where the type reference appears in the source file.
+	Location Location `json:"location"`
+}
+
+// MaxTypeReferencesPerSymbol is the maximum number of type references extracted per symbol.
+// This prevents memory exhaustion from functions with extremely long parameter lists.
+const MaxTypeReferencesPerSymbol = 200
+
 // MaxCallSitesPerSymbol is the maximum number of call sites extracted per symbol.
 // This prevents memory exhaustion from pathologically large functions.
 const MaxCallSitesPerSymbol = 1000
@@ -568,9 +611,20 @@ type SymbolMetadata struct {
 	// Example: ["staticmethod", "cache"] for Python.
 	Decorators []string `json:"decorators,omitempty"`
 
+	// DecoratorArgs maps decorator names to their argument identifiers.
+	// Only populated when a decorator has arguments that reference symbols.
+	// Example: {"UseInterceptors": ["LoggingInterceptor"], "Module": ["UserService"]}
+	// IT-03a A-3: Enables EdgeTypeReferences from decorated symbol to decorator arguments.
+	DecoratorArgs map[string][]string `json:"decorator_args,omitempty"`
+
 	// TypeParameters lists generic type parameter names.
 	// Example: ["T", "U"] for TypeScript generic function.
 	TypeParameters []string `json:"type_parameters,omitempty"`
+
+	// TypeArguments lists type identifiers used as generic arguments in the symbol's type annotations.
+	// IT-03a C-2: Tracks type arguments like User in Promise<User>, Handler in Map<string, Handler>.
+	// Only populated for non-primitive type names (skips string, number, boolean, etc.).
+	TypeArguments []string `json:"type_arguments,omitempty"`
 
 	// ReturnType is the declared return type (if available).
 	// Example: "Promise<User>" for TypeScript async function.
@@ -606,6 +660,25 @@ type SymbolMetadata struct {
 	// For structs/types: lists methods with receivers matching this type.
 	// Used for Go interface implementation detection via method-set matching (GR-40).
 	Methods []MethodSignature `json:"methods,omitempty"`
+
+	// IsConstructor indicates a JavaScript constructor function (uses this.x = ...).
+	// IT-03a B-1: Constructor functions are reclassified as SymbolKindClass for graph visibility.
+	IsConstructor bool `json:"is_constructor,omitempty"`
+
+	// TypeNarrowings lists type identifiers used in type narrowing expressions.
+	// IT-03a C-3: Tracks types referenced via instanceof, typeof, and type predicates.
+	// Example: ["Router", "Response"] for code containing `x instanceof Router`.
+	TypeNarrowings []string `json:"type_narrowings,omitempty"`
+
+	// IsOverload indicates the symbol is a Python @overload stub (type-checking only).
+	// IT-06c H-3: Overload stubs have no function body (just `...`) and zero callees.
+	// The actual implementation is the same-name function WITHOUT @overload.
+	// Symbol resolution should prefer non-overload symbols over overload stubs.
+	IsOverload bool `json:"is_overload,omitempty"`
+
+	// PrototypeOf indicates this symbol was assigned via Foo.prototype.method = ...
+	// IT-03a B-2: Links prototype method assignments to their constructor function.
+	PrototypeOf string `json:"prototype_of,omitempty"`
 
 	// CSSSelector is the full CSS selector for CSS symbols.
 	CSSSelector string `json:"css_selector,omitempty"`
@@ -838,6 +911,12 @@ type Import struct {
 	// IsCommonJS indicates if this is a CommonJS require() import.
 	// Example: 'const foo = require("bar")' in JavaScript.
 	IsCommonJS bool `json:"is_commonjs,omitempty"`
+
+	// IsDynamic indicates this is a dynamic import() call inside a function body.
+	// Example: 'const X = React.lazy(() => import("./HeavyComponent"))' in JavaScript.
+	// When true, the import was detected inside an expression rather than at top level.
+	// Enables the builder's resolveDynamicImportEdges post-pass and analytics filtering.
+	IsDynamic bool `json:"is_dynamic,omitempty"`
 
 	// IsScript indicates this is a script import (HTML <script src>).
 	IsScript bool `json:"is_script,omitempty"`

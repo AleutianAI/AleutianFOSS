@@ -582,7 +582,7 @@ func DefaultServiceDefinitions() []ServiceDefinition {
 		{
 			ID:            GenerateID(),
 			Name:          "Weaviate",
-			URL:           "http://localhost:12127/v1/.well-known/ready",
+			URL:           "http://localhost:12212/v1/.well-known/ready",
 			ContainerName: "aleutian-weaviate",
 			CheckType:     HealthCheckHTTP,
 			Critical:      true,

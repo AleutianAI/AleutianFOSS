@@ -1,0 +1,1339 @@
+# Concept Synonym Mappings for IT-12 Conceptual Symbol Resolution
+#
+# This file maps natural-language concept nouns (how users describe behavior)
+# to the verb/prefix forms that developers actually use in function names.
+#
+# When a user says "site initialization", the keyword "initialization" won't
+# match any Go/Python/JS/TS function because developers name functions with
+# verbs: Init, New, Build, Setup, Create. This mapping bridges that gap.
+#
+# HOW TO EDIT:
+#   - Keys are lowercase concept words that users might type in queries
+#   - Values are lists of short verbs/prefixes found in real function names
+#   - Changes take effect on next server restart (embedded at compile time)
+#   - Order within a list doesn't matter (all synonyms are searched equally)
+#   - Keep synonyms short (1-2 syllables) — they're matched against function names
+#   - Avoid adding stop words or very common words that would flood results
+#
+# WHEN TO ADD AN ENTRY:
+#   - A user query uses a noun form ("initialization") but the target function
+#     uses a verb form ("init", "build") and the index search can't bridge the gap
+#   - A concept is commonly described with a word that never appears in function names
+#   - Integration tests show conceptual resolution picking wrong candidates because
+#     the right function wasn't in the candidate pool
+#
+# TESTING:
+#   go test ./services/trace/agent/phases/... -run TestExpandConceptSynonyms -v
+#   go test ./services/trace/config/... -run TestConceptSynonyms -v
+
+# ── Lifecycle ────────────────────────────────────────────────────────────────
+initialization:
+  - init
+  - new
+  - build
+  - setup
+  - create
+  - start
+  - bootstrap
+  - launch
+
+init:
+  - initialize
+  - new
+  - build
+  - setup
+  - create
+  - start
+  - bootstrap
+
+creation:
+  - create
+  - new
+  - make
+  - build
+  - generate
+  - spawn
+  - factory
+
+construction:
+  - construct
+  - new
+  - create
+  - build
+  - make
+  - factory
+
+instantiation:
+  - new
+  - create
+  - make
+  - instance
+  - factory
+  - construct
+
+assembly:
+  - assemble
+  - build
+  - compose
+  - construct
+  - compile
+
+destruction:
+  - destroy
+  - close
+  - cleanup
+  - shutdown
+  - teardown
+  - dispose
+  - free
+  - release
+
+cleanup:
+  - clean
+  - teardown
+  - destroy
+  - dispose
+  - release
+  - free
+  - finalize
+
+finalization:
+  - finalize
+  - close
+  - cleanup
+  - flush
+  - dispose
+  - teardown
+
+startup:
+  - start
+  - boot
+  - init
+  - launch
+  - run
+  - main
+  - serve
+  - listen
+
+shutdown:
+  - shutdown
+  - stop
+  - close
+  - halt
+  - terminate
+  - quit
+  - graceful
+
+termination:
+  - terminate
+  - kill
+  - stop
+  - abort
+  - cancel
+  - shutdown
+
+restart:
+  - restart
+  - reload
+  - reset
+  - reboot
+  - reinit
+
+reset:
+  - reset
+  - clear
+  - reinit
+  - restart
+  - revert
+  - restore
+
+# ── Data I/O ────────────────────────────────────────────────────────────────
+loading:
+  - load
+  - read
+  - fetch
+  - import
+  - pull
+  - get
+  - retrieve
+  - open
+
+reading:
+  - read
+  - load
+  - get
+  - fetch
+  - scan
+  - parse
+  - open
+
+saving:
+  - save
+  - write
+  - store
+  - persist
+  - put
+  - flush
+  - dump
+  - export
+
+writing:
+  - write
+  - save
+  - put
+  - output
+  - emit
+  - store
+  - flush
+
+fetching:
+  - fetch
+  - get
+  - load
+  - pull
+  - retrieve
+  - request
+  - download
+
+retrieval:
+  - retrieve
+  - get
+  - fetch
+  - load
+  - find
+  - lookup
+  - query
+
+storage:
+  - store
+  - save
+  - put
+  - persist
+  - cache
+  - write
+  - stash
+
+streaming:
+  - stream
+  - pipe
+  - pump
+  - feed
+  - channel
+  - flow
+
+buffering:
+  - buffer
+  - batch
+  - accumulate
+  - collect
+  - queue
+
+flushing:
+  - flush
+  - drain
+  - write
+  - sync
+  - commit
+  - push
+
+upload:
+  - upload
+  - push
+  - send
+  - put
+  - transfer
+
+download:
+  - download
+  - fetch
+  - pull
+  - get
+  - retrieve
+
+# ── Data Transformation ─────────────────────────────────────────────────────
+parsing:
+  - parse
+  - decode
+  - unmarshal
+  - deserialize
+  - read
+  - extract
+  - tokenize
+
+serialization:
+  - serialize
+  - marshal
+  - encode
+  - stringify
+  - format
+  - dump
+
+encoding:
+  - encode
+  - marshal
+  - serialize
+  - format
+  - encrypt
+
+decoding:
+  - decode
+  - unmarshal
+  - deserialize
+  - parse
+  - decrypt
+
+transformation:
+  - transform
+  - convert
+  - map
+  - translate
+  - adapt
+  - reshape
+
+conversion:
+  - convert
+  - transform
+  - cast
+  - coerce
+  - translate
+  - adapt
+  - format
+
+formatting:
+  - format
+  - render
+  - template
+  - stringify
+  - pretty
+  - layout
+
+mapping:
+  - map
+  - transform
+  - convert
+  - translate
+  - project
+
+filtering:
+  - filter
+  - select
+  - where
+  - match
+  - include
+  - exclude
+  - reject
+
+sorting:
+  - sort
+  - order
+  - rank
+  - arrange
+  - compare
+
+grouping:
+  - group
+  - partition
+  - cluster
+  - bucket
+  - categorize
+  - classify
+
+aggregation:
+  - aggregate
+  - reduce
+  - sum
+  - count
+  - collect
+  - accumulate
+  - fold
+
+merging:
+  - merge
+  - combine
+  - join
+  - union
+  - concat
+  - fuse
+  - blend
+
+splitting:
+  - split
+  - partition
+  - chunk
+  - divide
+  - segment
+  - separate
+  - tokenize
+
+normalization:
+  - normalize
+  - sanitize
+  - clean
+  - standardize
+  - canonical
+
+flattening:
+  - flatten
+  - unwrap
+  - expand
+  - inline
+  - denormalize
+
+enrichment:
+  - enrich
+  - augment
+  - annotate
+  - decorate
+  - enhance
+  - supplement
+
+extraction:
+  - extract
+  - parse
+  - pull
+  - get
+  - scrape
+  - mine
+  - pick
+
+interpolation:
+  - interpolate
+  - template
+  - expand
+  - substitute
+  - replace
+
+compilation:
+  - compile
+  - build
+  - generate
+  - assemble
+  - link
+  - bundle
+
+generation:
+  - generate
+  - create
+  - produce
+  - emit
+  - build
+  - render
+  - synthesize
+
+# ── Validation & Error ──────────────────────────────────────────────────────
+validation:
+  - validate
+  - check
+  - verify
+  - assert
+  - ensure
+  - sanitize
+  - lint
+
+verification:
+  - verify
+  - validate
+  - check
+  - confirm
+  - assert
+  - test
+
+sanitization:
+  - sanitize
+  - clean
+  - escape
+  - strip
+  - normalize
+  - purify
+
+handling:
+  - handle
+  - process
+  - manage
+  - catch
+  - on
+  - respond
+
+recovery:
+  - recover
+  - retry
+  - fallback
+  - restore
+  - heal
+  - repair
+
+retry:
+  - retry
+  - backoff
+  - attempt
+  - repeat
+  - poll
+
+# ── Control Flow & Orchestration ────────────────────────────────────────────
+processing:
+  - process
+  - handle
+  - execute
+  - run
+  - perform
+  - do
+
+execution:
+  - execute
+  - run
+  - invoke
+  - call
+  - perform
+  - do
+  - eval
+
+routing:
+  - route
+  - dispatch
+  - forward
+  - redirect
+  - direct
+  - match
+
+dispatching:
+  - dispatch
+  - route
+  - send
+  - forward
+  - emit
+  - trigger
+
+scheduling:
+  - schedule
+  - dispatch
+  - queue
+  - defer
+  - cron
+  - timer
+  - enqueue
+
+orchestration:
+  - orchestrate
+  - coordinate
+  - manage
+  - control
+  - pipeline
+
+coordination:
+  - coordinate
+  - orchestrate
+  - sync
+  - manage
+  - sequence
+
+delegation:
+  - delegate
+  - proxy
+  - forward
+  - wrap
+  - pass
+
+iteration:
+  - iterate
+  - walk
+  - visit
+  - traverse
+  - scan
+  - loop
+  - each
+  - range
+
+traversal:
+  - traverse
+  - walk
+  - visit
+  - iterate
+  - scan
+  - crawl
+  - explore
+
+recursion:
+  - recurse
+  - recursive
+  - walk
+  - descend
+  - traverse
+
+pagination:
+  - paginate
+  - page
+  - cursor
+  - offset
+  - limit
+  - next
+
+batching:
+  - batch
+  - chunk
+  - bulk
+  - group
+  - partition
+
+throttling:
+  - throttle
+  - limit
+  - rate
+  - debounce
+  - backpressure
+
+middleware:
+  - middleware
+  - intercept
+  - wrap
+  - chain
+  - pipe
+  - handler
+  - filter
+
+# ── State Management ────────────────────────────────────────────────────────
+caching:
+  - cache
+  - memoize
+  - store
+  - buffer
+  - memo
+  - lru
+
+invalidation:
+  - invalidate
+  - expire
+  - evict
+  - purge
+  - clear
+  - bust
+
+synchronization:
+  - sync
+  - synchronize
+  - lock
+  - mutex
+  - barrier
+  - coordinate
+
+locking:
+  - lock
+  - mutex
+  - acquire
+  - hold
+  - synchronize
+
+unlocking:
+  - unlock
+  - release
+  - free
+  - relinquish
+
+update:
+  - update
+  - set
+  - modify
+  - patch
+  - change
+  - mutate
+  - refresh
+
+notification:
+  - notify
+  - alert
+  - signal
+  - emit
+  - broadcast
+  - publish
+  - trigger
+
+# ── Network & I/O ───────────────────────────────────────────────────────────
+connection:
+  - connect
+  - dial
+  - open
+  - establish
+  - handshake
+  - attach
+
+disconnection:
+  - disconnect
+  - close
+  - hangup
+  - detach
+  - release
+
+listening:
+  - listen
+  - serve
+  - bind
+  - accept
+  - watch
+  - await
+
+binding:
+  - bind
+  - listen
+  - attach
+  - mount
+  - register
+  - wire
+
+handshake:
+  - handshake
+  - negotiate
+  - auth
+  - exchange
+  - upgrade
+
+request:
+  - request
+  - fetch
+  - call
+  - invoke
+  - query
+  - ask
+
+response:
+  - respond
+  - reply
+  - answer
+  - return
+  - send
+
+transmission:
+  - transmit
+  - send
+  - transfer
+  - push
+  - write
+  - emit
+
+reception:
+  - receive
+  - accept
+  - read
+  - consume
+  - pull
+  - listen
+
+subscription:
+  - subscribe
+  - listen
+  - watch
+  - observe
+  - on
+  - follow
+
+# ── Auth & Security ─────────────────────────────────────────────────────────
+authentication:
+  - auth
+  - authenticate
+  - login
+  - signin
+  - verify
+  - identify
+
+authorization:
+  - authorize
+  - permit
+  - allow
+  - access
+  - grant
+  - check
+  - enforce
+
+auth:
+  - authenticate
+  - authorize
+  - login
+  - verify
+  - token
+  - session
+
+encryption:
+  - encrypt
+  - cipher
+  - seal
+  - protect
+  - encode
+
+decryption:
+  - decrypt
+  - decipher
+  - unseal
+  - decode
+
+hashing:
+  - hash
+  - digest
+  - checksum
+  - fingerprint
+
+signing:
+  - sign
+  - verify
+  - token
+  - jwt
+  - hmac
+
+# ── Search & Query ──────────────────────────────────────────────────────────
+search:
+  - search
+  - find
+  - query
+  - lookup
+  - scan
+  - match
+  - filter
+  - grep
+
+resolution:
+  - resolve
+  - lookup
+  - find
+  - discover
+  - locate
+  - detect
+
+indexing:
+  - index
+  - catalog
+  - register
+  - hash
+  - map
+
+matching:
+  - match
+  - compare
+  - diff
+  - equal
+  - pattern
+  - regex
+
+discovery:
+  - discover
+  - find
+  - detect
+  - scan
+  - probe
+  - locate
+
+lookup:
+  - lookup
+  - get
+  - find
+  - resolve
+  - fetch
+  - search
+
+# ── Registration & Wiring ───────────────────────────────────────────────────
+registration:
+  - register
+  - add
+  - subscribe
+  - enroll
+  - attach
+  - bind
+  - wire
+
+injection:
+  - inject
+  - provide
+  - supply
+  - wire
+  - bind
+  - resolve
+
+configuration:
+  - config
+  - configure
+  - setup
+  - settings
+  - options
+  - init
+  - prepare
+
+config:
+  - configure
+  - setup
+  - settings
+  - options
+  - init
+  - load
+  - parse
+
+# ── UI & Rendering ──────────────────────────────────────────────────────────
+rendering:
+  - render
+  - draw
+  - paint
+  - display
+  - show
+  - present
+  - output
+
+layout:
+  - layout
+  - arrange
+  - position
+  - place
+  - grid
+  - flex
+  - flow
+
+animation:
+  - animate
+  - transition
+  - tween
+  - interpolate
+  - ease
+
+styling:
+  - style
+  - theme
+  - css
+  - class
+  - skin
+  - appearance
+
+templating:
+  - template
+  - render
+  - compile
+  - interpolate
+  - expand
+
+navigation:
+  - navigate
+  - route
+  - menu
+  - link
+  - redirect
+  - push
+  - browse
+
+display:
+  - display
+  - show
+  - render
+  - present
+  - view
+  - output
+  - print
+
+# ── Deletion & Cleanup ─────────────────────────────────────────────────────
+deletion:
+  - delete
+  - remove
+  - drop
+  - purge
+  - destroy
+  - unlink
+  - erase
+
+removal:
+  - remove
+  - delete
+  - drop
+  - detach
+  - unregister
+  - dequeue
+
+purging:
+  - purge
+  - clean
+  - clear
+  - prune
+  - gc
+  - sweep
+  - expire
+
+# ── Publication & Events ────────────────────────────────────────────────────
+publication:
+  - publish
+  - emit
+  - broadcast
+  - send
+  - dispatch
+  - fire
+  - trigger
+
+emission:
+  - emit
+  - publish
+  - fire
+  - trigger
+  - send
+  - dispatch
+  - raise
+
+propagation:
+  - propagate
+  - spread
+  - cascade
+  - bubble
+  - forward
+  - broadcast
+
+# ── Allocation & Resources ──────────────────────────────────────────────────
+allocation:
+  - alloc
+  - allocate
+  - reserve
+  - acquire
+  - claim
+  - provision
+
+deallocation:
+  - dealloc
+  - free
+  - release
+  - dispose
+  - reclaim
+
+pooling:
+  - pool
+  - reuse
+  - recycle
+  - share
+  - lease
+
+migration:
+  - migrate
+  - upgrade
+  - evolve
+  - transform
+  - move
+  - transfer
+
+deployment:
+  - deploy
+  - release
+  - publish
+  - push
+  - ship
+  - rollout
+
+# ── Monitoring & Observability ──────────────────────────────────────────────
+logging:
+  - log
+  - trace
+  - record
+  - audit
+  - journal
+
+tracing:
+  - trace
+  - span
+  - instrument
+  - observe
+  - track
+  - profile
+
+monitoring:
+  - monitor
+  - watch
+  - observe
+  - health
+  - check
+  - probe
+
+instrumentation:
+  - instrument
+  - measure
+  - meter
+  - trace
+  - observe
+
+profiling:
+  - profile
+  - benchmark
+  - measure
+  - sample
+  - instrument
+
+# ── Testing ─────────────────────────────────────────────────────────────────
+mocking:
+  - mock
+  - stub
+  - fake
+  - spy
+  - double
+
+assertion:
+  - assert
+  - expect
+  - should
+  - verify
+  - check
+
+setup:
+  - setup
+  - init
+  - before
+  - prepare
+  - arrange
+  - fixture
+
+# ── Concurrency ─────────────────────────────────────────────────────────────
+spawning:
+  - spawn
+  - go
+  - fork
+  - launch
+  - start
+  - create
+
+cancellation:
+  - cancel
+  - abort
+  - stop
+  - terminate
+  - timeout
+  - deadline
+
+waiting:
+  - wait
+  - await
+  - block
+  - join
+  - sync
+  - poll
+
+signaling:
+  - signal
+  - notify
+  - wake
+  - trigger
+  - broadcast
+  - condition
+
+# ── Packaging & Build ───────────────────────────────────────────────────────
+bundling:
+  - bundle
+  - pack
+  - package
+  - zip
+  - archive
+  - compress
+
+linking:
+  - link
+  - bind
+  - connect
+  - wire
+  - resolve
+  - reference
+
+packaging:
+  - package
+  - bundle
+  - archive
+  - wrap
+  - assemble
+
+# ── Access patterns (informal user terms) ───────────────────────────────────
+getter:
+  - get
+  - fetch
+  - read
+  - load
+  - retrieve
+  - access
+
+setter:
+  - set
+  - put
+  - write
+  - update
+  - assign
+  - store
+
+handler:
+  - handle
+  - on
+  - process
+  - callback
+  - hook
+  - respond
+
+callback:
+  - callback
+  - handler
+  - hook
+  - listener
+  - on
+
+wrapper:
+  - wrap
+  - decorate
+  - proxy
+  - adapter
+  - middleware
+
+helper:
+  - help
+  - util
+  - helper
+  - assist
+  - support
+
+factory:
+  - factory
+  - create
+  - new
+  - make
+  - build
+  - construct
+
+builder:
+  - build
+  - construct
+  - assemble
+  - compose
+  - make
+
+parser:
+  - parse
+  - read
+  - decode
+  - tokenize
+  - lex
+  - extract
+
+serializer:
+  - serialize
+  - marshal
+  - encode
+  - format
+  - dump
+
+resolver:
+  - resolve
+  - lookup
+  - find
+  - locate
+  - discover
+
+validator:
+  - validate
+  - check
+  - verify
+  - sanitize
+  - lint
+
+converter:
+  - convert
+  - transform
+  - adapt
+  - translate
+  - map
+
+formatter:
+  - format
+  - render
+  - template
+  - pretty
+  - stringify
+
+scanner:
+  - scan
+  - read
+  - lex
+  - tokenize
+  - parse
+
+emitter:
+  - emit
+  - fire
+  - publish
+  - send
+  - dispatch
+  - trigger
+
+consumer:
+  - consume
+  - receive
+  - process
+  - handle
+  - accept
+
+producer:
+  - produce
+  - create
+  - generate
+  - emit
+  - publish
+
+provider:
+  - provide
+  - supply
+  - inject
+  - get
+  - resolve
+
+listener:
+  - listen
+  - on
+  - subscribe
+  - watch
+  - observe
+  - handler
+
+observer:
+  - observe
+  - watch
+  - listen
+  - subscribe
+  - monitor
+
+interceptor:
+  - intercept
+  - middleware
+  - filter
+  - wrap
+  - hook
+  - proxy
+
+controller:
+  - control
+  - handle
+  - manage
+  - route
+  - dispatch
+
+manager:
+  - manage
+  - handle
+  - coordinate
+  - control
+  - admin
+
+scheduler:
+  - schedule
+  - queue
+  - dispatch
+  - cron
+  - timer
+
+dispatcher:
+  - dispatch
+  - route
+  - send
+  - forward
+  - schedule
+
+worker:
+  - work
+  - process
+  - execute
+  - run
+  - handle
+  - consume
+
+adapter:
+  - adapt
+  - convert
+  - wrap
+  - bridge
+  - translate

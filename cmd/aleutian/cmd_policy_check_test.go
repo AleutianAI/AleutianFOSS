@@ -14,6 +14,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/AleutianAI/AleutianFOSS/services/policy_engine"
@@ -156,23 +157,47 @@ func TestCollectFiles(t *testing.T) {
 	})
 }
 
-// TestMatchesPatterns tests pattern matching.
+// TestMatchesPatterns tests pattern matching, including all supported ** glob forms.
 func TestMatchesPatterns(t *testing.T) {
 	tests := []struct {
 		path     string
 		patterns []string
 		want     bool
 	}{
+		// Simple basename patterns
 		{"main.go", []string{"*.go"}, true},
 		{"main.go", []string{"*.py"}, false},
-		{"vendor/lib.go", []string{"**/lib.go"}, true},
 		{"path/to/file.txt", []string{"*.txt"}, true},
 		{"path/to/file.txt", []string{"*.go", "*.py"}, false},
 		{"file.go", []string{}, false},
+
+		// **/suffix — match any depth
+		{"vendor/lib.go", []string{"**/lib.go"}, true},
+		{"vendor/lib/util.go", []string{"**/util.go"}, true},
+		{"util.go", []string{"**/util.go"}, true},
+		{"main.go", []string{"**/util.go"}, false},
+
+		// prefix/** — match any path under prefix
+		{"src/auth/auth.go", []string{"src/**"}, true},
+		{"src/auth/internal/token.go", []string{"src/**"}, true},
+		{"vendor/lib/lib.go", []string{"vendor/**"}, true},
+		{"main.go", []string{"vendor/**"}, false},
+		{"node_modules/pkg/index.js", []string{"node_modules/**"}, true},
+
+		// **/*.ext — match any path with extension
+		{"auth/auth_test.go", []string{"**/*_test.go"}, true},
+		{"main_test.go", []string{"**/*_test.go"}, true},
+		{"auth/auth.go", []string{"**/*_test.go"}, false},
+		{"auth/auth.go", []string{"**/*.go"}, true},
+		{"auth/auth.go", []string{"**/*.py"}, false},
+
+		// Multiple patterns — match if any matches
+		{"main.go", []string{"*.py", "*.go"}, true},
+		{"vendor/pkg.go", []string{"vendor/**", "node_modules/**"}, true},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.path, func(t *testing.T) {
+		t.Run(tt.path+"_"+strings.Join(tt.patterns, ","), func(t *testing.T) {
 			if got := matchesPatterns(tt.path, tt.patterns); got != tt.want {
 				t.Errorf("matchesPatterns(%q, %v) = %v, want %v",
 					tt.path, tt.patterns, got, tt.want)

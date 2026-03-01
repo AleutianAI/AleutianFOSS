@@ -50,7 +50,7 @@ var (
 	)
 
 	// servicesPattern matches services-style paths.
-	// Matches: services/code_buddy, services/embeddings
+	// Matches: services/trace, services/embeddings
 	servicesPattern = regexp.MustCompile(
 		`\bservices/[a-z][a-z0-9_/]*\b`,
 	)

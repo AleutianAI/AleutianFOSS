@@ -74,6 +74,26 @@ func RegisterExploreTools(registry *Registry, g *graph.Graph, idx *index.SymbolI
 	if g.IsFrozen() {
 		hg, err := graph.WrapGraph(g)
 		if err == nil && hg != nil {
+			// GR-60: Graph-based file classification
+			fc, fcErr := graph.ClassifyFiles(hg, graph.FileClassificationOptions{
+				ProjectRoot: g.ProjectRoot,
+			})
+			if fcErr == nil && fc != nil {
+				hg.SetFileClassification(fc)
+				stats := fc.Stats()
+				slog.Info("GR-60: file classification complete",
+					slog.Int("total_files", stats.TotalFiles),
+					slog.Int("production_files", stats.ProductionFiles),
+					slog.Int("non_production_files", stats.NonProductionFiles),
+					slog.Int("isolated_files", stats.IsolatedFiles),
+					slog.Int("likely_consumer_files", stats.LikelyConsumerFiles),
+				)
+			} else if fcErr != nil {
+				slog.Warn("GR-60: file classification failed, tools will use heuristic fallback",
+					slog.String("error", fcErr.Error()),
+				)
+			}
+
 			analytics := graph.NewGraphAnalytics(hg)
 			registry.Register(NewFindHotspotsTool(analytics, idx))
 			registry.Register(NewFindDeadCodeTool(analytics, idx))
@@ -160,22 +180,23 @@ func (t *findEntryPointsTool) Definition() ToolDefinition {
 	}
 }
 
-func (t *findEntryPointsTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findEntryPointsTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	m := params.ToMap()
 	opts := explore.DefaultEntryPointOptions()
 
-	if typeStr, ok := params["type"].(string); ok && typeStr != "" {
+	if typeStr, ok := m["type"].(string); ok && typeStr != "" {
 		opts.Type = explore.EntryPointType(typeStr)
 	}
 
-	if pkg, ok := params["package"].(string); ok {
+	if pkg, ok := m["package"].(string); ok {
 		opts.Package = pkg
 	}
 
-	if limit, ok := getIntParam(params, "limit"); ok {
+	if limit, ok := getIntParam(m, "limit"); ok {
 		opts.Limit = limit
 	}
 
-	if includeTests, ok := params["include_tests"].(bool); ok {
+	if includeTests, ok := m["include_tests"].(bool); ok {
 		opts.IncludeTests = includeTests
 	}
 
@@ -242,14 +263,15 @@ func (t *traceDataFlowTool) Definition() ToolDefinition {
 	}
 }
 
-func (t *traceDataFlowTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
-	symbolID, ok := params["symbol_id"].(string)
+func (t *traceDataFlowTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	m := params.ToMap()
+	symbolID, ok := m["symbol_id"].(string)
 	if !ok || symbolID == "" {
 		return &Result{Success: false, Error: "symbol_id is required"}, nil
 	}
 
 	var opts []explore.ExploreOption
-	if maxHops, ok := getIntParam(params, "max_hops"); ok {
+	if maxHops, ok := getIntParam(m, "max_hops"); ok {
 		opts = append(opts, explore.WithMaxHops(maxHops))
 	}
 
@@ -316,14 +338,15 @@ func (t *traceErrorFlowTool) Definition() ToolDefinition {
 	}
 }
 
-func (t *traceErrorFlowTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
-	symbolID, ok := params["symbol_id"].(string)
+func (t *traceErrorFlowTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	m := params.ToMap()
+	symbolID, ok := m["symbol_id"].(string)
 	if !ok || symbolID == "" {
 		return &Result{Success: false, Error: "symbol_id is required"}, nil
 	}
 
 	var opts []explore.ExploreOption
-	if maxHops, ok := getIntParam(params, "max_hops"); ok {
+	if maxHops, ok := getIntParam(m, "max_hops"); ok {
 		opts = append(opts, explore.WithMaxHops(maxHops))
 	}
 
@@ -392,14 +415,15 @@ func (t *buildMinimalContextTool) Definition() ToolDefinition {
 	}
 }
 
-func (t *buildMinimalContextTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
-	symbolID, ok := params["symbol_id"].(string)
+func (t *buildMinimalContextTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	m := params.ToMap()
+	symbolID, ok := m["symbol_id"].(string)
 	if !ok || symbolID == "" {
 		return &Result{Success: false, Error: "symbol_id is required"}, nil
 	}
 
 	var opts []explore.ExploreOption
-	if tokenBudget, ok := getIntParam(params, "token_budget"); ok {
+	if tokenBudget, ok := getIntParam(m, "token_budget"); ok {
 		opts = append(opts, explore.WithTokenBudget(tokenBudget))
 	}
 
@@ -516,14 +540,24 @@ func (t *findSimilarCodeTool) Definition() ToolDefinition {
 	}
 }
 
-func (t *findSimilarCodeTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
-	symbolID, ok := params["symbol_id"].(string)
+func (t *findSimilarCodeTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	m := params.ToMap()
+	symbolID, ok := m["symbol_id"].(string)
 	if !ok || symbolID == "" {
 		return &Result{Success: false, Error: "symbol_id is required"}, nil
 	}
 
+	// IT-06c I-11: Lazy-build the similarity index on first use.
+	// The constructor (NewFindSimilarCodeTool) cannot call Build() because it has
+	// no context. Build() is O(n) on the number of functions/methods (~1ms per 100).
+	if !t.engine.IsBuilt() {
+		if err := t.engine.Build(ctx); err != nil {
+			return &Result{Success: false, Error: fmt.Sprintf("similarity index build failed: %s", err.Error())}, nil
+		}
+	}
+
 	var opts []explore.ExploreOption
-	if limit, ok := getIntParam(params, "limit"); ok {
+	if limit, ok := getIntParam(m, "limit"); ok {
 		opts = append(opts, explore.WithMaxNodes(limit))
 	}
 
@@ -533,7 +567,7 @@ func (t *findSimilarCodeTool) Execute(ctx context.Context, params map[string]any
 	}
 
 	// Filter by minimum similarity if specified
-	if minSim, ok := params["min_similarity"].(float64); ok && minSim > 0 {
+	if minSim, ok := m["min_similarity"].(float64); ok && minSim > 0 {
 		filtered := make([]explore.SimilarResult, 0)
 		for _, r := range result.Results {
 			if r.Similarity >= minSim {
@@ -595,8 +629,9 @@ func (t *summarizeFileTool) Definition() ToolDefinition {
 	}
 }
 
-func (t *summarizeFileTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
-	filePath, ok := params["file_path"].(string)
+func (t *summarizeFileTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	m := params.ToMap()
+	filePath, ok := m["file_path"].(string)
 	if !ok || filePath == "" {
 		return &Result{Success: false, Error: "file_path is required"}, nil
 	}
@@ -658,8 +693,9 @@ func (t *findConfigUsageTool) Definition() ToolDefinition {
 	}
 }
 
-func (t *findConfigUsageTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
-	configKey, _ := params["config_key"].(string)
+func (t *findConfigUsageTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	m := params.ToMap()
+	configKey, _ := m["config_key"].(string)
 
 	var result *explore.ConfigUsage
 	var err error
@@ -796,16 +832,17 @@ type ListPackagesResult struct {
 	TotalCount int           `json:"total_count"`
 }
 
-func (t *listPackagesTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *listPackagesTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	m := params.ToMap()
 	start := time.Now()
 
 	includeTests := false
-	if v, ok := params["include_tests"].(bool); ok {
+	if v, ok := m["include_tests"].(bool); ok {
 		includeTests = v
 	}
 
 	filter := ""
-	if v, ok := params["filter"].(string); ok {
+	if v, ok := m["filter"].(string); ok {
 		filter = v
 	}
 
@@ -956,7 +993,7 @@ type MockTool struct {
 	name        string
 	category    ToolCategory
 	definition  ToolDefinition
-	ExecuteFunc func(ctx context.Context, params map[string]any) (*Result, error)
+	ExecuteFunc func(ctx context.Context, params TypedParams) (*Result, error)
 }
 
 // NewMockTool creates a mock tool for testing.
@@ -970,7 +1007,7 @@ func NewMockTool(name string, category ToolCategory) *MockTool {
 			Category:    category,
 			Parameters:  make(map[string]ParamDef),
 		},
-		ExecuteFunc: func(ctx context.Context, params map[string]any) (*Result, error) {
+		ExecuteFunc: func(ctx context.Context, params TypedParams) (*Result, error) {
 			return &Result{
 				Success:    true,
 				OutputText: fmt.Sprintf("Mock result from %s", name),
@@ -987,7 +1024,7 @@ func (t *MockTool) WithDefinition(d ToolDefinition) *MockTool {
 	return t
 }
 
-func (t *MockTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *MockTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	return t.ExecuteFunc(ctx, params)
 }
 
@@ -1248,12 +1285,34 @@ func StaticToolDefinitions() []ToolDefinition {
 					Required:    false,
 					Default:     50,
 				},
+				"exclude_tests": {
+					Type:        ParamTypeBool,
+					Description: "Exclude symbols from test files (default: true)",
+					Required:    false,
+					Default:     true,
+				},
 			},
 			Category:    CategoryExploration,
 			Priority:    84,
 			Requires:    []string{"graph_initialized"},
 			SideEffects: false,
 			Timeout:     10 * time.Second,
+			WhenToUse: WhenToUse{
+				Keywords: []string{
+					"dead code", "unused code", "unreferenced", "orphan code",
+					"unused functions", "not called", "no callers", "no references",
+					"no incoming calls", "no internal callers", "never called",
+					"zero callers", "not referenced",
+				},
+				UseWhen: "User asks about dead code, unused functions, unreferenced symbols, " +
+					"or wants to find code that is never called. IMPORTANT: Negated caller queries " +
+					"like 'functions with no callers', 'no incoming calls', or 'never called' mean " +
+					"dead code — use this tool, NOT find_callers.",
+				AvoidWhen: "User asks about most connected or heavily used functions " +
+					"(use find_hotspots). User asks about code complexity or structure " +
+					"(use find_communities). User asks WHO calls a specific function " +
+					"(use find_callers — but 'no callers' means dead code, not find_callers).",
+			},
 		},
 		{
 			Name: "find_cycles",
@@ -1272,6 +1331,18 @@ func StaticToolDefinitions() []ToolDefinition {
 					Description: "Maximum number of cycles to return",
 					Required:    false,
 					Default:     20,
+				},
+				"package_filter": {
+					Type:        ParamTypeString,
+					Description: "Filter cycles to those involving this package or directory (case-insensitive substring match)",
+					Required:    false,
+					Default:     "",
+				},
+				"sort_by": {
+					Type:        ParamTypeString,
+					Description: "Sort order: 'length_desc' (default, largest first) or 'length_asc' (smallest first)",
+					Required:    false,
+					Default:     "length_desc",
 				},
 			},
 			Category:    CategoryExploration,
@@ -1333,6 +1404,12 @@ func StaticToolDefinitions() []ToolDefinition {
 					Description: "Show edges between communities for seam identification (default: true)",
 					Required:    false,
 					Default:     true,
+				},
+				"package_filter": {
+					Type:        ParamTypeString,
+					Description: "Only show communities with members in this directory/package (case-insensitive substring match, e.g. 'hugolib', 'core', 'plots')",
+					Required:    false,
+					Default:     "",
 				},
 			},
 			Category:    CategoryExploration,
@@ -1415,9 +1492,99 @@ func StaticToolDefinitions() []ToolDefinition {
 			SideEffects: false,
 			Timeout:     30 * time.Second,
 		},
+		// IT-03 C-3: Add find_implementations to static definitions with cross-language
+		// description so the LLM classifier routes "extends" and "subclass" queries correctly.
+		{
+			Name: "find_implementations",
+			Description: "Find all types that implement a given interface or extend a given class. " +
+				"Works across languages: Go interfaces (structural typing), Python class inheritance and ABCs, " +
+				"JS/TS class extends and implements. " +
+				"Use for 'what implements X?', 'what extends X?', 'what subclasses X?', 'what derives from X?'.",
+			Parameters: map[string]ParamDef{
+				"interface_name": {
+					Type:        ParamTypeString,
+					Description: "Name of the interface or base class to find implementations/subclasses for (e.g., 'Reader', 'AbstractMesh', 'Index', 'SessionInterface')",
+					Required:    true,
+				},
+				"limit": {
+					Type:        ParamTypeInt,
+					Description: "Maximum number of implementations to return",
+					Required:    false,
+					Default:     50,
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    93,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     5 * time.Second,
+		},
 		// IT-02 H-1: Add find_callers and find_callees — the two most fundamental
 		// graph query tools were missing from static definitions, causing the LLM
 		// classifier to lack awareness for tool routing.
+		// IT-02 R6-FIX: Add get_call_chain to static definitions so the LLM
+		// classifier is aware of it and can distinguish it from find_callees.
+		{
+			Name: "get_call_chain",
+			Description: "Get the TRANSITIVE call chain for a function — traces ALL calls recursively up to depth 10. " +
+				"Can trace 'downstream' (what does X call, and what do those call, recursively) or 'upstream' (what calls X, recursively). " +
+				"ONLY use when the user explicitly asks for the FULL call hierarchy, transitive calls, impact analysis, or call chains. " +
+				"DO NOT use for simple 'what does X call' questions — those need find_callees for DIRECT callees only. " +
+				"Results from this tool are TRANSITIVE (indirect) calls, NOT direct callees.",
+			Parameters: map[string]ParamDef{
+				"function_name": {
+					Type:        ParamTypeString,
+					Description: "Name of the function to trace",
+					Required:    true,
+				},
+				"direction": {
+					Type:        ParamTypeString,
+					Description: "Traversal direction: 'downstream' (callees) or 'upstream' (callers)",
+					Required:    false,
+					Default:     "downstream",
+					Enum:        []any{"downstream", "upstream"},
+				},
+				"max_depth": {
+					Type:        ParamTypeInt,
+					Description: "Maximum traversal depth (1-10)",
+					Required:    false,
+					Default:     5,
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    80, // Lower than find_callees (94) to prefer direct queries
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     10 * time.Second,
+		},
+		// IT-04: Add find_symbol to static definitions so the LLM classifier
+		// can route "where is X defined?" and "find X" queries correctly.
+		{
+			Name: "find_symbol",
+			Description: "Look up a symbol (function, type, class, interface, variable) by name. " +
+				"Returns the symbol's definition location (file and line), kind, package, and signature. " +
+				"Use for 'where is X defined?', 'find X', 'locate X', 'what is X?'. " +
+				"Works across all languages: Go structs/interfaces, Python classes, JS/TS classes and functions.",
+			Parameters: map[string]ParamDef{
+				"name": {
+					Type:        ParamTypeString,
+					Description: "Name of the symbol to find (e.g., 'Router', 'DataFrame', 'Context', 'NestFactory')",
+					Required:    true,
+				},
+				"kind": {
+					Type:        ParamTypeString,
+					Description: "Filter by symbol kind: function, method, class, struct, interface, type, variable, constant, enum, or all",
+					Required:    false,
+					Default:     "all",
+					Enum:        []any{"function", "method", "class", "struct", "interface", "type", "variable", "constant", "enum", "all"},
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    92,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     5 * time.Second,
+		},
 		{
 			Name: "find_callers",
 			Description: "Find all functions that CALL a given function (upstream dependencies). " +

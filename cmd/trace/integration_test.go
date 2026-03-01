@@ -57,15 +57,19 @@ func newTestServer(t *testing.T) *testServer {
 
 	gin.SetMode(gin.TestMode)
 
-	cfg := code_buddy.DefaultServiceConfig()
-	svc := code_buddy.NewService(cfg)
-	handlers := code_buddy.NewHandlers(svc)
+	// Mark warmup complete so readiness checks pass in tests (no LLM in integration tests).
+	trace.MarkWarmupComplete()
+	t.Cleanup(trace.ResetWarmupStatus)
+
+	cfg := trace.DefaultServiceConfig()
+	svc := trace.NewService(cfg)
+	handlers := trace.NewHandlers(svc)
 
 	router := gin.New()
 	router.Use(gin.Recovery())
 
 	v1 := router.Group("/v1")
-	code_buddy.RegisterRoutes(v1, handlers)
+	trace.RegisterRoutes(v1, handlers)
 
 	ts := &testServer{
 		router: router,
@@ -84,7 +88,7 @@ func (ts *testServer) initGraph() {
 		"project_root": testProjectRoot,
 		"languages":    []string{"go"},
 	}
-	resp := ts.post("/v1/codebuddy/init", body)
+	resp := ts.post("/v1/trace/init", body)
 
 	if resp.Code != http.StatusOK {
 		ts.t.Fatalf("Failed to init graph: %d - %s", resp.Code, resp.Body.String())
@@ -132,7 +136,7 @@ func (ts *testServer) post(path string, body interface{}) *httptest.ResponseReco
 func TestIntegration_Health(t *testing.T) {
 	ts := newTestServer(t)
 
-	resp := ts.get("/v1/codebuddy/health")
+	resp := ts.get("/v1/trace/health")
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d", resp.Code)
 	}
@@ -148,7 +152,7 @@ func TestIntegration_Health(t *testing.T) {
 func TestIntegration_Ready(t *testing.T) {
 	ts := newTestServer(t)
 
-	resp := ts.get("/v1/codebuddy/ready")
+	resp := ts.get("/v1/trace/ready")
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d", resp.Code)
 	}
@@ -168,7 +172,7 @@ func TestIntegration_Ready(t *testing.T) {
 func TestIntegration_GetTools(t *testing.T) {
 	ts := newTestServer(t)
 
-	resp := ts.get("/v1/codebuddy/tools")
+	resp := ts.get("/v1/trace/tools")
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d", resp.Code)
 	}
@@ -217,7 +221,7 @@ func TestIntegration_Context(t *testing.T) {
 		"query":        "How does the GCS writer work?",
 		"token_budget": 4000,
 	}
-	resp := ts.post("/v1/codebuddy/context", body)
+	resp := ts.post("/v1/trace/context", body)
 
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d: %s", resp.Code, resp.Body.String())
@@ -243,7 +247,7 @@ func TestIntegration_Context(t *testing.T) {
 func TestIntegration_Callers(t *testing.T) {
 	ts := newTestServer(t)
 
-	path := fmt.Sprintf("/v1/codebuddy/callers?graph_id=%s&function=Write", ts.graphID)
+	path := fmt.Sprintf("/v1/trace/callers?graph_id=%s&function=Write", ts.graphID)
 	resp := ts.get(path)
 
 	if resp.Code != http.StatusOK {
@@ -265,7 +269,7 @@ func TestIntegration_Callers(t *testing.T) {
 func TestIntegration_Implementations(t *testing.T) {
 	ts := newTestServer(t)
 
-	path := fmt.Sprintf("/v1/codebuddy/implementations?graph_id=%s&interface=Writer", ts.graphID)
+	path := fmt.Sprintf("/v1/trace/implementations?graph_id=%s&interface=Writer", ts.graphID)
 	resp := ts.get(path)
 
 	if resp.Code != http.StatusOK {
@@ -296,7 +300,7 @@ func TestIntegration_Explore_EntryPoints(t *testing.T) {
 		"type":     "all",
 		"limit":    100,
 	}
-	resp := ts.post("/v1/codebuddy/explore/entry_points", body)
+	resp := ts.post("/v1/trace/explore/entry_points", body)
 
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d: %s", resp.Code, resp.Body.String())
@@ -335,7 +339,7 @@ func TestIntegration_Explore_DataFlow(t *testing.T) {
 		"type":     "command",
 		"limit":    1,
 	}
-	epResp := ts.post("/v1/codebuddy/explore/entry_points", epBody)
+	epResp := ts.post("/v1/trace/explore/entry_points", epBody)
 
 	var epResult struct {
 		Result struct {
@@ -358,7 +362,7 @@ func TestIntegration_Explore_DataFlow(t *testing.T) {
 		"max_hops":     3,
 		"include_code": false,
 	}
-	resp := ts.post("/v1/codebuddy/explore/data_flow", body)
+	resp := ts.post("/v1/trace/explore/data_flow", body)
 
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d: %s", resp.Code, resp.Body.String())
@@ -382,7 +386,7 @@ func TestIntegration_Explore_ErrorFlow(t *testing.T) {
 		"type":     "command",
 		"limit":    1,
 	}
-	epResp := ts.post("/v1/codebuddy/explore/entry_points", epBody)
+	epResp := ts.post("/v1/trace/explore/entry_points", epBody)
 
 	var epResult struct {
 		Result struct {
@@ -404,7 +408,7 @@ func TestIntegration_Explore_ErrorFlow(t *testing.T) {
 		"scope":    sourceID,
 		"max_hops": 2,
 	}
-	resp := ts.post("/v1/codebuddy/explore/error_flow", body)
+	resp := ts.post("/v1/trace/explore/error_flow", body)
 
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d: %s", resp.Code, resp.Body.String())
@@ -427,7 +431,7 @@ func TestIntegration_Explore_ConfigUsage(t *testing.T) {
 		"config_key":       "bucket",
 		"include_defaults": true,
 	}
-	resp := ts.post("/v1/codebuddy/explore/config_usage", body)
+	resp := ts.post("/v1/trace/explore/config_usage", body)
 
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d: %s", resp.Code, resp.Body.String())
@@ -451,7 +455,7 @@ func TestIntegration_Explore_SimilarCode(t *testing.T) {
 		"type":     "command",
 		"limit":    1,
 	}
-	epResp := ts.post("/v1/codebuddy/explore/entry_points", epBody)
+	epResp := ts.post("/v1/trace/explore/entry_points", epBody)
 
 	var epResult struct {
 		Result struct {
@@ -474,7 +478,7 @@ func TestIntegration_Explore_SimilarCode(t *testing.T) {
 		"min_similarity": 0.5,
 		"limit":          10,
 	}
-	resp := ts.post("/v1/codebuddy/explore/similar_code", body)
+	resp := ts.post("/v1/trace/explore/similar_code", body)
 
 	// Similar code search requires an initialized similarity index which may not be ready
 	if resp.Code == http.StatusInternalServerError {
@@ -504,7 +508,7 @@ func TestIntegration_Explore_MinimalContext(t *testing.T) {
 		"type":     "command",
 		"limit":    1,
 	}
-	epResp := ts.post("/v1/codebuddy/explore/entry_points", epBody)
+	epResp := ts.post("/v1/trace/explore/entry_points", epBody)
 
 	var epResult struct {
 		Result struct {
@@ -527,7 +531,7 @@ func TestIntegration_Explore_MinimalContext(t *testing.T) {
 		"token_budget":    2000,
 		"include_callees": true,
 	}
-	resp := ts.post("/v1/codebuddy/explore/minimal_context", body)
+	resp := ts.post("/v1/trace/explore/minimal_context", body)
 
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d: %s", resp.Code, resp.Body.String())
@@ -549,7 +553,7 @@ func TestIntegration_Explore_SummarizeFile(t *testing.T) {
 		"graph_id":  ts.graphID,
 		"file_path": "main/main.go",
 	}
-	resp := ts.post("/v1/codebuddy/explore/summarize_file", body)
+	resp := ts.post("/v1/trace/explore/summarize_file", body)
 
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d: %s", resp.Code, resp.Body.String())
@@ -575,7 +579,7 @@ func TestIntegration_Explore_SummarizePackage(t *testing.T) {
 		"graph_id": ts.graphID,
 		"package":  "main",
 	}
-	resp := ts.post("/v1/codebuddy/explore/summarize_package", body)
+	resp := ts.post("/v1/trace/explore/summarize_package", body)
 
 	if resp.Code != http.StatusOK {
 		// If main doesn't work, skip - package detection may vary
@@ -600,7 +604,7 @@ func TestIntegration_Explore_ChangeImpact(t *testing.T) {
 		"type":     "command",
 		"limit":    1,
 	}
-	epResp := ts.post("/v1/codebuddy/explore/entry_points", epBody)
+	epResp := ts.post("/v1/trace/explore/entry_points", epBody)
 
 	var epResult struct {
 		Result struct {
@@ -622,7 +626,7 @@ func TestIntegration_Explore_ChangeImpact(t *testing.T) {
 		"symbol_id":   symbolID,
 		"change_type": "signature",
 	}
-	resp := ts.post("/v1/codebuddy/explore/change_impact", body)
+	resp := ts.post("/v1/trace/explore/change_impact", body)
 
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d: %s", resp.Code, resp.Body.String())
@@ -650,7 +654,7 @@ func TestIntegration_Reason_BreakingChanges(t *testing.T) {
 		"type":     "command",
 		"limit":    1,
 	}
-	epResp := ts.post("/v1/codebuddy/explore/entry_points", epBody)
+	epResp := ts.post("/v1/trace/explore/entry_points", epBody)
 
 	var epResult struct {
 		Result struct {
@@ -673,7 +677,7 @@ func TestIntegration_Reason_BreakingChanges(t *testing.T) {
 		"symbol_id":          symbolID,
 		"proposed_signature": "func() (string, error)",
 	}
-	resp := ts.post("/v1/codebuddy/reason/breaking_changes", body)
+	resp := ts.post("/v1/trace/reason/breaking_changes", body)
 
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d: %s", resp.Code, resp.Body.String())
@@ -697,7 +701,7 @@ func TestIntegration_Reason_SimulateChange(t *testing.T) {
 		"type":     "command",
 		"limit":    1,
 	}
-	epResp := ts.post("/v1/codebuddy/explore/entry_points", epBody)
+	epResp := ts.post("/v1/trace/explore/entry_points", epBody)
 
 	var epResult struct {
 		Result struct {
@@ -723,7 +727,7 @@ func TestIntegration_Reason_SimulateChange(t *testing.T) {
 			"new_name": "NewFunctionName",
 		},
 	}
-	resp := ts.post("/v1/codebuddy/reason/simulate_change", body)
+	resp := ts.post("/v1/trace/reason/simulate_change", body)
 
 	// Simulation may fail if the change_details format is incorrect or feature is limited
 	if resp.Code == http.StatusInternalServerError {
@@ -756,7 +760,7 @@ func hello() string {
 `,
 		"language": "go",
 	}
-	resp := ts.post("/v1/codebuddy/reason/validate_change", body)
+	resp := ts.post("/v1/trace/reason/validate_change", body)
 
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d: %s", resp.Code, resp.Body.String())
@@ -790,7 +794,7 @@ func TestIntegration_Reason_ValidateChange_InvalidSyntax(t *testing.T) {
 		"code":     `func broken( { missing closing`,
 		"language": "go",
 	}
-	resp := ts.post("/v1/codebuddy/reason/validate_change", body)
+	resp := ts.post("/v1/trace/reason/validate_change", body)
 
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d: %s", resp.Code, resp.Body.String())
@@ -823,7 +827,7 @@ func TestIntegration_Reason_TestCoverage(t *testing.T) {
 		"type":     "command",
 		"limit":    1,
 	}
-	epResp := ts.post("/v1/codebuddy/explore/entry_points", epBody)
+	epResp := ts.post("/v1/trace/explore/entry_points", epBody)
 
 	var epResult struct {
 		Result struct {
@@ -845,7 +849,7 @@ func TestIntegration_Reason_TestCoverage(t *testing.T) {
 		"symbol_id":        symbolID,
 		"include_indirect": true,
 	}
-	resp := ts.post("/v1/codebuddy/reason/test_coverage", body)
+	resp := ts.post("/v1/trace/reason/test_coverage", body)
 
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d: %s", resp.Code, resp.Body.String())
@@ -869,7 +873,7 @@ func TestIntegration_Reason_SideEffects(t *testing.T) {
 		"type":     "command",
 		"limit":    1,
 	}
-	epResp := ts.post("/v1/codebuddy/explore/entry_points", epBody)
+	epResp := ts.post("/v1/trace/explore/entry_points", epBody)
 
 	var epResult struct {
 		Result struct {
@@ -891,7 +895,7 @@ func TestIntegration_Reason_SideEffects(t *testing.T) {
 		"symbol_id":  symbolID,
 		"transitive": true,
 	}
-	resp := ts.post("/v1/codebuddy/reason/side_effects", body)
+	resp := ts.post("/v1/trace/reason/side_effects", body)
 
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d: %s", resp.Code, resp.Body.String())
@@ -915,7 +919,7 @@ func TestIntegration_Reason_SuggestRefactor(t *testing.T) {
 		"type":     "command",
 		"limit":    1,
 	}
-	epResp := ts.post("/v1/codebuddy/explore/entry_points", epBody)
+	epResp := ts.post("/v1/trace/explore/entry_points", epBody)
 
 	var epResult struct {
 		Result struct {
@@ -936,7 +940,7 @@ func TestIntegration_Reason_SuggestRefactor(t *testing.T) {
 		"graph_id":  ts.graphID,
 		"symbol_id": symbolID,
 	}
-	resp := ts.post("/v1/codebuddy/reason/suggest_refactor", body)
+	resp := ts.post("/v1/trace/reason/suggest_refactor", body)
 
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d: %s", resp.Code, resp.Body.String())
@@ -964,7 +968,7 @@ func TestIntegration_Coordinate_PlanChanges(t *testing.T) {
 		"type":     "command",
 		"limit":    1,
 	}
-	epResp := ts.post("/v1/codebuddy/explore/entry_points", epBody)
+	epResp := ts.post("/v1/trace/explore/entry_points", epBody)
 
 	var epResult struct {
 		Result struct {
@@ -988,7 +992,7 @@ func TestIntegration_Coordinate_PlanChanges(t *testing.T) {
 		"new_name":      "RenamedFunction",
 		"include_tests": true,
 	}
-	resp := ts.post("/v1/codebuddy/coordinate/plan_changes", body)
+	resp := ts.post("/v1/trace/coordinate/plan_changes", body)
 
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d: %s", resp.Code, resp.Body.String())
@@ -1026,7 +1030,7 @@ func TestIntegration_Coordinate_ValidatePlan(t *testing.T) {
 		"type":     "command",
 		"limit":    1,
 	}
-	epResp := ts.post("/v1/codebuddy/explore/entry_points", epBody)
+	epResp := ts.post("/v1/trace/explore/entry_points", epBody)
 
 	var epResult struct {
 		Result struct {
@@ -1049,7 +1053,7 @@ func TestIntegration_Coordinate_ValidatePlan(t *testing.T) {
 		"change_type": "rename",
 		"new_name":    "RenamedFunction",
 	}
-	planResp := ts.post("/v1/codebuddy/coordinate/plan_changes", planBody)
+	planResp := ts.post("/v1/trace/coordinate/plan_changes", planBody)
 
 	var planResult struct {
 		Result struct {
@@ -1066,7 +1070,7 @@ func TestIntegration_Coordinate_ValidatePlan(t *testing.T) {
 	body := map[string]interface{}{
 		"plan_id": planResult.Result.PlanID,
 	}
-	resp := ts.post("/v1/codebuddy/coordinate/validate_plan", body)
+	resp := ts.post("/v1/trace/coordinate/validate_plan", body)
 
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d: %s", resp.Code, resp.Body.String())
@@ -1090,7 +1094,7 @@ func TestIntegration_Coordinate_PreviewChanges(t *testing.T) {
 		"type":     "command",
 		"limit":    1,
 	}
-	epResp := ts.post("/v1/codebuddy/explore/entry_points", epBody)
+	epResp := ts.post("/v1/trace/explore/entry_points", epBody)
 
 	var epResult struct {
 		Result struct {
@@ -1113,7 +1117,7 @@ func TestIntegration_Coordinate_PreviewChanges(t *testing.T) {
 		"change_type": "rename",
 		"new_name":    "RenamedFunction",
 	}
-	planResp := ts.post("/v1/codebuddy/coordinate/plan_changes", planBody)
+	planResp := ts.post("/v1/trace/coordinate/plan_changes", planBody)
 
 	var planResult struct {
 		Result struct {
@@ -1131,7 +1135,7 @@ func TestIntegration_Coordinate_PreviewChanges(t *testing.T) {
 		"plan_id":       planResult.Result.PlanID,
 		"context_lines": 3,
 	}
-	resp := ts.post("/v1/codebuddy/coordinate/preview_changes", body)
+	resp := ts.post("/v1/trace/coordinate/preview_changes", body)
 
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d: %s", resp.Code, resp.Body.String())
@@ -1159,7 +1163,7 @@ func TestIntegration_Patterns_Detect(t *testing.T) {
 		"patterns":       []string{"factory", "singleton", "observer", "middleware"},
 		"min_confidence": 0.7,
 	}
-	resp := ts.post("/v1/codebuddy/patterns/detect", body)
+	resp := ts.post("/v1/trace/patterns/detect", body)
 
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d: %s", resp.Code, resp.Body.String())
@@ -1189,7 +1193,7 @@ func TestIntegration_Patterns_CodeSmells(t *testing.T) {
 		"min_severity":  "low",
 		"include_tests": false,
 	}
-	resp := ts.post("/v1/codebuddy/patterns/code_smells", body)
+	resp := ts.post("/v1/trace/patterns/code_smells", body)
 
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d: %s", resp.Code, resp.Body.String())
@@ -1224,7 +1228,7 @@ func TestIntegration_Patterns_Duplication(t *testing.T) {
 		"min_similarity": 0.8,
 		"type":           "all",
 	}
-	resp := ts.post("/v1/codebuddy/patterns/duplication", body)
+	resp := ts.post("/v1/trace/patterns/duplication", body)
 
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d: %s", resp.Code, resp.Body.String())
@@ -1251,7 +1255,7 @@ func TestIntegration_Patterns_CircularDeps(t *testing.T) {
 		"graph_id": ts.graphID,
 		"level":    "package",
 	}
-	resp := ts.post("/v1/codebuddy/patterns/circular_deps", body)
+	resp := ts.post("/v1/trace/patterns/circular_deps", body)
 
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d: %s", resp.Code, resp.Body.String())
@@ -1277,7 +1281,7 @@ func TestIntegration_Patterns_Conventions(t *testing.T) {
 		"scope":    "all",
 		"types":    []string{"naming", "structure", "error_handling"},
 	}
-	resp := ts.post("/v1/codebuddy/patterns/conventions", body)
+	resp := ts.post("/v1/trace/patterns/conventions", body)
 
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d: %s", resp.Code, resp.Body.String())
@@ -1305,7 +1309,7 @@ func TestIntegration_Patterns_DeadCode(t *testing.T) {
 		"scope":            "all",
 		"include_exported": false,
 	}
-	resp := ts.post("/v1/codebuddy/patterns/dead_code", body)
+	resp := ts.post("/v1/trace/patterns/dead_code", body)
 
 	if resp.Code != http.StatusOK {
 		t.Errorf("Expected 200, got %d: %s", resp.Code, resp.Body.String())
@@ -1342,7 +1346,7 @@ func TestIntegration_Error_GraphNotFound(t *testing.T) {
 		"graph_id": "nonexistent-graph-id",
 		"type":     "all",
 	}
-	resp := ts.post("/v1/codebuddy/explore/entry_points", body)
+	resp := ts.post("/v1/trace/explore/entry_points", body)
 
 	// Graph not found returns 400 Bad Request with GRAPH_NOT_FOUND code
 	if resp.Code != http.StatusBadRequest {
@@ -1367,7 +1371,7 @@ func TestIntegration_Error_InvalidRequest(t *testing.T) {
 		"graph_id": ts.graphID,
 		// missing "scope" which is required for error_flow
 	}
-	resp := ts.post("/v1/codebuddy/explore/error_flow", body)
+	resp := ts.post("/v1/trace/explore/error_flow", body)
 
 	if resp.Code != http.StatusBadRequest {
 		t.Errorf("Expected 400, got %d: %s", resp.Code, resp.Body.String())
@@ -1380,7 +1384,7 @@ func TestIntegration_Error_PlanNotFound(t *testing.T) {
 	body := map[string]interface{}{
 		"plan_id": "nonexistent-plan-id",
 	}
-	resp := ts.post("/v1/codebuddy/coordinate/validate_plan", body)
+	resp := ts.post("/v1/trace/coordinate/validate_plan", body)
 
 	if resp.Code != http.StatusNotFound {
 		t.Errorf("Expected 404, got %d: %s", resp.Code, resp.Body.String())
@@ -1410,7 +1414,7 @@ func TestIntegration_Memory_CRUD(t *testing.T) {
 		"source":     "user",
 		"confidence": 0.9,
 	}
-	createResp := ts.post("/v1/codebuddy/memories", createBody)
+	createResp := ts.post("/v1/trace/memories", createBody)
 
 	if createResp.Code != http.StatusCreated && createResp.Code != http.StatusOK {
 		t.Logf("Memory creation returned %d: %s (memory feature may not be fully implemented)",
@@ -1424,7 +1428,7 @@ func TestIntegration_Memory_CRUD(t *testing.T) {
 func TestIntegration_Memory_List(t *testing.T) {
 	ts := newTestServer(t)
 
-	path := fmt.Sprintf("/v1/codebuddy/memories?graph_id=%s", ts.graphID)
+	path := fmt.Sprintf("/v1/trace/memories?graph_id=%s", ts.graphID)
 	resp := ts.get(path)
 
 	// Memory feature requires Weaviate which is not configured in tests
@@ -1453,7 +1457,7 @@ func TestIntegration_FullWorkflow(t *testing.T) {
 		"type":     "command",
 		"limit":    5,
 	}
-	epResp := ts.post("/v1/codebuddy/explore/entry_points", epBody)
+	epResp := ts.post("/v1/trace/explore/entry_points", epBody)
 	if epResp.Code != http.StatusOK {
 		t.Fatalf("Failed to find entry points: %s", epResp.Body.String())
 	}
@@ -1483,7 +1487,7 @@ func TestIntegration_FullWorkflow(t *testing.T) {
 		"symbol_id":   targetID,
 		"change_type": "signature",
 	}
-	impactResp := ts.post("/v1/codebuddy/explore/change_impact", impactBody)
+	impactResp := ts.post("/v1/trace/explore/change_impact", impactBody)
 	if impactResp.Code != http.StatusOK {
 		t.Errorf("Failed to analyze impact: %s", impactResp.Body.String())
 	} else {
@@ -1497,7 +1501,7 @@ func TestIntegration_FullWorkflow(t *testing.T) {
 		"symbol_id":          targetID,
 		"proposed_signature": "func(ctx context.Context, w http.ResponseWriter, r *http.Request) error",
 	}
-	breakingResp := ts.post("/v1/codebuddy/reason/breaking_changes", breakingBody)
+	breakingResp := ts.post("/v1/trace/reason/breaking_changes", breakingBody)
 	if breakingResp.Code != http.StatusOK {
 		t.Errorf("Failed to check breaking changes: %s", breakingResp.Body.String())
 	} else {
@@ -1513,7 +1517,7 @@ func TestIntegration_FullWorkflow(t *testing.T) {
 		"new_signature": "func(ctx context.Context, w http.ResponseWriter, r *http.Request) error",
 		"include_tests": true,
 	}
-	planResp := ts.post("/v1/codebuddy/coordinate/plan_changes", planBody)
+	planResp := ts.post("/v1/trace/coordinate/plan_changes", planBody)
 	if planResp.Code != http.StatusOK {
 		t.Errorf("Failed to plan changes: %s", planResp.Body.String())
 	} else {
@@ -1532,7 +1536,7 @@ func TestIntegration_FullWorkflow(t *testing.T) {
 			validateBody := map[string]interface{}{
 				"plan_id": planResult.Result.PlanID,
 			}
-			validateResp := ts.post("/v1/codebuddy/coordinate/validate_plan", validateBody)
+			validateResp := ts.post("/v1/trace/coordinate/validate_plan", validateBody)
 			if validateResp.Code != http.StatusOK {
 				t.Errorf("Failed to validate plan: %s", validateResp.Body.String())
 			} else {
@@ -1545,7 +1549,7 @@ func TestIntegration_FullWorkflow(t *testing.T) {
 				"plan_id":       planResult.Result.PlanID,
 				"context_lines": 3,
 			}
-			previewResp := ts.post("/v1/codebuddy/coordinate/preview_changes", previewBody)
+			previewResp := ts.post("/v1/trace/coordinate/preview_changes", previewBody)
 			if previewResp.Code != http.StatusOK {
 				t.Errorf("Failed to preview changes: %s", previewResp.Body.String())
 			} else {
@@ -1560,7 +1564,7 @@ func TestIntegration_FullWorkflow(t *testing.T) {
 		"graph_id":     ts.graphID,
 		"min_severity": "medium",
 	}
-	smellsResp := ts.post("/v1/codebuddy/patterns/code_smells", smellsBody)
+	smellsResp := ts.post("/v1/trace/patterns/code_smells", smellsBody)
 	if smellsResp.Code != http.StatusOK {
 		t.Errorf("Failed to find code smells: %s", smellsResp.Body.String())
 	} else {
@@ -1591,20 +1595,20 @@ func newAgentTestServer(t *testing.T) *testServer {
 
 	gin.SetMode(gin.TestMode)
 
-	cfg := code_buddy.DefaultServiceConfig()
-	svc := code_buddy.NewService(cfg)
-	handlers := code_buddy.NewHandlers(svc)
+	cfg := trace.DefaultServiceConfig()
+	svc := trace.NewService(cfg)
+	handlers := trace.NewHandlers(svc)
 
 	// Create agent loop (will be mock mode without Ollama)
 	agentLoop := agent.NewDefaultAgentLoop()
-	agentHandlers := code_buddy.NewAgentHandlers(agentLoop, svc)
+	agentHandlers := trace.NewAgentHandlers(agentLoop, svc)
 
 	router := gin.New()
 	router.Use(gin.Recovery())
 
 	v1 := router.Group("/v1")
-	code_buddy.RegisterRoutes(v1, handlers)
-	code_buddy.RegisterAgentRoutes(v1, agentHandlers)
+	trace.RegisterRoutes(v1, handlers)
+	trace.RegisterAgentRoutes(v1, agentHandlers)
 
 	ts := &testServer{
 		router: router,
@@ -1624,7 +1628,7 @@ func TestIntegration_Agent_Run(t *testing.T) {
 		"project_root": testProjectRoot,
 		"query":        "What are the main entry points in this codebase?",
 	}
-	resp := ts.post("/v1/codebuddy/agent/run", body)
+	resp := ts.post("/v1/trace/agent/run", body)
 
 	// Without Ollama, the agent runs in mock mode
 	// It should still return a valid response structure
@@ -1657,7 +1661,7 @@ func TestIntegration_Agent_Run_EmptyQuery(t *testing.T) {
 		"project_root": testProjectRoot,
 		"query":        "",
 	}
-	resp := ts.post("/v1/codebuddy/agent/run", body)
+	resp := ts.post("/v1/trace/agent/run", body)
 
 	if resp.Code != http.StatusBadRequest {
 		t.Errorf("Expected 400 for empty query, got %d", resp.Code)
@@ -1677,7 +1681,7 @@ func TestIntegration_Agent_Run_EmptyQuery(t *testing.T) {
 func TestIntegration_Agent_State_NotFound(t *testing.T) {
 	ts := newAgentTestServer(t)
 
-	resp := ts.get("/v1/codebuddy/agent/nonexistent-session-id")
+	resp := ts.get("/v1/trace/agent/nonexistent-session-id")
 
 	if resp.Code != http.StatusNotFound {
 		t.Errorf("Expected 404 for nonexistent session, got %d", resp.Code)
@@ -1699,7 +1703,7 @@ func TestIntegration_Agent_Abort_NotFound(t *testing.T) {
 	body := map[string]interface{}{
 		"session_id": "nonexistent-session-id",
 	}
-	resp := ts.post("/v1/codebuddy/agent/abort", body)
+	resp := ts.post("/v1/trace/agent/abort", body)
 
 	if resp.Code != http.StatusNotFound {
 		t.Errorf("Expected 404 for nonexistent session, got %d", resp.Code)
@@ -1712,7 +1716,7 @@ func TestIntegration_Agent_Continue_MissingSessionID(t *testing.T) {
 	body := map[string]interface{}{
 		"input": "some clarification",
 	}
-	resp := ts.post("/v1/codebuddy/agent/continue", body)
+	resp := ts.post("/v1/trace/agent/continue", body)
 
 	if resp.Code != http.StatusBadRequest {
 		t.Errorf("Expected 400 for missing session_id, got %d", resp.Code)
@@ -1726,7 +1730,7 @@ func TestIntegration_Agent_Continue_MissingSessionID(t *testing.T) {
 func TestIntegration_Agent_ReasoningTrace_NotFound(t *testing.T) {
 	ts := newAgentTestServer(t)
 
-	resp := ts.get("/v1/codebuddy/agent/nonexistent-session-id/reasoning")
+	resp := ts.get("/v1/trace/agent/nonexistent-session-id/reasoning")
 
 	if resp.Code != http.StatusNotFound {
 		t.Errorf("Expected 404 for nonexistent session, got %d", resp.Code)
@@ -1745,7 +1749,7 @@ func TestIntegration_Agent_ReasoningTrace_NotFound(t *testing.T) {
 func TestIntegration_Agent_CRSExport_NotFound(t *testing.T) {
 	ts := newAgentTestServer(t)
 
-	resp := ts.get("/v1/codebuddy/agent/nonexistent-session-id/crs")
+	resp := ts.get("/v1/trace/agent/nonexistent-session-id/crs")
 
 	if resp.Code != http.StatusNotFound {
 		t.Errorf("Expected 404 for nonexistent session, got %d", resp.Code)
@@ -1770,7 +1774,7 @@ func TestIntegration_Agent_FullSessionLifecycle(t *testing.T) {
 		"project_root": testProjectRoot,
 		"query":        "List all exported functions",
 	}
-	runResp := ts.post("/v1/codebuddy/agent/run", runBody)
+	runResp := ts.post("/v1/trace/agent/run", runBody)
 
 	// Mock mode may fail, but we should at least get a valid response
 	if runResp.Code == http.StatusOK {
@@ -1789,7 +1793,7 @@ func TestIntegration_Agent_FullSessionLifecycle(t *testing.T) {
 
 		// Step 2: Get session state
 		t.Log("Step 2: Getting session state...")
-		stateResp := ts.get("/v1/codebuddy/agent/" + sessionID)
+		stateResp := ts.get("/v1/trace/agent/" + sessionID)
 		if stateResp.Code == http.StatusOK {
 			var stateResult struct {
 				SessionID   string `json:"session_id"`
@@ -1805,7 +1809,7 @@ func TestIntegration_Agent_FullSessionLifecycle(t *testing.T) {
 
 		// Step 3: Get reasoning trace (may return 204 if not enabled)
 		t.Log("Step 3: Getting reasoning trace...")
-		traceResp := ts.get("/v1/codebuddy/agent/" + sessionID + "/reasoning")
+		traceResp := ts.get("/v1/trace/agent/" + sessionID + "/reasoning")
 		if traceResp.Code == http.StatusOK {
 			var traceResult struct {
 				TotalSteps int `json:"total_steps"`
@@ -1822,7 +1826,7 @@ func TestIntegration_Agent_FullSessionLifecycle(t *testing.T) {
 
 		// Step 4: Get CRS export (may return 204 if not enabled)
 		t.Log("Step 4: Getting CRS export...")
-		crsResp := ts.get("/v1/codebuddy/agent/" + sessionID + "/crs")
+		crsResp := ts.get("/v1/trace/agent/" + sessionID + "/crs")
 		if crsResp.Code == http.StatusOK {
 			var crsResult struct {
 				SessionID  string `json:"session_id"`
@@ -1844,7 +1848,7 @@ func TestIntegration_Agent_FullSessionLifecycle(t *testing.T) {
 		abortBody := map[string]interface{}{
 			"session_id": sessionID,
 		}
-		abortResp := ts.post("/v1/codebuddy/agent/abort", abortBody)
+		abortResp := ts.post("/v1/trace/agent/abort", abortBody)
 		if abortResp.Code == http.StatusOK {
 			t.Log("  Session aborted successfully")
 		}
@@ -1867,11 +1871,11 @@ func TestIntegration_RouteRegistration_CoreEndpoints(t *testing.T) {
 		method string
 		path   string
 	}{
-		{"GET", "/v1/codebuddy/health"},
-		{"GET", "/v1/codebuddy/ready"},
-		{"GET", "/v1/codebuddy/tools"},
-		{"GET", "/v1/codebuddy/callers?graph_id=test&function=test"},
-		{"GET", "/v1/codebuddy/implementations?graph_id=test&interface=test"},
+		{"GET", "/v1/trace/health"},
+		{"GET", "/v1/trace/ready"},
+		{"GET", "/v1/trace/tools"},
+		{"GET", "/v1/trace/callers?graph_id=test&function=test"},
+		{"GET", "/v1/trace/implementations?graph_id=test&interface=test"},
 	}
 
 	for _, route := range routes {
@@ -1894,9 +1898,9 @@ func TestIntegration_RouteRegistration_AgentEndpoints(t *testing.T) {
 		method string
 		path   string
 	}{
-		{"GET", "/v1/codebuddy/agent/test-id"},
-		{"GET", "/v1/codebuddy/agent/test-id/reasoning"},
-		{"GET", "/v1/codebuddy/agent/test-id/crs"},
+		{"GET", "/v1/trace/agent/test-id"},
+		{"GET", "/v1/trace/agent/test-id/reasoning"},
+		{"GET", "/v1/trace/agent/test-id/crs"},
 	}
 
 	for _, route := range routes {
@@ -1921,15 +1925,15 @@ func TestIntegration_RouteRegistration_ExploreEndpoints(t *testing.T) {
 	ts := newTestServer(t)
 
 	exploreRoutes := []string{
-		"/v1/codebuddy/explore/entry_points",
-		"/v1/codebuddy/explore/data_flow",
-		"/v1/codebuddy/explore/error_flow",
-		"/v1/codebuddy/explore/config_usage",
-		"/v1/codebuddy/explore/similar_code",
-		"/v1/codebuddy/explore/minimal_context",
-		"/v1/codebuddy/explore/summarize_file",
-		"/v1/codebuddy/explore/summarize_package",
-		"/v1/codebuddy/explore/change_impact",
+		"/v1/trace/explore/entry_points",
+		"/v1/trace/explore/data_flow",
+		"/v1/trace/explore/error_flow",
+		"/v1/trace/explore/config_usage",
+		"/v1/trace/explore/similar_code",
+		"/v1/trace/explore/minimal_context",
+		"/v1/trace/explore/summarize_file",
+		"/v1/trace/explore/summarize_package",
+		"/v1/trace/explore/change_impact",
 	}
 
 	for _, path := range exploreRoutes {
@@ -1950,12 +1954,12 @@ func TestIntegration_RouteRegistration_ReasonEndpoints(t *testing.T) {
 	ts := newTestServer(t)
 
 	reasonRoutes := []string{
-		"/v1/codebuddy/reason/breaking_changes",
-		"/v1/codebuddy/reason/simulate_change",
-		"/v1/codebuddy/reason/validate_change",
-		"/v1/codebuddy/reason/test_coverage",
-		"/v1/codebuddy/reason/side_effects",
-		"/v1/codebuddy/reason/suggest_refactor",
+		"/v1/trace/reason/breaking_changes",
+		"/v1/trace/reason/simulate_change",
+		"/v1/trace/reason/validate_change",
+		"/v1/trace/reason/test_coverage",
+		"/v1/trace/reason/side_effects",
+		"/v1/trace/reason/suggest_refactor",
 	}
 
 	for _, path := range reasonRoutes {
@@ -1974,9 +1978,9 @@ func TestIntegration_RouteRegistration_CoordinateEndpoints(t *testing.T) {
 	ts := newTestServer(t)
 
 	coordinateRoutes := []string{
-		"/v1/codebuddy/coordinate/plan_changes",
-		"/v1/codebuddy/coordinate/validate_plan",
-		"/v1/codebuddy/coordinate/preview_changes",
+		"/v1/trace/coordinate/plan_changes",
+		"/v1/trace/coordinate/validate_plan",
+		"/v1/trace/coordinate/preview_changes",
 	}
 
 	for _, path := range coordinateRoutes {
@@ -1995,12 +1999,12 @@ func TestIntegration_RouteRegistration_PatternEndpoints(t *testing.T) {
 	ts := newTestServer(t)
 
 	patternRoutes := []string{
-		"/v1/codebuddy/patterns/detect",
-		"/v1/codebuddy/patterns/code_smells",
-		"/v1/codebuddy/patterns/duplication",
-		"/v1/codebuddy/patterns/circular_deps",
-		"/v1/codebuddy/patterns/conventions",
-		"/v1/codebuddy/patterns/dead_code",
+		"/v1/trace/patterns/detect",
+		"/v1/trace/patterns/code_smells",
+		"/v1/trace/patterns/duplication",
+		"/v1/trace/patterns/circular_deps",
+		"/v1/trace/patterns/conventions",
+		"/v1/trace/patterns/dead_code",
 	}
 
 	for _, path := range patternRoutes {

@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -116,6 +117,11 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 
 	results := make([]*tools.Result, 0, len(invocations))
 	blocked := false
+
+	// GR-59 Group B: Track consecutive CB fires per tool.
+	// Allocated lazily on first CB fire to avoid allocation on non-CB paths.
+	var consecutiveCBFires map[string]int
+	var lastCBTool string
 
 	// GR-39b: Build tool count map ONCE before the loop for O(n+m) efficiency.
 	// This counts ALL tool calls (router + LLM paths) from session trace steps.
@@ -246,12 +252,37 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 					slog.String("tool", inv.Tool),
 				)
 
-				// Return error result - signals synthesis should happen
+				// GR-59 Group B Part 1: Stronger CB message that signals finality.
 				results = append(results, &tools.Result{
 					Success: false,
-					Error:   fmt.Sprintf("GR-39b: Tool %s already called %d times (threshold: %d). Synthesize from existing results.", inv.Tool, callCount, crs.DefaultCircuitBreakerThreshold),
+					Error: fmt.Sprintf("GR-39b: Tool %s PERMANENTLY BLOCKED (called %d times, threshold: %d). "+
+						"You MUST provide your answer NOW using the results you already have. "+
+						"Do NOT call any search tools.", inv.Tool, callCount, crs.DefaultCircuitBreakerThreshold),
 				})
 				blocked = true
+
+				// GR-59 Group B Part 2: Track consecutive CB fires.
+				if consecutiveCBFires == nil {
+					consecutiveCBFires = make(map[string]int)
+				}
+				if lastCBTool == inv.Tool {
+					consecutiveCBFires[inv.Tool]++
+				} else {
+					consecutiveCBFires[inv.Tool] = 1
+					lastCBTool = inv.Tool
+				}
+
+				// If 2+ consecutive CB fires for the same tool, force immediate return.
+				// This eliminates 5+ wasted LLM round-trips after CB activation.
+				if consecutiveCBFires[inv.Tool] >= 2 {
+					slog.Info("GR-59: Consecutive CB fires forcing immediate synthesis",
+						slog.String("session_id", deps.Session.ID),
+						slog.String("tool", inv.Tool),
+						slog.Int("consecutive_fires", consecutiveCBFires[inv.Tool]),
+					)
+					return results, true
+				}
+
 				continue
 			}
 		}
@@ -310,6 +341,12 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 					continue
 				}
 			}
+		}
+
+		// GR-59 Group B: Reset consecutive CB counter when a different tool is called
+		// (the LLM changed strategy, so give it a chance).
+		if lastCBTool != "" && inv.Tool != lastCBTool {
+			lastCBTool = ""
 		}
 
 		// Execute the tool with timing
@@ -400,16 +437,12 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 		}
 		p.recordTraceStep(deps, &inv, result, toolDuration, errMsg)
 
-		// GR-38 Issue 16: Estimate and track tokens for tool results
-		// This ensures token metrics include tool output, not just LLM tokens.
-		// Previously only hard-forced tools counted tokens, causing low token counts
-		// for tool-heavy sessions.
-		if result != nil && result.Success && result.Output != nil {
-			outputStr := fmt.Sprintf("%v", result.Output)
-			estimatedTokens := estimateToolResultTokens(outputStr)
-			if estimatedTokens > 0 {
-				deps.Session.IncrementMetric(agent.MetricTokens, estimatedTokens)
-			}
+		// GR-38 Issue 16: Track tokens for tool results.
+		// IT-06c I-12: Use result.TokensUsed (computed by the tool from OutputText)
+		// instead of fmt.Sprintf("%v", result.Output) which produces verbose Go struct
+		// notation and inflates token counts ~13.5x for large outputs.
+		if result != nil && result.Success && result.TokensUsed > 0 {
+			deps.Session.IncrementMetric(agent.MetricTokens, result.TokensUsed)
 		}
 
 		// CRS-02: Update proof numbers based on tool execution outcome.
@@ -586,7 +619,36 @@ func (p *ExecutePhase) recordTraceStep(deps *Dependencies, inv *agent.ToolInvoca
 		step.SymbolsFound = extractSymbolsFromResult(result)
 	}
 
+	// GR-59 Rev 3: Merge tool's own TraceStep metadata into the session step.
+	// Tools like find_implementations, find_callers, find_callees record domain-specific
+	// metadata (match_count, total_implementations, total_callers, etc.) in result.TraceStep.
+	// Without merging, sessionHasPriorGraphToolResults() cannot detect prior graph tool
+	// results, causing forced synthesis to miss and allowing unnecessary Grep/Glob loops.
+	if result != nil && result.TraceStep != nil && result.TraceStep.Metadata != nil {
+		for k, v := range result.TraceStep.Metadata {
+			step.Metadata[k] = v
+		}
+		// Preserve the tool's action if it's more specific (e.g., "tool_find_implementations")
+		if result.TraceStep.Action != "" {
+			step.Action = result.TraceStep.Action
+		}
+	}
+
 	deps.Session.RecordTraceStep(step)
+
+	// CRS-WIRE-01: Also record in CRS for execution counting.
+	// This feeds CountToolExecutions() which the circuit breaker uses as fallback
+	// when no proof data exists for a tool path. Without this, the count-based
+	// circuit breaker never fires because stepData is never populated.
+	if deps.Session.HasCRS() {
+		stepRecord := crs.TraceStepToStepRecord(step, deps.Session.ID)
+		if err := deps.Session.GetCRS().RecordStep(context.Background(), stepRecord); err != nil {
+			slog.Debug("CRS step recording failed",
+				slog.String("tool", inv.Tool),
+				slog.String("error", err.Error()),
+			)
+		}
+	}
 }
 
 // extractSymbolsFromResult extracts symbol IDs from a tool result.
@@ -1200,6 +1262,7 @@ func (p *ExecutePhase) getToolNames(deps *Dependencies) []string {
 //
 // Inputs:
 //
+//	goCtx - Context for cancellation propagation to downstream operations.
 //	query - The user's query string.
 //	toolName - The name of the tool to extract parameters for.
 //	toolDefs - Available tool definitions.
@@ -1211,12 +1274,13 @@ func (p *ExecutePhase) getToolNames(deps *Dependencies) []string {
 //	map[string]interface{} - Extracted parameters.
 //	error - Non-nil if parameter extraction fails.
 func (p *ExecutePhase) extractToolParameters(
+	goCtx context.Context,
 	query string,
 	toolName string,
 	toolDefs []tools.ToolDefinition,
 	ctx *agent.AssembledContext,
 	deps *Dependencies,
-) (map[string]interface{}, error) {
+) (tools.TypedParams, error) {
 	// Find tool definition
 	var toolDef *tools.ToolDefinition
 	for i := range toolDefs {
@@ -1234,16 +1298,15 @@ func (p *ExecutePhase) extractToolParameters(
 	switch toolName {
 	case "list_packages":
 		// No parameters required
-		return map[string]interface{}{}, nil
+		return tools.EmptyParams{Tool: "list_packages"}, nil
 
 	case "graph_overview":
 		// Optional parameters with defaults
-		params := map[string]interface{}{
-			"depth":                2,
-			"include_dependencies": true,
-			"include_metrics":      true,
-		}
-		return params, nil
+		return tools.GraphOverviewParams{
+			Depth:               2,
+			IncludeDependencies: true,
+			IncludeMetrics:      true,
+		}, nil
 
 	case "explore_package":
 		// Extract package name from query
@@ -1251,15 +1314,15 @@ func (p *ExecutePhase) extractToolParameters(
 		if pkgName == "" {
 			return nil, errors.New("could not extract package name from query")
 		}
-		return map[string]interface{}{
-			"package":              pkgName,
-			"include_dependencies": true,
-			"include_dependents":   true,
+		return tools.ExplorePackageParams{
+			Package:             pkgName,
+			IncludeDependencies: true,
+			IncludeDependents:   true,
 		}, nil
 
 	case "find_entry_points":
 		// Use defaults
-		return map[string]interface{}{}, nil
+		return tools.EmptyParams{Tool: "find_entry_points"}, nil
 
 	case "find_callers", "find_callees":
 		// GR-Phase1: Extract function name from query or context
@@ -1274,24 +1337,47 @@ func (p *ExecutePhase) extractToolParameters(
 			return nil, fmt.Errorf("could not extract function name from query for %s", toolName)
 		}
 
-		return map[string]interface{}{
-			"function_name": funcName,
-			"limit":         20,
+		// IT-06c Bug C: Extract package context to disambiguate when multiple
+		// symbols share the same name (e.g., 11 "Build" functions in Hugo).
+		pkgHint := extractPackageContextFromQuery(query)
+		if pkgHint != "" {
+			slog.Info("IT-06c: extracted package context for disambiguation",
+				slog.String("tool", toolName),
+				slog.String("function_name", funcName),
+				slog.String("package_hint", pkgHint),
+			)
+		}
+
+		if toolName == "find_callers" {
+			return tools.FindCallersParams{
+				FunctionName: funcName,
+				Limit:        20,
+				PackageHint:  pkgHint,
+			}, nil
+		}
+		return tools.FindCalleesParams{
+			FunctionName: funcName,
+			Limit:        20,
+			PackageHint:  pkgHint,
 		}, nil
 
 	case "find_implementations":
-		// Extract interface name from query
-		// Similar patterns to function name but looking for interface
-		interfaceName := extractFunctionNameFromQuery(query) // Reuse same logic
+		// Extract interface/class name from query using implementation-specific patterns first,
+		// then fall back to generic function name extraction.
+		interfaceName := extractInterfaceNameFromQuery(query)
+		if interfaceName == "" {
+			interfaceName = extractFunctionNameFromQuery(query)
+		}
 		if interfaceName == "" && ctx != nil {
 			interfaceName = extractFunctionNameFromContext(ctx)
 		}
 		if interfaceName == "" {
 			return nil, fmt.Errorf("could not extract interface name from query")
 		}
-		return map[string]interface{}{
-			"interface_name": interfaceName,
-			"limit":          20,
+		return tools.FindImplementationsParams{
+			InterfaceName: interfaceName,
+			Limit:         20,
+			PackageHint:   extractPackageContextFromQuery(query),
 		}, nil
 
 	case "find_references":
@@ -1303,49 +1389,71 @@ func (p *ExecutePhase) extractToolParameters(
 		if symbolName == "" {
 			return nil, fmt.Errorf("could not extract symbol name from query")
 		}
-		return map[string]interface{}{
-			"symbol_name": symbolName,
-			"limit":       20,
+		return tools.FindReferencesParams{
+			SymbolName:  symbolName,
+			Limit:       20,
+			PackageHint: extractPackageContextFromQuery(query),
 		}, nil
 
 	// GR-Phase1: Parameter extraction for graph analytics tools
 	case "find_hotspots":
-		// Extract "top N" and "kind" from query
-		// Defaults: top=10, kind="all"
+		// Extract "top N", "kind", "sort_by", and "exclude_tests" from query
+		// Defaults: top=10, kind="all", sort_by="score", exclude_tests=true
 		top := extractTopNFromQuery(query, 10)
 		kind := extractKindFromQuery(query)
+		sortBy := extractSortByFromQuery(query)
+		excludeTests := extractExcludeTestsFromQuery(query)
 		slog.Debug("GR-Phase1: extracted find_hotspots params",
 			slog.String("tool", toolName),
 			slog.Int("top", top),
 			slog.String("kind", kind),
+			slog.String("sort_by", sortBy),
+			slog.Bool("exclude_tests", excludeTests),
 		)
-		return map[string]interface{}{
-			"top":  top,
-			"kind": kind,
+		return tools.FindHotspotsParams{
+			Top:          top,
+			Kind:         kind,
+			Package:      extractPackageContextFromQuery(query),
+			ExcludeTests: excludeTests,
+			SortBy:       sortBy,
 		}, nil
 
 	case "find_dead_code":
 		// Defaults work for most queries
-		// include_exported=false, package="", limit=50
-		params := map[string]interface{}{
-			"include_exported": false,
-			"limit":            50,
-		}
-		// Check if user specifically asks for exported symbols
+		includeExported := false
 		lowerQuery := strings.ToLower(query)
 		if strings.Contains(lowerQuery, "export") || strings.Contains(lowerQuery, "public") {
-			params["include_exported"] = true
+			// IT-08d: Check for negation before enabling exported inclusion.
+			// "not public", "non-exported" etc. mean the opposite.
+			negated := false
+			for _, neg := range []string{
+				"not public", "not export", "no public", "no export",
+				"non-public", "non-export", "aren't public", "isn't public",
+				"without public", "without export", "excluding public", "excluding export",
+			} {
+				if strings.Contains(lowerQuery, neg) {
+					negated = true
+					break
+				}
+			}
+			if !negated {
+				includeExported = true
+			}
 		}
-		// Try to extract package name if specified
-		if pkgName := extractPackageNameFromQuery(query); pkgName != "" {
-			params["package"] = pkgName
-		}
+		// IT-08: Only include test files if the query explicitly mentions tests
+		excludeTests := !strings.Contains(lowerQuery, "test")
 		slog.Debug("GR-Phase1: extracted find_dead_code params",
 			slog.String("tool", toolName),
-			slog.Bool("include_exported", params["include_exported"].(bool)),
-			slog.Int("limit", params["limit"].(int)),
+			slog.Bool("include_exported", includeExported),
+			slog.Bool("exclude_tests", excludeTests),
+			slog.Int("limit", 50),
 		)
-		return params, nil
+		return tools.FindDeadCodeParams{
+			IncludeExported: includeExported,
+			Limit:           50,
+			Package:         extractPackageContextFromQuery(query),
+			ExcludeTests:    excludeTests,
+		}, nil
 
 	case "find_cycles":
 		// Defaults: min_size=2, limit=20
@@ -1354,9 +1462,9 @@ func (p *ExecutePhase) extractToolParameters(
 			slog.Int("min_size", 2),
 			slog.Int("limit", 20),
 		)
-		return map[string]interface{}{
-			"min_size": 2,
-			"limit":    20,
+		return tools.FindCyclesParams{
+			MinSize: 2,
+			Limit:   20,
 		}, nil
 
 	case "find_path":
@@ -1365,7 +1473,11 @@ func (p *ExecutePhase) extractToolParameters(
 		if !ok {
 			// Try to extract any two function names from the query
 			funcName := extractFunctionNameFromQuery(query)
-			if funcName != "" && (from == "" || to == "") {
+			// IT-R2d: Guard against setting to=from. When extractPathSymbolsFromQuery
+			// finds "from" but not "to" (e.g., "between Camera.update and the final draw call"),
+			// the fallback would set to=Camera.update (same as from), causing from==to.
+			// Skip if funcName matches the already-extracted value.
+			if funcName != "" && funcName != from && funcName != to && (from == "" || to == "") {
 				if from == "" {
 					from = funcName
 				} else if to == "" {
@@ -1387,24 +1499,36 @@ func (p *ExecutePhase) extractToolParameters(
 			slog.String("from", from),
 			slog.String("to", to),
 		)
-		return map[string]interface{}{
-			"from": from,
-			"to":   to,
+		return tools.FindPathParams{
+			From: from,
+			To:   to,
 		}, nil
 
 	case "find_important":
-		// Extract "top N" and "kind" from query (same as find_hotspots)
-		// Defaults: top=10, kind="all"
+		// Extract "top N", "kind", "package", "exclude_tests", and "reverse" from query.
+		// Defaults: top=10, kind="all", exclude_tests=true, reverse=false
+		// IT-Summary Round 2: Package was never wired here (FIX-6 gap). Without this,
+		// p.Package is always "" and the Phase 2 filter in Execute() never fires.
+		// This caused 9 test regressions (7160, 7161, 5260, 5261, 5060, 5061, 8060, 6161, 8160).
 		top := extractTopNFromQuery(query, 10)
 		kind := extractKindFromQuery(query)
+		excludeTests := extractExcludeTestsFromQuery(query)
+		pkg := extractPackageContextFromQuery(query)
+		reverse := extractReverseFromQuery(query)
 		slog.Debug("GR-Phase1: extracted find_important params",
 			slog.String("tool", toolName),
 			slog.Int("top", top),
 			slog.String("kind", kind),
+			slog.Bool("exclude_tests", excludeTests),
+			slog.String("package", pkg),
+			slog.Bool("reverse", reverse),
 		)
-		return map[string]interface{}{
-			"top":  top,
-			"kind": kind,
+		return tools.FindImportantParams{
+			Top:          top,
+			Kind:         kind,
+			Package:      pkg,
+			ExcludeTests: excludeTests,
+			Reverse:      reverse,
 		}, nil
 
 	case "find_symbol":
@@ -1420,21 +1544,16 @@ func (p *ExecutePhase) extractToolParameters(
 			)
 			return nil, fmt.Errorf("could not extract symbol name from query for find_symbol")
 		}
-		params := map[string]interface{}{
-			"name": symbolName,
-			"kind": "all",
-		}
-		// Check if user specified a kind filter
 		kind := extractKindFromQuery(query)
-		if kind != "all" {
-			params["kind"] = kind
-		}
 		slog.Debug("GR-Phase1: extracted find_symbol params",
 			slog.String("tool", toolName),
 			slog.String("name", symbolName),
 			slog.String("kind", kind),
 		)
-		return params, nil
+		return tools.FindSymbolParams{
+			Name: symbolName,
+			Kind: kind,
+		}, nil
 
 	case "find_communities":
 		// GR-47 Fix: Extract resolution and top from query
@@ -1455,9 +1574,27 @@ func (p *ExecutePhase) extractToolParameters(
 			slog.Float64("resolution", resolution),
 			slog.Int("top", top),
 		)
-		return map[string]interface{}{
-			"resolution": resolution,
-			"top":        top,
+		// IT-11: Must set ALL defaults explicitly — Go zero values for MinSize (0)
+		// and ShowCrossEdges (false) cause: (a) 11K micro-communities flooding output,
+		// (b) cross-community edges section missing, making coupling queries unanswerable.
+		// IT-R2c Fix C: Re-enable extractPackageContextFromQuery for communities.
+		// IT-11 J-9 originally disabled this due to false positives ("natural code" → "natural").
+		// Those false positives are now mitigated by:
+		// (a) skipGeneric catching "code", "system" (already in place)
+		// (b) Only extracting when the query has explicit scope markers ("in X", "X directory")
+		// Risk of empty results from wrong package name is LOW (communities still run,
+		// just returns empty for that scope — same as find_important behavior per CR-11).
+		pkg := extractPackageContextFromQuery(query)
+		slog.Debug("IT-R2c: extracted find_communities package",
+			slog.String("tool", toolName),
+			slog.String("package", pkg),
+		)
+		return tools.FindCommunitiesParams{
+			MinSize:        3,
+			Resolution:     resolution,
+			Top:            top,
+			ShowCrossEdges: true,
+			PackageFilter:  pkg,
 		}, nil
 
 	case "find_articulation_points":
@@ -1476,19 +1613,23 @@ func (p *ExecutePhase) extractToolParameters(
 			slog.Int("top", top),
 			slog.Bool("include_bridges", includeBridges),
 		)
-		return map[string]interface{}{
-			"top":             top,
-			"include_bridges": includeBridges,
+		return tools.FindArticulationPointsParams{
+			Top:            top,
+			IncludeBridges: includeBridges,
 		}, nil
 
 	case "find_dominators":
 		// CB-31d: Extract target function and optional entry point
 		// Patterns: "dominators of X", "what dominates X", "must call before X"
-		target := extractFunctionNameFromQuery(query)
-		if target == "" && ctx != nil {
+		// IT-00a-1 Phase 3: Multi-candidate extraction + candidate-loop resolution
+		candidates := extractFunctionNameCandidates(query)
+		target := ""
+		if len(candidates) == 0 && ctx != nil {
 			target = extractFunctionNameFromContext(ctx)
+		} else if len(candidates) > 0 {
+			target = candidates[0]
 		}
-		if target == "" {
+		if target == "" && len(candidates) == 0 {
 			slog.Debug("CB-31d: find_dominators extraction failed",
 				slog.String("tool", toolName),
 				slog.String("query_preview", truncateForLog(query, 100)),
@@ -1497,31 +1638,38 @@ func (p *ExecutePhase) extractToolParameters(
 		}
 
 		// CB-31d: Resolve target symbol if possible
+		// IT-00a-1: Use candidate-loop resolution when multiple candidates available
 		if deps != nil && deps.SymbolIndex != nil {
 			sessionID := ""
 			if deps.Session != nil {
 				sessionID = deps.Session.ID
 			}
-			resolvedTarget, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, target, deps)
-			if err == nil {
-				slog.Debug("CB-31d: resolved target symbol for find_dominators",
-					slog.String("raw", target),
-					slog.String("resolved", resolvedTarget),
-					slog.Float64("confidence", confidence),
-				)
-				target = resolvedTarget
+			if len(candidates) > 1 {
+				resolvedTarget, rawName, confidence, err := resolveFirstCandidate(goCtx, &p.symbolCache, sessionID, candidates, deps)
+				if err == nil {
+					slog.Debug("CB-31d: resolved target symbol for find_dominators",
+						slog.String("raw", rawName),
+						slog.String("resolved", resolvedTarget),
+						slog.Float64("confidence", confidence),
+						slog.Int("candidates", len(candidates)),
+					)
+					target = resolvedTarget
+				}
 			} else {
-				slog.Debug("CB-31d: symbol resolution failed, using raw name",
-					slog.String("target", target),
-					slog.String("error", err.Error()),
-				)
+				resolvedTarget, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, target, deps)
+				if err == nil {
+					slog.Debug("CB-31d: resolved target symbol for find_dominators",
+						slog.String("raw", target),
+						slog.String("resolved", resolvedTarget),
+						slog.Float64("confidence", confidence),
+					)
+					target = resolvedTarget
+				}
 			}
 		}
 
-		params := map[string]interface{}{
-			"target": target,
-		}
 		// Try to extract entry point if specified (e.g., "dominators from main to X")
+		entry := ""
 		from, _, ok := extractPathSymbolsFromQuery(query)
 		if ok && from != "" && from != target {
 			// CB-31d: Resolve entry_point symbol if possible
@@ -1540,13 +1688,16 @@ func (p *ExecutePhase) extractToolParameters(
 					from = resolvedFrom
 				}
 			}
-			params["entry_point"] = from
+			entry = from
 		}
 		slog.Debug("CB-31d: extracted find_dominators params",
 			slog.String("tool", toolName),
 			slog.String("target", target),
 		)
-		return params, nil
+		return tools.FindDominatorsParams{
+			Target: target,
+			Entry:  entry,
+		}, nil
 
 	case "find_common_dependency":
 		// CB-31d: Extract two or more function names
@@ -1608,29 +1759,29 @@ func (p *ExecutePhase) extractToolParameters(
 			}
 		}
 
-		params := map[string]interface{}{
-			"targets": targets, // Array of strings
-		}
-		if entry != "" {
-			params["entry"] = entry
-		}
-
 		slog.Debug("CB-31d: extracted find_common_dependency params",
 			slog.String("tool", toolName),
 			slog.Any("targets", targets),
 			slog.String("entry", entry),
 		)
-		return params, nil
+		return tools.FindCommonDependencyParams{
+			Targets: targets,
+			Entry:   entry,
+		}, nil
 
 	case "find_critical_path":
 		// CB-31d: Extract target and optional entry point
 		// Patterns: "critical path to X", "mandatory path to X", "from Y to X"
-		target := extractFunctionNameFromQuery(query)
-		if target == "" && ctx != nil {
+		// IT-00a-1 Phase 3: Multi-candidate extraction + candidate-loop resolution
+		candidates := extractFunctionNameCandidates(query)
+		target := ""
+		if len(candidates) == 0 && ctx != nil {
 			target = extractFunctionNameFromContext(ctx)
+		} else if len(candidates) > 0 {
+			target = candidates[0]
 		}
 		// If still no target, try extracting from path symbols (might be "to" symbol)
-		if target == "" {
+		if target == "" && len(candidates) == 0 {
 			_, to, ok := extractPathSymbolsFromQuery(query)
 			if ok && to != "" {
 				target = to
@@ -1645,26 +1796,38 @@ func (p *ExecutePhase) extractToolParameters(
 		}
 
 		// CB-31d: Resolve target symbol if possible
+		// IT-00a-1: Use candidate-loop resolution when multiple candidates available
 		if deps != nil && deps.SymbolIndex != nil {
 			sessionID := ""
 			if deps.Session != nil {
 				sessionID = deps.Session.ID
 			}
-			resolvedTarget, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, target, deps)
-			if err == nil {
-				slog.Debug("CB-31d: resolved target symbol for find_critical_path",
-					slog.String("raw", target),
-					slog.String("resolved", resolvedTarget),
-					slog.Float64("confidence", confidence),
-				)
-				target = resolvedTarget
+			if len(candidates) > 1 {
+				resolvedTarget, rawName, confidence, err := resolveFirstCandidate(goCtx, &p.symbolCache, sessionID, candidates, deps)
+				if err == nil {
+					slog.Debug("CB-31d: resolved target symbol for find_critical_path",
+						slog.String("raw", rawName),
+						slog.String("resolved", resolvedTarget),
+						slog.Float64("confidence", confidence),
+						slog.Int("candidates", len(candidates)),
+					)
+					target = resolvedTarget
+				}
+			} else {
+				resolvedTarget, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, target, deps)
+				if err == nil {
+					slog.Debug("CB-31d: resolved target symbol for find_critical_path",
+						slog.String("raw", target),
+						slog.String("resolved", resolvedTarget),
+						slog.Float64("confidence", confidence),
+					)
+					target = resolvedTarget
+				}
 			}
 		}
 
-		params := map[string]interface{}{
-			"target": target,
-		}
 		// Try to extract entry point
+		entry := ""
 		from, _, ok := extractPathSymbolsFromQuery(query)
 		if ok && from != "" && from != target {
 			// CB-31d: Resolve entry_point symbol if possible
@@ -1683,13 +1846,16 @@ func (p *ExecutePhase) extractToolParameters(
 					from = resolvedFrom
 				}
 			}
-			params["entry_point"] = from
+			entry = from
 		}
 		slog.Debug("CB-31d: extracted find_critical_path params",
 			slog.String("tool", toolName),
 			slog.String("target", target),
 		)
-		return params, nil
+		return tools.FindCriticalPathParams{
+			Target: target,
+			Entry:  entry,
+		}, nil
 
 	case "find_merge_points":
 		// CB-31d: Extract source functions (usually 2+)
@@ -1714,12 +1880,10 @@ func (p *ExecutePhase) extractToolParameters(
 				slog.String("tool", toolName),
 				slog.String("query_preview", truncateForLog(query, 100)),
 			)
-			// Return defaults - find merge points for all entry points
-			return map[string]interface{}{}, nil
 		}
 
 		// CB-31d: Resolve all source symbols if possible
-		if deps != nil && deps.SymbolIndex != nil {
+		if len(sources) > 0 && deps != nil && deps.SymbolIndex != nil {
 			sessionID := ""
 			if deps.Session != nil {
 				sessionID = deps.Session.ID
@@ -1735,7 +1899,6 @@ func (p *ExecutePhase) extractToolParameters(
 					)
 					resolvedSources = append(resolvedSources, resolvedSource)
 				} else {
-					// Fall back to raw name on resolution failure
 					resolvedSources = append(resolvedSources, source)
 				}
 			}
@@ -1746,18 +1909,28 @@ func (p *ExecutePhase) extractToolParameters(
 			slog.String("tool", toolName),
 			slog.Int("source_count", len(sources)),
 		)
-		return map[string]interface{}{
-			"sources": sources,
+		// Note: FindMergePointsParams only has Top/MinSources fields.
+		// The "sources" extracted above were previously passed but never consumed
+		// by the tool's parseParams(). Using defaults here.
+		return tools.FindMergePointsParams{
+			Top:        20,
+			MinSources: 2,
 		}, nil
 
 	case "find_control_dependencies":
 		// CB-31d: Extract target function
 		// Patterns: "control dependencies of X", "what controls X"
-		target := extractFunctionNameFromQuery(query)
+		// IT-00a-1 Phase 3: Multi-candidate extraction + candidate-loop resolution
+		candidates := extractFunctionNameCandidates(query)
+		target := ""
+		if len(candidates) > 0 {
+			target = candidates[0]
+		}
 		slog.Info("P0 DEBUG: find_control_dependencies parameter extraction",
 			slog.String("tool", toolName),
 			slog.String("query_preview", truncateForLog(query, 100)),
 			slog.String("extracted_from_query", target),
+			slog.Int("candidates", len(candidates)),
 		)
 		if target == "" && ctx != nil {
 			target = extractFunctionNameFromContext(ctx)
@@ -1774,19 +1947,33 @@ func (p *ExecutePhase) extractToolParameters(
 		}
 
 		// CB-31d: Resolve target symbol if possible
+		// IT-00a-1: Use candidate-loop resolution when multiple candidates available
 		if deps != nil && deps.SymbolIndex != nil {
 			sessionID := ""
 			if deps.Session != nil {
 				sessionID = deps.Session.ID
 			}
-			resolvedTarget, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, target, deps)
-			if err == nil {
-				slog.Debug("CB-31d: resolved target symbol for find_control_dependencies",
-					slog.String("raw", target),
-					slog.String("resolved", resolvedTarget),
-					slog.Float64("confidence", confidence),
-				)
-				target = resolvedTarget
+			if len(candidates) > 1 {
+				resolvedTarget, rawName, confidence, err := resolveFirstCandidate(goCtx, &p.symbolCache, sessionID, candidates, deps)
+				if err == nil {
+					slog.Debug("CB-31d: resolved target symbol for find_control_dependencies",
+						slog.String("raw", rawName),
+						slog.String("resolved", resolvedTarget),
+						slog.Float64("confidence", confidence),
+						slog.Int("candidates", len(candidates)),
+					)
+					target = resolvedTarget
+				}
+			} else {
+				resolvedTarget, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, target, deps)
+				if err == nil {
+					slog.Debug("CB-31d: resolved target symbol for find_control_dependencies",
+						slog.String("raw", target),
+						slog.String("resolved", resolvedTarget),
+						slog.Float64("confidence", confidence),
+					)
+					target = resolvedTarget
+				}
 			}
 		}
 
@@ -1794,8 +1981,8 @@ func (p *ExecutePhase) extractToolParameters(
 			slog.String("tool", toolName),
 			slog.String("target", target),
 		)
-		return map[string]interface{}{
-			"target": target,
+		return tools.FindControlDependenciesParams{
+			Target: target,
 		}, nil
 
 	case "find_extractable_regions":
@@ -1804,36 +1991,22 @@ func (p *ExecutePhase) extractToolParameters(
 		slog.Debug("CB-31d: extracted find_extractable_regions params (defaults)",
 			slog.String("tool", toolName),
 		)
-		return map[string]interface{}{}, nil
+		return tools.EmptyParams{Tool: "find_extractable_regions"}, nil
 
 	case "find_loops":
 		// CB-31d: Optional entry point, otherwise finds all natural loops
 		// Patterns: "loops in X", "recursive calls in X"
-		params := map[string]interface{}{}
-		funcName := extractFunctionNameFromQuery(query)
-		if funcName != "" {
-			// CB-31d: Resolve entry_point symbol if possible
-			if deps != nil && deps.SymbolIndex != nil {
-				sessionID := ""
-				if deps.Session != nil {
-					sessionID = deps.Session.ID
-				}
-				resolvedFunc, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, funcName, deps)
-				if err == nil {
-					slog.Debug("CB-31d: resolved entry_point symbol for find_loops",
-						slog.String("raw", funcName),
-						slog.String("resolved", resolvedFunc),
-						slog.Float64("confidence", confidence),
-					)
-					funcName = resolvedFunc
-				}
-			}
-			params["entry_point"] = funcName
-		}
+		// IT-00a-1 Phase 3: Multi-candidate extraction + candidate-loop resolution
+		// find_loops accepts top, min_size, show_nesting — no entry_point parameter.
+		// The old code extracted entry_point but it was silently ignored by parseParams().
 		slog.Debug("CB-31d: extracted find_loops params",
 			slog.String("tool", toolName),
 		)
-		return params, nil
+		return tools.FindLoopsParams{
+			Top:         20,
+			MinSize:     1,
+			ShowNesting: true,
+		}, nil
 
 	case "find_weighted_criticality":
 		// CB-31d: Extract top N parameter
@@ -1843,30 +2016,24 @@ func (p *ExecutePhase) extractToolParameters(
 			slog.String("tool", toolName),
 			slog.Int("top", top),
 		)
-		return map[string]interface{}{
-			"top": top,
+		return tools.FindWeightedCriticalityParams{
+			Top: top,
 		}, nil
 
 	case "find_module_api":
 		// CB-31d: Extract optional top N and min_community_size parameters
 		// Patterns: "top 5 module APIs", "module APIs with at least 10 functions"
 		// Note: Tool analyzes communities detected by community detection, not specific modules
-		params := map[string]interface{}{}
-
-		// Try to extract top N
 		top := extractTopNFromQuery(query, 10)
-		if top != 10 {
-			params["top"] = top
-		}
-
-		// Could extract min_community_size if patterns like "with at least X functions" exist
-		// For now, use defaults
 
 		slog.Debug("CB-31d: extracted find_module_api params",
 			slog.String("tool", toolName),
 			slog.Int("top", top),
 		)
-		return params, nil
+		return tools.FindModuleAPIParams{
+			CommunityID: -1,
+			Top:         top,
+		}, nil
 
 	case "Grep":
 		// P0-2: Extract pattern parameter for LLM-generated Grep calls (Feb 14, 2026)
@@ -1893,47 +2060,43 @@ func (p *ExecutePhase) extractToolParameters(
 			return nil, fmt.Errorf("could not extract search pattern from query for Grep")
 		}
 
-		params := map[string]interface{}{
-			"pattern": pattern,
-		}
-
-		// Try to extract output_mode if specified
+		// Extract output_mode
+		outputMode := "content" // Default to showing content
 		lowerQuery := strings.ToLower(query)
 		if strings.Contains(lowerQuery, "file") && (strings.Contains(lowerQuery, "list") || strings.Contains(lowerQuery, "which")) {
-			params["output_mode"] = "files_with_matches"
+			outputMode = "files_with_matches"
 		} else if strings.Contains(lowerQuery, "count") || strings.Contains(lowerQuery, "how many") {
-			params["output_mode"] = "count"
-		} else {
-			params["output_mode"] = "content" // Default to showing content
+			outputMode = "count"
 		}
 
 		slog.Debug("P0-2: extracted Grep params",
 			slog.String("tool", toolName),
 			slog.String("pattern", pattern),
-			slog.String("output_mode", params["output_mode"].(string)),
+			slog.String("output_mode", outputMode),
 		)
-		return params, nil
+		return tools.GrepToolParams{
+			Pattern:    pattern,
+			OutputMode: outputMode,
+		}, nil
 
 	case "check_reducibility":
 		// CB-31d Item 1: Extract show_irreducible parameter (optional, default true)
 		// Patterns: "check reducibility", "is this code reducible", "find irreducible regions"
 		// Default behavior: Show irreducible regions for debugging
-		params := map[string]interface{}{
-			"show_irreducible": true, // Default: show irreducible regions
-		}
-
-		// Check if user explicitly asks to hide irreducible regions
+		showIrreducible := true
 		lowerQuery := strings.ToLower(query)
 		if strings.Contains(lowerQuery, "hide") || strings.Contains(lowerQuery, "without") ||
 			strings.Contains(lowerQuery, "no details") || strings.Contains(lowerQuery, "summary only") {
-			params["show_irreducible"] = false
+			showIrreducible = false
 		}
 
 		slog.Debug("CB-31d: extracted check_reducibility params",
 			slog.String("tool", toolName),
-			slog.Bool("show_irreducible", params["show_irreducible"].(bool)),
+			slog.Bool("show_irreducible", showIrreducible),
 		)
-		return params, nil
+		return tools.CheckReducibilityParams{
+			ShowIrreducible: showIrreducible,
+		}, nil
 
 	case "get_call_chain":
 		// CB-31d Item 2: Extract function_name, direction, and max_depth parameters
@@ -1942,7 +2105,12 @@ func (p *ExecutePhase) extractToolParameters(
 		// Optional: direction (default "downstream"), max_depth (default 5, range 1-10)
 
 		// Extract function name (required)
-		funcName := extractFunctionNameFromQuery(query)
+		// IT-00a-1 Phase 3: Multi-candidate extraction + candidate-loop resolution
+		candidates := extractFunctionNameCandidates(query)
+		funcName := ""
+		if len(candidates) > 0 {
+			funcName = candidates[0]
+		}
 		if funcName == "" && ctx != nil {
 			funcName = extractFunctionNameFromContext(ctx)
 		}
@@ -1955,19 +2123,57 @@ func (p *ExecutePhase) extractToolParameters(
 		}
 
 		// CB-31d: Resolve function name if possible
-		if deps != nil && deps.SymbolIndex != nil {
+		// IT-00a-1: Use candidate-loop resolution when multiple candidates available
+		// IT-05 Run 2 Fix: Dot-notation names (Type.Method like "Engine.runRenderLoop")
+		// fail agent-side resolution because the index stores bare method names, not
+		// "Type.Method". The tool's ResolveFunctionWithFuzzy with WithBareMethodFallback()
+		// handles this correctly. Skip pre-resolution for dot-notation and let the tool
+		// resolve it.
+		isDotNotation := strings.Contains(funcName, ".") && !strings.Contains(funcName, "/")
+		if isDotNotation {
+			// CR-R2-4: Log the passthrough decision for observability.
+			slog.Debug("IT-05: skipping agent-side resolution for dot-notation name",
+				slog.String("tool", toolName),
+				slog.String("func_name", funcName),
+			)
+		} else if deps != nil && deps.SymbolIndex != nil {
 			sessionID := ""
 			if deps.Session != nil {
 				sessionID = deps.Session.ID
 			}
-			resolvedFunc, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, funcName, deps)
-			if err == nil {
-				slog.Debug("CB-31d: resolved function symbol for get_call_chain",
-					slog.String("raw", funcName),
-					slog.String("resolved", resolvedFunc),
-					slog.Float64("confidence", confidence),
-				)
-				funcName = resolvedFunc
+			if len(candidates) > 1 {
+				resolvedFunc, rawName, confidence, err := resolveFirstCandidate(goCtx, &p.symbolCache, sessionID, candidates, deps)
+				if err == nil {
+					slog.Debug("CB-31d: resolved function symbol for get_call_chain",
+						slog.String("raw", rawName),
+						slog.String("resolved", resolvedFunc),
+						slog.Float64("confidence", confidence),
+						slog.Int("candidates", len(candidates)),
+					)
+					funcName = resolvedFunc
+				}
+			} else {
+				resolvedFunc, confidence, err := resolveSymbolCached(&p.symbolCache, sessionID, funcName, deps)
+				if err == nil {
+					slog.Debug("CB-31d: resolved function symbol for get_call_chain",
+						slog.String("raw", funcName),
+						slog.String("resolved", resolvedFunc),
+						slog.Float64("confidence", confidence),
+					)
+					funcName = resolvedFunc
+				}
+			}
+		}
+
+		// IT-12: Conceptual symbol resolution fallback.
+		// When the extracted function name doesn't resolve (e.g., "assigning" from
+		// "call chain from assigning a material to shader compilation"), search the
+		// symbol index for keywords and use the LLM to pick the best starting symbol.
+		if deps != nil && deps.SymbolIndex != nil && deps.ParamExtractor != nil {
+			resolved := resolveConceptualName(goCtx, funcName, query,
+				deps.SymbolIndex, deps.ParamExtractor, deps.GraphAnalytics)
+			if resolved != funcName {
+				funcName = resolved
 			}
 		}
 
@@ -2001,10 +2207,31 @@ func (p *ExecutePhase) extractToolParameters(
 			maxDepth = 10
 		}
 
-		params := map[string]interface{}{
-			"function_name": funcName,
-			"direction":     direction,
-			"max_depth":     maxDepth,
+		callChainParams := tools.GetCallChainParams{
+			FunctionName: funcName,
+			Direction:    direction,
+			MaxDepth:     maxDepth,
+			PackageHint:  extractPackageContextFromQuery(query),
+		}
+
+		// IT-05 R5: Dual-endpoint resolution for "from X to Y" queries.
+		// When query has a destination, resolve it too and pass as optional param.
+		destCandidates := extractDestinationCandidates(query)
+		if len(destCandidates) > 0 && deps != nil && deps.SymbolIndex != nil {
+			sessionID := ""
+			if deps.Session != nil {
+				sessionID = deps.Session.ID
+			}
+			destID, destName, destConf, destErr := resolveFirstCandidate(
+				context.Background(), &p.symbolCache, sessionID, destCandidates, deps)
+			if destErr == nil && destConf > 0 {
+				callChainParams.DestinationName = destID
+				slog.Debug("IT-05 R5: resolved destination for get_call_chain",
+					slog.String("raw", destName),
+					slog.String("resolved", destID),
+					slog.Float64("confidence", destConf),
+				)
+			}
 		}
 
 		slog.Debug("CB-31d: extracted get_call_chain params",
@@ -2013,11 +2240,407 @@ func (p *ExecutePhase) extractToolParameters(
 			slog.String("direction", direction),
 			slog.Int("max_depth", maxDepth),
 		)
-		return params, nil
+		return callChainParams, nil
 
 	default:
 		// For other tools, fallback to Main LLM
 		return nil, fmt.Errorf("parameter extraction not implemented for tool: %s", toolName)
+	}
+}
+
+// enhanceParamsWithLLM attempts to improve regex-extracted parameters using the LLM.
+//
+// Description:
+//
+//	IT-08b: Takes the regex extraction result, sends it to the LLM as a hint
+//	along with the tool schema and user query. The LLM can confirm or correct
+//	the parameters. If the LLM call fails for any reason, the original regex
+//	result is returned unchanged (safe fallback).
+//
+// Inputs:
+//
+//	ctx - Context for cancellation.
+//	deps - Phase dependencies (must have ParamExtractor set).
+//	toolName - The name of the tool.
+//	toolDefs - Available tool definitions.
+//	regexResult - The regex extraction result to enhance.
+//
+// Outputs:
+//
+//	tools.TypedParams - Enhanced params, or original regexResult on failure.
+func (p *ExecutePhase) enhanceParamsWithLLM(
+	ctx context.Context,
+	deps *Dependencies,
+	toolName string,
+	toolDefs []tools.ToolDefinition,
+	regexResult tools.TypedParams,
+) tools.TypedParams {
+	if deps.ParamExtractor == nil || !deps.ParamExtractor.IsEnabled() {
+		return regexResult
+	}
+
+	// Find tool definition for schema
+	var toolDef *tools.ToolDefinition
+	for i := range toolDefs {
+		if toolDefs[i].Name == toolName {
+			toolDef = &toolDefs[i]
+			break
+		}
+	}
+	if toolDef == nil {
+		return regexResult
+	}
+
+	// Build param schemas from tool definition
+	schemas := buildParamSchemas(toolDef)
+	if len(schemas) == 0 {
+		return regexResult
+	}
+
+	// Get regex hint as map
+	regexHint := regexResult.ToMap()
+
+	// Call LLM extractor
+	enhanced, llmErr := deps.ParamExtractor.ExtractParams(
+		ctx, deps.Query, toolName, schemas, regexHint,
+	)
+	if llmErr != nil {
+		slog.Warn("IT-08b: LLM param extraction failed, using regex fallback",
+			slog.String("tool", toolName),
+			slog.String("error", llmErr.Error()),
+		)
+		return regexResult
+	}
+
+	// Convert enhanced map back to TypedParams
+	converted, convErr := convertMapToTypedParams(toolName, enhanced)
+	if convErr != nil {
+		slog.Warn("IT-08b: Failed to convert LLM params, using regex fallback",
+			slog.String("tool", toolName),
+			slog.String("error", convErr.Error()),
+		)
+		return regexResult
+	}
+
+	return converted
+}
+
+// buildParamSchemas converts a ToolDefinition's parameters to ParamExtractorSchema.
+// Schemas are sorted by name for deterministic LLM prompt construction.
+func buildParamSchemas(toolDef *tools.ToolDefinition) []agent.ParamExtractorSchema {
+	if toolDef == nil || len(toolDef.Parameters) == 0 {
+		return nil
+	}
+
+	// Collect param names and sort for deterministic order.
+	// Go map iteration is non-deterministic; sorting ensures the LLM
+	// prompt is identical for the same tool across invocations.
+	names := make([]string, 0, len(toolDef.Parameters))
+	for name := range toolDef.Parameters {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	schemas := make([]agent.ParamExtractorSchema, 0, len(toolDef.Parameters))
+	for _, name := range names {
+		paramDef := toolDef.Parameters[name]
+		defaultStr := ""
+		if paramDef.Default != nil {
+			defaultStr = fmt.Sprintf("%v", paramDef.Default)
+		}
+		schemas = append(schemas, agent.ParamExtractorSchema{
+			Name:        name,
+			Type:        string(paramDef.Type),
+			Required:    paramDef.Required,
+			Default:     defaultStr,
+			Description: paramDef.Description,
+		})
+	}
+	return schemas
+}
+
+// convertMapToTypedParams converts the LLM's map[string]any output back to the
+// correct TypedParams concrete type based on tool name.
+//
+// Description:
+//
+//	IT-08b: Each tool has a specific TypedParams struct. This function converts
+//	from the generic map to the concrete type, applying type coercion and
+//	defaults as needed.
+//
+// Inputs:
+//
+//	toolName - The tool name.
+//	params - The LLM-extracted parameters.
+//
+// Outputs:
+//
+//	tools.TypedParams - The concrete typed params.
+//	error - Non-nil if conversion fails.
+func convertMapToTypedParams(toolName string, params map[string]any) (tools.TypedParams, error) {
+	switch toolName {
+	case "find_dead_code":
+		return tools.FindDeadCodeParams{
+			Package:         getStringParam(params, "package", ""),
+			IncludeExported: getBoolParam(params, "include_exported", false),
+			Limit:           getIntParam(params, "limit", 50),
+			ExcludeTests:    getBoolParam(params, "exclude_tests", true),
+		}, nil
+
+	case "find_hotspots":
+		return tools.FindHotspotsParams{
+			Top:          getIntParam(params, "top", 10),
+			Kind:         getStringParam(params, "kind", "all"),
+			Package:      getStringParam(params, "package", ""),
+			ExcludeTests: getBoolParam(params, "exclude_tests", true),
+			SortBy:       getStringParam(params, "sort_by", "score"),
+		}, nil
+
+	case "find_callers":
+		return tools.FindCallersParams{
+			FunctionName: getStringParam(params, "function_name", ""),
+			Limit:        getIntParam(params, "limit", 20),
+			PackageHint:  getStringParam(params, "package_hint", ""),
+		}, nil
+
+	case "find_callees":
+		return tools.FindCalleesParams{
+			FunctionName: getStringParam(params, "function_name", ""),
+			Limit:        getIntParam(params, "limit", 20),
+			PackageHint:  getStringParam(params, "package_hint", ""),
+		}, nil
+
+	case "find_implementations":
+		return tools.FindImplementationsParams{
+			InterfaceName: getStringParam(params, "interface_name", ""),
+			Limit:         getIntParam(params, "limit", 20),
+			PackageHint:   getStringParam(params, "package_hint", ""),
+		}, nil
+
+	case "find_references":
+		return tools.FindReferencesParams{
+			SymbolName:  getStringParam(params, "symbol_name", ""),
+			Limit:       getIntParam(params, "limit", 20),
+			PackageHint: getStringParam(params, "package_hint", ""),
+		}, nil
+
+	case "find_communities":
+		return tools.FindCommunitiesParams{
+			MinSize:        getIntParam(params, "min_size", 3),
+			Resolution:     getFloat64Param(params, "resolution", 1.0),
+			Top:            getIntParam(params, "top", 20),
+			ShowCrossEdges: getBoolParam(params, "show_cross_edges", true),
+			PackageFilter:  getStringParam(params, "package_filter", ""),
+		}, nil
+
+	case "find_cycles":
+		return tools.FindCyclesParams{
+			MinSize:       getIntParam(params, "min_size", 2),
+			Limit:         getIntParam(params, "limit", 20),
+			PackageFilter: getStringParam(params, "package_filter", ""),
+			SortBy:        getStringParam(params, "sort_by", "length_desc"),
+		}, nil
+
+	case "find_dominators":
+		return tools.FindDominatorsParams{
+			Target:   getStringParam(params, "target", ""),
+			Entry:    getStringParam(params, "entry", ""),
+			ShowTree: getBoolParam(params, "show_tree", false),
+		}, nil
+
+	case "find_critical_path":
+		return tools.FindCriticalPathParams{
+			Target: getStringParam(params, "target", ""),
+			Entry:  getStringParam(params, "entry", ""),
+		}, nil
+
+	case "find_path":
+		return tools.FindPathParams{
+			From: getStringParam(params, "from", ""),
+			To:   getStringParam(params, "to", ""),
+		}, nil
+
+	case "find_important":
+		return tools.FindImportantParams{
+			Top:          getIntParam(params, "top", 10),
+			Kind:         getStringParam(params, "kind", "all"),
+			Package:      getStringParam(params, "package", ""),
+			ExcludeTests: getBoolParam(params, "exclude_tests", true),
+			Reverse:      getBoolParam(params, "reverse", false),
+		}, nil
+
+	case "find_symbol":
+		return tools.FindSymbolParams{
+			Name:    getStringParam(params, "name", ""),
+			Kind:    getStringParam(params, "kind", ""),
+			Package: getStringParam(params, "package", ""),
+		}, nil
+
+	case "find_articulation_points":
+		return tools.FindArticulationPointsParams{
+			Top:            getIntParam(params, "top", 20),
+			IncludeBridges: getBoolParam(params, "include_bridges", true),
+		}, nil
+
+	case "find_common_dependency":
+		targetsRaw, ok := params["targets"]
+		targets := []string{}
+		if ok {
+			if arr, isArr := targetsRaw.([]any); isArr {
+				for _, v := range arr {
+					if s, isStr := v.(string); isStr {
+						targets = append(targets, s)
+					}
+				}
+			}
+		}
+		return tools.FindCommonDependencyParams{
+			Targets: targets,
+			Entry:   getStringParam(params, "entry", ""),
+		}, nil
+
+	case "find_merge_points":
+		return tools.FindMergePointsParams{
+			Top:        getIntParam(params, "top", 20),
+			MinSources: getIntParam(params, "min_sources", 2),
+		}, nil
+
+	case "find_control_dependencies":
+		return tools.FindControlDependenciesParams{
+			Target: getStringParam(params, "target", ""),
+			Depth:  getIntParam(params, "depth", 5),
+		}, nil
+
+	case "find_loops":
+		return tools.FindLoopsParams{
+			Top:         getIntParam(params, "top", 20),
+			MinSize:     getIntParam(params, "min_size", 1),
+			ShowNesting: getBoolParam(params, "show_nesting", true),
+		}, nil
+
+	case "find_weighted_criticality":
+		return tools.FindWeightedCriticalityParams{
+			Top:          getIntParam(params, "top", 20),
+			Entry:        getStringParam(params, "entry", ""),
+			ShowQuadrant: getBoolParam(params, "show_quadrant", true),
+		}, nil
+
+	case "find_module_api":
+		return tools.FindModuleAPIParams{
+			CommunityID:      getIntParam(params, "community_id", -1),
+			Top:              getIntParam(params, "top", 10),
+			MinCommunitySize: getIntParam(params, "min_community_size", 3),
+		}, nil
+
+	case "get_call_chain":
+		return tools.GetCallChainParams{
+			FunctionName:    getStringParam(params, "function_name", ""),
+			Direction:       getStringParam(params, "direction", "downstream"),
+			MaxDepth:        getIntParam(params, "max_depth", 5),
+			PackageHint:     getStringParam(params, "package_hint", ""),
+			DestinationName: getStringParam(params, "destination_name", ""),
+		}, nil
+
+	case "check_reducibility":
+		return tools.CheckReducibilityParams{
+			ShowIrreducible: getBoolParam(params, "show_irreducible", true),
+		}, nil
+
+	case "explore_package":
+		return tools.ExplorePackageParams{
+			Package:             getStringParam(params, "package", ""),
+			IncludeDependencies: getBoolParam(params, "include_dependencies", true),
+			IncludeDependents:   getBoolParam(params, "include_dependents", true),
+		}, nil
+
+	case "graph_overview":
+		return tools.GraphOverviewParams{
+			Depth:               getIntParam(params, "depth", 2),
+			IncludeDependencies: getBoolParam(params, "include_dependencies", true),
+			IncludeMetrics:      getBoolParam(params, "include_metrics", true),
+		}, nil
+
+	case "Grep":
+		return tools.GrepToolParams{
+			Pattern:    getStringParam(params, "pattern", ""),
+			OutputMode: getStringParam(params, "output_mode", "content"),
+		}, nil
+
+	case "list_packages", "find_entry_points", "find_extractable_regions":
+		return tools.EmptyParams{Tool: toolName}, nil
+
+	default:
+		return tools.MapParams{Tool: toolName, Params: params}, nil
+	}
+}
+
+// =============================================================================
+// Parameter type conversion helpers
+// =============================================================================
+
+// getStringParam extracts a string parameter from a map with a default.
+func getStringParam(params map[string]any, key, defaultVal string) string {
+	v, ok := params[key]
+	if !ok {
+		return defaultVal
+	}
+	s, ok := v.(string)
+	if !ok {
+		return defaultVal
+	}
+	return s
+}
+
+// getBoolParam extracts a boolean parameter from a map with a default.
+func getBoolParam(params map[string]any, key string, defaultVal bool) bool {
+	v, ok := params[key]
+	if !ok {
+		return defaultVal
+	}
+	b, ok := v.(bool)
+	if ok {
+		return b
+	}
+	// Handle string "true"/"false"
+	if s, ok := v.(string); ok {
+		return strings.EqualFold(s, "true")
+	}
+	return defaultVal
+}
+
+// getIntParam extracts an integer parameter from a map with a default.
+func getIntParam(params map[string]any, key string, defaultVal int) int {
+	v, ok := params[key]
+	if !ok {
+		return defaultVal
+	}
+	switch n := v.(type) {
+	case int:
+		return n
+	case float64:
+		return int(n)
+	case int64:
+		return int(n)
+	default:
+		return defaultVal
+	}
+}
+
+// getFloat64Param extracts a float64 parameter from a map with a default.
+func getFloat64Param(params map[string]any, key string, defaultVal float64) float64 {
+	v, ok := params[key]
+	if !ok {
+		return defaultVal
+	}
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	default:
+		return defaultVal
 	}
 }
 
@@ -2044,7 +2667,7 @@ func (p *ExecutePhase) executeToolDirectlyWithFallback(
 	ctx context.Context,
 	deps *Dependencies,
 	toolName string,
-	params map[string]interface{},
+	params tools.TypedParams,
 	toolDefs []tools.ToolDefinition,
 ) (*PhaseResult, error) {
 	start := time.Now()
@@ -2055,7 +2678,7 @@ func (p *ExecutePhase) executeToolDirectlyWithFallback(
 		return nil, fmt.Errorf("tool implementation not found: %s", toolName)
 	}
 
-	// Execute the tool
+	// Execute the tool — params are already TypedParams, pass directly
 	result, err := tool.Execute(ctx, params)
 	duration := time.Since(start)
 
@@ -2083,22 +2706,43 @@ func (p *ExecutePhase) executeToolDirectlyWithFallback(
 		stepBuilder = stepBuilder.WithMetadata("result_preview", outputStr)
 	}
 
+	// GR-59 Rev 3: Merge tool's own TraceStep metadata into the forced call step.
+	// This ensures sessionHasPriorGraphToolResults() can detect that graph tools
+	// returned substantive results (match_count, total_implementations, etc.)
+	// even when executed via the forced tool call path.
+	if result != nil && result.TraceStep != nil && result.TraceStep.Metadata != nil {
+		for k, v := range result.TraceStep.Metadata {
+			stepBuilder = stepBuilder.WithMetadata(k, v)
+		}
+	}
+
 	deps.Session.RecordTraceStep(stepBuilder.Build())
 
-	// CB-30c: Estimate and track tokens for tool output
-	// This ensures token metrics are non-zero even when using hard-forced tools
-	// without LLM calls (which was causing tokens_used=0 in trace_logs_36).
-	if result != nil && result.Output != nil {
-		outputStr := fmt.Sprintf("%v", result.Output)
-		estimatedTokens := estimateToolResultTokens(outputStr)
-		if estimatedTokens > 0 {
-			deps.Session.IncrementMetric(agent.MetricTokens, estimatedTokens)
-			slog.Debug("CB-30c: Estimated tokens for hard-forced tool",
-				slog.String("tool", toolName),
-				slog.Int("estimated_tokens", estimatedTokens),
-				slog.Int("output_len", len(outputStr)),
-			)
-		}
+	// GR-59 Rev 4: Set session flag when forced graph tool completes successfully.
+	// Graph results are authoritative whether positive ("Found 3 implementations")
+	// or zero ("Symbol 'X' not found"). Both are definitive answers — the graph
+	// analyzed every source file. The LLM must synthesize from these results,
+	// not spiral into Grep/Glob loops trying to verify or search independently.
+	if graphToolsWithSubstantiveResults[toolName] &&
+		result != nil && result.Success {
+		deps.Session.SetGraphToolHadSubstantiveResults(true)
+		slog.Info("GR-59 Rev 4: Forced graph tool completed — will force synthesis",
+			slog.String("session_id", deps.Session.ID),
+			slog.String("tool", toolName),
+			slog.Int("output_len", len(result.OutputText)),
+			slog.Bool("has_positive_results", hasSubstantiveGraphResult(result.OutputText)),
+		)
+	}
+
+	// CB-30c: Track tokens for tool output.
+	// IT-06c I-12: Use result.TokensUsed (computed by the tool from OutputText)
+	// instead of fmt.Sprintf("%v", result.Output) which inflates counts ~13.5x.
+	if result != nil && result.TokensUsed > 0 {
+		deps.Session.IncrementMetric(agent.MetricTokens, result.TokensUsed)
+		slog.Debug("CB-30c: Token count for hard-forced tool",
+			slog.String("tool", toolName),
+			slog.Int("tokens_used", result.TokensUsed),
+		)
 	}
 
 	// Update context with tool result using ContextManager

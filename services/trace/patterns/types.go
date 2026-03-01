@@ -8,7 +8,7 @@
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
 
-// Package patterns provides design pattern and anti-pattern detection for Code Buddy.
+// Package patterns provides design pattern and anti-pattern detection for Trace.
 //
 // # Description
 //

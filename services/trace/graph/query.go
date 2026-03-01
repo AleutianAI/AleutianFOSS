@@ -450,22 +450,25 @@ func (g *Graph) FindCalleesByID(ctx context.Context, symbolID string, opts ...Qu
 	return result, nil
 }
 
-// FindImplementationsByID returns all types that implement the given interface.
+// FindImplementationsByID returns all types that implement or extend the given type.
 //
 // Description:
 //
-//	Finds all types that have an IMPLEMENTS edge to the interface.
-//	Uses interface ID for unambiguous lookup.
+//	Finds all types that have an IMPLEMENTS or EMBEDS edge to the target.
+//	IMPLEMENTS edges come from Go interface satisfaction and TS implements clauses.
+//	EMBEDS edges come from Python/JS/TS class extends and Go struct embedding.
+//	Uses target ID for unambiguous lookup. Deduplicates results when a type
+//	has both edge types to the same target.
 //
 // Inputs:
 //
 //	ctx - Context for cancellation
-//	interfaceID - ID of the interface to find implementers for
+//	interfaceID - ID of the interface, class, or struct to find implementers for
 //	opts - Query options (Limit, Timeout)
 //
 // Outputs:
 //
-//	*QueryResult - Types implementing the interface (empty if none)
+//	*QueryResult - Types implementing/extending the target (empty if none)
 //	error - Non-nil if context error occurs
 func (g *Graph) FindImplementationsByID(ctx context.Context, interfaceID string, opts ...QueryOption) (*QueryResult, error) {
 	start := time.Now()
@@ -481,6 +484,11 @@ func (g *Graph) FindImplementationsByID(ctx context.Context, interfaceID string,
 		return result, nil
 	}
 
+	// IT-03 C-3b: Check both EdgeTypeImplements (Go interfaces, TS implements)
+	// AND EdgeTypeEmbeds (Python/JS/TS class extends, Go struct embedding).
+	// Class inheritance creates EdgeTypeEmbeds edges via extractEmbedsEdges
+	// in the builder, not EdgeTypeImplements.
+	seen := make(map[string]bool)
 	for _, edge := range node.Incoming {
 		if err := ctx.Err(); err != nil {
 			result.Truncated = true
@@ -488,7 +496,7 @@ func (g *Graph) FindImplementationsByID(ctx context.Context, interfaceID string,
 			return result, nil
 		}
 
-		if edge.Type != EdgeTypeImplements {
+		if edge.Type != EdgeTypeImplements && edge.Type != EdgeTypeEmbeds {
 			continue
 		}
 
@@ -498,7 +506,8 @@ func (g *Graph) FindImplementationsByID(ctx context.Context, interfaceID string,
 		}
 
 		implNode, exists := g.nodes[edge.FromID]
-		if exists {
+		if exists && implNode.Symbol != nil && !seen[implNode.ID] {
+			seen[implNode.ID] = true
 			result.Symbols = append(result.Symbols, implNode.Symbol)
 		}
 	}
@@ -533,16 +542,38 @@ func (g *Graph) FindReferencesByID(ctx context.Context, symbolID string, opts ..
 	}
 
 	locations := make([]ast.Location, 0)
+
+	// IT-06d Bug 10: Two-pass edge collection ensures EdgeTypeReferences and
+	// EdgeTypeImplements edges appear before EdgeTypeCalls edges, regardless of
+	// graph insertion order. Edges are inserted in builder call order: extractCallEdges
+	// runs before extractTypeRefEdges, so for highly-called symbols (e.g., pandas.Series
+	// with hundreds of asv_bench EdgeTypeCalls), the call edges fill the fetch window and
+	// annotation-based references (core/frame.py etc.) are never returned.
+	//
+	// Pass 1: annotation-based references (most semantically informative).
 	for _, edge := range node.Incoming {
 		if err := ctx.Err(); err != nil {
 			return locations, nil
 		}
-
 		if len(locations) >= options.Limit {
-			break
+			return locations, nil
 		}
+		if edge.Type == EdgeTypeReferences || edge.Type == EdgeTypeImplements {
+			locations = append(locations, edge.Location)
+		}
+	}
 
-		locations = append(locations, edge.Location)
+	// Pass 2: call-based references (constructor calls, direct invocations).
+	for _, edge := range node.Incoming {
+		if err := ctx.Err(); err != nil {
+			return locations, nil
+		}
+		if len(locations) >= options.Limit {
+			return locations, nil
+		}
+		if edge.Type != EdgeTypeReferences && edge.Type != EdgeTypeImplements {
+			locations = append(locations, edge.Location)
+		}
 	}
 
 	return locations, nil
@@ -628,22 +659,23 @@ func (g *Graph) FindCalleesByName(ctx context.Context, name string, opts ...Quer
 	return results, nil
 }
 
-// FindImplementationsByName returns implementations for all interfaces matching the given name.
+// FindImplementationsByName returns implementations for all types matching the given name.
 //
 // Description:
 //
-//	When multiple interfaces have the same name, this returns implementers
-//	for each, keyed by interface ID.
+//	When multiple types (interfaces, classes, structs) share the same name,
+//	this returns implementers/subclasses for each, keyed by type ID.
+//	Non-type symbols (functions, variables, etc.) are filtered out.
 //
 // Inputs:
 //
 //	ctx - Context for cancellation
-//	name - Interface name to search for
-//	opts - Query options (Limit per interface, Timeout)
+//	name - Interface/class/struct name to search for
+//	opts - Query options (Limit per target type, Timeout)
 //
 // Outputs:
 //
-//	map[string]*QueryResult - Interface ID → implementers of that interface
+//	map[string]*QueryResult - Type ID → implementers/subclasses of that type
 //	error - Non-nil if context error occurs
 func (g *Graph) FindImplementationsByName(ctx context.Context, name string, opts ...QueryOption) (map[string]*QueryResult, error) {
 	results := make(map[string]*QueryResult)
@@ -654,13 +686,18 @@ func (g *Graph) FindImplementationsByName(ctx context.Context, name string, opts
 			return results, nil
 		}
 
-		// Only query if it's an interface
-		if node.Symbol != nil && node.Symbol.Kind == ast.SymbolKindInterface {
-			result, err := g.FindImplementationsByID(ctx, node.ID, opts...)
-			if err != nil {
-				return results, err
+		// IT-03 C-3b: Accept interfaces, classes, and structs as valid targets.
+		// Interfaces have EdgeTypeImplements edges from concrete types.
+		// Classes/structs have EdgeTypeEmbeds edges from subclasses/embedding types.
+		if node.Symbol != nil {
+			switch node.Symbol.Kind {
+			case ast.SymbolKindInterface, ast.SymbolKindClass, ast.SymbolKindStruct:
+				result, err := g.FindImplementationsByID(ctx, node.ID, opts...)
+				if err != nil {
+					return results, err
+				}
+				results[node.ID] = result
 			}
-			results[node.ID] = result
 		}
 	}
 

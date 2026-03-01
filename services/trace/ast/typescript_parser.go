@@ -26,6 +26,11 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
+const (
+	// maxDecoratorArgDepth is the maximum recursion depth for walking decorator arguments.
+	maxDecoratorArgDepth = 5
+)
+
 // TypeScriptParserOption configures a TypeScriptParser instance.
 type TypeScriptParserOption func(*TypeScriptParser)
 
@@ -513,13 +518,17 @@ func (p *TypeScriptParser) extractDeclarations(ctx context.Context, root *sitter
 		case "export_statement":
 			p.processExportStatement(ctx, child, content, filePath, result)
 		case "function_declaration":
-			if fn := p.processFunction(ctx, child, content, filePath, nil, false); fn != nil {
+			fn, dynImps := p.processFunction(ctx, child, content, filePath, nil, false)
+			if fn != nil {
 				result.Symbols = append(result.Symbols, fn)
 			}
+			result.Imports = append(result.Imports, dynImps...)
 		case "class_declaration":
-			if cls := p.processClass(ctx, child, content, filePath, nil, false); cls != nil {
+			cls, dynImps := p.processClass(ctx, child, content, filePath, nil, false)
+			if cls != nil {
 				result.Symbols = append(result.Symbols, cls)
 			}
+			result.Imports = append(result.Imports, dynImps...)
 		case "interface_declaration":
 			if iface := p.processInterface(child, content, filePath, false); iface != nil {
 				result.Symbols = append(result.Symbols, iface)
@@ -533,9 +542,23 @@ func (p *TypeScriptParser) extractDeclarations(ctx context.Context, root *sitter
 				result.Symbols = append(result.Symbols, enum)
 			}
 		case "lexical_declaration":
-			p.processLexicalDeclaration(child, content, filePath, result, false)
+			p.processLexicalDeclaration(ctx, child, content, filePath, result, false)
+			// IT-06e Bug 4: scan for top-level dynamic import() patterns
+			result.Imports = append(result.Imports, p.scanForDynamicImports(child, content, filePath)...)
 		case "variable_declaration":
-			p.processVariableDeclaration(child, content, filePath, result, false)
+			p.processVariableDeclaration(ctx, child, content, filePath, result, false)
+			// IT-06e Bug 4: scan for top-level dynamic import() patterns
+			result.Imports = append(result.Imports, p.scanForDynamicImports(child, content, filePath)...)
+		case "expression_statement":
+			// IT-06e Bug 4: scan for top-level dynamic import() expression statements
+			result.Imports = append(result.Imports, p.scanForDynamicImports(child, content, filePath)...)
+		case "abstract_class_declaration":
+			// IT-03a Phase 13 T-4: Handle non-exported abstract classes
+			cls, dynImps := p.processAbstractClass(ctx, child, content, filePath, nil, false)
+			if cls != nil {
+				result.Symbols = append(result.Symbols, cls)
+			}
+			result.Imports = append(result.Imports, dynImps...)
 		}
 	}
 }
@@ -543,29 +566,56 @@ func (p *TypeScriptParser) extractDeclarations(ctx context.Context, root *sitter
 // processExportStatement handles export statements.
 func (p *TypeScriptParser) processExportStatement(ctx context.Context, node *sitter.Node, content []byte, filePath string, result *ParseResult) {
 	var decorators []string
+	var decoratorArgs map[string][]string
 	isDefault := false
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
 		switch child.Type() {
 		case "decorator":
-			decorators = append(decorators, p.extractDecoratorName(child, content))
+			name, args := p.extractDecoratorNameAndArgs(child, content)
+			if name != "" {
+				decorators = append(decorators, name)
+				if len(args) > 0 {
+					if decoratorArgs == nil {
+						decoratorArgs = make(map[string][]string)
+					}
+					decoratorArgs[name] = args
+				}
+			}
 		case "default":
 			isDefault = true
 		case "function_declaration":
-			if fn := p.processFunction(ctx, child, content, filePath, decorators, true); fn != nil {
+			fn, dynImps := p.processFunction(ctx, child, content, filePath, decorators, true)
+			if fn != nil {
 				if isDefault {
 					if fn.Metadata == nil {
 						fn.Metadata = &SymbolMetadata{}
 					}
-					// Note: We could add an IsDefault field, but for now just mark exported
+				}
+				// IT-03a A-3: Attach decorator arguments
+				if len(decoratorArgs) > 0 {
+					if fn.Metadata == nil {
+						fn.Metadata = &SymbolMetadata{}
+					}
+					fn.Metadata.DecoratorArgs = decoratorArgs
 				}
 				result.Symbols = append(result.Symbols, fn)
 			}
+			result.Imports = append(result.Imports, dynImps...)
 		case "class_declaration":
-			if cls := p.processClass(ctx, child, content, filePath, decorators, true); cls != nil {
+			cls, dynImps := p.processClass(ctx, child, content, filePath, decorators, true)
+			if cls != nil {
+				// IT-03a A-3: Attach decorator arguments
+				if len(decoratorArgs) > 0 {
+					if cls.Metadata == nil {
+						cls.Metadata = &SymbolMetadata{}
+					}
+					cls.Metadata.DecoratorArgs = decoratorArgs
+				}
 				result.Symbols = append(result.Symbols, cls)
 			}
+			result.Imports = append(result.Imports, dynImps...)
 		case "interface_declaration":
 			if iface := p.processInterface(child, content, filePath, true); iface != nil {
 				result.Symbols = append(result.Symbols, iface)
@@ -579,17 +629,35 @@ func (p *TypeScriptParser) processExportStatement(ctx context.Context, node *sit
 				result.Symbols = append(result.Symbols, enum)
 			}
 		case "lexical_declaration":
-			p.processLexicalDeclaration(child, content, filePath, result, true)
+			p.processLexicalDeclaration(ctx, child, content, filePath, result, true)
 		case "abstract_class_declaration":
-			if cls := p.processAbstractClass(ctx, child, content, filePath, decorators, true); cls != nil {
+			cls, dynImps := p.processAbstractClass(ctx, child, content, filePath, decorators, true)
+			if cls != nil {
 				result.Symbols = append(result.Symbols, cls)
+			}
+			result.Imports = append(result.Imports, dynImps...)
+		case "string", "template_string":
+			// IT-03a B-3: Re-export source module: export { Foo } from './bar'
+			source := p.extractStringContent(child, content)
+			if source != "" {
+				result.Imports = append(result.Imports, Import{
+					Path:       source,
+					IsRelative: strings.HasPrefix(source, "."),
+					Location: Location{
+						FilePath:  filePath,
+						StartLine: int(node.StartPoint().Row) + 1,
+						EndLine:   int(node.EndPoint().Row) + 1,
+						StartCol:  int(node.StartPoint().Column),
+						EndCol:    int(node.EndPoint().Column),
+					},
+				})
 			}
 		}
 	}
 }
 
 // processFunction extracts a function declaration.
-func (p *TypeScriptParser) processFunction(ctx context.Context, node *sitter.Node, content []byte, filePath string, decorators []string, exported bool) *Symbol {
+func (p *TypeScriptParser) processFunction(ctx context.Context, node *sitter.Node, content []byte, filePath string, decorators []string, exported bool) (*Symbol, []Import) {
 	var name string
 	var typeParams []string
 	var params string
@@ -597,6 +665,7 @@ func (p *TypeScriptParser) processFunction(ctx context.Context, node *sitter.Nod
 	var docstring string
 	var isAsync bool
 	var bodyNode *sitter.Node
+	var typeRefs []TypeReference // IT-06 Bug 9
 
 	// Get preceding comment
 	docstring = p.getPrecedingComment(node, content)
@@ -612,15 +681,21 @@ func (p *TypeScriptParser) processFunction(ctx context.Context, node *sitter.Nod
 			typeParams = p.extractTypeParameters(child, content)
 		case "formal_parameters":
 			params = string(content[child.StartByte():child.EndByte()])
+			// IT-06 Bug 9: Extract type refs from parameter annotations
+			paramRefs := extractTSParamTypeRefs(child, content, filePath)
+			typeRefs = append(typeRefs, paramRefs...)
 		case "type_annotation":
 			returnType = p.extractTypeAnnotation(child, content)
+			// IT-06 Bug 9: Extract type refs from return type annotation
+			retRefs := extractTSTypeRefsFromAnnotation(child, content, filePath)
+			typeRefs = append(typeRefs, retRefs...)
 		case tsNodeStatementBlock:
 			bodyNode = child
 		}
 	}
 
 	if name == "" {
-		return nil
+		return nil, nil
 	}
 
 	// Build signature
@@ -657,16 +732,42 @@ func (p *TypeScriptParser) processFunction(ctx context.Context, node *sitter.Nod
 		}
 	}
 
-	// GR-41: Extract call sites from function body
-	if bodyNode != nil {
-		sym.Calls = p.extractCallSites(ctx, bodyNode, content, filePath)
+	// IT-03a C-2: Extract type arguments from return type
+	if returnType != "" {
+		typeArgs := extractTypeArgumentIdentifiers(returnType)
+		if len(typeArgs) > 0 {
+			if sym.Metadata == nil {
+				sym.Metadata = &SymbolMetadata{}
+			}
+			sym.Metadata.TypeArguments = typeArgs
+		}
 	}
 
-	return sym
+	// GR-41: Extract call sites from function body
+	var dynImps []Import
+	if bodyNode != nil {
+		sym.Calls, dynImps = p.extractCallSites(ctx, bodyNode, content, filePath)
+
+		// IT-03a C-3: Extract type narrowing expressions (instanceof, type predicates)
+		narrowings := p.extractTypeNarrowings(bodyNode, content)
+		if len(narrowings) > 0 {
+			if sym.Metadata == nil {
+				sym.Metadata = &SymbolMetadata{}
+			}
+			sym.Metadata.TypeNarrowings = narrowings
+		}
+	}
+
+	// IT-06 Bug 9: Set type annotation references
+	if len(typeRefs) > 0 {
+		sym.TypeReferences = typeRefs
+	}
+
+	return sym, dynImps
 }
 
 // processClass extracts a class declaration.
-func (p *TypeScriptParser) processClass(ctx context.Context, node *sitter.Node, content []byte, filePath string, decorators []string, exported bool) *Symbol {
+func (p *TypeScriptParser) processClass(ctx context.Context, node *sitter.Node, content []byte, filePath string, decorators []string, exported bool) (*Symbol, []Import) {
 	var name string
 	var typeParams []string
 	var extends string
@@ -691,7 +792,7 @@ func (p *TypeScriptParser) processClass(ctx context.Context, node *sitter.Node, 
 	}
 
 	if name == "" {
-		return nil
+		return nil, nil
 	}
 
 	sym := &Symbol{
@@ -719,46 +820,59 @@ func (p *TypeScriptParser) processClass(ctx context.Context, node *sitter.Node, 
 	}
 
 	// Extract class members
+	var dynImps []Import
 	if bodyNode != nil {
-		p.extractClassMembers(ctx, bodyNode, content, filePath, sym)
+		dynImps = p.extractClassMembers(ctx, bodyNode, content, filePath, sym)
+		// IT-03a Phase 12 F-2: Collect MethodSignatures for implicit interface matching.
+		// Without this, computeInterfaceImplementations() skips all TS classes
+		// because Metadata.Methods is empty.
+		p.collectTSClassMethods(sym)
 	}
 
-	return sym
+	return sym, dynImps
 }
 
 // processAbstractClass extracts an abstract class declaration.
-func (p *TypeScriptParser) processAbstractClass(ctx context.Context, node *sitter.Node, content []byte, filePath string, decorators []string, exported bool) *Symbol {
-	sym := p.processClass(ctx, node, content, filePath, decorators, exported)
+func (p *TypeScriptParser) processAbstractClass(ctx context.Context, node *sitter.Node, content []byte, filePath string, decorators []string, exported bool) (*Symbol, []Import) {
+	sym, dynImps := p.processClass(ctx, node, content, filePath, decorators, exported)
 	if sym != nil {
 		if sym.Metadata == nil {
 			sym.Metadata = &SymbolMetadata{}
 		}
 		sym.Metadata.IsAbstract = true
 	}
-	return sym
+	return sym, dynImps
 }
 
 // extractClassMembers extracts methods and fields from a class body.
-func (p *TypeScriptParser) extractClassMembers(ctx context.Context, body *sitter.Node, content []byte, filePath string, classSym *Symbol) {
+func (p *TypeScriptParser) extractClassMembers(ctx context.Context, body *sitter.Node, content []byte, filePath string, classSym *Symbol) []Import {
+	var dynImps []Import
 	for i := 0; i < int(body.ChildCount()); i++ {
 		child := body.Child(i)
 		switch child.Type() {
 		case "method_definition":
-			if method := p.processMethod(ctx, child, content, filePath); method != nil {
+			method, imps := p.processMethod(ctx, child, content, filePath)
+			if method != nil {
 				// IT-01 Phase C: Set Receiver to class name for graph builder receiver resolution
 				method.Receiver = classSym.Name
 				classSym.Children = append(classSym.Children, method)
 			}
+			dynImps = append(dynImps, imps...)
 		case "public_field_definition":
-			if field := p.processField(child, content, filePath); field != nil {
+			// IT-R2d F.1: processField now extracts call sites from arrow/function initializers.
+			field, imps := p.processField(ctx, child, content, filePath)
+			if field != nil {
+				field.Receiver = classSym.Name
 				classSym.Children = append(classSym.Children, field)
 			}
+			dynImps = append(dynImps, imps...)
 		}
 	}
+	return dynImps
 }
 
 // processMethod extracts a method definition.
-func (p *TypeScriptParser) processMethod(ctx context.Context, node *sitter.Node, content []byte, filePath string) *Symbol {
+func (p *TypeScriptParser) processMethod(ctx context.Context, node *sitter.Node, content []byte, filePath string) (*Symbol, []Import) {
 	var name string
 	var typeParams []string
 	var params string
@@ -768,6 +882,7 @@ func (p *TypeScriptParser) processMethod(ctx context.Context, node *sitter.Node,
 	var isStatic bool
 	var isAbstract bool
 	var bodyNode *sitter.Node
+	var typeRefs []TypeReference // IT-06 Bug 9
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
@@ -786,15 +901,21 @@ func (p *TypeScriptParser) processMethod(ctx context.Context, node *sitter.Node,
 			typeParams = p.extractTypeParameters(child, content)
 		case "formal_parameters":
 			params = string(content[child.StartByte():child.EndByte()])
+			// IT-06 Bug 9: Extract type refs from parameter annotations
+			paramRefs := extractTSParamTypeRefs(child, content, filePath)
+			typeRefs = append(typeRefs, paramRefs...)
 		case "type_annotation":
 			returnType = p.extractTypeAnnotation(child, content)
+			// IT-06 Bug 9: Extract type refs from return type annotation
+			retRefs := extractTSTypeRefsFromAnnotation(child, content, filePath)
+			typeRefs = append(typeRefs, retRefs...)
 		case tsNodeStatementBlock:
 			bodyNode = child
 		}
 	}
 
 	if name == "" {
-		return nil
+		return nil, nil
 	}
 
 	// Determine visibility
@@ -828,21 +949,49 @@ func (p *TypeScriptParser) processMethod(ctx context.Context, node *sitter.Node,
 		},
 	}
 
-	// GR-41: Extract call sites from method body
-	if bodyNode != nil {
-		sym.Calls = p.extractCallSites(ctx, bodyNode, content, filePath)
+	// IT-03a Phase 14 T-1: Extract type arguments from return type (parity with processFunction)
+	if returnType != "" {
+		typeArgs := extractTypeArgumentIdentifiers(returnType)
+		if len(typeArgs) > 0 {
+			sym.Metadata.TypeArguments = typeArgs
+		}
 	}
 
-	return sym
+	// GR-41: Extract call sites from method body
+	var dynImps []Import
+	if bodyNode != nil {
+		sym.Calls, dynImps = p.extractCallSites(ctx, bodyNode, content, filePath)
+
+		// IT-03a Phase 14 T-2: Extract type narrowings (parity with processFunction)
+		narrowings := p.extractTypeNarrowings(bodyNode, content)
+		if len(narrowings) > 0 {
+			sym.Metadata.TypeNarrowings = narrowings
+		}
+	}
+
+	// IT-06 Bug 9: Set type annotation references
+	if len(typeRefs) > 0 {
+		sym.TypeReferences = typeRefs
+	}
+
+	return sym, dynImps
 }
 
 // processField extracts a field definition.
-func (p *TypeScriptParser) processField(node *sitter.Node, content []byte, filePath string) *Symbol {
+//
+// IT-R2d F.1: Now accepts ctx and returns []Import. Detects arrow function or
+// function expression initializers in class fields and extracts call sites from
+// their bodies. This fixes the gap where class fields like
+// `_renderLoop = () => { this.renderMeshes(...) }` had their calls invisible
+// to the graph builder.
+func (p *TypeScriptParser) processField(ctx context.Context, node *sitter.Node, content []byte, filePath string) (*Symbol, []Import) {
 	var name string
 	var typeStr string
 	var accessModifier string
 	var isReadonly bool
 	var isStatic bool
+	var arrowBodyNode *sitter.Node
+	var hasArrowFunction bool
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
@@ -857,11 +1006,37 @@ func (p *TypeScriptParser) processField(node *sitter.Node, content []byte, fileP
 			name = string(content[child.StartByte():child.EndByte()])
 		case "type_annotation":
 			typeStr = p.extractTypeAnnotation(child, content)
+		case tsNodeArrowFunction:
+			// IT-R2d F.1: Detect arrow function initializer.
+			hasArrowFunction = true
+			for j := 0; j < int(child.ChildCount()); j++ {
+				gc := child.Child(j)
+				switch gc.Type() {
+				case tsNodeStatementBlock:
+					arrowBodyNode = gc
+				case "call_expression", "parenthesized_expression", "object", "array",
+					"template_string", "binary_expression", "ternary_expression",
+					"await_expression", "new_expression":
+					if arrowBodyNode == nil {
+						arrowBodyNode = gc
+					}
+				}
+			}
+		case "function_expression":
+			// IT-R2d F.1: Detect function expression initializer.
+			hasArrowFunction = true
+			for j := 0; j < int(child.ChildCount()); j++ {
+				gc := child.Child(j)
+				if gc.Type() == tsNodeStatementBlock {
+					arrowBodyNode = gc
+					break
+				}
+			}
 		}
 	}
 
 	if name == "" {
-		return nil
+		return nil, nil
 	}
 
 	exported := accessModifier != "private"
@@ -874,10 +1049,15 @@ func (p *TypeScriptParser) processField(node *sitter.Node, content []byte, fileP
 		signature = "readonly " + signature
 	}
 
+	kind := SymbolKindField
+	if hasArrowFunction {
+		kind = SymbolKindProperty
+	}
+
 	sym := &Symbol{
 		ID:        GenerateID(filePath, int(node.StartPoint().Row+1), name),
 		Name:      name,
-		Kind:      SymbolKindField,
+		Kind:      kind,
 		FilePath:  filePath,
 		Language:  "typescript",
 		Exported:  exported,
@@ -892,7 +1072,13 @@ func (p *TypeScriptParser) processField(node *sitter.Node, content []byte, fileP
 		},
 	}
 
-	return sym
+	// IT-R2d F.1: Extract call sites from arrow/function body.
+	var dynImps []Import
+	if hasArrowFunction && arrowBodyNode != nil {
+		sym.Calls, dynImps = p.extractCallSites(ctx, arrowBodyNode, content, filePath)
+	}
+
+	return sym, dynImps
 }
 
 // processInterface extracts an interface declaration.
@@ -901,6 +1087,7 @@ func (p *TypeScriptParser) processInterface(node *sitter.Node, content []byte, f
 	var typeParams []string
 	var bodyNode *sitter.Node
 	var docstring string
+	var extendsInterfaces []string
 
 	docstring = p.getPrecedingComment(node, content)
 
@@ -913,6 +1100,9 @@ func (p *TypeScriptParser) processInterface(node *sitter.Node, content []byte, f
 			typeParams = p.extractTypeParameters(child, content)
 		case "interface_body", "object_type":
 			bodyNode = child
+		case "extends_type_clause":
+			// IT-03a A-2: Extract interface inheritance (interface Foo extends Bar, Baz)
+			extendsInterfaces = p.extractInterfaceHeritage(child, content)
 		}
 	}
 
@@ -935,18 +1125,70 @@ func (p *TypeScriptParser) processInterface(node *sitter.Node, content []byte, f
 		Children:   make([]*Symbol, 0),
 	}
 
-	if len(typeParams) > 0 {
+	// Build metadata from type params and heritage
+	hasMetadata := len(typeParams) > 0 || len(extendsInterfaces) > 0
+	if hasMetadata {
 		sym.Metadata = &SymbolMetadata{
 			TypeParameters: typeParams,
+		}
+	}
+
+	// IT-03a A-2: Populate Extends (first parent) and Implements (additional parents)
+	// Same convention as Python multi-base: Extends=first, Implements=rest.
+	if len(extendsInterfaces) > 0 {
+		if sym.Metadata == nil {
+			sym.Metadata = &SymbolMetadata{}
+		}
+		sym.Metadata.Extends = extendsInterfaces[0]
+		if len(extendsInterfaces) > 1 {
+			sym.Metadata.Implements = extendsInterfaces[1:]
 		}
 	}
 
 	// Extract interface members
 	if bodyNode != nil {
 		p.extractInterfaceMembers(bodyNode, content, filePath, sym)
+		// IT-03a Phase 12 F-1: Collect MethodSignatures for implicit interface matching.
+		// Without this, computeInterfaceImplementations() skips all TS interfaces
+		// because Metadata.Methods is empty.
+		p.collectTSInterfaceMethods(sym)
 	}
 
 	return sym
+}
+
+// extractInterfaceHeritage extracts parent interface names from an extends_type_clause.
+//
+// Description:
+//
+//	Handles TS interface inheritance: interface Foo extends Bar, Baz { }
+//	Returns the list of parent interface names in declaration order.
+//
+// Inputs:
+//   - node: An extends_type_clause node from tree-sitter.
+//   - content: Source file bytes.
+//
+// Outputs:
+//   - []string: Parent interface names. Empty if none found.
+func (p *TypeScriptParser) extractInterfaceHeritage(node *sitter.Node, content []byte) []string {
+	var parents []string
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		switch child.Type() {
+		case "type_identifier":
+			parents = append(parents, string(content[child.StartByte():child.EndByte()]))
+		case "generic_type":
+			// interface Foo extends Bar<T> — extract the base name
+			for j := 0; j < int(child.ChildCount()); j++ {
+				gc := child.Child(j)
+				if gc.Type() == "type_identifier" {
+					parents = append(parents, string(content[gc.StartByte():gc.EndByte()]))
+					break
+				}
+			}
+		}
+	}
+	return parents
 }
 
 // extractInterfaceMembers extracts properties and methods from an interface body.
@@ -956,10 +1198,16 @@ func (p *TypeScriptParser) extractInterfaceMembers(body *sitter.Node, content []
 		switch child.Type() {
 		case "property_signature":
 			if prop := p.processPropertySignature(child, content, filePath); prop != nil {
+				// IT-R2d F.3: Set Receiver to interface name for Strategy 1 resolution
+				// and RECEIVES edge creation in graph builder.
+				prop.Receiver = ifaceSym.Name
 				ifaceSym.Children = append(ifaceSym.Children, prop)
 			}
 		case "method_signature":
 			if method := p.processMethodSignature(child, content, filePath); method != nil {
+				// IT-R2d F.3: Set Receiver to interface name for Strategy 1 resolution
+				// and RECEIVES edge creation in graph builder.
+				method.Receiver = ifaceSym.Name
 				ifaceSym.Children = append(ifaceSym.Children, method)
 			}
 		}
@@ -1245,7 +1493,9 @@ func (p *TypeScriptParser) processEnumMember(node *sitter.Node, content []byte, 
 }
 
 // processLexicalDeclaration handles const/let declarations.
-func (p *TypeScriptParser) processLexicalDeclaration(node *sitter.Node, content []byte, filePath string, result *ParseResult, exported bool) {
+//
+// IT-R2d F.2: Now accepts ctx for call site extraction from arrow function bodies.
+func (p *TypeScriptParser) processLexicalDeclaration(ctx context.Context, node *sitter.Node, content []byte, filePath string, result *ParseResult, exported bool) {
 	var declKind string // const or let
 
 	for i := 0; i < int(node.ChildCount()); i++ {
@@ -1254,30 +1504,41 @@ func (p *TypeScriptParser) processLexicalDeclaration(node *sitter.Node, content 
 		case "const", "let":
 			declKind = child.Type()
 		case "variable_declarator":
-			if variable := p.processVariableDeclarator(child, content, filePath, declKind, exported); variable != nil {
+			variable, dynImps := p.processVariableDeclarator(ctx, child, content, filePath, declKind, exported)
+			if variable != nil {
 				result.Symbols = append(result.Symbols, variable)
 			}
+			result.Imports = append(result.Imports, dynImps...)
 		}
 	}
 }
 
 // processVariableDeclaration handles var declarations.
-func (p *TypeScriptParser) processVariableDeclaration(node *sitter.Node, content []byte, filePath string, result *ParseResult, exported bool) {
+//
+// IT-R2d F.2: Now accepts ctx for call site extraction from arrow function bodies.
+func (p *TypeScriptParser) processVariableDeclaration(ctx context.Context, node *sitter.Node, content []byte, filePath string, result *ParseResult, exported bool) {
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
 		if child.Type() == "variable_declarator" {
-			if variable := p.processVariableDeclarator(child, content, filePath, "var", exported); variable != nil {
+			variable, dynImps := p.processVariableDeclarator(ctx, child, content, filePath, "var", exported)
+			if variable != nil {
 				result.Symbols = append(result.Symbols, variable)
 			}
+			result.Imports = append(result.Imports, dynImps...)
 		}
 	}
 }
 
 // processVariableDeclarator extracts a variable declarator.
-func (p *TypeScriptParser) processVariableDeclarator(node *sitter.Node, content []byte, filePath string, declKind string, exported bool) *Symbol {
+//
+// IT-R2d F.2: Now accepts ctx and returns []Import. Extracts call sites from
+// arrow function bodies, mirroring the JS parser's extractVariableDeclarator
+// which already handles this correctly.
+func (p *TypeScriptParser) processVariableDeclarator(ctx context.Context, node *sitter.Node, content []byte, filePath string, declKind string, exported bool) (*Symbol, []Import) {
 	var name string
 	var typeStr string
 	var hasArrowFunction bool
+	var arrowBodyNode *sitter.Node
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
@@ -1286,13 +1547,28 @@ func (p *TypeScriptParser) processVariableDeclarator(node *sitter.Node, content 
 			name = string(content[child.StartByte():child.EndByte()])
 		case "type_annotation":
 			typeStr = p.extractTypeAnnotation(child, content)
-		case "arrow_function":
+		case tsNodeArrowFunction:
 			hasArrowFunction = true
+			// IT-R2d F.2: Extract arrow function body for call site extraction.
+			for j := 0; j < int(child.ChildCount()); j++ {
+				gc := child.Child(j)
+				switch gc.Type() {
+				case tsNodeStatementBlock:
+					arrowBodyNode = gc
+				case "call_expression", "parenthesized_expression", "object", "array",
+					"template_string", "binary_expression", "ternary_expression",
+					"await_expression", "new_expression":
+					// Expression-body arrow: const f = (x) => doSomething(x)
+					if arrowBodyNode == nil {
+						arrowBodyNode = gc
+					}
+				}
+			}
 		}
 	}
 
 	if name == "" {
-		return nil
+		return nil, nil
 	}
 
 	kind := SymbolKindVariable
@@ -1308,7 +1584,7 @@ func (p *TypeScriptParser) processVariableDeclarator(node *sitter.Node, content 
 		signature += ": " + typeStr
 	}
 
-	return &Symbol{
+	sym := &Symbol{
 		ID:        GenerateID(filePath, int(node.StartPoint().Row+1), name),
 		Name:      name,
 		Kind:      kind,
@@ -1321,6 +1597,114 @@ func (p *TypeScriptParser) processVariableDeclarator(node *sitter.Node, content 
 		StartCol:  int(node.StartPoint().Column),
 		EndCol:    int(node.EndPoint().Column),
 	}
+
+	// IT-R2d F.2: Extract call sites from arrow function body.
+	var dynImps []Import
+	if hasArrowFunction && arrowBodyNode != nil {
+		sym.Calls, dynImps = p.extractCallSites(ctx, arrowBodyNode, content, filePath)
+	}
+
+	return sym, dynImps
+}
+
+// tsTypeSkipList contains TypeScript primitive types that should not produce TypeReference entries.
+var tsTypeSkipList = map[string]bool{
+	"string": true, "number": true, "boolean": true, "void": true,
+	"any": true, "unknown": true, "never": true, "null": true,
+	"undefined": true, "object": true, "symbol": true, "bigint": true,
+}
+
+// extractTSTypeRefsFromAnnotation walks a tree-sitter type_annotation node and extracts
+// non-primitive type identifiers as TypeReference entries.
+//
+// IT-06 Bug 9: Enables graph edges from TypeScript type annotations.
+//
+// Inputs:
+//   - annNode: The tree-sitter "type_annotation" node (contains ":" + type expression).
+//   - content: Source file bytes.
+//   - filePath: Relative path for Location.
+//
+// Outputs:
+//   - []TypeReference: Non-primitive type identifiers found in the annotation.
+func extractTSTypeRefsFromAnnotation(annNode *sitter.Node, content []byte, filePath string) []TypeReference {
+	if annNode == nil {
+		return nil
+	}
+
+	var refs []TypeReference
+	seen := make(map[string]bool)
+
+	var walk func(node *sitter.Node)
+	walk = func(node *sitter.Node) {
+		if node == nil || len(refs) >= MaxTypeReferencesPerSymbol {
+			return
+		}
+
+		switch node.Type() {
+		case tsNodeTypeIdentifier, tsNodeIdentifier:
+			name := string(content[node.StartByte():node.EndByte()])
+			if !tsTypeSkipList[name] && !seen[name] {
+				seen[name] = true
+				refs = append(refs, TypeReference{
+					Name: name,
+					Location: Location{
+						FilePath:  filePath,
+						StartLine: int(node.StartPoint().Row + 1),
+						EndLine:   int(node.EndPoint().Row + 1),
+						StartCol:  int(node.StartPoint().Column),
+						EndCol:    int(node.EndPoint().Column),
+					},
+				})
+			}
+			return // don't recurse into identifier children
+		case tsNodePredefinedType:
+			return // skip "string", "number", etc. — these are leaf nodes
+		}
+
+		for i := 0; i < int(node.ChildCount()); i++ {
+			walk(node.Child(i))
+		}
+	}
+
+	walk(annNode)
+	return refs
+}
+
+// extractTSParamTypeRefs extracts TypeReference entries from formal parameter type annotations.
+//
+// IT-06 Bug 9: Enables graph edges from parameter type annotations like "foo(x: User)".
+//
+// Inputs:
+//   - paramsNode: The tree-sitter "formal_parameters" node.
+//   - content: Source file bytes.
+//   - filePath: Relative path for Location.
+//
+// Outputs:
+//   - []TypeReference: Non-primitive type identifiers from all parameter annotations.
+func extractTSParamTypeRefs(paramsNode *sitter.Node, content []byte, filePath string) []TypeReference {
+	if paramsNode == nil {
+		return nil
+	}
+
+	var refs []TypeReference
+
+	for i := 0; i < int(paramsNode.ChildCount()); i++ {
+		child := paramsNode.Child(i)
+
+		switch child.Type() {
+		case tsNodeRequiredParameter, tsNodeOptionalParameter:
+			for j := 0; j < int(child.ChildCount()); j++ {
+				typeChild := child.Child(j)
+				if typeChild.Type() == tsNodeTypeAnnotation {
+					paramRefs := extractTSTypeRefsFromAnnotation(typeChild, content, filePath)
+					refs = append(refs, paramRefs...)
+					break
+				}
+			}
+		}
+	}
+
+	return refs
 }
 
 // extractTypeParameters extracts type parameters from a type_parameters node.
@@ -1357,16 +1741,24 @@ func (p *TypeScriptParser) extractClassHeritage(node *sitter.Node, content []byt
 		case "extends_clause":
 			for j := 0; j < int(child.ChildCount()); j++ {
 				gc := child.Child(j)
-				// Tree-sitter uses "identifier" for simple class names, "type_identifier" for type references
-				if gc.Type() == "identifier" || gc.Type() == "type_identifier" || gc.Type() == "generic_type" {
+				switch gc.Type() {
+				case "identifier", "type_identifier":
 					extends = string(content[gc.StartByte():gc.EndByte()])
+				case "generic_type":
+					// IT-03a Phase 13 T-3: Extract base type name, strip generic params
+					// e.g., "Base<T>" → "Base"
+					extends = extractGenericBaseName(gc, content)
 				}
 			}
 		case "implements_clause":
 			for j := 0; j < int(child.ChildCount()); j++ {
 				gc := child.Child(j)
-				if gc.Type() == "type_identifier" || gc.Type() == "generic_type" {
+				switch gc.Type() {
+				case "type_identifier":
 					implements = append(implements, string(content[gc.StartByte():gc.EndByte()]))
+				case "generic_type":
+					// IT-03a Phase 13 T-3: Extract base type name, strip generic params
+					implements = append(implements, extractGenericBaseName(gc, content))
 				}
 			}
 		}
@@ -1374,23 +1766,151 @@ func (p *TypeScriptParser) extractClassHeritage(node *sitter.Node, content []byt
 	return
 }
 
-// extractDecoratorName extracts the name from a decorator node.
-func (p *TypeScriptParser) extractDecoratorName(node *sitter.Node, content []byte) string {
+// extractGenericBaseName extracts the base type identifier from a generic_type node.
+//
+// Description:
+//
+//	Given a tree-sitter generic_type node representing e.g. "Base<T, U>",
+//	extracts just the base type name "Base" by finding the first type_identifier
+//	or identifier child. Falls back to verbatim text if no identifier is found.
+//
+// Inputs:
+//   - node: A tree-sitter generic_type node. Must not be nil.
+//   - content: Raw source bytes for text extraction.
+//
+// Outputs:
+//   - string: The base type name without generic parameters.
+//
+// Limitations:
+//   - Does not handle nested generics as base types (e.g., Foo<T>.Bar<U>).
+//   - Fallback returns full text including angle brackets if no identifier child found.
+//
+// Assumptions:
+//   - Node is a "generic_type" from tree-sitter TypeScript grammar.
+//   - The first type_identifier or identifier child is the base type name.
+//
+// IT-03a Phase 13 T-3: Prevents "Base<T>" from being stored in Metadata.Extends.
+func extractGenericBaseName(node *sitter.Node, content []byte) string {
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
-		switch child.Type() {
-		case "identifier":
+		if child.Type() == "type_identifier" || child.Type() == "identifier" {
 			return string(content[child.StartByte():child.EndByte()])
-		case "call_expression":
-			for j := 0; j < int(child.ChildCount()); j++ {
-				gc := child.Child(j)
-				if gc.Type() == "identifier" {
-					return string(content[gc.StartByte():gc.EndByte()])
-				}
-			}
 		}
 	}
-	return ""
+	// Fallback: return full text if no identifier found (shouldn't happen for valid generic_type)
+	return string(content[node.StartByte():node.EndByte()])
+}
+
+// extractDecoratorName extracts the name from a decorator node.
+func (p *TypeScriptParser) extractDecoratorName(node *sitter.Node, content []byte) string {
+	name, _ := p.extractDecoratorNameAndArgs(node, content)
+	return name
+}
+
+// extractDecoratorNameAndArgs extracts the name and argument identifiers from a decorator node.
+//
+// Description:
+//
+//	For simple decorators like @Injectable, returns ("Injectable", nil).
+//	For call decorators like @UseInterceptors(LoggingInterceptor, AuthGuard),
+//	returns ("UseInterceptors", ["LoggingInterceptor", "AuthGuard"]).
+//	Only identifier arguments are extracted — string literals and complex expressions are skipped.
+//
+// IT-03a A-3: Enables EdgeTypeReferences from decorated symbol to decorator arguments.
+func (p *TypeScriptParser) extractDecoratorNameAndArgs(node *sitter.Node, content []byte) (string, []string) {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child == nil {
+			continue
+		}
+		switch child.Type() {
+		case "identifier":
+			return string(content[child.StartByte():child.EndByte()]), nil
+		case "call_expression":
+			var name string
+			var args []string
+			for j := 0; j < int(child.ChildCount()); j++ {
+				gc := child.Child(j)
+				if gc == nil {
+					continue
+				}
+				switch gc.Type() {
+				case "identifier":
+					if name == "" {
+						name = string(content[gc.StartByte():gc.EndByte()])
+					}
+				case "member_expression":
+					if name == "" {
+						name = string(content[gc.StartByte():gc.EndByte()])
+					}
+				case "arguments":
+					args = p.extractDecoratorArgIdentifiers(gc, content)
+				}
+			}
+			return name, args
+		}
+	}
+	return "", nil
+}
+
+// extractDecoratorArgIdentifiers extracts identifier arguments from a decorator's arguments node.
+//
+// Description:
+//
+//	Walks the arguments node and extracts top-level identifiers and member expressions.
+//	Skips string literals, numbers, objects, arrays, and other non-identifier arguments.
+//	Example: @Module({providers: [UserService]}) extracts ["UserService"].
+func (p *TypeScriptParser) extractDecoratorArgIdentifiers(argsNode *sitter.Node, content []byte) []string {
+	identifiers := make([]string, 0, argsNode.ChildCount())
+	p.walkDecoratorArgs(argsNode, content, &identifiers, 0)
+	return identifiers
+}
+
+// walkDecoratorArgs recursively walks decorator argument nodes to find identifiers.
+//
+// Description:
+//
+//	Traverses the AST of a decorator's arguments, recursing into containers
+//	(arrays, objects, key-value pairs) to extract all identifier references.
+//	Skips common JS keyword identifiers (true, false, null, undefined).
+//
+// Inputs:
+//   - node: The current AST node to walk. May be nil.
+//   - content: Raw source bytes of the file.
+//   - identifiers: Accumulator for found identifier names. Must not be nil.
+//   - depth: Current recursion depth. Stops at maxDecoratorArgDepth.
+//
+// Outputs:
+//
+//	None. Appends found identifiers to the identifiers slice.
+//
+// Limitations:
+//   - Does not extract member expressions or complex expressions.
+//   - Depth limited to maxDecoratorArgDepth (5) levels.
+//
+// Assumptions:
+//   - identifiers pointer is non-nil.
+func (p *TypeScriptParser) walkDecoratorArgs(node *sitter.Node, content []byte, identifiers *[]string, depth int) {
+	if depth > maxDecoratorArgDepth || node == nil {
+		return
+	}
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child == nil {
+			continue
+		}
+		switch child.Type() {
+		case "identifier":
+			name := string(content[child.StartByte():child.EndByte()])
+			// Skip common non-symbol identifiers (JS keywords used as property names, etc.)
+			if name != "true" && name != "false" && name != "null" && name != "undefined" {
+				*identifiers = append(*identifiers, name)
+			}
+		case "array", "object", "pair":
+			// Recurse into containers to find nested identifiers
+			p.walkDecoratorArgs(child, content, identifiers, depth+1)
+		}
+	}
 }
 
 // extractStringContent extracts the content from a string node.
@@ -1448,6 +1968,10 @@ func (p *TypeScriptParser) getPrecedingComment(node *sitter.Node, content []byte
 //	and whether it's a method call (e.g., this.method(), obj.func()). This enables
 //	the graph builder to create EdgeTypeCalls edges for find_callers/find_callees.
 //
+//	IT-06e Bug 4: dynamic import() calls (call_expression whose function child has type
+//	"import") are detected inline during this walk and returned as a separate []Import
+//	slice, eliminating the need for a second full-AST post-pass.
+//
 // Inputs:
 //   - ctx: Context for cancellation. Checked every 100 nodes.
 //   - bodyNode: The statement_block node representing the function body. May be nil.
@@ -1456,21 +1980,23 @@ func (p *TypeScriptParser) getPrecedingComment(node *sitter.Node, content []byte
 //
 // Outputs:
 //   - []CallSite: Extracted call sites. Limited to MaxCallSitesPerSymbol (1000).
+//   - []Import: Dynamic import() calls found inside the body. Nil if none.
 //
 // Thread Safety: Safe for concurrent use.
-func (p *TypeScriptParser) extractCallSites(ctx context.Context, bodyNode *sitter.Node, content []byte, filePath string) []CallSite {
+func (p *TypeScriptParser) extractCallSites(ctx context.Context, bodyNode *sitter.Node, content []byte, filePath string) ([]CallSite, []Import) {
 	if bodyNode == nil {
-		return nil
+		return nil, nil
 	}
 
 	if ctx.Err() != nil {
-		return nil
+		return nil, nil
 	}
 
 	ctx, span := tracer.Start(ctx, "TypeScriptParser.extractCallSites")
 	defer span.End()
 
 	calls := make([]CallSite, 0, 16)
+	dynImports := make([]Import, 0)
 
 	type stackEntry struct {
 		node  *sitter.Node
@@ -1505,7 +2031,7 @@ func (p *TypeScriptParser) extractCallSites(ctx context.Context, bodyNode *sitte
 					slog.String("file", filePath),
 					slog.Int("calls_found", len(calls)),
 				)
-				return calls
+				return calls, dynImports
 			}
 		}
 
@@ -1514,12 +2040,55 @@ func (p *TypeScriptParser) extractCallSites(ctx context.Context, bodyNode *sitte
 				slog.String("file", filePath),
 				slog.Int("limit", MaxCallSitesPerSymbol),
 			)
-			return calls
+			return calls, dynImports
 		}
 
-		// TypeScript tree-sitter uses "call_expression" for calls
+		// TypeScript tree-sitter uses "call_expression" for regular calls.
 		if node.Type() == tsNodeCallExpression {
-			call := p.extractSingleCallSite(node, content, filePath)
+			funcNode := node.ChildByFieldName("function")
+			argsNode := node.ChildByFieldName("arguments")
+			// IT-06e Bug 4: dynamic import() inside function bodies
+			if funcNode != nil && funcNode.Type() == "import" && argsNode != nil {
+				for i := 0; i < int(argsNode.ChildCount()); i++ {
+					arg := argsNode.Child(i)
+					if arg != nil && arg.Type() == tsNodeString {
+						importPath := p.extractStringContent(arg, content)
+						if importPath != "" {
+							dynImports = append(dynImports, Import{
+								Path:      importPath,
+								IsDynamic: true,
+								IsModule:  true,
+								Location: Location{
+									FilePath:  filePath,
+									StartLine: int(node.StartPoint().Row) + 1,
+									EndLine:   int(node.EndPoint().Row) + 1,
+									StartCol:  int(node.StartPoint().Column),
+									EndCol:    int(node.EndPoint().Column),
+								},
+							})
+							slog.Debug("IT-06e Bug 4: TS dynamic import() in function body",
+								slog.String("file", filePath),
+								slog.String("path", importPath),
+							)
+						}
+						break
+					}
+				}
+			} else {
+				call := p.extractSingleCallSite(node, content, filePath)
+				if call != nil && call.Target != "" {
+					calls = append(calls, *call)
+				}
+			}
+		}
+
+		// IT-06d Bug 13: Extract constructor calls: new Drawer(), new LinePlot().
+		// new_expression nodes were previously skipped silently. Extracting them as
+		// call sites produces incoming EdgeTypeCalls on the constructor symbol, making
+		// structurally-typed TS classes visible to find_references without requiring
+		// explicit type annotations.
+		if node.Type() == tsNodeNewExpression {
+			call := p.extractNewExpressionCallSite(node, content, filePath)
 			if call != nil && call.Target != "" {
 				calls = append(calls, *call)
 			}
@@ -1543,7 +2112,94 @@ func (p *TypeScriptParser) extractCallSites(ctx context.Context, bodyNode *sitte
 		attribute.Int("nodes_traversed", nodeCount),
 	)
 
-	return calls
+	return calls, dynImports
+}
+
+// scanForDynamicImports performs a depth-limited DFS on a subtree looking for
+// dynamic import(stringLiteral) calls. Used for top-level module-scope patterns
+// like: const X = React.lazy(() => import('./X'))
+// where the import() is inside an anonymous arrow function that is never passed
+// to extractCallSites (since no named symbol is extracted for it).
+//
+// Description:
+//
+//	Walks at most MaxCallExpressionDepth levels deep. Emits
+//	Import{IsDynamic: true, IsModule: true} for each import(stringLiteral) found.
+//
+// Inputs:
+//   - node: The subtree root to scan. May be nil.
+//   - content: Raw source bytes for text extraction.
+//   - filePath: File path for Location.
+//
+// Outputs:
+//   - []Import: Any dynamic imports found. Nil if none.
+//
+// Limitations:
+//   - Only detects import(stringLiteral). Template literal and variable paths are ignored.
+//
+// Assumptions:
+//   - node is a top-level declaration subtree (lexical_declaration, variable_declaration,
+//     or expression_statement).
+//
+// Thread Safety: Safe for concurrent use.
+func (p *TypeScriptParser) scanForDynamicImports(node *sitter.Node, content []byte, filePath string) []Import {
+	if node == nil {
+		return nil
+	}
+	type entry struct {
+		node  *sitter.Node
+		depth int
+	}
+	stack := make([]entry, 0, 16)
+	stack = append(stack, entry{node, 0})
+	var dynImports []Import
+
+	for len(stack) > 0 {
+		e := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if e.node == nil || e.depth > MaxCallExpressionDepth {
+			continue
+		}
+		if e.node.Type() == tsNodeCallExpression {
+			funcNode := e.node.ChildByFieldName("function")
+			argsNode := e.node.ChildByFieldName("arguments")
+			if funcNode != nil && funcNode.Type() == "import" && argsNode != nil {
+				for i := 0; i < int(argsNode.ChildCount()); i++ {
+					arg := argsNode.Child(i)
+					if arg != nil && arg.Type() == tsNodeString {
+						importPath := p.extractStringContent(arg, content)
+						if importPath != "" {
+							dynImports = append(dynImports, Import{
+								Path:      importPath,
+								IsDynamic: true,
+								IsModule:  true,
+								Location: Location{
+									FilePath:  filePath,
+									StartLine: int(e.node.StartPoint().Row) + 1,
+									EndLine:   int(e.node.EndPoint().Row) + 1,
+									StartCol:  int(e.node.StartPoint().Column),
+									EndCol:    int(e.node.EndPoint().Column),
+								},
+							})
+							slog.Debug("IT-06e Bug 4: TS dynamic import() at module scope",
+								slog.String("file", filePath),
+								slog.String("path", importPath),
+							)
+						}
+						break
+					}
+				}
+			}
+		}
+		childCount := int(e.node.ChildCount())
+		for i := childCount - 1; i >= 0; i-- {
+			child := e.node.Child(i)
+			if child != nil {
+				stack = append(stack, entry{child, e.depth + 1})
+			}
+		}
+	}
+	return dynImports
 }
 
 // extractSingleCallSite extracts call information from a TypeScript call_expression node.
@@ -1622,7 +2278,384 @@ func (p *TypeScriptParser) extractSingleCallSite(node *sitter.Node, content []by
 		return nil
 	}
 
+	// IT-03a C-1: Extract identifier arguments (callback/HOF references)
+	argsNode := node.ChildByFieldName("arguments")
+	if argsNode != nil {
+		call.FunctionArgs = p.extractCallbackArgIdentifiers(argsNode, content)
+	}
+
 	return call
+}
+
+// extractNewExpressionCallSite extracts a call site from a TypeScript new_expression node.
+//
+// Description:
+//
+//	Parses a new_expression node (e.g., `new Drawer()`, `new LinePlot(config)`) and
+//	returns a CallSite with the constructor name as the target. This mirrors
+//	extractSingleCallSite but uses the "constructor" named field of new_expression
+//	rather than the "function" field of call_expression.
+//
+//	Handles:
+//	  - Simple constructors: new ClassName(args)         → Target: "ClassName"
+//	  - Qualified constructors: new module.ClassName()   → Target: "ClassName" (leaf only)
+//
+// Inputs:
+//   - node: A new_expression node from tree-sitter-typescript. Must not be nil.
+//   - content: The source file content bytes.
+//   - filePath: Path to the source file for location data.
+//
+// Outputs:
+//   - *CallSite: The extracted call site, or nil if extraction fails.
+//
+// Thread Safety: Safe for concurrent use.
+func (p *TypeScriptParser) extractNewExpressionCallSite(node *sitter.Node, content []byte, filePath string) *CallSite {
+	if node == nil || node.Type() != tsNodeNewExpression {
+		return nil
+	}
+
+	// new_expression named field: "constructor" holds the class identifier or member expression.
+	constructorNode := node.ChildByFieldName("constructor")
+	if constructorNode == nil {
+		return nil
+	}
+
+	call := &CallSite{
+		Location: Location{
+			FilePath:  filePath,
+			StartLine: int(node.StartPoint().Row) + 1,
+			EndLine:   int(node.EndPoint().Row) + 1,
+			StartCol:  int(node.StartPoint().Column),
+			EndCol:    int(node.EndPoint().Column),
+		},
+		IsMethod: false,
+	}
+
+	switch constructorNode.Type() {
+	case "identifier":
+		// new ClassName(args)
+		call.Target = string(content[constructorNode.StartByte():constructorNode.EndByte()])
+
+	case "member_expression":
+		// new module.ClassName(args) — use the property (leaf) as target, object as receiver.
+		propertyNode := constructorNode.ChildByFieldName("property")
+		objectNode := constructorNode.ChildByFieldName("object")
+		if propertyNode != nil {
+			call.Target = string(content[propertyNode.StartByte():propertyNode.EndByte()])
+		}
+		if objectNode != nil {
+			call.Receiver = string(content[objectNode.StartByte():objectNode.EndByte()])
+			call.IsMethod = true
+		}
+
+	default:
+		text := string(content[constructorNode.StartByte():constructorNode.EndByte()])
+		if len(text) > 100 {
+			text = text[:100]
+		}
+		call.Target = text
+	}
+
+	if call.Target == "" {
+		return nil
+	}
+
+	return call
+}
+
+// extractCallbackArgIdentifiers extracts identifier arguments from a TS call's arguments node.
+//
+// Description:
+//
+//	Walks the arguments node and extracts top-level identifiers that likely reference
+//	functions or classes. This enables callback/HOF tracking in the graph.
+//
+// IT-03a C-1: Enables EdgeTypeReferences from caller to callback arguments.
+func (p *TypeScriptParser) extractCallbackArgIdentifiers(argsNode *sitter.Node, content []byte) []string {
+	identifiers := make([]string, 0, argsNode.ChildCount())
+	for i := 0; i < int(argsNode.ChildCount()); i++ {
+		child := argsNode.Child(i)
+		if child == nil {
+			continue
+		}
+		switch child.Type() {
+		case "identifier":
+			name := string(content[child.StartByte():child.EndByte()])
+			if name != "true" && name != "false" && name != "null" && name != "undefined" && name != "this" {
+				identifiers = append(identifiers, name)
+			}
+		case "member_expression":
+			text := string(content[child.StartByte():child.EndByte()])
+			if len(text) <= 50 && !strings.Contains(text, "(") {
+				identifiers = append(identifiers, text)
+			}
+		}
+	}
+	return identifiers
+}
+
+// extractTypeNarrowings extracts type identifiers from instanceof and type predicate expressions.
+//
+// Description:
+//
+//	Walks a function body to find "instanceof" binary expressions and extracts
+//	the type identifier on the right side. For `x instanceof Router`, extracts "Router".
+//	This enables the graph builder to create REFERENCES edges for type narrowing.
+//
+// IT-03a C-3: Tracks types referenced via instanceof for graph visibility.
+func (p *TypeScriptParser) extractTypeNarrowings(bodyNode *sitter.Node, content []byte) []string {
+	if bodyNode == nil {
+		return nil
+	}
+
+	var narrowings []string
+	seen := make(map[string]bool)
+
+	type stackEntry struct {
+		node  *sitter.Node
+		depth int
+	}
+
+	stack := []stackEntry{{node: bodyNode, depth: 0}}
+	for len(stack) > 0 {
+		entry := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+
+		node := entry.node
+		if node == nil || entry.depth > 20 {
+			continue
+		}
+
+		// Look for binary expressions with "instanceof" operator
+		if node.Type() == "binary_expression" {
+			operatorFound := false
+			for i := 0; i < int(node.ChildCount()); i++ {
+				child := node.Child(i)
+				if child == nil {
+					continue
+				}
+				text := string(content[child.StartByte():child.EndByte()])
+				if text == "instanceof" {
+					operatorFound = true
+				} else if operatorFound && (child.Type() == "identifier" || child.Type() == "type_identifier") {
+					typeName := text
+					if !seen[typeName] {
+						seen[typeName] = true
+						narrowings = append(narrowings, typeName)
+					}
+					break
+				}
+			}
+		}
+
+		// Recurse into children (but not into nested function bodies)
+		childCount := int(node.ChildCount())
+		for i := childCount - 1; i >= 0; i-- {
+			child := node.Child(i)
+			if child != nil && child.Type() != "function_declaration" &&
+				child.Type() != "arrow_function" && child.Type() != "function" {
+				stack = append(stack, stackEntry{node: child, depth: entry.depth + 1})
+			}
+		}
+	}
+
+	return narrowings
+}
+
+// extractTypeArgumentIdentifiers extracts non-primitive type identifiers from a type expression string.
+//
+// Description:
+//
+//	Parses type strings like "Promise<User>", "Map<string, Handler>", "Observable<Event[]>"
+//	and extracts user-defined type names (skipping primitives like string, number, boolean, etc.).
+//
+// IT-03a C-2: Enables graph edges from symbols to their generic type arguments.
+func extractTypeArgumentIdentifiers(typeExpr string) []string {
+	if !strings.Contains(typeExpr, "<") {
+		return nil
+	}
+
+	primitives := map[string]bool{
+		"string": true, "number": true, "boolean": true, "void": true,
+		"any": true, "unknown": true, "never": true, "null": true,
+		"undefined": true, "object": true, "symbol": true, "bigint": true,
+	}
+
+	var identifiers []string
+	// Extract identifiers between < > brackets
+	depth := 0
+	current := strings.Builder{}
+	for _, ch := range typeExpr {
+		switch ch {
+		case '<':
+			depth++
+			current.Reset()
+		case '>':
+			if depth > 0 {
+				name := strings.TrimSpace(current.String())
+				// Handle array types: User[]
+				name = strings.TrimSuffix(name, "[]")
+				if name != "" && !primitives[strings.ToLower(name)] {
+					identifiers = append(identifiers, name)
+				}
+				current.Reset()
+			}
+			depth--
+		case ',':
+			if depth > 0 {
+				name := strings.TrimSpace(current.String())
+				name = strings.TrimSuffix(name, "[]")
+				if name != "" && !primitives[strings.ToLower(name)] {
+					identifiers = append(identifiers, name)
+				}
+				current.Reset()
+			}
+		default:
+			if depth > 0 {
+				current.WriteRune(ch)
+			}
+		}
+	}
+
+	return identifiers
+}
+
+// collectTSInterfaceMethods converts an interface's Children of kind SymbolKindMethod
+// into MethodSignature entries in Metadata.Methods.
+//
+// Description:
+//
+//	This bridges the gap between tree-sitter extraction (which creates Children)
+//	and the builder's computeInterfaceImplementations (which reads Metadata.Methods).
+//	Without this, all TS interfaces are skipped during implicit matching because
+//	Metadata.Methods is empty.
+//
+// Inputs:
+//   - ifaceSym: The interface Symbol whose Children have been populated.
+//     Must not be nil.
+//
+// Outputs:
+//   - None. Mutates ifaceSym.Metadata.Methods in place.
+//
+// Limitations:
+//   - Only collects methods (SymbolKindMethod), not properties (SymbolKindField).
+//   - ParamCount is derived from signature string parsing, not AST analysis.
+//
+// Assumptions:
+//   - Children have already been populated by extractInterfaceMembers.
+//   - Method Children have Signature populated with the method signature string.
+func (p *TypeScriptParser) collectTSInterfaceMethods(ifaceSym *Symbol) {
+	if ifaceSym == nil || len(ifaceSym.Children) == 0 {
+		return
+	}
+
+	methods := make([]MethodSignature, 0, len(ifaceSym.Children))
+	for _, child := range ifaceSym.Children {
+		if child.Kind != SymbolKindMethod {
+			continue
+		}
+		sig := MethodSignature{
+			Name:       child.Name,
+			ParamCount: countTSParams(child.Signature),
+		}
+		methods = append(methods, sig)
+	}
+
+	if len(methods) > 0 {
+		if ifaceSym.Metadata == nil {
+			ifaceSym.Metadata = &SymbolMetadata{}
+		}
+		ifaceSym.Metadata.Methods = methods
+	}
+}
+
+// collectTSClassMethods converts a class's Children of kind SymbolKindMethod
+// into MethodSignature entries in Metadata.Methods.
+//
+// Description:
+//
+//	Mirrors collectTSInterfaceMethods but for classes. Skips constructors and
+//	static methods since they are not part of interface contracts.
+//
+// Inputs:
+//   - classSym: The class Symbol whose Children have been populated.
+//     Must not be nil.
+//
+// Outputs:
+//   - None. Mutates classSym.Metadata.Methods in place.
+//
+// Limitations:
+//   - Only collects instance methods, not constructors or static methods.
+//   - ParamCount is derived from signature string parsing, not AST analysis.
+//
+// Assumptions:
+//   - Children have already been populated by extractClassMembers.
+//   - Method Children have Signature populated with the method signature string.
+//   - Static methods have Metadata.IsStatic == true.
+func (p *TypeScriptParser) collectTSClassMethods(classSym *Symbol) {
+	if classSym == nil || len(classSym.Children) == 0 {
+		return
+	}
+
+	methods := make([]MethodSignature, 0, len(classSym.Children))
+	for _, child := range classSym.Children {
+		if child.Kind != SymbolKindMethod {
+			continue
+		}
+		// Skip constructor — not part of interface contracts.
+		if child.Name == "constructor" {
+			continue
+		}
+		// Skip static methods — they don't satisfy instance-level interface contracts.
+		if child.Metadata != nil && child.Metadata.IsStatic {
+			continue
+		}
+		sig := MethodSignature{
+			Name:       child.Name,
+			ParamCount: countTSParams(child.Signature),
+		}
+		methods = append(methods, sig)
+	}
+
+	if len(methods) > 0 {
+		if classSym.Metadata == nil {
+			classSym.Metadata = &SymbolMetadata{}
+		}
+		classSym.Metadata.Methods = methods
+	}
+}
+
+// countTSParams extracts parameter count from a TypeScript method signature string.
+//
+// Description:
+//
+//	Parses a signature like "methodName(param1: type, param2: type): returnType"
+//	and counts the parameters between parentheses by counting commas + 1.
+//	Returns 0 for empty params "()" or if no parens found.
+//
+// Inputs:
+//   - signature: A TypeScript method signature string. May be empty.
+//
+// Outputs:
+//   - int: The number of parameters. 0 if no params or invalid format.
+//
+// Limitations:
+//   - Does not track angle bracket depth when counting commas. Generic parameter types
+//     containing commas (e.g., "Map<string, number>") or callback signatures
+//     (e.g., "(a: string, b: number) => void") cause overcounting. This is acceptable
+//     because isMethodSuperset() uses name-only matching — ParamCount is informational
+//     and not used in the current matching algorithm.
+func countTSParams(signature string) int {
+	start := strings.Index(signature, "(")
+	end := strings.Index(signature, ")")
+	if start < 0 || end <= start+1 {
+		return 0
+	}
+	paramStr := signature[start+1 : end]
+	if strings.TrimSpace(paramStr) == "" {
+		return 0
+	}
+	return strings.Count(paramStr, ",") + 1
 }
 
 // Compile-time interface compliance check.

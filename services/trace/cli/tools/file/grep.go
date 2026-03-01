@@ -138,38 +138,39 @@ func (t *GrepTool) Definition() tools.ToolDefinition {
 }
 
 // Execute searches for content matching the pattern.
-func (t *GrepTool) Execute(ctx context.Context, params map[string]any) (*tools.Result, error) {
+func (t *GrepTool) Execute(ctx context.Context, params tools.TypedParams) (*tools.Result, error) {
 	start := time.Now()
 
 	// Parse parameters
+	m := params.ToMap()
 	p := &GrepParams{}
-	if pattern, ok := params["pattern"].(string); ok {
+	if pattern, ok := m["pattern"].(string); ok {
 		p.Pattern = pattern
 	}
-	if path, ok := params["path"].(string); ok {
+	if path, ok := m["path"].(string); ok {
 		p.Path = path
 	}
-	if glob, ok := params["glob"].(string); ok {
+	if glob, ok := m["glob"].(string); ok {
 		p.Glob = glob
 	}
-	if contextLines, ok := getIntParam(params, "context_lines"); ok {
+	if contextLines, ok := getIntParam(m, "context_lines"); ok {
 		p.ContextLines = contextLines
 	}
-	if caseInsensitive, ok := params["case_insensitive"].(bool); ok {
+	if caseInsensitive, ok := m["case_insensitive"].(bool); ok {
 		p.CaseInsensitive = caseInsensitive
 	}
-	if limit, ok := getIntParam(params, "limit"); ok {
+	if limit, ok := getIntParam(m, "limit"); ok {
 		p.Limit = limit
 	}
-	if fuzzy, ok := params["fuzzy"].(bool); ok {
+	if fuzzy, ok := m["fuzzy"].(bool); ok {
 		p.Fuzzy = fuzzy
 	}
-	if approximate, ok := params["approximate"].(bool); ok {
+	if approximate, ok := m["approximate"].(bool); ok {
 		p.Approximate = approximate
 	}
 	// Track if max_errors was explicitly provided
 	maxErrorsProvided := false
-	if maxErrors, ok := getIntParam(params, "max_errors"); ok {
+	if maxErrors, ok := getIntParam(m, "max_errors"); ok {
 		p.MaxErrors = maxErrors
 		maxErrorsProvided = true
 	}
@@ -214,6 +215,10 @@ func (t *GrepTool) Execute(ctx context.Context, params map[string]any) (*tools.R
 	} else {
 		// Standard regex mode
 		regexPattern := p.Pattern
+
+		// GR-59 Group D: Auto-fix common regex errors before compiling.
+		regexPattern = fixCommonRegexErrors(regexPattern)
+
 		if p.CaseInsensitive {
 			regexPattern = "(?i)" + regexPattern
 		}
@@ -688,4 +693,35 @@ func levenshteinDistance(s1, s2 string) int {
 	}
 
 	return prev[m]
+}
+
+// fixCommonRegexErrors attempts to fix the most common LLM regex mistake: unclosed parentheses.
+//
+// Description:
+//
+//	LLMs frequently generate regex patterns with unbalanced parentheses, e.g.,
+//	"func (.*) Next(" where the trailing "(" is intended as a literal but is
+//	unescaped. This function escapes the last unmatched open paren to produce
+//	a compilable pattern.
+//
+// Inputs:
+//
+//   - pattern: The regex pattern string (max 1024 chars per MaxGrepPattern).
+//
+// Outputs:
+//
+//   - string: The fixed pattern. Unchanged if no fix was needed.
+//
+// Thread Safety: This function is safe for concurrent use.
+func fixCommonRegexErrors(pattern string) string {
+	openParens := strings.Count(pattern, "(") - strings.Count(pattern, "\\(")
+	closeParens := strings.Count(pattern, ")") - strings.Count(pattern, "\\)")
+	if openParens > closeParens {
+		// Escape the last unmatched open paren.
+		lastOpen := strings.LastIndex(pattern, "(")
+		if lastOpen >= 0 && (lastOpen == 0 || pattern[lastOpen-1] != '\\') {
+			pattern = pattern[:lastOpen] + "\\(" + pattern[lastOpen+1:]
+		}
+	}
+	return pattern
 }

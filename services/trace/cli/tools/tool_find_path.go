@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -40,6 +41,17 @@ type FindPathParams struct {
 
 	// To is the target symbol name.
 	To string
+}
+
+// ToolName returns the tool name for TypedParams interface.
+func (p FindPathParams) ToolName() string { return "find_path" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p FindPathParams) ToMap() map[string]any {
+	return map[string]any{
+		"from": p.From,
+		"to":   p.To,
+	}
 }
 
 // FindPathOutput contains the structured result.
@@ -109,8 +121,6 @@ type findPathTool struct {
 //
 // Limitations:
 //
-//   - Symbol names must match exactly (no fuzzy matching)
-//   - When multiple symbols share a name, uses first function/method found
 //   - Returns only one path even if multiple shortest paths exist
 //   - Path length is measured in hops, not weighted by call frequency
 //
@@ -162,11 +172,11 @@ func (t *findPathTool) Definition() ToolDefinition {
 }
 
 // Execute runs the find_path tool.
-func (t *findPathTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findPathTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	start := time.Now()
 
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
 		return &Result{
 			Success: false,
@@ -192,9 +202,57 @@ func (t *findPathTool) Execute(ctx context.Context, params map[string]any) (*Res
 	)
 	defer span.End()
 
-	// Resolve symbol names to IDs using index
-	fromID, fromPackage := t.resolveSymbol(p.From)
-	toID, toPackage := t.resolveSymbol(p.To)
+	// IT-Summary FIX-C Step 1: Strip package qualifiers before resolution.
+	// ParamExtractor may pass "gin.New" even though the prompt says to strip —
+	// the tool must strip as a fallback safety net.
+	fromName := stripPackageQualifier(p.From)
+	toName := stripPackageQualifier(p.To)
+
+	// IT-12 Rev 3: Use multi-candidate resolution so we can retry with alternate
+	// From/To combinations if the first resolution produces no path.
+	fromCandidates := t.resolveSymbolCandidates(ctx, fromName, 3)
+	toCandidates := t.resolveSymbolCandidates(ctx, toName, 3)
+
+	var fromID, fromPackage string
+	if len(fromCandidates) > 0 {
+		fromID = fromCandidates[0].ID
+		fromPackage = fromCandidates[0].Package
+	}
+	var toID, toPackage string
+	if len(toCandidates) > 0 {
+		toID = toCandidates[0].ID
+		toPackage = toCandidates[0].Package
+	}
+
+	// IT-R2b Fix 3: Guard against from==to (produces useless 0-hop self-reference).
+	// When both endpoints resolve to the same symbol, try alternate candidates.
+	if fromID != "" && toID != "" && fromID == toID {
+		t.logger.Info("find_path: from==to after primary resolution, trying alternates",
+			slog.String("from_name", p.From),
+			slog.String("to_name", p.To),
+			slog.String("same_id", fromID),
+		)
+		// Try next to-candidate first (from is usually more specific)
+		swapped := false
+		for i := 1; i < len(toCandidates); i++ {
+			if toCandidates[i].ID != fromID {
+				toID = toCandidates[i].ID
+				toPackage = toCandidates[i].Package
+				swapped = true
+				break
+			}
+		}
+		// If no alternate to-candidate, try next from-candidate
+		if !swapped {
+			for i := 1; i < len(fromCandidates); i++ {
+				if fromCandidates[i].ID != toID {
+					fromID = fromCandidates[i].ID
+					fromPackage = fromCandidates[i].Package
+					break
+				}
+			}
+		}
+	}
 
 	// Handle not found cases
 	if fromID == "" {
@@ -287,13 +345,60 @@ func (t *findPathTool) Execute(ctx context.Context, params map[string]any) (*Res
 
 	// Structured logging for edge cases
 	if pathResult.Length < 0 {
-		t.logger.Debug("no path found between symbols",
-			slog.String("tool", "find_path"),
+		t.logger.Info("find_path: no path found — running chain diagnostic",
 			slog.String("from", p.From),
 			slog.String("to", p.To),
 			slog.String("from_id", fromID),
 			slog.String("to_id", toID),
 		)
+		// IT-12 Rev 5e diagnostic: trace outgoing edges from the "from" node
+		// link-by-link to find where the expected call chain breaks.
+		t.logChainDiagnostic(ctx, fromID, toID)
+	}
+
+	// IT-12 Rev 3: If no path found and we have alternative candidates,
+	// try other From/To combinations. Try alt-From with original To first,
+	// then original From with alt-To. Max 3 extra attempts total.
+	if pathResult.Length < 0 && (len(fromCandidates) > 1 || len(toCandidates) > 1) {
+		t.logger.Info("find_path: no path with primary candidates, trying alternatives",
+			slog.String("from", p.From),
+			slog.String("to", p.To),
+			slog.Int("from_candidates", len(fromCandidates)),
+			slog.Int("to_candidates", len(toCandidates)),
+		)
+		attempts := 0
+		found := false
+		for fi, fc := range fromCandidates {
+			for ti, tc := range toCandidates {
+				if fi == 0 && ti == 0 {
+					continue // Already tried
+				}
+				// IT-R2b Fix 4: Skip same-symbol combinations.
+				if fc.ID == tc.ID {
+					continue
+				}
+				if attempts >= 3 {
+					break
+				}
+				attempts++
+				altResult, altErr := t.graph.ShortestPath(ctx, fc.ID, tc.ID)
+				if altErr == nil && altResult.Length >= 0 {
+					t.logger.Info("find_path: alternative candidates found path",
+						slog.String("from_id", fc.ID),
+						slog.String("to_id", tc.ID),
+						slog.Int("length", altResult.Length),
+					)
+					pathResult = altResult
+					fromID = fc.ID
+					toID = tc.ID
+					found = true
+					break
+				}
+			}
+			if found || attempts >= 3 {
+				break
+			}
+		}
 	}
 
 	// Build typed output
@@ -322,8 +427,8 @@ func (t *findPathTool) parseParams(params map[string]any) (FindPathParams, error
 			p.From = from
 		}
 	}
-	if p.From == "" {
-		return p, fmt.Errorf("from is required")
+	if err := ValidateSymbolName(p.From, "from", "'main', 'handleRequest', 'Initialize'"); err != nil {
+		return p, err
 	}
 
 	// Extract to (required)
@@ -332,44 +437,158 @@ func (t *findPathTool) parseParams(params map[string]any) (FindPathParams, error
 			p.To = to
 		}
 	}
-	if p.To == "" {
-		return p, fmt.Errorf("to is required")
+	if err := ValidateSymbolName(p.To, "to", "'Serve', 'Execute', 'render'"); err != nil {
+		return p, err
 	}
 
 	return p, nil
 }
 
-// resolveSymbol resolves a symbol name to an ID.
-func (t *findPathTool) resolveSymbol(name string) (string, string) {
+// resolveSymbolCandidates resolves a symbol name to multiple candidates using
+// the multi-candidate resolution pipeline.
+//
+// Description:
+//
+//	IT-12 Rev 3: Wraps ResolveFunctionCandidates for use by find_path. Returns
+//	up to max candidates ranked callable-first, so the tool can retry with
+//	alternate From/To combinations when the primary pair produces no path.
+//
+// Inputs:
+//   - ctx: Context for timeout control. Must not be nil.
+//   - name: Symbol name to resolve. Must not be empty.
+//   - max: Maximum number of candidates to return.
+//
+// Outputs:
+//   - []*ast.Symbol: Ranked candidates, or nil on error.
+//
+// Thread Safety: Safe for concurrent use (read-only operations).
+func (t *findPathTool) resolveSymbolCandidates(ctx context.Context, name string, max int) []*ast.Symbol {
 	if t.index == nil {
-		return "", ""
+		return nil
+	}
+	candidates, err := ResolveFunctionCandidates(ctx, t.index, name,
+		t.logger, max, WithKindFilter(KindFilterAny), WithBareMethodFallback())
+	if err != nil {
+		t.logger.Debug("find_path: candidate resolution failed",
+			slog.String("name", name),
+			slog.String("error", err.Error()),
+		)
+		return nil
 	}
 
-	symbols := t.index.GetByName(name)
-
-	// Prefer function/method
-	for _, sym := range symbols {
-		if sym != nil && (sym.Kind == ast.SymbolKindFunction || sym.Kind == ast.SymbolKindMethod) {
-			// Log disambiguation when multiple symbols match
-			if len(symbols) > 1 {
-				t.logger.Info("multiple symbols matched, using first function",
-					slog.String("tool", "find_path"),
-					slog.String("symbol_name", name),
-					slog.String("selected_package", sym.Package),
-					slog.String("selected_id", sym.ID),
-					slog.Int("total_matches", len(symbols)),
-				)
+	// IT-R2c Fix A: Re-rank ALTERNATE candidates by graph edge count.
+	// Preserves primary candidate from symbol resolution (type-prefix disambiguation)
+	// and only re-ranks candidates[1:] by connectivity. Previous version sorted ALL
+	// candidates which overrode type-prefix match (e.g., Buffer.update over Camera.update).
+	if t.graph != nil && len(candidates) > 2 {
+		sort.SliceStable(candidates[1:], func(i, j int) bool {
+			nodeI, okI := t.graph.GetNode(candidates[1+i].ID)
+			nodeJ, okJ := t.graph.GetNode(candidates[1+j].ID)
+			edgesI, edgesJ := 0, 0
+			if okI {
+				edgesI = len(nodeI.Outgoing) + len(nodeI.Incoming)
 			}
-			return sym.ID, sym.Package
+			if okJ {
+				edgesJ = len(nodeJ.Outgoing) + len(nodeJ.Incoming)
+			}
+			return edgesI > edgesJ
+		})
+	}
+
+	return candidates
+}
+
+// logChainDiagnostic traces outgoing edges from the "from" node via BFS up to
+// 4 hops, logging each hop's outgoing edge names. This reveals where the expected
+// call chain breaks (e.g., Build → assemble → render → renderPages).
+//
+// Also checks: does the "to" node have ANY incoming edges at all? If not, it's
+// completely disconnected (parser didn't link any callers to it).
+//
+// This is a debug diagnostic — only called when find_path returns no path.
+func (t *findPathTool) logChainDiagnostic(_ context.Context, fromID, toID string) {
+	// Check "to" node reachability
+	if toNode, ok := t.graph.GetNode(toID); ok {
+		t.logger.Info("find_path diagnostic: TO node edges",
+			slog.String("to_id", toID),
+			slog.String("to_name", toNode.Symbol.Name),
+			slog.Int("incoming_edges", len(toNode.Incoming)),
+			slog.Int("outgoing_edges", len(toNode.Outgoing)),
+		)
+		if len(toNode.Incoming) > 0 {
+			var callers []string
+			for i, e := range toNode.Incoming {
+				if i >= 10 {
+					callers = append(callers, fmt.Sprintf("...and %d more", len(toNode.Incoming)-10))
+					break
+				}
+				if callerNode, ok := t.graph.GetNode(e.FromID); ok {
+					callers = append(callers, fmt.Sprintf("%s (%s)", callerNode.Symbol.Name, callerNode.Symbol.FilePath))
+				} else {
+					callers = append(callers, e.FromID)
+				}
+			}
+			t.logger.Info("find_path diagnostic: TO node callers",
+				slog.String("to_name", toNode.Symbol.Name),
+				slog.Any("callers", callers),
+			)
 		}
 	}
 
-	// Fallback to any symbol
-	if len(symbols) > 0 && symbols[0] != nil {
-		return symbols[0].ID, symbols[0].Package
-	}
+	// BFS from "from" node — log first 3 hops of outgoing edges
+	if fromNode, ok := t.graph.GetNode(fromID); ok {
+		t.logger.Info("find_path diagnostic: FROM node edges",
+			slog.String("from_id", fromID),
+			slog.String("from_name", fromNode.Symbol.Name),
+			slog.Int("outgoing_edges", len(fromNode.Outgoing)),
+		)
 
-	return "", ""
+		// Hop 1: direct callees of "from"
+		var hop1Names []string
+		for i, e := range fromNode.Outgoing {
+			if i >= 20 {
+				hop1Names = append(hop1Names, fmt.Sprintf("...and %d more", len(fromNode.Outgoing)-20))
+				break
+			}
+			if targetNode, ok := t.graph.GetNode(e.ToID); ok {
+				hop1Names = append(hop1Names, targetNode.Symbol.Name)
+			} else {
+				hop1Names = append(hop1Names, e.ToID)
+			}
+		}
+		t.logger.Info("find_path diagnostic: hop 1 (direct callees)",
+			slog.String("from", fromNode.Symbol.Name),
+			slog.Any("callees", hop1Names),
+		)
+
+		// Hop 2: callees of callees (only for first 5 hop-1 nodes to limit output)
+		for i, e := range fromNode.Outgoing {
+			if i >= 5 {
+				break
+			}
+			hop1Node, ok := t.graph.GetNode(e.ToID)
+			if !ok {
+				continue
+			}
+			var hop2Names []string
+			for j, e2 := range hop1Node.Outgoing {
+				if j >= 15 {
+					hop2Names = append(hop2Names, fmt.Sprintf("...and %d more", len(hop1Node.Outgoing)-15))
+					break
+				}
+				if targetNode, ok := t.graph.GetNode(e2.ToID); ok {
+					hop2Names = append(hop2Names, targetNode.Symbol.Name)
+				} else {
+					hop2Names = append(hop2Names, e2.ToID)
+				}
+			}
+			t.logger.Info("find_path diagnostic: hop 2",
+				slog.String("via", hop1Node.Symbol.Name),
+				slog.Int("outgoing", len(hop1Node.Outgoing)),
+				slog.Any("callees", hop2Names),
+			)
+		}
+	}
 }
 
 // buildOutput creates the typed output struct.
@@ -405,6 +624,57 @@ func (t *findPathTool) buildOutput(fromName, toName string, result *graph.PathRe
 	}
 
 	return output
+}
+
+// stripPackageQualifier removes known package/project/stdlib prefixes from
+// dot-notation symbol names while preserving Type.Method format.
+//
+// Description:
+//
+//	IT-Summary FIX-C Step 1: ParamExtractor may pass "gin.New" even though
+//	the prompt instructs it to strip package qualifiers. This function acts
+//	as a fallback safety net. If the prefix is a known project name or stdlib
+//	package (all lowercase), it is stripped. If both parts are PascalCase or
+//	the prefix is a type name (capitalized), the name is kept as-is for
+//	Type.Method resolution.
+//
+// Inputs:
+//   - name: Symbol name, possibly package-qualified (e.g., "gin.New").
+//
+// Outputs:
+//   - string: The name with package prefix stripped, or unchanged if the
+//     prefix is not a known package (e.g., "Engine.ServeHTTP" stays as-is).
+//
+// Thread Safety: This function is safe for concurrent use (pure function).
+func stripPackageQualifier(name string) string {
+	parts := strings.SplitN(name, ".", 2)
+	if len(parts) != 2 {
+		return name
+	}
+	// If the prefix is PascalCase (starts with uppercase), it's likely a type name
+	// (e.g., "Engine.ServeHTTP", "Context.JSON"), not a package qualifier.
+	// Only strip when the prefix matches a known package in lowercase form AND
+	// the original prefix is all lowercase (e.g., "gin.New", "http.Get").
+	if parts[0] != strings.ToLower(parts[0]) {
+		return name // Prefix has uppercase — treat as Type.Method
+	}
+	prefix := parts[0] // Already lowercase at this point
+	knownPrefixes := map[string]bool{
+		// Project names
+		"gin": true, "flask": true, "express": true, "hugo": true,
+		"nestjs": true, "pandas": true, "badger": true, "plottable": true,
+		"babylonjs": true, "babylon": true,
+		// Go stdlib
+		"http": true, "os": true, "fmt": true, "io": true,
+		"net": true, "path": true, "strings": true, "context": true,
+		"sync": true, "time": true, "math": true, "sort": true,
+		// Python stdlib
+		"numpy": true, "np": true, "pd": true,
+	}
+	if knownPrefixes[prefix] {
+		return parts[1]
+	}
+	return name // Keep Type.Method as-is
 }
 
 // formatText creates a human-readable text summary.

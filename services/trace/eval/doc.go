@@ -9,12 +9,12 @@
 // See the NOTICE.txt file for details regarding AI system attribution.
 
 /*
-Package eval provides the evaluation framework for Code Buddy components.
+Package eval provides the evaluation framework for Trace components.
 
 # Overview
 
 The eval package is the foundation for proving correctness, measuring performance,
-and comparing algorithm implementations in Code Buddy. Every component that participates
+and comparing algorithm implementations in Trace. Every component that participates
 in the CRS (Code Reasoning State) system implements the Evaluable interface, enabling:
 
   - Property-based correctness verification

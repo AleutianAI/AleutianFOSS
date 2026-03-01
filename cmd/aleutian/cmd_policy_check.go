@@ -336,21 +336,58 @@ func collectFiles(root string, recursive bool, includes, excludes []string) ([]s
 	return files, nil
 }
 
+// matchesPatterns reports whether path matches any of the given glob patterns.
+//
+// Supported pattern forms:
+//   - "*.go"           — basename match only
+//   - "vendor/**"      — any path whose segment contains "vendor/"
+//   - "**/suffix"      — any path whose base matches "suffix"
+//   - "**/*.go"        — any path whose base matches "*.go"
+//   - "**/dir/file.go" — prefix="" + suffix "dir/file.go" checked via filepath.Match on tail
+//   - "src/**"         — any path containing path segment "src/"
 func matchesPatterns(path string, patterns []string) bool {
+	// Normalize path separators for consistent matching.
+	normPath := filepath.ToSlash(path)
+
 	for _, pattern := range patterns {
-		// Handle ** glob patterns
-		if strings.Contains(pattern, "**") {
-			// Simple ** handling: check if path ends with suffix
-			suffix := strings.TrimPrefix(pattern, "**/")
-			if strings.HasSuffix(path, suffix) {
+		normPattern := filepath.ToSlash(pattern)
+
+		if !strings.Contains(normPattern, "**") {
+			// Simple pattern: try basename match, then full-path match.
+			if matched, _ := filepath.Match(normPattern, filepath.Base(normPath)); matched {
+				return true
+			}
+			if matched, _ := filepath.Match(normPattern, normPath); matched {
 				return true
 			}
 			continue
 		}
 
-		// Use filepath.Match for simple patterns
-		matched, _ := filepath.Match(pattern, filepath.Base(path))
-		if matched {
+		// Pattern contains "**". Split on the first occurrence.
+		idx := strings.Index(normPattern, "**")
+		prefix := normPattern[:idx]   // e.g. "vendor/" or "" or "src/"
+		suffix := normPattern[idx+2:] // e.g. "/*.go" or "/suffix" or ""
+		suffix = strings.TrimPrefix(suffix, "/")
+
+		// Check prefix: path must contain the prefix segment.
+		if prefix != "" && !strings.Contains(normPath, prefix) {
+			continue
+		}
+
+		// Check suffix: if present, the base of the path must match.
+		if suffix == "" {
+			// Bare "**" or "something/**" — prefix check above is sufficient.
+			return true
+		}
+
+		// suffix may itself be a glob (e.g. "*.go") or a plain name.
+		if matched, _ := filepath.Match(suffix, filepath.Base(normPath)); matched {
+			return true
+		}
+
+		// Also try matching suffix against the tail of the path to support
+		// patterns like "**/dir/file.go".
+		if strings.HasSuffix(normPath, "/"+suffix) || normPath == suffix {
 			return true
 		}
 	}

@@ -8,11 +8,11 @@
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
 
-package code_buddy
+package trace
 
 import "errors"
 
-// Sentinel errors for the Code Buddy service.
+// Sentinel errors for the Trace service.
 var (
 	// ErrGraphNotInitialized indicates no graph has been built for the project.
 	ErrGraphNotInitialized = errors.New("graph not initialized")

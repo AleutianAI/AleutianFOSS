@@ -8,7 +8,7 @@
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
 
-// Package lsp provides Language Server Protocol integration for Code Buddy.
+// Package lsp provides Language Server Protocol integration for Trace.
 //
 // The LSP layer provides accurate type information, references, and rename
 // capabilities by communicating with external language servers (gopls, pyright, etc.).
@@ -20,7 +20,7 @@
 // references, and rename operations.
 //
 //	┌─────────────────────────────────────────────────────────────────────────────┐
-//	│                           Code Buddy Service                                 │
+//	│                           Trace Service                                 │
 //	│                                                                             │
 //	│  Graph Queries (Tree-sitter)  ◄──  Query Router  ──►  LSP Queries           │
 //	│  Fast ~1ms, ~90% accuracy                            Accurate ~50ms, ~100%  │

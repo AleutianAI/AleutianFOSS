@@ -8,7 +8,16 @@
 package phases
 
 import (
+	"context"
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
+
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
 )
 
 // TestExtractFunctionNameFromQuery_P0Fix tests the P0 fix for parameter extraction
@@ -494,7 +503,7 @@ func TestExtractFunctionNameFromQuery_RegressionNonInterference(t *testing.T) {
 		{
 			name:  "regression: CamelCase fallback",
 			query: "What about HandleHTTP",
-			want:  "about", // Pre-existing: Pattern 7 picks "about" (valid, ≤15 chars) before "HandleHTTP"
+			want:  "HandleHTTP", // IT-06: "about" no longer passes isFunctionLikeName (not PascalCase/CamelCase/snake_case)
 		},
 		{
 			name:  "regression: snake_case via callers-of pattern",
@@ -602,6 +611,51 @@ func TestExtractFunctionNameFromQuery_AllNineProjects(t *testing.T) {
 	}
 }
 
+// IT-06c: Test that "Build method" extraction works after removing "build" from
+// isValidSymbolNameBeforeKindKeyword skipWords, and that Pattern 1 skips articles.
+func TestExtractFunctionNameFromQuery_BuildMethodExtraction(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{
+			name:  "Hugo: Build method with article",
+			query: "What functions does the Build method call in hugolib?",
+			want:  "Build",
+		},
+		{
+			name:  "Hugo: Build method without article",
+			query: "What functions does Build method call?",
+			want:  "Build",
+		},
+		{
+			name:  "Hugo: Build function with article",
+			query: "What does the Build function call?",
+			want:  "Build",
+		},
+		{
+			name:  "Hugo: Build without kind keyword (CRS verification query)",
+			query: "What functions does the Build method call?",
+			want:  "Build",
+		},
+		{
+			name:  "Verb 'build' should not extract from non-symbol context",
+			query: "build the call graph from parseConfig",
+			want:  "parseConfig",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractFunctionNameFromQuery(tt.query)
+			if got != tt.want {
+				t.Errorf("extractFunctionNameFromQuery(%q) = %q, want %q", tt.query, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestExtractFunctionNameFromQuery_EmptyAndNil verifies safe behavior on edge inputs.
 func TestExtractFunctionNameFromQuery_EmptyAndNil(t *testing.T) {
 	tests := []struct {
@@ -614,7 +668,7 @@ func TestExtractFunctionNameFromQuery_EmptyAndNil(t *testing.T) {
 		{"only common words", "the a an this that", ""},
 		{"only punctuation", "???...!!!", ""},
 		{"single common word", "function", ""},
-		{"query with no function-like words", "how are you doing today", "you"}, // Pre-existing: "you" passes isFunctionLikeName (≤15 chars)
+		{"query with no function-like words", "how are you doing today", ""}, // IT-06: "you" no longer passes isFunctionLikeName (not PascalCase/CamelCase/snake_case)
 	}
 
 	for _, tt := range tests {
@@ -625,6 +679,78 @@ func TestExtractFunctionNameFromQuery_EmptyAndNil(t *testing.T) {
 					tt.query, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestIsValidFunctionName_RejectsBrackets verifies that symbol names containing
+// brackets, braces, or angle brackets are rejected.
+// IT-06b Issue 2: "[Tool calls: Grep]" contaminated ConversationHistory,
+// causing "Grep]" to be extracted as a valid symbol name.
+func TestIsValidFunctionName_RejectsBrackets(t *testing.T) {
+	tests := []struct {
+		name string
+		s    string
+		want bool
+	}{
+		{"bare name is valid", "Grep", true},
+		{"trailing bracket rejected", "Grep]", false},
+		{"leading bracket rejected", "[Tool", false},
+		{"curly brace rejected", "Config{}", false},
+		{"angle bracket rejected", "List<T>", false},
+		{"parentheses rejected", "func()", false},
+		{"CamelCase valid", "HandlerFunc", true},
+		{"snake_case valid", "full_dispatch_request", true},
+		{"dot notation valid", "DB.Open", true}, // dots are OK
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isValidFunctionName(tt.s)
+			if got != tt.want {
+				t.Errorf("isValidFunctionName(%q) = %v, want %v", tt.s, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestExtractFunctionNameFromQuery_ToolCallContamination verifies that
+// tool call placeholder messages like "[Tool calls: Grep]" do not produce
+// the CORRUPTED symbol name "Grep]" that caused IT-06b Issue 2.
+//
+// Before fix: "[Tool calls: Grep]" → "Grep]" (bracket not stripped, passed validation)
+// After fix: "[Tool calls: Grep]" → "Tool" (brackets stripped, "Grep" also valid)
+//
+// The primary defense is that extractFunctionNameFromContext no longer scans
+// ConversationHistory, so this input never reaches extractFunctionNameFromQuery.
+// This test verifies the secondary defense: brackets are stripped and "Grep]" is impossible.
+func TestExtractFunctionNameFromQuery_ToolCallContamination(t *testing.T) {
+	// The critical assertion: "Grep]" (with trailing bracket) must NEVER be returned.
+	// Before IT-06b fix, this returned "Grep]". Now brackets are stripped by Trim
+	// and rejected by isValidFunctionName.
+	got := extractFunctionNameFromQuery("[Tool calls: Grep]")
+	if got == "Grep]" {
+		t.Errorf("extractFunctionNameFromQuery returned corrupted name %q — IT-06b regression", got)
+	}
+	// After fix, "Tool" is extracted (brackets stripped, CamelCase) — this is a harmless
+	// generic word that won't match any real symbol. The primary defense (ConversationHistory
+	// removal) prevents this path from ever being exercised in production.
+	if got != "Tool" {
+		t.Logf("extractFunctionNameFromQuery(%q) = %q (expected 'Tool' after bracket stripping)", "[Tool calls: Grep]", got)
+	}
+}
+
+// TestExtractFunctionNameFromContext_NoHistoryContamination verifies the primary
+// IT-06b Issue 2 fix: extractFunctionNameFromContext no longer scans ConversationHistory.
+func TestExtractFunctionNameFromContext_NoHistoryContamination(t *testing.T) {
+	ctx := &agent.AssembledContext{
+		ConversationHistory: []agent.Message{
+			{Role: "assistant", Content: "[Tool calls: Grep]"},
+			{Role: "assistant", Content: "[Tool calls: find_references]"},
+		},
+		ToolResults: nil, // No tool results — forces history fallback (which is now removed)
+	}
+	got := extractFunctionNameFromContext(ctx)
+	if got != "" {
+		t.Errorf("extractFunctionNameFromContext with only ConversationHistory returned %q, want empty (IT-06b: history scanning removed)", got)
 	}
 }
 
@@ -661,4 +787,2256 @@ func TestExtractTypeDotMethodFromQuery_PunctuationStripping(t *testing.T) {
 			}
 		})
 	}
+}
+
+// =============================================================================
+// GR-59 Group F: Surrender Detection Tests
+// =============================================================================
+
+func TestIsSurrenderResponse(t *testing.T) {
+	tests := []struct {
+		name     string
+		response string
+		expected bool
+	}{
+		{"simple surrender", "I don't know", true},
+		{"surrender with context", "I don't know the answer.", true},
+		{"formal surrender", "I do not know", true},
+		{"unsure", "I'm not sure", true},
+		{"cannot determine", "I cannot determine that", true},
+		{"unable", "I'm unable to answer", true},
+		{"long response not surrender", "I don't know exactly how many functions there are, but based on the graph analysis, the function parseConfig is called by main() and initServer(). Here are the details...", false},
+		{"normal answer", "The function parseConfig is called by main and initServer.", false},
+		{"empty", "", false},
+		{"just spaces", "   ", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isSurrenderResponse(tt.response)
+			if result != tt.expected {
+				t.Errorf("isSurrenderResponse(%q) = %v, want %v", tt.response, result, tt.expected)
+			}
+		})
+	}
+}
+
+// =============================================================================
+// IT-03a: File Extension Rejection + Interface Name Extraction Tests
+// =============================================================================
+
+func TestExtractFunctionNameFromQuery_FileExtensionRejection(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{
+			name:  "Babylon.js should not match as Type.Method",
+			query: "What classes extend the AbstractMesh class in Babylon.js?",
+			// Without file extension fix, this would return "Babylon.js"
+			// With fix, it falls through to Pattern 7 (CamelCase fallback) → "AbstractMesh"
+			want: "AbstractMesh",
+		},
+		{
+			name:  "Express.js should not match as Type.Method",
+			query: "Find implementations of Router in Express.js",
+			want:  "Router",
+		},
+		{
+			name:  "Flask.py should not match as Type.Method",
+			query: "What extends Blueprint in Flask.py?",
+			// "extends" is in skipWords, "Blueprint" is CamelCase → Pattern 7
+			want: "Blueprint",
+		},
+		{
+			name:  "real dot-notation still works",
+			query: "Who calls Router.handle?",
+			want:  "Router.handle",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractFunctionNameFromQuery(tt.query)
+			if got != tt.want {
+				t.Errorf("extractFunctionNameFromQuery(%q) = %q, want %q",
+					tt.query, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractInterfaceNameFromQuery(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		// "extend" patterns
+		{
+			name:  "what classes extend X",
+			query: "What classes extend the AbstractMesh class?",
+			want:  "AbstractMesh",
+		},
+		{
+			name:  "what extends X in project",
+			query: "What classes extend the Light base class in Babylon.js?",
+			want:  "Light",
+		},
+		{
+			name:  "classes that extend X",
+			query: "Show classes that extend EventEmitter",
+			want:  "EventEmitter",
+		},
+
+		// "implement" patterns
+		{
+			name:  "what implements X",
+			query: "What implements the Reader interface?",
+			want:  "Reader",
+		},
+		{
+			name:  "classes implementing X",
+			query: "Find all types that implement SessionInterface",
+			want:  "SessionInterface",
+		},
+
+		// "subclass" patterns
+		{
+			name:  "subclasses of X",
+			query: "What are the subclasses of AbstractMesh?",
+			want:  "AbstractMesh",
+		},
+
+		// "X class/interface" pattern
+		{
+			name:  "X class pattern",
+			query: "Find implementations of the AbstractMesh class",
+			want:  "AbstractMesh",
+		},
+		{
+			name:  "X interface pattern",
+			query: "Show all implementations of the Handler interface",
+			want:  "Handler",
+		},
+
+		// No match — should return empty
+		{
+			name:  "no inheritance keywords",
+			query: "How does the parser work?",
+			want:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractInterfaceNameFromQuery(tt.query)
+			if got != tt.want {
+				t.Errorf("extractInterfaceNameFromQuery(%q) = %q, want %q",
+					tt.query, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsFileExtension(t *testing.T) {
+	// File extensions should be rejected
+	for _, ext := range []string{"js", "ts", "py", "go", "rs", "java", "css", "html", "json"} {
+		if !isFileExtension(ext) {
+			t.Errorf("isFileExtension(%q) = false, want true", ext)
+		}
+	}
+	// Non-extensions should pass
+	for _, notExt := range []string{"Get", "handle", "render", "JSON", "Open", "Init"} {
+		if isFileExtension(notExt) {
+			t.Errorf("isFileExtension(%q) = true, want false", notExt)
+		}
+	}
+}
+
+// TestExtractFunctionNameFromQuery_IT04_FindSymbolQueries tests the IT-04 fix for
+// find_symbol queries using "Where is the X class/struct defined?" pattern.
+// Previously, Pattern 6 only recognized "function"/"method"/"symbol" as kind keywords,
+// causing "Where" to be extracted instead of the actual symbol name.
+func TestExtractFunctionNameFromQuery_IT04_FindSymbolQueries(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		// === All 29 find_symbol test queries from integration testing ===
+		// JavaScript/TypeScript - class keyword
+		{name: "BabylonJS: Scene class", query: "Where is the Scene class defined in this codebase?", want: "Scene"},
+		{name: "BabylonJS: Engine class", query: "Where is the Engine class defined in this codebase?", want: "Engine"},
+		{name: "BabylonJS: TransformNode class", query: "Where is the TransformNode class defined?", want: "TransformNode"},
+		{name: "Express: Application prototype", query: "Where is the Application prototype defined in this codebase?", want: "Application"},
+		{name: "Express: View constructor", query: "Where is the View constructor defined in this codebase?", want: "View"},
+		{name: "Express: Layer constructor", query: "Where is the Layer constructor defined?", want: "Layer"},
+		{name: "NestJS: NestFactory class", query: "Where is the NestFactory class defined?", want: "NestFactory"},
+		{name: "NestJS: Injector class", query: "Where is the Injector class defined?", want: "Injector"},
+		{name: "NestJS: RoutesResolver class", query: "Where is the RoutesResolver class defined?", want: "RoutesResolver"},
+		{name: "Plottable: Plot class", query: "Where is the Plot class defined?", want: "Plot"},
+		{name: "Plottable: Table class", query: "Where is the Table class defined?", want: "Table"},
+		{name: "Plottable: Dispatcher class", query: "Where is the Dispatcher class defined?", want: "Dispatcher"},
+		// Python - class keyword
+		{name: "Pandas: DataFrame class", query: "Where is the DataFrame class defined?", want: "DataFrame"},
+		{name: "Pandas: Series class", query: "Where is the Series class defined?", want: "Series"},
+		{name: "Pandas: MultiIndex class", query: "Where is the MultiIndex class defined?", want: "MultiIndex"},
+		{name: "Flask: Flask class", query: "Where is the Flask class defined?", want: "Flask"},
+		{name: "Flask: Blueprint class", query: "Where is the Blueprint class defined?", want: "Blueprint"},
+		{name: "Flask: Config class", query: "Where is the Config class defined?", want: "Config"},
+		// Go - struct keyword
+		{name: "Gin: Context struct", query: "Where is the Context struct defined?", want: "Context"},
+		{name: "Gin: Engine struct", query: "Where is the Engine struct defined?", want: "Engine"},
+		{name: "Gin: RouterGroup struct", query: "Where is the RouterGroup struct defined?", want: "RouterGroup"},
+		{name: "Badger: DB struct", query: "Where is the DB struct defined?", want: "DB"},
+		{name: "Badger: Txn struct", query: "Where is the Txn struct defined in this codebase?", want: "Txn"},
+		{name: "Badger: levelsController struct", query: "Where is the levelsController struct defined?", want: "levelsController"},
+		// Go - no kind keyword
+		{name: "Hugo: HugoSites", query: "Where is HugoSites defined in this codebase?", want: "HugoSites"},
+		{name: "Hugo: pageState struct", query: "Where is the pageState struct defined in this codebase?", want: "pageState"},
+		{name: "Hugo: ContentSpec", query: "Where is ContentSpec defined in this codebase?", want: "ContentSpec"},
+		// Edge cases
+		{name: "bare symbol name", query: "TransformNode", want: "TransformNode"},
+		{name: "just asking where", query: "Where is handleRequest defined?", want: "handleRequest"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractFunctionNameFromQuery(tt.query)
+			if got != tt.want {
+				t.Errorf("extractFunctionNameFromQuery(%q) = %q, want %q", tt.query, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestExtractFunctionNameFromQuery_CompoundPhraseSkip tests IT-05 FN1: compound phrase
+// sanitization prevents extracting "call" from queries like "call chain of main".
+func TestExtractFunctionNameFromQuery_CompoundPhraseSkip(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{
+			name:  "call chain of main — should extract main, not call",
+			query: "Show the call chain of main",
+			want:  "main",
+		},
+		{
+			name:  "call graph from ProcessData — should extract ProcessData",
+			query: "Build the call graph from ProcessData",
+			want:  "ProcessData",
+		},
+		{
+			name:  "call hierarchy of Handler — should extract Handler",
+			query: "Get the call hierarchy of Handler",
+			want:  "Handler",
+		},
+		{
+			name:  "call tree from parseConfig — should extract parseConfig",
+			query: "Show the call tree from parseConfig",
+			want:  "parseConfig",
+		},
+		{
+			name:  "call stack of initServer — should extract initServer",
+			query: "Trace the call stack of initServer",
+			want:  "initServer",
+		},
+		{
+			name:  "call flow from LoadConfig — should extract LoadConfig",
+			query: "Show call flow from LoadConfig",
+			want:  "LoadConfig",
+		},
+		{
+			name:  "call path for renderScene — should extract renderScene",
+			query: "Get the call path for renderScene function",
+			want:  "renderScene",
+		},
+		{
+			name:  "regular query without compound phrase — unaffected",
+			query: "Find the Process function",
+			want:  "Process",
+		},
+		{
+			name:  "upstream call chain from main — should extract main",
+			query: "Show the upstream call chain from main",
+			want:  "main",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractFunctionNameFromQuery(tt.query)
+			if got != tt.want {
+				t.Errorf("extractFunctionNameFromQuery(%q) = %q, want %q", tt.query, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestValidateToolQuerySemantics_CallChainCorrection tests IT-05 R1: call chain
+// queries misrouted to find_callers/find_callees are corrected to get_call_chain.
+func TestValidateToolQuerySemantics_CallChainCorrection(t *testing.T) {
+	tests := []struct {
+		name         string
+		query        string
+		selectedTool string
+		wantTool     string
+		wantChanged  bool
+	}{
+		{
+			name:         "call chain misrouted to find_callers",
+			query:        "Show the call chain from main",
+			selectedTool: "find_callers",
+			wantTool:     "get_call_chain",
+			wantChanged:  true,
+		},
+		{
+			name:         "call graph misrouted to find_callees",
+			query:        "Build the call graph from parseConfig",
+			selectedTool: "find_callees",
+			wantTool:     "get_call_chain",
+			wantChanged:  true,
+		},
+		{
+			name:         "call hierarchy misrouted to find_callers",
+			query:        "Get the call hierarchy of Handler",
+			selectedTool: "find_callers",
+			wantTool:     "get_call_chain",
+			wantChanged:  true,
+		},
+		{
+			name:         "call tree misrouted to find_callees",
+			query:        "Show the call tree from initServer",
+			selectedTool: "find_callees",
+			wantTool:     "get_call_chain",
+			wantChanged:  true,
+		},
+		{
+			name:         "transitive call misrouted to find_callers",
+			query:        "Find all transitive callers of Process",
+			selectedTool: "find_callers",
+			wantTool:     "get_call_chain",
+			wantChanged:  true,
+		},
+		{
+			name:         "recursive call misrouted to find_callees",
+			query:        "Find recursive call paths from main",
+			selectedTool: "find_callees",
+			wantTool:     "get_call_chain",
+			wantChanged:  true,
+		},
+		{
+			name:         "full call misrouted to find_callers",
+			query:        "Show the full call trace from LoadConfig",
+			selectedTool: "find_callers",
+			wantTool:     "get_call_chain",
+			wantChanged:  true,
+		},
+		{
+			name:         "non-call-chain query stays as find_callers",
+			query:        "Who calls parseConfig?",
+			selectedTool: "find_callers",
+			wantTool:     "find_callers",
+			wantChanged:  false,
+		},
+		{
+			name:         "non-call-chain query stays as find_callees",
+			query:        "What does main call?",
+			selectedTool: "find_callees",
+			wantTool:     "find_callees",
+			wantChanged:  false,
+		},
+		{
+			name:         "call chain query on non-caller/callee tool — no change",
+			query:        "Show the call chain from main",
+			selectedTool: "find_symbol",
+			wantTool:     "find_symbol",
+			wantChanged:  false,
+		},
+		{
+			name:         "call chain query on get_call_chain — no change",
+			query:        "Show the call chain from main",
+			selectedTool: "get_call_chain",
+			wantTool:     "get_call_chain",
+			wantChanged:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotTool, gotChanged, reason := ValidateToolQuerySemantics(tt.query, tt.selectedTool)
+			if gotTool != tt.wantTool {
+				t.Errorf("ValidateToolQuerySemantics(%q, %q) tool = %q, want %q (reason: %s)",
+					tt.query, tt.selectedTool, gotTool, tt.wantTool, reason)
+			}
+			if gotChanged != tt.wantChanged {
+				t.Errorf("ValidateToolQuerySemantics(%q, %q) changed = %v, want %v (reason: %s)",
+					tt.query, tt.selectedTool, gotChanged, tt.wantChanged, reason)
+			}
+		})
+	}
+}
+
+// TestValidateToolQuerySemantics_CallersCalleesCorrection tests the existing
+// callers/callees semantic correction that predates IT-05.
+func TestValidateToolQuerySemantics_CallersCalleesCorrection(t *testing.T) {
+	tests := []struct {
+		name         string
+		query        string
+		selectedTool string
+		wantTool     string
+		wantChanged  bool
+	}{
+		{
+			name:         "what does X call misrouted to find_callers",
+			query:        "What does main call?",
+			selectedTool: "find_callers",
+			wantTool:     "find_callees",
+			wantChanged:  true,
+		},
+		{
+			name:         "who calls X misrouted to find_callees",
+			query:        "Who calls parseConfig?",
+			selectedTool: "find_callees",
+			wantTool:     "find_callers",
+			wantChanged:  true,
+		},
+		{
+			name:         "callers of X misrouted to find_callees",
+			query:        "Show callers of Handler",
+			selectedTool: "find_callees",
+			wantTool:     "find_callers",
+			wantChanged:  true,
+		},
+		{
+			name:         "correctly routed find_callers unchanged",
+			query:        "Who calls parseConfig?",
+			selectedTool: "find_callers",
+			wantTool:     "find_callers",
+			wantChanged:  false,
+		},
+		{
+			name:         "correctly routed find_callees unchanged",
+			query:        "What does main call?",
+			selectedTool: "find_callees",
+			wantTool:     "find_callees",
+			wantChanged:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotTool, gotChanged, _ := ValidateToolQuerySemantics(tt.query, tt.selectedTool)
+			if gotTool != tt.wantTool {
+				t.Errorf("ValidateToolQuerySemantics(%q, %q) tool = %q, want %q",
+					tt.query, tt.selectedTool, gotTool, tt.wantTool)
+			}
+			if gotChanged != tt.wantChanged {
+				t.Errorf("ValidateToolQuerySemantics(%q, %q) changed = %v, want %v",
+					tt.query, tt.selectedTool, gotChanged, tt.wantChanged)
+			}
+		})
+	}
+}
+
+// TestExtractFunctionNameCandidates_MultipleResults tests that the multi-candidate
+// extraction returns ranked candidates from multiple patterns.
+func TestExtractFunctionNameCandidates_MultipleResults(t *testing.T) {
+	tests := []struct {
+		name       string
+		query      string
+		wantFirst  string
+		wantMinLen int // minimum number of candidates expected
+	}{
+		{
+			name:       "simple query with one function name",
+			query:      "Who calls ProcessData?",
+			wantFirst:  "ProcessData",
+			wantMinLen: 1,
+		},
+		{
+			name:       "query with function after 'of' plus CamelCase fallback",
+			query:      "Find callers of ProcessData in the BuildRequest handler",
+			wantFirst:  "ProcessData",
+			wantMinLen: 2, // ProcessData from Pattern 2, BuildRequest from Pattern 7
+		},
+		{
+			name:       "call chain query with stripped phrases yields candidate from remaining",
+			query:      "Show the call chain from ProcessData",
+			wantFirst:  "ProcessData",
+			wantMinLen: 1,
+		},
+		{
+			name:       "Type.Method extraction is highest priority",
+			query:      "Who calls Transaction.Get in the Handler?",
+			wantFirst:  "Transaction.Get",
+			wantMinLen: 2, // Transaction.Get from Pattern 0b, Handler from Pattern 7
+		},
+		{
+			name:       "multiple CamelCase words yield multiple candidates",
+			query:      "How does BuildRequest connect to ProcessData?",
+			wantFirst:  "BuildRequest",
+			wantMinLen: 2,
+		},
+		{
+			name:       "empty query returns empty candidates",
+			query:      "",
+			wantFirst:  "",
+			wantMinLen: 0,
+		},
+		{
+			name:       "all skip words returns empty candidates",
+			query:      "find the function from the codebase",
+			wantFirst:  "",
+			wantMinLen: 0,
+		},
+		{
+			name:       "pattern 5: for X function yields candidate",
+			query:      "control dependencies for Process function in the codebase",
+			wantFirst:  "Process",
+			wantMinLen: 1,
+		},
+		{
+			name:       "pattern 6: X class yields candidate",
+			query:      "Where is the TransformNode class defined?",
+			wantFirst:  "TransformNode",
+			wantMinLen: 1,
+		},
+		{
+			name:       "does X call pattern",
+			query:      "What does parseConfig call in BuildHandler?",
+			wantFirst:  "parseConfig",
+			wantMinLen: 2, // parseConfig from Pattern 1, BuildHandler from Pattern 7
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candidates := extractFunctionNameCandidates(tt.query)
+
+			if tt.wantMinLen == 0 {
+				if len(candidates) != 0 {
+					t.Errorf("extractFunctionNameCandidates(%q) returned %d candidates, want 0: %v",
+						tt.query, len(candidates), candidates)
+				}
+				return
+			}
+
+			if len(candidates) < tt.wantMinLen {
+				t.Errorf("extractFunctionNameCandidates(%q) returned %d candidates, want >= %d: %v",
+					tt.query, len(candidates), tt.wantMinLen, candidates)
+			}
+
+			if tt.wantFirst != "" && (len(candidates) == 0 || candidates[0] != tt.wantFirst) {
+				first := ""
+				if len(candidates) > 0 {
+					first = candidates[0]
+				}
+				t.Errorf("extractFunctionNameCandidates(%q) first = %q, want %q (all: %v)",
+					tt.query, first, tt.wantFirst, candidates)
+			}
+		})
+	}
+}
+
+// TestExtractFunctionNameCandidates_NoDuplicates verifies that duplicate candidates
+// are suppressed across patterns.
+func TestExtractFunctionNameCandidates_NoDuplicates(t *testing.T) {
+	// "callers of ProcessData" — Pattern 2 extracts "ProcessData",
+	// Pattern 7 would also find "ProcessData" as CamelCase. Should only appear once.
+	candidates := extractFunctionNameCandidates("Find callers of ProcessData")
+
+	seen := make(map[string]bool)
+	for _, c := range candidates {
+		if seen[c] {
+			t.Errorf("duplicate candidate %q in results: %v", c, candidates)
+		}
+		seen[c] = true
+	}
+}
+
+// TestExtractFunctionNameCandidates_BackwardsCompatible verifies that the first
+// candidate matches what extractFunctionNameFromQuery would have returned.
+func TestExtractFunctionNameCandidates_BackwardsCompatible(t *testing.T) {
+	queries := []string{
+		"Who calls ProcessData?",
+		"What does main call?",
+		"Find callers of handleRequest",
+		"functions called by BuildRequest",
+		"Show control dependencies for Process function with depth 3",
+		"Where is the TransformNode class defined?",
+		"Show the call chain from ProcessData",
+		"Who calls the Get method on the Transaction type?",
+	}
+
+	for _, query := range queries {
+		oldResult := extractFunctionNameFromQuery(query)
+		candidates := extractFunctionNameCandidates(query)
+
+		first := ""
+		if len(candidates) > 0 {
+			first = candidates[0]
+		}
+
+		if first != oldResult {
+			t.Errorf("backwards compatibility broken for %q: extractFunctionNameFromQuery=%q, candidates[0]=%q",
+				query, oldResult, first)
+		}
+	}
+}
+
+// TestResolveFirstCandidate tests the candidate-loop resolution.
+func TestResolveFirstCandidate(t *testing.T) {
+	// Build a symbol index with known symbols
+	idx := index.NewSymbolIndex()
+	idx.Add(&ast.Symbol{
+		ID:        "pkg/handler.go:ProcessData",
+		Name:      "ProcessData",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "pkg/handler.go",
+		StartLine: 10,
+		EndLine:   20,
+		Language:  "go",
+		Exported:  true,
+	})
+
+	deps := &Dependencies{
+		SymbolIndex: idx,
+	}
+
+	t.Run("first candidate resolves immediately", func(t *testing.T) {
+		var cache sync.Map
+		symbolID, rawName, _, err := resolveFirstCandidate(context.Background(), &cache, "sess1", []string{"ProcessData"}, deps)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if symbolID != "pkg/handler.go:ProcessData" {
+			t.Errorf("symbolID = %q, want %q", symbolID, "pkg/handler.go:ProcessData")
+		}
+		if rawName != "ProcessData" {
+			t.Errorf("rawName = %q, want %q", rawName, "ProcessData")
+		}
+	})
+
+	t.Run("first candidate fails, second resolves", func(t *testing.T) {
+		var cache sync.Map
+		candidates := []string{"NonExistent", "ProcessData"}
+		symbolID, rawName, _, err := resolveFirstCandidate(context.Background(), &cache, "sess2", candidates, deps)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if symbolID != "pkg/handler.go:ProcessData" {
+			t.Errorf("symbolID = %q, want %q", symbolID, "pkg/handler.go:ProcessData")
+		}
+		if rawName != "ProcessData" {
+			t.Errorf("rawName = %q, want %q (should be the candidate that resolved)", rawName, "ProcessData")
+		}
+	})
+
+	t.Run("all candidates fail", func(t *testing.T) {
+		var cache sync.Map
+		candidates := []string{"NonExistent1", "NonExistent2"}
+		_, _, _, err := resolveFirstCandidate(context.Background(), &cache, "sess3", candidates, deps)
+		if err == nil {
+			t.Fatal("expected error when all candidates fail")
+		}
+	})
+
+	t.Run("empty candidates returns error", func(t *testing.T) {
+		var cache sync.Map
+		_, _, _, err := resolveFirstCandidate(context.Background(), &cache, "sess4", []string{}, deps)
+		if err == nil {
+			t.Fatal("expected error for empty candidates")
+		}
+	})
+
+	t.Run("nil candidates returns error", func(t *testing.T) {
+		var cache sync.Map
+		_, _, _, err := resolveFirstCandidate(context.Background(), &cache, "sess5", nil, deps)
+		if err == nil {
+			t.Fatal("expected error for nil candidates")
+		}
+	})
+}
+
+// TestResolveFirstCandidate_SkipsBadExtraction simulates the Issue 4 scenario:
+// extraction picks wrong word first, but correct word is second candidate.
+func TestResolveFirstCandidate_SkipsBadExtraction(t *testing.T) {
+	idx := index.NewSymbolIndex()
+	// Only "ProcessData" exists in the index — "Build" does not
+	idx.Add(&ast.Symbol{
+		ID:        "pkg/data.go:ProcessData",
+		Name:      "ProcessData",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "pkg/data.go",
+		StartLine: 5,
+		EndLine:   15,
+		Language:  "go",
+		Exported:  true,
+	})
+
+	deps := &Dependencies{
+		SymbolIndex: idx,
+	}
+
+	// Simulates: "Build the call graph from ProcessData"
+	// Pattern extraction might yield ["ProcessData"] after skip phrase stripping.
+	// But in theory, if "Build" slipped through, the candidate loop would recover.
+	var cache sync.Map
+	candidates := []string{"Build", "ProcessData"}
+
+	symbolID, rawName, _, err := resolveFirstCandidate(context.Background(), &cache, "test-session", candidates, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rawName != "ProcessData" {
+		t.Errorf("rawName = %q, want %q — candidate loop should have skipped 'Build'", rawName, "ProcessData")
+	}
+	if symbolID != "pkg/data.go:ProcessData" {
+		t.Errorf("symbolID = %q, want %q", symbolID, "pkg/data.go:ProcessData")
+	}
+}
+
+// mockSearchableIndex is a helper to ensure resolveFirstCandidate uses the Search path too.
+// This verifies that the index.Search method is called for candidates not found by exact name.
+type mockSearchableIndex struct {
+	*index.SymbolIndex
+}
+
+func (m *mockSearchableIndex) Search(ctx context.Context, query string, limit int) ([]*ast.Symbol, error) {
+	return m.SymbolIndex.Search(ctx, query, limit)
+}
+
+// =============================================================================
+// IT-05 Run 2: "from X to Y" Boundary Tests
+// =============================================================================
+
+// TestExtractFunctionNameCandidates_FromToBoundary tests that the "from X to Y"
+// pattern prevents destination words from leaking into candidates via Pattern 7.
+func TestExtractFunctionNameCandidates_FromToBoundary(t *testing.T) {
+	tests := []struct {
+		name       string
+		query      string
+		wantFirst  string
+		wantAbsent []string // words that must NOT appear in candidates
+		wantMinLen int
+	}{
+		{
+			name:       "Engine.runRenderLoop to mesh rendering — no destination words",
+			query:      "Show the call chain from Engine.runRenderLoop to mesh rendering",
+			wantFirst:  "Engine.runRenderLoop",
+			wantAbsent: []string{"mesh", "rendering"},
+			wantMinLen: 1,
+		},
+		{
+			name:       "Scene.addMesh to scene graph update — no destination words",
+			query:      "Show the call chain from Scene.addMesh to scene graph update",
+			wantFirst:  "Scene.addMesh",
+			wantAbsent: []string{"scene", "graph"},
+			wantMinLen: 1,
+		},
+		{
+			name:       "DB.Open to value retrieval — no destination words",
+			query:      "Show the call chain from DB.Open to value retrieval",
+			wantFirst:  "DB.Open",
+			wantAbsent: []string{"value", "retrieval"},
+			wantMinLen: 1,
+		},
+		{
+			name:       "Engine.Run to handler execution — no destination words",
+			query:      "Show the call chain from Engine.Run to handler execution",
+			wantFirst:  "Engine.Run",
+			wantAbsent: []string{"handler", "execution"},
+			wantMinLen: 1,
+		},
+		{
+			name:       "Flask.run to view function — no destination words",
+			query:      "Show the call chain from Flask.run to a view function",
+			wantFirst:  "Flask.run",
+			wantAbsent: []string{"view"},
+			wantMinLen: 1,
+		},
+		{
+			name:       "Context.Bind to data validation — no destination words",
+			query:      "Show the call chain from Context.Bind to data validation",
+			wantFirst:  "Context.Bind",
+			wantAbsent: []string{"data", "validation"},
+			wantMinLen: 1,
+		},
+		{
+			name:       "Plot.render to SVG creation — creation blocked, SVG allowed (all-caps is CamelCase)",
+			query:      "Show the call chain from Plot.render to SVG creation",
+			wantFirst:  "Plot.render",
+			wantAbsent: []string{"creation"},
+			wantMinLen: 1,
+		},
+		{
+			name:       "app.use to middleware execution — no destination words",
+			query:      "Show the call chain from app.use to middleware execution",
+			wantAbsent: []string{"middleware", "execution"},
+			wantMinLen: 0, // app.use may not extract (lowercase 'app')
+		},
+		// CR-R2-6: Pattern 2 "of" after boundary — "callers of mesh" is in destination zone
+		{
+			name:       "Engine.Run to callers of mesh — Pattern 2 gated",
+			query:      "Show the call chain from Engine.Run to callers of mesh",
+			wantFirst:  "Engine.Run",
+			wantAbsent: []string{"mesh"},
+			wantMinLen: 1,
+		},
+		// CR-R2-1: Pattern 5 "for X function" after boundary — "for handler function" is in destination zone
+		{
+			name:       "Engine.Run to handler function — Pattern 5/6 gated",
+			query:      "Show the call chain from Engine.Run to handler function dispatch",
+			wantFirst:  "Engine.Run",
+			wantAbsent: []string{"handler"},
+			wantMinLen: 1,
+		},
+		// IT-05 R3-3: CamelCase words past boundary ARE extracted (they are symbol names)
+		{
+			name:       "route dispatch to canActivate — CamelCase past boundary extracted",
+			query:      "Show the call chain from route handler dispatch to guard canActivate execution",
+			wantAbsent: []string{"guard", "execution"},
+			wantMinLen: 1, // at least "route" or "handler" should be extracted
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candidates := extractFunctionNameCandidates(tt.query)
+
+			if tt.wantMinLen > 0 && len(candidates) < tt.wantMinLen {
+				t.Errorf("extractFunctionNameCandidates(%q) returned %d candidates, want >= %d: %v",
+					tt.query, len(candidates), tt.wantMinLen, candidates)
+			}
+
+			if tt.wantFirst != "" && len(candidates) > 0 && candidates[0] != tt.wantFirst {
+				t.Errorf("extractFunctionNameCandidates(%q) first = %q, want %q (all: %v)",
+					tt.query, candidates[0], tt.wantFirst, candidates)
+			}
+
+			// Verify absent words are NOT in candidates
+			for _, absent := range tt.wantAbsent {
+				for _, c := range candidates {
+					if strings.EqualFold(c, absent) {
+						t.Errorf("extractFunctionNameCandidates(%q) contains unwanted %q (all: %v)",
+							tt.query, absent, candidates)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestExtractFunctionNameCandidates_NoFromToNoTruncation verifies that queries
+// WITHOUT "from X to Y" are unaffected by the boundary logic.
+func TestExtractFunctionNameCandidates_NoFromToNoTruncation(t *testing.T) {
+	tests := []struct {
+		name      string
+		query     string
+		wantFirst string
+	}{
+		{
+			name:      "who calls — no boundary applied",
+			query:     "Who calls renderMesh?",
+			wantFirst: "renderMesh",
+		},
+		{
+			name:      "callers of — no boundary applied",
+			query:     "Find callers of ProcessData",
+			wantFirst: "ProcessData",
+		},
+		{
+			name:      "what does X call — no boundary applied",
+			query:     "What does main call?",
+			wantFirst: "main",
+		},
+		{
+			name:      "call chain of X (no 'from') — no boundary applied",
+			query:     "Show the call chain of main",
+			wantFirst: "main",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candidates := extractFunctionNameCandidates(tt.query)
+			if len(candidates) == 0 || candidates[0] != tt.wantFirst {
+				first := ""
+				if len(candidates) > 0 {
+					first = candidates[0]
+				}
+				t.Errorf("extractFunctionNameCandidates(%q) first = %q, want %q (all: %v)",
+					tt.query, first, tt.wantFirst, candidates)
+			}
+		})
+	}
+}
+
+// TestExtractFunctionNameCandidates_CamelCaseExemption tests IT-05 R3-3:
+// CamelCase words past the "to" boundary ARE extracted (they are likely symbol names),
+// while single-case words past the boundary are still blocked.
+func TestExtractFunctionNameCandidates_CamelCaseExemption(t *testing.T) {
+	tests := []struct {
+		name        string
+		query       string
+		wantPresent []string // words that MUST appear in candidates
+		wantAbsent  []string // words that must NOT appear in candidates
+	}{
+		{
+			name:        "canActivate (CamelCase) past boundary is extracted",
+			query:       "Show the call chain from route handler dispatch to guard canActivate execution",
+			wantPresent: []string{"canActivate"},
+			wantAbsent:  []string{"guard", "execution"},
+		},
+		{
+			name:        "runRenderLoop (CamelCase) past boundary is extracted",
+			query:       "Show the call chain from main to runRenderLoop processing",
+			wantPresent: []string{"runRenderLoop"},
+			wantAbsent:  []string{"processing"},
+		},
+		{
+			name:        "DataFrame (CamelCase) past boundary is extracted",
+			query:       "Show the call chain from read_csv to DataFrame construction",
+			wantPresent: []string{"read_csv", "DataFrame"},
+			wantAbsent:  []string{"construction"},
+		},
+		{
+			name:        "single-case words past boundary still blocked",
+			query:       "Show the call chain from Engine.Run to handler execution",
+			wantPresent: []string{"Engine.Run"},
+			wantAbsent:  []string{"handler", "execution"},
+		},
+		{
+			name:        "no boundary — CamelCase extracted normally",
+			query:       "Who calls canActivate?",
+			wantPresent: []string{"canActivate"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candidates := extractFunctionNameCandidates(tt.query)
+
+			for _, want := range tt.wantPresent {
+				found := false
+				for _, c := range candidates {
+					if c == want {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("extractFunctionNameCandidates(%q) missing expected %q (all: %v)",
+						tt.query, want, candidates)
+				}
+			}
+
+			for _, absent := range tt.wantAbsent {
+				for _, c := range candidates {
+					if strings.EqualFold(c, absent) {
+						t.Errorf("extractFunctionNameCandidates(%q) contains unwanted %q (all: %v)",
+							tt.query, absent, candidates)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestIsStrictCamelCase tests the isStrictCamelCase helper function.
+func TestIsStrictCamelCase(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		// CamelCase: has uppercase in middle → true
+		{"canActivate", true},
+		{"runRenderLoop", true},
+		{"DataFrame", true},
+		{"NestFactory", true},
+		{"processData", true},
+		{"ABCTest", true},
+
+		// Not CamelCase: all lowercase or all uppercase or single letter → false
+		{"route", false},
+		{"handler", false},
+		{"mesh", false},
+		{"rendering", false},
+		{"execution", false},
+		{"main", false},
+		{"a", false},
+		{"", false},
+		{"x", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := isStrictCamelCase(tt.input)
+			if got != tt.want {
+				t.Errorf("isStrictCamelCase(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestExtractFunctionNameCandidates_ConceptWordsFiltered verifies that concept/action
+// words added to skipWords are properly filtered.
+func TestExtractFunctionNameCandidates_ConceptWordsFiltered(t *testing.T) {
+	conceptWords := []string{
+		"rendering", "creation", "retrieval", "persistence", "execution",
+		"compilation", "initialization", "processing", "assembly",
+		"assigning", "parsing", "dispatch", "handling",
+		"update", "validation", "construction", "aggregation",
+	}
+
+	for _, word := range conceptWords {
+		t.Run(word, func(t *testing.T) {
+			// These words should not pass isValidFunctionName
+			if isValidFunctionName(word) {
+				t.Errorf("isValidFunctionName(%q) = true, want false (should be in skipWords)", word)
+			}
+		})
+	}
+}
+
+// TestExtractDestinationCandidates tests IT-05 R5 destination extraction for "from X to Y" queries.
+func TestExtractDestinationCandidates(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		want  []string // nil means no candidates expected
+	}{
+		{
+			name:  "from X to Y: extracts destination",
+			query: "Show the call chain from Engine.runRenderLoop to mesh rendering",
+			want:  nil, // IT-06: "mesh" no longer passes isFunctionLikeName (lowercase, no structural signal)
+		},
+		{
+			name:  "from X to Y with CamelCase destination",
+			query: "Show the call chain from main to ParseConfig",
+			want:  []string{"ParseConfig"},
+		},
+		{
+			name:  "no from/to pattern returns nil",
+			query: "Show callers of ProcessData",
+			want:  nil,
+		},
+		{
+			name:  "from but no to returns nil",
+			query: "Show the call chain from main",
+			want:  nil,
+		},
+		{
+			name:  "from X to Y with dot notation destination",
+			query: "Show the call chain from App.listen to Router.handle",
+			want:  []string{"Router.handle"},
+		},
+		{
+			name:  "from X to Y with function-like destination",
+			query: "Show the call chain from read_csv to DataFrame creation",
+			want:  []string{"DataFrame"},
+		},
+		{
+			name:  "multi-hop uses last 'to' (review fix #5)",
+			query: "Show the call chain from login to the dashboard to SettingsPage",
+			want:  []string{"SettingsPage"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractDestinationCandidates(tt.query)
+
+			if tt.want == nil {
+				if len(got) > 0 {
+					t.Errorf("extractDestinationCandidates(%q) = %v, want nil/empty", tt.query, got)
+				}
+				return
+			}
+
+			if len(got) == 0 {
+				t.Errorf("extractDestinationCandidates(%q) = nil/empty, want %v", tt.query, tt.want)
+				return
+			}
+
+			// Check that expected candidates appear in results
+			for _, expected := range tt.want {
+				found := false
+				for _, candidate := range got {
+					if candidate == expected {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("extractDestinationCandidates(%q) = %v, missing expected candidate %q", tt.query, got, expected)
+				}
+			}
+		})
+	}
+}
+
+// IT-06c Bug C: Test extractPackageContextFromQuery.
+func TestExtractPackageContextFromQuery(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{
+			name:  "in hugolib at end",
+			query: "What functions does the Build method call in hugolib?",
+			want:  "hugolib",
+		},
+		{
+			name:  "in gin at end",
+			query: "What does Engine.Run call in gin?",
+			want:  "gin",
+		},
+		{
+			name:  "in flask mid-query",
+			query: "Who calls request in flask across the codebase?",
+			want:  "flask",
+		},
+		{
+			name:  "the hugolib package",
+			query: "Find callers of Build in the hugolib package",
+			want:  "hugolib",
+		},
+		{
+			name:  "no package context",
+			query: "What functions does Build call?",
+			want:  "",
+		},
+		{
+			name:  "in the codebase should not match",
+			query: "Where is Build used in the codebase?",
+			want:  "",
+		},
+		{
+			name:  "in the project should not match",
+			query: "Find callers in the project",
+			want:  "",
+		},
+		{
+			name:  "package with underscore",
+			query: "What does read_csv call in pandas_core?",
+			want:  "pandas_core",
+		},
+		// IT-07 Phase 2: Subsystem and within patterns
+		{
+			name:  "within keyword",
+			query: "What are the hotspot functions within the lib/router directory?",
+			want:  "lib/router",
+		},
+		{
+			name:  "in the X subsystem",
+			query: "What are the hotspot functions in the binding subsystem?",
+			want:  "binding",
+		},
+		{
+			name:  "within the X subsystem",
+			query: "What are the hotspot functions within the materials subsystem?",
+			want:  "materials",
+		},
+		{
+			name:  "in the X package",
+			query: "What are the hotspot functions in the render package?",
+			want:  "render",
+		},
+		{
+			name:  "multi-word subsystem extracts first qualifier",
+			query: "Find hotspots in the blueprint registration subsystem",
+			want:  "blueprint",
+		},
+		{
+			name:  "single-word subsystem after the",
+			query: "Find hotspots in the blueprint subsystem",
+			want:  "blueprint",
+		},
+		{
+			name:  "in the X path",
+			query: "What are the hotspot functions in the write path?",
+			want:  "write",
+		},
+		{
+			name:  "X directory pattern",
+			query: "Find hotspots within the lib/router directory",
+			want:  "lib/router",
+		},
+		{
+			name:  "in the system should not match",
+			query: "Find hotspots in the system",
+			want:  "",
+		},
+		{
+			name:  "in the system code should not match",
+			query: "Find hotspots in the system code",
+			want:  "",
+		},
+		{
+			name:  "in the code should not match",
+			query: "Find hotspots in the code",
+			want:  "",
+		},
+		// IT-07 Phase 2: Actual _b test queries
+		{
+			name:  "b_hugo tpl package",
+			query: "What are the hotspot functions in the tpl package?",
+			want:  "tpl",
+		},
+		{
+			name:  "b_badger table package",
+			query: "What are the hotspot functions in the table package?",
+			want:  "table",
+		},
+		{
+			name:  "b_gin render package",
+			query: "What are the hotspot functions in the render package?",
+			want:  "render",
+		},
+		{
+			name:  "b_flask blueprint subsystem",
+			query: "What are the hotspots in the blueprint subsystem?",
+			want:  "blueprint",
+		},
+		{
+			name:  "b_pandas io subsystem",
+			query: "What are the hotspot functions in the io subsystem?",
+			want:  "io",
+		},
+		{
+			name:  "b_express lib/router directory",
+			query: "What are the hotspot functions within the lib/router directory?",
+			want:  "lib/router",
+		},
+		{
+			name:  "b_babylonjs materials subsystem",
+			query: "What are the hotspot functions within the materials subsystem?",
+			want:  "materials",
+		},
+		{
+			name:  "b_nestjs microservices package",
+			query: "What are the hotspot functions in the microservices package?",
+			want:  "microservices",
+		},
+		{
+			name:  "b_plottable plots subsystem",
+			query: "What are the hotspot functions in the plots subsystem?",
+			want:  "plots",
+		},
+		// IT-08: Dead code queries with package context (Problem A fixes)
+		{
+			name:  "dead_code render package",
+			query: "Find dead code in the render package",
+			want:  "render",
+		},
+		{
+			name:  "dead_code render module",
+			query: "What dead code exists in the render module?",
+			want:  "render",
+		},
+		{
+			name:  "dead_code value log subsystem",
+			query: "Find dead code in the value log subsystem",
+			want:  "value",
+		},
+		{
+			name:  "dead_code math utilities module",
+			query: "What unused code is in the math utilities module?",
+			want:  "math",
+		},
+		{
+			name:  "dead_code auth module",
+			query: "What dead code exists in the auth module?",
+			want:  "auth",
+		},
+		{
+			name:  "dead_code plot module",
+			query: "What dead code exists in the plot module?",
+			want:  "plot",
+		},
+		{
+			name:  "dead_code page package",
+			query: "Find dead code in the page package",
+			want:  "page",
+		},
+		{
+			name:  "dead_code router module",
+			query: "Find dead code in the router module",
+			want:  "router",
+		},
+		{
+			name:  "dead_code materials subsystem",
+			query: "Find unused code within the materials subsystem",
+			want:  "materials",
+		},
+		// IT-08: Class-name scoping ("class" as scope keyword)
+		{
+			name:  "dead_code Engine class",
+			query: "Are there any dead code functions in the Engine class?",
+			want:  "engine",
+		},
+		{
+			name:  "dead_code Router class",
+			query: "Find dead code in the Router class",
+			want:  "router",
+		},
+		// IT-08d: Capitalized project names skipped in Pattern 1
+		{
+			name:  "capitalized project name in Pattern 1 skipped",
+			query: "Find dead code or unreachable functions in Express.",
+			want:  "",
+		},
+		// IT-08d: Capitalized project name in Pattern 2 → use module name
+		{
+			name:  "capitalized project name in Pattern 2 uses module",
+			query: "Find dead code specifically in the Flask helpers module",
+			want:  "helpers",
+		},
+		{
+			name:  "capitalized project name in Pattern 2 Pandas",
+			query: "Find dead code specifically in the Pandas reshape module",
+			want:  "reshape",
+		},
+		// IT-08d: Lowercase multi-word still uses first word (no regression)
+		{
+			name:  "lowercase multi-word subsystem unchanged",
+			query: "Find dead code in the value log subsystem",
+			want:  "value",
+		},
+		// IT-08d: Single word after article unchanged regardless of case
+		{
+			name:  "single word after article unchanged",
+			query: "Find dead code in the Router class",
+			want:  "router",
+		},
+		// IT-08d Next Steps: Exact queries from failing integration tests
+		{
+			name:  "IT-08d_5056_hugo_resources_package",
+			query: "Find unused or dead code in the resources package",
+			want:  "resources",
+		},
+		{
+			name:  "IT-08d_8056_nestjs_packages_common_directory",
+			query: "Find dead code specifically in the packages/common directory",
+			want:  "packages/common",
+		},
+		// IT-43c: Multi-word subsystem with capitalized project name prefix
+		{
+			name:  "IT-43c_pandas_indexing_and_selection",
+			query: "What are the hotspot functions in Pandas indexing and selection code?",
+			want:  "indexing",
+		},
+		{
+			name:  "IT-43c_pandas_indexing_code",
+			query: "What are the hotspot functions in Pandas indexing code?",
+			want:  "indexing",
+		},
+		{
+			name:  "IT-43c_flask_request_handling_module",
+			query: "Find hotspots in the Flask request handling module",
+			want:  "request",
+		},
+		{
+			name:  "IT-43c_express_routing_middleware_system",
+			query: "What are the hotspots in the Express routing middleware system?",
+			want:  "routing",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractPackageContextFromQuery(tt.query)
+			if got != tt.want {
+				t.Errorf("extractPackageContextFromQuery(%q) = %q, want %q", tt.query, got, tt.want)
+			}
+		})
+	}
+}
+
+// IT-07 Phase 3: Test extractSortByFromQuery.
+func TestExtractSortByFromQuery(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{name: "default", query: "Find hotspot functions", want: "score"},
+		{name: "fan-in", query: "Which hotspot functions have the highest fan-in?", want: "in"},
+		{name: "fan-out", query: "Which hotspot functions have the highest fan-out?", want: "out"},
+		{name: "fanin no hyphen", query: "Sort by fanin", want: "in"},
+		{name: "fanout no hyphen", query: "Sort by fanout", want: "out"},
+		{name: "incoming", query: "Functions with most incoming calls", want: "in"},
+		{name: "outgoing", query: "Functions with most outgoing calls", want: "out"},
+		{name: "most called", query: "Show the most called functions", want: "in"},
+		{name: "called by", query: "Functions called by the most other functions", want: "in"},
+		{name: "indegree", query: "Sort hotspots by indegree", want: "in"},
+		{name: "outdegree", query: "Sort hotspots by outdegree", want: "out"},
+		{name: "connectivity no hint", query: "Most connected hotspots", want: "score"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractSortByFromQuery(tt.query)
+			if got != tt.want {
+				t.Errorf("extractSortByFromQuery(%q) = %q, want %q", tt.query, got, tt.want)
+			}
+		})
+	}
+}
+
+// IT-07 Phase 3: Test extractExcludeTestsFromQuery.
+func TestExtractExcludeTestsFromQuery(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		want  bool
+	}{
+		{name: "default excludes tests", query: "Find hotspot functions", want: true},
+		{name: "test file query includes", query: "Find hotspots in test files", want: false},
+		{name: "test code query includes", query: "Hotspots in the test code", want: false},
+		{name: "including tests", query: "Find hotspots including tests", want: false},
+		{name: "test functions", query: "What are the test functions with highest degree?", want: false},
+		{name: "no test mention excludes", query: "Most connected functions in the render package", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractExcludeTestsFromQuery(tt.query)
+			if got != tt.want {
+				t.Errorf("extractExcludeTestsFromQuery(%q) = %v, want %v", tt.query, got, tt.want)
+			}
+		})
+	}
+}
+
+// IT-06c H-4: Test Pattern 1b — "Where is X used/referenced/defined" extraction.
+// These queries are natural find_references patterns where the symbol name is
+// often lowercase (request, app, db, session) and wouldn't pass isFunctionLikeName.
+func TestExtractFunctionNameFromQuery_WhereIsUsed(t *testing.T) {
+	tests := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{
+			name:  "flask request proxy",
+			query: "Where is the request proxy used across the codebase?",
+			want:  "request",
+		},
+		{
+			name:  "no article",
+			query: "Where is Config used?",
+			want:  "Config",
+		},
+		{
+			name:  "db session",
+			query: "Where is the db session referenced in the project?",
+			want:  "db",
+		},
+		{
+			name:  "PascalCase symbol",
+			query: "Where is the HandlerFunc type used?",
+			want:  "HandlerFunc",
+		},
+		{
+			name:  "snake_case symbol",
+			query: "Where is read_csv defined?",
+			want:  "read_csv",
+		},
+		{
+			name:  "where is without symbol (should return empty)",
+			query: "Where is the codebase located?",
+			// "codebase" is in skipWords for isValidFunctionName → next word "located" also in skipWords
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractFunctionNameFromQuery(tt.query)
+			if got != tt.want {
+				t.Errorf("extractFunctionNameFromQuery(%q) = %q, want %q", tt.query, got, tt.want)
+			}
+		})
+	}
+}
+
+// =============================================================================
+// IT-12: Conceptual Symbol Resolution Helper Tests
+// =============================================================================
+
+// TestTokenizeQueryKeywords_ConceptualQuery tests keyword extraction from
+// conceptual queries that describe behavior rather than name functions.
+func TestTokenizeQueryKeywords_ConceptualQuery(t *testing.T) {
+	tests := []struct {
+		name     string
+		query    string
+		wantAny  []string // at least these keywords should be present
+		wantNone []string // these should NOT be present
+	}{
+		{
+			name:     "material shader query",
+			query:    "Show the call chain from assigning a material to a mesh through to shader compilation",
+			wantAny:  []string{"material", "mesh", "shader", "compilation", "assign", "assigning"},
+			wantNone: []string{"show", "the", "call", "chain", "from", "to"},
+		},
+		{
+			name:     "rendering pipeline query",
+			query:    "What is the rendering pipeline for scene objects?",
+			wantAny:  []string{"render", "rendering", "pipeline", "scene", "objects"},
+			wantNone: []string{"what", "the", "for"},
+		},
+		{
+			name:    "simple function name query",
+			query:   "What does render call?",
+			wantAny: []string{"render"},
+		},
+		{
+			name:    "strips punctuation",
+			query:   "How does the binding subsystem handle validation?",
+			wantAny: []string{"binding", "subsystem", "handle", "validation"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			keywords := tokenizeQueryKeywords(tt.query)
+			keywordSet := make(map[string]bool)
+			for _, k := range keywords {
+				keywordSet[k] = true
+			}
+
+			for _, want := range tt.wantAny {
+				if !keywordSet[want] {
+					t.Errorf("tokenizeQueryKeywords(%q) missing expected keyword %q (got: %v)",
+						tt.query, want, keywords)
+				}
+			}
+
+			for _, noWant := range tt.wantNone {
+				if keywordSet[noWant] {
+					t.Errorf("tokenizeQueryKeywords(%q) should not contain stop word %q (got: %v)",
+						tt.query, noWant, keywords)
+				}
+			}
+		})
+	}
+}
+
+// TestTokenizeQueryKeywords_EmptyQuery returns empty slice.
+func TestTokenizeQueryKeywords_EmptyQuery(t *testing.T) {
+	keywords := tokenizeQueryKeywords("")
+	if len(keywords) != 0 {
+		t.Errorf("tokenizeQueryKeywords('') = %v, want empty", keywords)
+	}
+}
+
+// TestSearchSymbolCandidates_FiltersNonCallable verifies that non-callable kinds
+// (imports, variables, fields, constants, properties, interfaces, types,
+// classes, structs) are filtered out, keeping only functions and methods.
+func TestSearchSymbolCandidates_FiltersNonCallable(t *testing.T) {
+	idx := index.NewSymbolIndex()
+	// Add a method (should be kept)
+	idx.Add(&ast.Symbol{
+		ID: "mesh.ts:10:setMaterial", Name: "setMaterial",
+		Kind: ast.SymbolKindMethod, FilePath: "mesh.ts",
+		StartLine: 10, EndLine: 20, Language: "typescript",
+	})
+	// Add a function (should be kept)
+	idx.Add(&ast.Symbol{
+		ID: "utils.ts:1:getMesh", Name: "getMesh",
+		Kind: ast.SymbolKindFunction, FilePath: "utils.ts",
+		StartLine: 1, EndLine: 10, Language: "typescript",
+	})
+	// Non-callable kinds (all should be filtered out)
+	idx.Add(&ast.Symbol{
+		ID: "imports.ts:1:material_import", Name: "material",
+		Kind: ast.SymbolKindImport, FilePath: "imports.ts",
+		StartLine: 1, EndLine: 1, Language: "typescript",
+	})
+	idx.Add(&ast.Symbol{
+		ID: "mesh.ts:5:meshType", Name: "Mesh",
+		Kind: ast.SymbolKindClass, FilePath: "mesh.ts",
+		StartLine: 5, EndLine: 100, Language: "typescript",
+	})
+	idx.Add(&ast.Symbol{
+		ID: "vars.ts:3:materialVar", Name: "materialColor",
+		Kind: ast.SymbolKindVariable, FilePath: "vars.ts",
+		StartLine: 3, EndLine: 3, Language: "typescript",
+	})
+	idx.Add(&ast.Symbol{
+		ID: "mesh.ts:1:MeshInterface", Name: "MeshInterface",
+		Kind: ast.SymbolKindInterface, FilePath: "mesh.ts",
+		StartLine: 1, EndLine: 10, Language: "typescript",
+	})
+	idx.Add(&ast.Symbol{
+		ID: "mesh.ts:1:MeshType", Name: "MeshType",
+		Kind: ast.SymbolKindType, FilePath: "mesh.ts",
+		StartLine: 1, EndLine: 10, Language: "go",
+	})
+	idx.Add(&ast.Symbol{
+		ID: "mesh.go:1:MeshStruct", Name: "MeshStruct",
+		Kind: ast.SymbolKindStruct, FilePath: "mesh.go",
+		StartLine: 1, EndLine: 10, Language: "go",
+	})
+
+	candidates := searchSymbolCandidates(context.Background(), idx, []string{"material", "mesh"}, 10)
+
+	// Only setMaterial (method) and getMesh (function) should remain
+	nonCallableKinds := map[string]bool{
+		"import": true, "variable": true, "class": true,
+		"interface": true, "type": true, "struct": true,
+	}
+	for _, c := range candidates {
+		if nonCallableKinds[c.Kind] {
+			t.Errorf("searchSymbolCandidates returned non-callable kind %q for %q", c.Kind, c.Name)
+		}
+	}
+
+	if len(candidates) != 2 {
+		t.Errorf("expected 2 candidates (setMaterial, getMesh), got %d: %v", len(candidates), candidates)
+	}
+}
+
+// TestSearchSymbolCandidates_NilIndex returns empty.
+func TestSearchSymbolCandidates_NilIndex(t *testing.T) {
+	candidates := searchSymbolCandidates(context.Background(), nil, []string{"material"}, 10)
+	if len(candidates) != 0 {
+		t.Errorf("searchSymbolCandidates(nil index) = %v, want empty", candidates)
+	}
+}
+
+// TestSearchSymbolCandidates_EmptyKeywords returns empty.
+func TestSearchSymbolCandidates_EmptyKeywords(t *testing.T) {
+	idx := index.NewSymbolIndex()
+	candidates := searchSymbolCandidates(context.Background(), idx, []string{}, 10)
+	if len(candidates) != 0 {
+		t.Errorf("searchSymbolCandidates(empty keywords) = %v, want empty", candidates)
+	}
+}
+
+// TestSearchSymbolCandidates_Deduplication verifies that symbols found by
+// multiple keywords are only returned once.
+func TestSearchSymbolCandidates_Deduplication(t *testing.T) {
+	idx := index.NewSymbolIndex()
+	idx.Add(&ast.Symbol{
+		ID: "mesh.ts:10:setMaterial", Name: "setMaterial",
+		Kind: ast.SymbolKindMethod, FilePath: "mesh.ts",
+		StartLine: 10, EndLine: 20, Language: "typescript",
+	})
+
+	// Search with keywords that would both match "setMaterial"
+	candidates := searchSymbolCandidates(context.Background(), idx, []string{"setMaterial", "material"}, 10)
+
+	nameCount := make(map[string]int)
+	for _, c := range candidates {
+		nameCount[c.Name]++
+	}
+
+	for name, count := range nameCount {
+		if count > 1 {
+			t.Errorf("searchSymbolCandidates returned duplicate candidate %q (%d times)", name, count)
+		}
+	}
+}
+
+// mockConceptualExtractor is a minimal ParamExtractor for testing resolveConceptualName.
+type mockConceptualExtractor struct {
+	enabled     bool
+	resolveFunc func(ctx context.Context, query string, candidates []agent.SymbolCandidate) (string, error)
+}
+
+func (m *mockConceptualExtractor) IsEnabled() bool { return m.enabled }
+func (m *mockConceptualExtractor) ExtractParams(_ context.Context, _ string, _ string,
+	_ []agent.ParamExtractorSchema, _ map[string]any) (map[string]any, error) {
+	return nil, nil
+}
+func (m *mockConceptualExtractor) ResolveConceptualSymbol(ctx context.Context, query string,
+	candidates []agent.SymbolCandidate) (string, error) {
+	if m.resolveFunc != nil {
+		return m.resolveFunc(ctx, query, candidates)
+	}
+	return "", nil
+}
+
+// TestResolveConceptualName_CallableAwareExit verifies IT-12 Rev 4: when a name
+// exists in the index but ONLY as non-callable kinds (struct, type, interface),
+// resolveConceptualName should NOT exit early and should continue to LLM resolution.
+func TestResolveConceptualName_CallableAwareExit(t *testing.T) {
+	ctx := context.Background()
+	idx := index.NewSymbolIndex()
+
+	// "Site" exists as a struct only (no callable matches)
+	siteStruct := &ast.Symbol{
+		ID:        "hugolib/site.go:91:Site",
+		Name:      "Site",
+		Kind:      ast.SymbolKindStruct,
+		FilePath:  "hugolib/site.go",
+		StartLine: 91,
+		EndLine:   200,
+		Package:   "hugolib",
+		Exported:  true,
+		Language:  "go",
+	}
+	// "newHugoSites" exists as a function (better for call chains)
+	newHugoSites := &ast.Symbol{
+		ID:        "hugolib/hugo_sites.go:20:newHugoSites",
+		Name:      "newHugoSites",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "hugolib/hugo_sites.go",
+		StartLine: 20,
+		EndLine:   50,
+		Package:   "hugolib",
+		Exported:  false,
+		Language:  "go",
+	}
+	for _, sym := range []*ast.Symbol{siteStruct, newHugoSites} {
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("Failed to add %s: %v", sym.ID, err)
+		}
+	}
+
+	t.Run("name_only_non_callable_continues_to_LLM", func(t *testing.T) {
+		// When "Site" is only a struct, resolveConceptualName should NOT return
+		// "Site" early. It should proceed to LLM resolution which picks "newHugoSites".
+		extractor := &mockConceptualExtractor{
+			enabled: true,
+			resolveFunc: func(_ context.Context, _ string, candidates []agent.SymbolCandidate) (string, error) {
+				// The LLM picks the best function from candidates
+				return "newHugoSites", nil
+			},
+		}
+		result := resolveConceptualName(ctx, "Site", "call chain from site initialization", idx, extractor)
+		if result == "Site" {
+			t.Errorf("IT-12 Rev 4: resolveConceptualName should NOT return 'Site' when only non-callable matches exist, got %q", result)
+		}
+		if result != "newHugoSites" {
+			t.Errorf("expected 'newHugoSites' from LLM resolution, got %q", result)
+		}
+	})
+
+	t.Run("name_with_callable_exits_early", func(t *testing.T) {
+		// Add a function named "Site" — now the name has callable matches
+		siteFunc := &ast.Symbol{
+			ID:        "hugolib/site.go:536:Site",
+			Name:      "Site",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "hugolib/site.go",
+			StartLine: 536,
+			EndLine:   540,
+			Package:   "hugolib",
+			Exported:  true,
+			Language:  "go",
+		}
+		if err := idx.Add(siteFunc); err != nil {
+			t.Fatalf("Failed to add %s: %v", siteFunc.ID, err)
+		}
+
+		extractor := &mockConceptualExtractor{
+			enabled: true,
+			resolveFunc: func(_ context.Context, _ string, _ []agent.SymbolCandidate) (string, error) {
+				t.Error("IT-12 Rev 4: ResolveConceptualSymbol should NOT be called when callable matches exist")
+				return "should_not_be_used", nil
+			},
+		}
+		result := resolveConceptualName(ctx, "Site", "call chain from site initialization", idx, extractor)
+		if result != "Site" {
+			t.Errorf("expected 'Site' (early exit because callable match exists), got %q", result)
+		}
+	})
+}
+
+func TestExpandConceptSynonyms(t *testing.T) {
+	t.Run("expands initialization to verb forms", func(t *testing.T) {
+		result := expandConceptSynonyms([]string{"site", "initialization"})
+		// Should contain original keywords plus synonyms
+		has := make(map[string]bool)
+		for _, kw := range result {
+			has[kw] = true
+		}
+		if !has["site"] {
+			t.Error("missing original keyword 'site'")
+		}
+		if !has["initialization"] {
+			t.Error("missing original keyword 'initialization'")
+		}
+		for _, expected := range []string{"init", "new", "build", "setup", "create"} {
+			if !has[expected] {
+				t.Errorf("missing synonym %q for 'initialization'", expected)
+			}
+		}
+	})
+
+	t.Run("no duplicates in output", func(t *testing.T) {
+		result := expandConceptSynonyms([]string{"build", "creation"})
+		seen := make(map[string]int)
+		for _, kw := range result {
+			seen[kw]++
+			if seen[kw] > 1 {
+				t.Errorf("duplicate keyword %q in result", kw)
+			}
+		}
+		// "build" appears in input and in "creation" synonyms — should only appear once
+		if seen["build"] != 1 {
+			t.Errorf("expected 'build' exactly once, got %d", seen["build"])
+		}
+	})
+
+	t.Run("no expansion for unknown words", func(t *testing.T) {
+		result := expandConceptSynonyms([]string{"menu", "frobnicator"})
+		if len(result) != 2 {
+			t.Errorf("expected 2 keywords (no expansion), got %d: %v", len(result), result)
+		}
+	})
+
+	t.Run("empty input returns empty", func(t *testing.T) {
+		result := expandConceptSynonyms(nil)
+		if len(result) != 0 {
+			t.Errorf("expected empty result, got %v", result)
+		}
+	})
+}
+
+// TestExtractDomainNouns verifies that extractDomainNouns correctly identifies
+// tokens that are NOT concept synonym keys (i.e., domain-specific nouns).
+func TestExtractDomainNouns(t *testing.T) {
+	tests := []struct {
+		name   string
+		tokens []string
+		want   []string
+	}{
+		{
+			name:   "menu assembly - menu is domain noun",
+			tokens: []string{"menu", "assembly"},
+			want:   []string{"menu"},
+		},
+		{
+			name:   "site initialization - site is domain noun",
+			tokens: []string{"site", "initialization"},
+			want:   []string{"site"},
+		},
+		{
+			name:   "axis rendering - axis is domain noun",
+			tokens: []string{"axis", "rendering"},
+			want:   []string{"axis"},
+		},
+		{
+			name:   "error handling - error is domain noun",
+			tokens: []string{"error", "handling"},
+			want:   []string{"error"},
+		},
+		{
+			name:   "initialization only - all concept keys",
+			tokens: []string{"initialization"},
+			want:   nil,
+		},
+		{
+			name:   "shader compilation - shader is domain noun",
+			tokens: []string{"shader", "compilation"},
+			want:   []string{"shader"},
+		},
+		{
+			name:   "page rendering - render stripped from rendering is concept root",
+			tokens: []string{"page", "render"},
+			want:   []string{"page"},
+		},
+		{
+			name:   "page rendering full tokens - both forms filtered",
+			tokens: []string{"page", "rendering", "render"},
+			want:   []string{"page"},
+		},
+		{
+			name:   "handl stripped from handling is concept root",
+			tokens: []string{"error", "handl"},
+			want:   []string{"error"},
+		},
+		{
+			name:   "empty input returns empty",
+			tokens: nil,
+			want:   nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractDomainNouns(tt.tokens)
+			if len(got) != len(tt.want) {
+				t.Errorf("extractDomainNouns(%v) = %v, want %v", tt.tokens, got, tt.want)
+				return
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("extractDomainNouns(%v)[%d] = %q, want %q", tt.tokens, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestExtractConceptValues verifies that concept synonym values are extracted
+// for concept keys found in name tokens (including -ing reconstituted forms).
+func TestExtractConceptValues(t *testing.T) {
+	t.Run("rendering token produces render in values", func(t *testing.T) {
+		values := extractConceptValues([]string{"page", "rendering"})
+		has := make(map[string]bool)
+		for _, v := range values {
+			has[v] = true
+		}
+		if !has["render"] {
+			t.Errorf("expected 'render' in concept values, got %v", values)
+		}
+	})
+
+	t.Run("render token reconstitutes to rendering key", func(t *testing.T) {
+		values := extractConceptValues([]string{"page", "render"})
+		has := make(map[string]bool)
+		for _, v := range values {
+			has[v] = true
+		}
+		if !has["render"] {
+			t.Errorf("expected 'render' in concept values via rendering key, got %v", values)
+		}
+	})
+
+	t.Run("assembly token produces assemble in values", func(t *testing.T) {
+		values := extractConceptValues([]string{"menu", "assembly"})
+		has := make(map[string]bool)
+		for _, v := range values {
+			has[v] = true
+		}
+		if !has["assemble"] {
+			t.Errorf("expected 'assemble' in concept values, got %v", values)
+		}
+	})
+
+	t.Run("no concept tokens returns empty", func(t *testing.T) {
+		values := extractConceptValues([]string{"page", "menu"})
+		if len(values) != 0 {
+			t.Errorf("expected empty concept values for non-concept tokens, got %v", values)
+		}
+	})
+
+	t.Run("no duplicates", func(t *testing.T) {
+		// Both "rendering" and "render" map to the same key's values
+		values := extractConceptValues([]string{"rendering", "render"})
+		seen := make(map[string]int)
+		for _, v := range values {
+			seen[v]++
+			if seen[v] > 1 {
+				t.Errorf("duplicate value %q in concept values", v)
+			}
+		}
+	})
+}
+
+// TestCandidateTier verifies three-tier assignment based on domain noun and concept value matching.
+func TestCandidateTier(t *testing.T) {
+	tests := []struct {
+		name          string
+		candidate     agent.SymbolCandidate
+		domainNouns   []string
+		conceptValues []string
+		wantTier      int
+	}{
+		{
+			name:          "renderPages with page+render → tier 0 (domain+concept)",
+			candidate:     agent.SymbolCandidate{Name: "renderPages"},
+			domainNouns:   []string{"page"},
+			conceptValues: []string{"render", "draw", "paint"},
+			wantTier:      0,
+		},
+		{
+			name:          "assembleMenus with menu+assemble → tier 0 (domain+concept)",
+			candidate:     agent.SymbolCandidate{Name: "assembleMenus"},
+			domainNouns:   []string{"menu"},
+			conceptValues: []string{"assemble", "build", "compose"},
+			wantTier:      0,
+		},
+		{
+			name:          "Page with page but no concept match → tier 1 (domain only)",
+			candidate:     agent.SymbolCandidate{Name: "Page"},
+			domainNouns:   []string{"page"},
+			conceptValues: []string{"render", "draw", "paint"},
+			wantTier:      1,
+		},
+		{
+			name:          "menuEntries with menu but no concept match → tier 1 (domain only)",
+			candidate:     agent.SymbolCandidate{Name: "menuEntries"},
+			domainNouns:   []string{"menu"},
+			conceptValues: []string{"assemble", "build"},
+			wantTier:      1,
+		},
+		{
+			name:          "Build with menu domain noun → tier 2 (no domain match)",
+			candidate:     agent.SymbolCandidate{Name: "Build"},
+			domainNouns:   []string{"menu"},
+			conceptValues: []string{"assemble", "build"},
+			wantTier:      2,
+		},
+		{
+			name:          "Render with page domain noun → tier 2 (no domain match)",
+			candidate:     agent.SymbolCandidate{Name: "Render"},
+			domainNouns:   []string{"page"},
+			conceptValues: []string{"render", "draw"},
+			wantTier:      2,
+		},
+		{
+			name:          "empty domain nouns → tier 2 (no regression)",
+			candidate:     agent.SymbolCandidate{Name: "assembleMenus"},
+			domainNouns:   nil,
+			conceptValues: []string{"assemble"},
+			wantTier:      2,
+		},
+		{
+			name:          "short noun log does not boost catalogBuilder",
+			candidate:     agent.SymbolCandidate{Name: "catalogBuilder"},
+			domainNouns:   []string{"log"},
+			conceptValues: []string{"build"},
+			wantTier:      2,
+		},
+		{
+			name:          "short noun api does not boost apiHandler",
+			candidate:     agent.SymbolCandidate{Name: "apiHandler"},
+			domainNouns:   []string{"api"},
+			conceptValues: []string{"handle"},
+			wantTier:      2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := candidateTier(tt.candidate, tt.domainNouns, tt.conceptValues)
+			if got != tt.wantTier {
+				t.Errorf("candidateTier(%q, domainNouns=%v, conceptValues=%v) = %d, want %d",
+					tt.candidate.Name, tt.domainNouns, tt.conceptValues, got, tt.wantTier)
+			}
+		})
+	}
+}
+
+// TestResolveConceptualName_DomainNounBoosting verifies the end-to-end behavior
+// of domain noun boosting in resolveConceptualName. assembleMenus (8 edges, contains
+// "menu") must rank above Build (55 edges, synonym-only match) for "menu assembly".
+func TestResolveConceptualName_DomainNounBoosting(t *testing.T) {
+	ctx := context.Background()
+	idx := index.NewSymbolIndex()
+
+	// assembleMenus: a method with 8 edges — contains "menu" domain noun
+	assembleMenus := &ast.Symbol{
+		ID:        "hugolib/menu.go:50:assembleMenus",
+		Name:      "assembleMenus",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "hugolib/menu.go",
+		StartLine: 50,
+		EndLine:   100,
+		Package:   "hugolib",
+		Exported:  false,
+		Language:  "go",
+	}
+	// Build: a function with 55 edges — matches via "build" synonym of "assembly"
+	build := &ast.Symbol{
+		ID:        "hugolib/hugo_sites.go:100:Build",
+		Name:      "Build",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "hugolib/hugo_sites.go",
+		StartLine: 100,
+		EndLine:   200,
+		Package:   "hugolib",
+		Exported:  true,
+		Language:  "go",
+	}
+	for _, sym := range []*ast.Symbol{assembleMenus, build} {
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("Failed to add %s: %v", sym.ID, err)
+		}
+	}
+
+	t.Run("domain_noun_beats_high_edge_count", func(t *testing.T) {
+		// The mock extractor returns the FIRST candidate's name,
+		// simulating positional bias in small LLMs.
+		extractor := &mockConceptualExtractor{
+			enabled: true,
+			resolveFunc: func(_ context.Context, _ string, candidates []agent.SymbolCandidate) (string, error) {
+				if len(candidates) == 0 {
+					return "", nil
+				}
+				// Return the first candidate (simulates positional bias)
+				return candidates[0].Name, nil
+			},
+		}
+		result := resolveConceptualName(ctx, "menu assembly", "Show the call chain from site initialization to menu assembly", idx, extractor)
+		if result != "assembleMenus" {
+			t.Errorf("IT-12 Rev 5: domain noun boosting should rank assembleMenus above Build for 'menu assembly', got %q", result)
+		}
+	})
+
+	t.Run("no_domain_noun_uses_edge_count", func(t *testing.T) {
+		// "initialization" is all concept keys → no domain nouns → pure edge count sort.
+		// Inject graph analytics so Build (55 edges) ranks above Init (15 edges).
+		idx2 := index.NewSymbolIndex()
+		buildSym2 := &ast.Symbol{
+			ID:        "hugolib/hugo_sites.go:100:Build",
+			Name:      "Build",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "hugolib/hugo_sites.go",
+			StartLine: 100,
+			EndLine:   200,
+			Package:   "hugolib",
+			Exported:  true,
+			Language:  "go",
+		}
+		initSym := &ast.Symbol{
+			ID:        "hugolib/hugo_sites.go:10:Init",
+			Name:      "Init",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "hugolib/hugo_sites.go",
+			StartLine: 10,
+			EndLine:   20,
+			Package:   "hugolib",
+			Exported:  true,
+			Language:  "go",
+		}
+		for _, sym := range []*ast.Symbol{buildSym2, initSym} {
+			if err := idx2.Add(sym); err != nil {
+				t.Fatalf("Failed to add %s: %v", sym.ID, err)
+			}
+		}
+
+		// Build a graph with edge counts: Build gets 55 edges, Init gets 15.
+		g := graph.NewGraph("/project")
+		// Add all nodes first (need dummy targets for edges).
+		for _, sym := range []*ast.Symbol{buildSym2, initSym} {
+			if _, err := g.AddNode(sym); err != nil {
+				t.Fatalf("AddNode %s: %v", sym.ID, err)
+			}
+		}
+		// Add dummy target nodes for edges.
+		dummySymbols := make([]*ast.Symbol, 55)
+		for i := range dummySymbols {
+			dummySymbols[i] = &ast.Symbol{
+				ID:        fmt.Sprintf("hugolib/dummy.go:%d:dummy%d", i+1, i),
+				Name:      fmt.Sprintf("dummy%d", i),
+				Kind:      ast.SymbolKindFunction,
+				FilePath:  "hugolib/dummy.go",
+				StartLine: i + 1,
+				EndLine:   i + 2,
+				Package:   "hugolib",
+				Language:  "go",
+			}
+			if _, err := g.AddNode(dummySymbols[i]); err != nil {
+				t.Fatalf("AddNode dummy%d: %v", i, err)
+			}
+		}
+		// Build: 47 outgoing + 8 incoming = 55 total
+		for i := 0; i < 47; i++ {
+			if err := g.AddEdge(buildSym2.ID, dummySymbols[i].ID, graph.EdgeTypeCalls, ast.Location{}); err != nil {
+				t.Fatalf("AddEdge out %d: %v", i, err)
+			}
+		}
+		for i := 47; i < 55; i++ {
+			if err := g.AddEdge(dummySymbols[i].ID, buildSym2.ID, graph.EdgeTypeCalls, ast.Location{}); err != nil {
+				t.Fatalf("AddEdge in %d: %v", i, err)
+			}
+		}
+		// Init: 12 outgoing + 3 incoming = 15 total
+		for i := 0; i < 12; i++ {
+			if err := g.AddEdge(initSym.ID, dummySymbols[i].ID, graph.EdgeTypeCalls, ast.Location{}); err != nil {
+				t.Fatalf("AddEdge init out %d: %v", i, err)
+			}
+		}
+		for i := 12; i < 15; i++ {
+			if err := g.AddEdge(dummySymbols[i].ID, initSym.ID, graph.EdgeTypeCalls, ast.Location{}); err != nil {
+				t.Fatalf("AddEdge init in %d: %v", i, err)
+			}
+		}
+		g.Freeze()
+		hg, err := graph.WrapGraph(g)
+		if err != nil {
+			t.Fatalf("WrapGraph: %v", err)
+		}
+		ga := graph.NewGraphAnalytics(hg)
+
+		extractor := &mockConceptualExtractor{
+			enabled: true,
+			resolveFunc: func(_ context.Context, _ string, candidates []agent.SymbolCandidate) (string, error) {
+				if len(candidates) == 0 {
+					return "", nil
+				}
+				// Return first candidate (simulates positional bias)
+				return candidates[0].Name, nil
+			},
+		}
+		// "initialization" → all concept keys → domainNouns = [] → all tier 1 → pure edge count
+		// Build (55 edges) should be sorted above Init (15 edges)
+		result := resolveConceptualName(ctx, "initialization", "call chain from initialization", idx2, extractor, ga)
+		if result != "Build" {
+			t.Errorf("IT-12 Rev 5: with no domain nouns, edge-count sort should pick Build (55 edges) over Init (15 edges), got %q", result)
+		}
+	})
+}
+
+// TestResolveConceptualName_DotNotationPreserved verifies IT-R2d: when a
+// dot-notation name like "Scene.constructor" is passed, resolveConceptualName
+// must return the ORIGINAL dot-notation name (not strip it to "constructor").
+// The tool-side ResolveFunctionCandidates handles dot-notation correctly via
+// resolveTypeDotMethod(Type, Method), which uses Receiver filtering. Stripping
+// the type prefix loses disambiguation context.
+func TestResolveConceptualName_DotNotationPreserved(t *testing.T) {
+	ctx := context.Background()
+	idx := index.NewSymbolIndex()
+
+	// Add multiple "constructor" symbols with different Receivers
+	sceneConstructor := &ast.Symbol{
+		ID:        "scene.ts:2006:constructor",
+		Name:      "constructor",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "scene.ts",
+		StartLine: 2006,
+		EndLine:   2100,
+		Receiver:  "Scene",
+		Language:  "typescript",
+	}
+	nodeConstructor := &ast.Symbol{
+		ID:        "node.ts:384:constructor",
+		Name:      "constructor",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "node.ts",
+		StartLine: 384,
+		EndLine:   420,
+		Receiver:  "Node",
+		Language:  "typescript",
+	}
+	for _, sym := range []*ast.Symbol{sceneConstructor, nodeConstructor} {
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("Failed to add %s: %v", sym.ID, err)
+		}
+	}
+
+	extractor := &mockConceptualExtractor{enabled: true}
+
+	t.Run("dot_notation_preserved_not_stripped", func(t *testing.T) {
+		// "Scene.constructor" should return "Scene.constructor" (preserving the
+		// type prefix), NOT "constructor" (which would lose disambiguation).
+		result := resolveConceptualName(ctx, "Scene.constructor",
+			"Find path from Scene.constructor to render", idx, extractor)
+		if result != "Scene.constructor" {
+			t.Errorf("IT-R2d: resolveConceptualName should preserve dot-notation 'Scene.constructor', got %q", result)
+		}
+	})
+
+	t.Run("bare_method_still_returns_bare", func(t *testing.T) {
+		// A bare "constructor" (no dot) with callable matches should return as-is.
+		result := resolveConceptualName(ctx, "constructor",
+			"Find path from constructor to render", idx, extractor)
+		if result != "constructor" {
+			t.Errorf("bare name 'constructor' should return unchanged, got %q", result)
+		}
+	})
 }

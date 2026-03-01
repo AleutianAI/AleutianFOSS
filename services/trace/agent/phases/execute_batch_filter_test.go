@@ -814,17 +814,17 @@ func TestExtractKindFromQuery(t *testing.T) {
 		{
 			name:  "method_keyword",
 			query: "List all methods with high connectivity",
-			want:  "function", // methods map to function
+			want:  "method", // IT-04 Audit: methods now map precisely to "method"
 		},
 		{
 			name:  "struct_keyword",
 			query: "Find hotspot structs",
-			want:  "type", // struct maps to type
+			want:  "struct", // IT-04 Audit: structs now map precisely to "struct"
 		},
 		{
 			name:  "interface_keyword",
 			query: "Show interface hotspots",
-			want:  "type", // interface maps to type
+			want:  "interface", // IT-04 Audit: interfaces now map precisely to "interface"
 		},
 		{
 			name:  "no_kind_specified",
@@ -898,6 +898,80 @@ func TestExtractPathSymbolsFromQuery(t *testing.T) {
 			wantFrom: "getDatesToProcess",
 			wantTo:   "AnalyzeBeaconSessionData",
 			wantOk:   true,
+		},
+		// IT-R2b Fix 1: Dot-notation names must be captured intact.
+		{
+			name:     "dot_notation_both",
+			query:    "path from Engine.runRenderLoop to Scene.render",
+			wantFrom: "Engine.runRenderLoop",
+			wantTo:   "Scene.render",
+			wantOk:   true,
+		},
+		{
+			name:     "dot_notation_from_only",
+			query:    "from Camera.update to rendering",
+			wantFrom: "Camera.update",
+			wantTo:   "",
+			wantOk:   false,
+		},
+		{
+			name:     "single_word_still_works",
+			query:    "from main to parseConfig",
+			wantFrom: "main",
+			wantTo:   "parseConfig",
+			wantOk:   true,
+		},
+		{
+			name:     "quoted_dot_notation",
+			query:    "from 'Scene.constructor' to render",
+			wantFrom: "Scene.constructor",
+			wantTo:   "render",
+			wantOk:   true,
+		},
+		{
+			name:     "trailing_dot_stripped",
+			query:    "find path from Engine.runRenderLoop.",
+			wantFrom: "Engine.runRenderLoop",
+			wantTo:   "",
+			wantOk:   false,
+		},
+		// IT-R2c Fix D: Multi-word conceptual phrases.
+		{
+			name:     "multi_word_conceptual_from_to",
+			query:    "find path from memtable flush to disk persistence",
+			wantFrom: "memtable flush",
+			wantTo:   "disk persistence",
+			wantOk:   true,
+		},
+		{
+			name:     "multi_word_from_single_word_to",
+			query:    "find path from scene graph update to render",
+			wantFrom: "scene graph update",
+			wantTo:   "render",
+			wantOk:   true,
+		},
+		{
+			name:     "single_word_not_overridden_by_phrase",
+			query:    "from main to parseConfig",
+			wantFrom: "main",
+			wantTo:   "parseConfig",
+			wantOk:   true,
+		},
+		// IT-R2d: "between X and Y" where Y is conceptual (no CamelCase).
+		// Must NOT set to=from.
+		{
+			name:     "between_dot_notation_and_conceptual",
+			query:    "Find the shortest path between Camera.update and the final draw call",
+			wantFrom: "Camera.update",
+			wantTo:   "",
+			wantOk:   false,
+		},
+		{
+			name:     "between_camel_and_conceptual",
+			query:    "path between SceneManager.render and the display pipeline",
+			wantFrom: "SceneManager.render",
+			wantTo:   "",
+			wantOk:   false,
 		},
 	}
 

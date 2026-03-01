@@ -94,13 +94,19 @@ tests:
     name: babylonjs_get_call_chain
     category: TOOL_HAPPY_PATH
     description: >
-      get_call_chain tool against Babylon.js. From Engine.runRenderLoop to mesh rendering.
+      get_call_chain tool against Babylon.js. Scene.render downstream call chain.
+      Scene.render (scene.ts:5412) directly calls _processSubCameras, animate,
+      _clearFrameBuffer, _checkIntersections, _registerTransientComponents, and
+      resetCachedMaterial. This is a rich downstream tree with many static edges.
     query: |
-      Show the call chain from Engine.runRenderLoop to mesh rendering
+      Show the downstream call chain from Scene.render
     expected_state: COMPLETE
     reference_answer: |
-      Engine.runRenderLoop -> render callback -> Scene.render ->
-      RenderingManager -> mesh._render -> SubMesh.render -> material draw.
+      get_call_chain from Scene.render shows a deep downstream tree including
+      _processSubCameras, _renderForCamera, _evaluateActiveMeshes, animate,
+      _clearFrameBuffer, _checkIntersections, _registerTransientComponents,
+      resetCachedMaterial, updateTransformMatrix, and _bindFrameBuffer. Should
+      return multiple nodes at depth 2-5 showing the rendering pipeline internals.
     validations:
       - type: graph_tool_used
 
@@ -108,13 +114,16 @@ tests:
     name: babylonjs_find_path
     category: TOOL_HAPPY_PATH
     description: >
-      find_path tool against Babylon.js. Between Scene constructor and material application.
+      find_path tool against Babylon.js. Scene.render to _evaluateActiveMeshes.
+      Direct static chain: Scene.render → _processSubCameras → _renderForCamera
+      → _evaluateActiveMeshes. All are methods on Scene class in scene.ts.
     query: |
-      Find the shortest path between Scene constructor and material application
+      Find the shortest path between Scene.render and _evaluateActiveMeshes
     expected_state: COMPLETE
     reference_answer: |
-      Scene constructor initializes the rendering manager which connects through
-      mesh rendering to material bind and shader application.
+      find_path returns a multi-hop path: Scene.render → _processSubCameras →
+      _renderForCamera → _evaluateActiveMeshes. All functions are in scene.ts.
+      This is a 3-hop path through the camera rendering pipeline.
     validations:
       - type: graph_tool_used
 
@@ -155,8 +164,12 @@ tests:
       Find circular call dependencies in this codebase
     expected_state: COMPLETE
     reference_answer: |
-      Babylon.js has circular dependencies in the scene graph where Scene
-      references meshes and meshes reference back to Scene for context.
+      Found 20 circular dependency cycles. The largest cycle contains 542 nodes
+      starting with _updateShadows -> _updateEnv -> resetModel -> _stopSceneOptimizer
+      -> _startSceneOptimizer -> resetEnvironment -> playAnimation -> updateShadows
+      -> _reset -> play -> _getCameraConfig -> _reframeCameraFromBounds -> _reframeCamera,
+      spanning packages/tools/viewer/src/viewerElement.ts, packages/tools/viewer/src/viewer.ts,
+      and packages/dev/core/src/Animations/animationGroup.ts.
     validations:
       - type: graph_tool_used
 
@@ -346,88 +359,108 @@ tests:
 
   - id: 7123
     name: babylonjs_find_entry_points
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: find_entry_points tool (not yet registered as standalone tool).
+      find_entry_points tool against Babylon.js. Find execution entry points.
     query: |
       What are the entry points into this codebase?
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone. Entry points include
-      Engine constructor, Scene constructor, and module index exports.
-    validations: []
+      Entry points include Engine constructor for WebGL setup,
+      Scene constructor for scene graph creation, and the
+      runRenderLoop that starts the frame rendering cycle.
+    validations:
+      - type: graph_tool_used
 
   - id: 7124
     name: babylonjs_trace_data_flow
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: trace_data_flow tool (not yet registered as standalone tool).
+      trace_data_flow tool against Babylon.js. Trace vertex data flow.
     query: |
       Trace how vertex data flows through the rendering pipeline
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      Vertex data flows from Mesh/VertexData through VertexBuffer
+      to GPU buffers, then through Effect/shader programs during
+      Scene.render draw calls via the RenderingManager.
+    validations:
+      - type: graph_tool_used
 
   - id: 7125
     name: babylonjs_trace_error_flow
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: trace_error_flow tool (not yet registered as standalone tool).
+      trace_error_flow tool against Babylon.js. Trace shader errors.
     query: |
       Trace how errors propagate through the shader compilation system
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      Shader compilation errors propagate from Effect.createProgram
+      through the shader processor, triggering fallback materials
+      and error callbacks on the Engine.
+    validations:
+      - type: graph_tool_used
 
   - id: 7126
     name: babylonjs_find_config_usage
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: find_config_usage tool (not yet registered as standalone tool).
+      find_config_usage tool against Babylon.js. Find engine config.
     query: |
       How is the engine configuration used across Babylon.js?
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      Engine configuration controls WebGL context options, antialiasing,
+      render target resolution, hardware scaling, and feature detection
+      across the rendering, material, and texture systems.
+    validations:
+      - type: graph_tool_used
 
   - id: 7127
     name: babylonjs_find_similar_code
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: find_similar_code tool (not yet registered as standalone tool).
+      find_similar_code tool against Babylon.js. Similar to mesh rendering.
     query: |
       Find code similar to the mesh rendering logic
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      Code similar to mesh rendering exists in particle system
+      rendering, sprite rendering, and post-process rendering — all
+      following the pattern of binding buffers, setting uniforms, draw.
+    validations:
+      - type: graph_tool_used
 
   - id: 7128
     name: babylonjs_build_minimal_context
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: build_minimal_context tool (not yet registered as standalone tool).
+      build_minimal_context tool against Babylon.js. Context for Scene.render.
     query: |
       Build minimal context needed to understand the Scene.render function
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      Minimal context includes Scene, RenderingManager, SubMesh,
+      DrawWrapper, Effect, and the camera/material binding that
+      sets up each draw call in the render loop.
+    validations:
+      - type: graph_tool_used
 
   - id: 7129
     name: babylonjs_summarize_file
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: summarize_file tool (not yet registered as standalone tool).
+      summarize_file tool against Babylon.js. Summarize scene.ts.
     query: |
       Summarize the scene.ts file
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      scene.ts defines the Scene class, the container for all 3D
+      objects. It manages cameras, lights, meshes, materials, the
+      render loop, pick/collision, and resource disposal.
+    validations:
+      - type: graph_tool_used
 
   - id: 7130
     name: babylonjs_summarize_package
@@ -525,7 +558,7 @@ tests:
       TODO: Tool not yet registered as standalone.
     validations: []
 
-  - id: 7138
+  - id: 7238
     name: babylonjs_find_duplication
     category: TOOL_HAPPY_PATH_TODO
     description: >
@@ -583,6 +616,37 @@ tests:
       user code outside the engine source.
     validations:
       - type: graph_tool_used
+  # -- Additional find_implementations tests (44-45) -- expected_state: COMPLETE --
+  - id: 7144
+    name: babylonjs_find_implementations_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_implementations tool against BabylonJS (test B). Target: Light base class.
+    query: |
+      What classes extend the Light base class in BabylonJS?
+    expected_state: COMPLETE
+    reference_answer: |
+      Light in src/Lights/light.ts is extended by ShadowLight (abstract
+      intermediary), HemisphericLight, DirectionalLight, PointLight, and
+      SpotLight for different lighting models in the 3D scene graph.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7145
+    name: babylonjs_find_implementations_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_implementations tool against BabylonJS (test C). Target: Material base class.
+    query: |
+      What classes extend the Material base class in BabylonJS?
+    expected_state: COMPLETE
+    reference_answer: |
+      Material in src/Materials/material.ts is extended by StandardMaterial,
+      PBRMaterial, PBRMetallicRoughnessMaterial, ShaderMaterial, NodeMaterial,
+      and BackgroundMaterial for different rendering pipelines.
+    validations:
+      - type: graph_tool_used
+
   # -- Additional find_callees tests (42-43) -- expected_state: COMPLETE --
   - id: 7142
     name: babylonjs_find_callees_b
@@ -617,3 +681,1586 @@ tests:
       and skeletons, and finally notifying dispose observers.
     validations:
       - type: graph_tool_used
+
+  # -- Additional find_symbol tests (46-47) -- expected_state: COMPLETE --
+
+  - id: 7146
+    name: babylonjs_find_symbol_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_symbol tool against BabylonJS (test B). Target: Engine class.
+    query: |
+      Where is the Engine class defined in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Engine class is defined in src/Engines/engine.ts. It manages the
+      WebGL context, render loop, viewport, and low-level GPU operations
+      that Scene and all rendering subsystems depend on.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7147
+    name: babylonjs_find_symbol_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_symbol tool against BabylonJS (test C). Target: TransformNode class.
+    query: |
+      Where is the TransformNode class defined?
+    expected_state: COMPLETE
+    reference_answer: |
+      The TransformNode class is defined in src/Meshes/transformNode.ts. It
+      extends Node and provides position, rotation, and scaling transforms,
+      serving as the base class for AbstractMesh and all spatial objects.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_references tests (48-49) -- expected_state: COMPLETE --
+
+  - id: 7148
+    name: babylonjs_find_references_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_references tool against BabylonJS (test B). Target: Vector3 class.
+    query: |
+      Where is the Vector3 class referenced across the codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      Vector3 from src/Maths/math.vector.ts is referenced extensively across
+      mesh transforms, camera positioning, light direction, physics, particle
+      systems, and virtually every spatial computation in the engine.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7149
+    name: babylonjs_find_references_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_references tool against BabylonJS (test C). Target: Material class.
+    query: |
+      Where is the Material base class referenced in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Material base class from src/Materials/material.ts is referenced in
+      mesh rendering (SubMesh.render), scene management (Scene.materials array),
+      and all derived material types (StandardMaterial, PBRMaterial, etc.).
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional get_call_chain tests (50-51) -- expected_state: COMPLETE --
+
+  - id: 7150
+    name: babylonjs_get_call_chain_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      get_call_chain tool against BabylonJS (test B). Target: from Scene.addMesh to scene graph update.
+      Note: "scene graph update" is a conceptual phrase. IT-12 conceptual resolution
+      maps it to a scene-related symbol. The actual observer chain (addMesh ->
+      onNewMeshAddedObservable.notifyObservers -> registered callbacks) uses dynamic
+      dispatch via the Observable pattern which static analysis cannot fully follow.
+    query: |
+      Show the call chain from Scene.addMesh to the scene graph update
+    expected_state: COMPLETE
+    reference_answer: |
+      find_path from Scene.addMesh (scene.ts:2849) to a scene-related symbol.
+      addMesh calls _resyncLightSources, _addToSceneRootNodes, and fires
+      onNewMeshAddedObservable.notifyObservers (observer dispatch). The static
+      call graph follows direct calls from addMesh through light source syncing
+      and scene root node management. The path length and intermediate nodes
+      depend on which "scene graph update" symbol IT-12 resolution selects.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7151
+    name: babylonjs_get_call_chain_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      get_call_chain tool against BabylonJS (test C). Target: from material assignment to shader compilation.
+    query: |
+      Show the call chain from assigning a material to a mesh through to shader compilation
+    expected_state: COMPLETE
+    reference_answer: |
+      The get_call_chain tool used IT-12 conceptual symbol resolution to
+      replace the hallucinated function name with shaderPath from
+      packages/dev/core/src/Compute/computeShader.ts. The call chain
+      returned depth 0, 1 node — shaderPath is a leaf node with no
+      outgoing call edges, so the chain is shallow.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_path tests (52-53) -- expected_state: COMPLETE --
+
+  - id: 7152
+    name: babylonjs_find_path_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_path tool against BabylonJS (test B). Scene.render to _bindFrameBuffer.
+      Scene.render directly calls _bindFrameBuffer (scene.ts:4860) as a 1-hop
+      path. Both are methods on Scene in scene.ts.
+    query: |
+      Find the shortest path between Scene.render and _bindFrameBuffer
+    expected_state: COMPLETE
+    reference_answer: |
+      find_path returns a 1-hop direct call: Scene.render (scene.ts:5412)
+      → _bindFrameBuffer (scene.ts:4860). Scene.render calls _bindFrameBuffer
+      directly to bind the GPU frame buffer before rendering the scene.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7153
+    name: babylonjs_find_path_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_path tool against BabylonJS (test C). Scene._processSubCameras to
+      updateTransformMatrix. _processSubCameras directly calls
+      updateTransformMatrix (scene.ts:4842) as a 1-hop path.
+    query: |
+      Find the shortest path between Scene._processSubCameras and updateTransformMatrix
+    expected_state: COMPLETE
+    reference_answer: |
+      find_path returns a 1-hop direct call: Scene._processSubCameras
+      (scene.ts:5092) → updateTransformMatrix (scene.ts:4842).
+      _processSubCameras calls updateTransformMatrix directly to
+      recompute the scene transform matrix for camera rendering.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_hotspots tests (54-55) -- expected_state: COMPLETE --
+
+  - id: 7154
+    name: babylonjs_find_hotspots_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_hotspots tool against BabylonJS (test B). Target: materials subsystem.
+    query: |
+      What are the hotspot functions within the materials subsystem?
+    expected_state: COMPLETE
+    reference_answer: |
+      Within the materials subsystem, Material.isReadyForSubMesh has the highest
+      connectivity as all material types override it. StandardMaterial.bind and
+      PBRMaterial.bind also rank highly due to their shader uniform setup.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7155
+    name: babylonjs_find_hotspots_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_hotspots tool against BabylonJS (test C). Target: scene graph node hierarchy.
+    query: |
+      What are the hotspot functions in the BabylonJS Node class hierarchy?
+    expected_state: COMPLETE
+    reference_answer: |
+      In the Node hierarchy, computeWorldMatrix is a top hotspot due to calls
+      from transforms, rendering, and physics. dispose also ranks highly since
+      every node type calls it for cleanup across the scene graph.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_dead_code tests (56-57) -- expected_state: COMPLETE --
+
+  - id: 7156
+    name: babylonjs_find_dead_code_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dead_code tool against BabylonJS (test B). Target: engine utilities.
+    query: |
+      Are there any dead code functions in the Engine class?
+    expected_state: COMPLETE
+    reference_answer: |
+      Dead code analysis of the Engine class checks for internal methods with
+      zero callers that may be legacy code from older WebGL versions or
+      deprecated rendering paths no longer used by the current pipeline.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7157
+    name: babylonjs_find_dead_code_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dead_code tool against BabylonJS (test C). Target: math utilities.
+    query: |
+      Find unused functions in the math utilities module
+    expected_state: COMPLETE
+    reference_answer: |
+      Dead code analysis of the math module (Vector3, Matrix, Quaternion)
+      identifies static helper methods with zero incoming edges that may
+      exist for API completeness but are not called within the engine itself.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_cycles tests (58-59) -- expected_state: COMPLETE --
+
+  - id: 7158
+    name: babylonjs_find_cycles_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_cycles tool against BabylonJS (test B). Target: Scene and Node relationship.
+    query: |
+      Find circular dependencies between Scene and Node classes
+    expected_state: COMPLETE
+    reference_answer: |
+      Scene and Node have a circular dependency where Scene maintains arrays
+      of Nodes (meshes, lights, cameras) and each Node holds a reference
+      back to its parent Scene for context during transforms and rendering.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7159
+    name: babylonjs_find_cycles_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_cycles tool against BabylonJS (test C). Target: material and effect pipeline.
+    query: |
+      Are there circular call dependencies in the material-to-shader pipeline?
+    expected_state: COMPLETE
+    reference_answer: |
+      Cycle analysis of the material pipeline checks for mutual dependencies
+      between Material.isReadyForSubMesh, Effect creation, and shader
+      compilation callbacks that may reference material state.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_important tests (60-61) -- expected_state: COMPLETE --
+
+  - id: 7160
+    name: babylonjs_find_important_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_important tool against BabylonJS (test B). Target: rendering pipeline.
+    query: |
+      What are the most important functions by PageRank in the rendering pipeline?
+    expected_state: COMPLETE
+    reference_answer: |
+      In the rendering pipeline, Scene.render ranks highest by PageRank,
+      followed by RenderingManager.render, _renderForCamera, and
+      SubMesh.render which form the core execution spine of every frame.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7161
+    name: babylonjs_find_important_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_important tool against BabylonJS (test C). Target: mesh geometry subsystem.
+    query: |
+      Which mesh geometry functions have the highest structural importance?
+    expected_state: COMPLETE
+    reference_answer: |
+      Found 10 most important symbols by PageRank. Top results include:
+      push (PageRank 0.001857) in dynamicFloat32Array.ts,
+      notifyObservers (PageRank 0.001168) in observable.ts,
+      _growArray (PageRank 0.000796) in dynamicFloat32Array.ts,
+      remove (PageRank 0.000745) in cameraInputsManager.ts.
+      These are general-purpose utility methods with high graph centrality
+      rather than mesh-specific functions.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_communities tests (62-63) -- expected_state: COMPLETE --
+
+  - id: 7162
+    name: babylonjs_find_communities_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_communities tool against BabylonJS (test B). Target: engine vs scene separation.
+    query: |
+      Do the Engine and Scene form distinct code communities?
+    expected_state: COMPLETE
+    reference_answer: |
+      Community detection separates Engine functions (WebGL context, viewport,
+      frame management) from Scene functions (scene graph, evaluation, render
+      orchestration), with rendering manager bridging the two communities.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7163
+    name: babylonjs_find_communities_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_communities tool against BabylonJS (test C). Target: camera subsystem community.
+    query: |
+      What code community does the camera subsystem belong to?
+    expected_state: COMPLETE
+    reference_answer: |
+      Community detection groups Camera, FreeCamera, ArcRotateCamera, and
+      TargetCamera into a camera community with shared viewport and projection
+      logic, distinct from the mesh and material communities.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_articulation_points tests (64-65) -- expected_state: COMPLETE --
+
+  - id: 7164
+    name: babylonjs_find_articulation_points_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_articulation_points tool against BabylonJS (test B). Target: rendering pipeline.
+    query: |
+      What are the single points of failure in the rendering pipeline?
+    expected_state: COMPLETE
+    reference_answer: |
+      In the rendering pipeline, Scene.render and RenderingManager.render are
+      articulation points. Removing either would disconnect the render loop
+      from all mesh drawing and material binding operations.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7165
+    name: babylonjs_find_articulation_points_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_articulation_points tool against BabylonJS (test C). Target: scene graph hierarchy.
+    query: |
+      Are there articulation points in the scene graph node hierarchy?
+    expected_state: COMPLETE
+    reference_answer: |
+      In the scene graph, Node.computeWorldMatrix is an articulation point
+      since it bridges parent transform propagation to child transforms,
+      and removing it would disconnect the spatial hierarchy.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_dominators tests (66-67) -- expected_state: COMPLETE --
+
+  - id: 7166
+    name: babylonjs_find_dominators_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dominators tool against BabylonJS (test B). Target: material shader application.
+    query: |
+      What functions must be called before a shader is applied to a mesh?
+    expected_state: COMPLETE
+    reference_answer: |
+      Dominators of shader application include Scene.render, SubMesh.render,
+      and Material.isReadyForSubMesh which must verify shader compilation
+      and readiness before Effect.bind applies the shader to the GPU.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7167
+    name: babylonjs_find_dominators_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dominators tool against BabylonJS (test C). Target: texture upload to GPU.
+    query: |
+      What functions dominate the path to uploading a texture to the GPU?
+    expected_state: COMPLETE
+    reference_answer: |
+      Dominators of texture GPU upload include Texture constructor,
+      _prepareTexture, and Engine.createTexture which must complete
+      image loading and format conversion before the GPU upload call.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_loops tests (68-69) -- expected_state: COMPLETE --
+
+  - id: 7168
+    name: babylonjs_find_loops_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_loops tool against BabylonJS (test B). Target: animation system.
+    query: |
+      Find loops or recursive patterns in the animation evaluation system
+    expected_state: COMPLETE
+    reference_answer: |
+      The animation system uses iterative loops in Scene.animate to evaluate
+      all active Animatable instances, each calling Animation.interpolate
+      which loops through keyframes to compute the current value per frame.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7169
+    name: babylonjs_find_loops_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_loops tool against BabylonJS (test C). Target: dispose and cleanup hierarchy.
+    query: |
+      Are there recursive patterns in the node disposal process?
+    expected_state: COMPLETE
+    reference_answer: |
+      Node.dispose recursively walks child nodes calling dispose on each,
+      then removes the node from parent references and Scene arrays,
+      forming a recursive tree cleanup pattern through the hierarchy.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_merge_points tests (70-71) -- expected_state: COMPLETE --
+
+  - id: 7170
+    name: babylonjs_find_merge_points_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_merge_points tool against BabylonJS (test B). Target: material types convergence.
+    query: |
+      Where do different material types converge in the rendering pipeline?
+    expected_state: COMPLETE
+    reference_answer: |
+      All material types (StandardMaterial, PBRMaterial, ShaderMaterial)
+      converge at the Material.bind call during SubMesh.render, where each
+      type sets its specific uniforms before the shared GPU draw call.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7171
+    name: babylonjs_find_merge_points_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_merge_points tool against BabylonJS (test C). Target: input event handling.
+    query: |
+      Where do different mesh creation paths converge?
+    expected_state: COMPLETE
+    reference_answer: |
+      Different mesh creation methods (MeshBuilder.CreateBox, CreateSphere,
+      CreateGround, imported meshes) all converge at Scene.addMesh which
+      registers the mesh in the scene graph and triggers evaluation.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_common_dependency tests (72-73) -- expected_state: COMPLETE --
+
+  - id: 7172
+    name: babylonjs_find_common_dependency_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_common_dependency tool against BabylonJS (test B). Target: Camera and Light.
+    query: |
+      What shared dependency do Camera and Light have?
+    expected_state: COMPLETE
+    reference_answer: |
+      Both Camera and Light extend Node, sharing computeWorldMatrix,
+      dispose, and the parent-child hierarchy. They also both reference
+      Scene for registration and removal during their lifecycle.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7173
+    name: babylonjs_find_common_dependency_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_common_dependency tool against BabylonJS (test C). Target: StandardMaterial and PBRMaterial.
+    query: |
+      What shared dependency do StandardMaterial and PBRMaterial have?
+    expected_state: COMPLETE
+    reference_answer: |
+      Both StandardMaterial and PBRMaterial share the Material base class,
+      the Effect system for shader management, and the Texture class for
+      sampling inputs like diffuse, normal, and environment maps.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_control_dependencies tests (74-75) -- expected_state: COMPLETE --
+
+  - id: 7174
+    name: babylonjs_find_control_dependencies_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_control_dependencies tool against BabylonJS (test B). Target: frustum culling.
+    query: |
+      What conditionals control whether a mesh passes frustum culling?
+    expected_state: COMPLETE
+    reference_answer: |
+      Frustum culling is controlled by mesh.isVisible, mesh.isEnabled,
+      alwaysSelectAsActiveMesh flag, and the BoundingInfo.isInFrustum check
+      against the camera frustum planes in Scene._evaluateActiveMeshes.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7175
+    name: babylonjs_find_control_dependencies_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_control_dependencies tool against BabylonJS (test C). Target: material readiness.
+    query: |
+      What conditionals control whether a material is considered ready for rendering?
+    expected_state: COMPLETE
+    reference_answer: |
+      Material readiness is controlled by checks in isReadyForSubMesh including
+      texture loading completion, shader compilation status, alpha mode state,
+      and engine capabilities for features like float textures.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_extractable_regions tests (76-77) -- expected_state: COMPLETE --
+
+  - id: 7176
+    name: babylonjs_find_extractable_regions_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_extractable_regions tool against BabylonJS (test B). Target: Scene.render method.
+    query: |
+      Find extractable regions in the Scene.render method
+    expected_state: COMPLETE
+    reference_answer: |
+      Scene.render contains extractable regions for animation evaluation,
+      camera activation, render target processing, and particle system
+      updates, each with clear entry/exit boundaries for extraction.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7177
+    name: babylonjs_find_extractable_regions_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_extractable_regions tool against BabylonJS (test C). Target: Engine initialization.
+    query: |
+      Find extractable code regions in the Engine constructor
+    expected_state: COMPLETE
+    reference_answer: |
+      The Engine constructor contains extractable regions for WebGL context
+      creation, extension detection, capability probing, and default state
+      setup, each forming a self-contained initialization phase.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional check_reducibility tests (78-79) -- expected_state: COMPLETE --
+
+  - id: 7178
+    name: babylonjs_check_reducibility_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      check_reducibility tool against BabylonJS (test B). Target: rendering pipeline.
+    query: |
+      Check the control flow reducibility of the rendering pipeline
+    expected_state: COMPLETE
+    reference_answer: |
+      Reducibility analysis of the rendering pipeline evaluates whether the
+      multi-stage render process (evaluate meshes, sort, draw opaque,
+      draw transparent) forms a well-structured control flow graph.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7179
+    name: babylonjs_check_reducibility_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      check_reducibility tool against BabylonJS (test C). Target: scene graph traversal.
+    query: |
+      Is the scene graph traversal control flow reducible?
+    expected_state: COMPLETE
+    reference_answer: |
+      Reducibility analysis of the scene graph traversal checks whether
+      the parent-child walk, world matrix computation, and bounding info
+      update paths form a reducible control flow structure.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_critical_path tests (80-81) -- expected_state: COMPLETE --
+
+  - id: 7180
+    name: babylonjs_find_critical_path_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_critical_path tool against BabylonJS (test B). Target: texture loading to display.
+    query: |
+      What is the critical path from loading a texture to displaying it on a mesh?
+    expected_state: COMPLETE
+    reference_answer: |
+      The critical path goes through Texture constructor -> _prepareTexture ->
+      Engine.createTexture -> InternalTexture upload -> material.bind ->
+      Effect.setTexture -> GPU sampling during draw call.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7181
+    name: babylonjs_find_critical_path_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_critical_path tool against BabylonJS (test C). Target: mesh import to rendering.
+    query: |
+      What is the mandatory call sequence from importing a mesh to its first render?
+    expected_state: COMPLETE
+    reference_answer: |
+      The critical path goes through importMeshAsync -> Scene.addMesh ->
+      computeWorldMatrix -> _evaluateActiveMeshes (next frame) ->
+      SubMesh.render -> material.bind -> engine.draw for the first visible frame.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_module_api tests (82-83) -- expected_state: COMPLETE --
+
+  - id: 7182
+    name: babylonjs_find_module_api_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_module_api tool against BabylonJS (test B). Target: Engine class API.
+    query: |
+      What is the public API of the Engine class?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Engine class exports methods including runRenderLoop, stopRenderLoop,
+      resize, wipeCaches, createTexture, createEffect, drawElementsType,
+      and properties like isWebGPU, webGLVersion, and frameId.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7183
+    name: babylonjs_find_module_api_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_module_api tool against BabylonJS (test C). Target: Mesh class API.
+    query: |
+      What is the public API of the Mesh class?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Mesh class exports methods including setVerticesData, updateVerticesData,
+      setIndices, render, dispose, createInstance, and static MeshBuilder
+      methods like CreateBox, CreateSphere, CreateGround, and CreatePlane.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_weighted_criticality tests (84-85) -- expected_state: COMPLETE --
+
+  - id: 7184
+    name: babylonjs_find_weighted_criticality_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_weighted_criticality tool against BabylonJS (test B). Target: scene graph subsystem.
+    query: |
+      What are the most critical functions by weighted importance in the scene graph?
+    expected_state: COMPLETE
+    reference_answer: |
+      In the scene graph, Scene.render scores highest in weighted criticality
+      combining PageRank, betweenness (bridges engine to meshes), and degree
+      centrality. Node.computeWorldMatrix and dispose follow closely.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7185
+    name: babylonjs_find_weighted_criticality_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_weighted_criticality tool against BabylonJS (test C). Target: materials subsystem.
+    query: |
+      Which material subsystem functions have the highest weighted criticality?
+    expected_state: COMPLETE
+    reference_answer: |
+      In the materials subsystem, Material.isReadyForSubMesh ranks highest in
+      weighted criticality since it combines high degree (all material types),
+      high betweenness (bridges scene to GPU), and high PageRank.
+    validations:
+      - type: graph_tool_used
+
+
+  # ── IT-24 through IT-42: New tool tests ──
+
+  - id: 7186
+    name: babylonjs_graph_overview
+    category: TOOL_HAPPY_PATH
+    description: >
+      graph_overview tool against Babylon.js 3D engine. Get overall graph statistics.
+    query: |
+      Give me an overview of this codebase's call graph
+    expected_state: COMPLETE
+    reference_answer: |
+      The Babylon.js 3D engine call graph contains 3D rendering framework
+      spanning packages like Scene, Engine, Mesh, Material, Camera.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7187
+    name: babylonjs_graph_overview_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      graph_overview tool against Babylon.js 3D engine (test B). Focus on graph density.
+    query: |
+      How dense is the call graph and what is the average connectivity?
+    expected_state: COMPLETE
+    reference_answer: |
+      The graph has moderate density with most functions having 2-5 callees.
+      Hotspot functions have significantly higher degree reflecting the
+      core architecture of Babylon.js 3D engine.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7188
+    name: babylonjs_graph_overview_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      graph_overview tool against Babylon.js 3D engine (test C). Focus on package distribution.
+    query: |
+      How are functions distributed across packages in the call graph?
+    expected_state: COMPLETE
+    reference_answer: |
+      Functions are distributed across Scene, Engine, Mesh, Material, Camera,
+      with the core package containing the most edges due to
+      orchestration responsibilities.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7189
+    name: babylonjs_explore_package
+    category: TOOL_HAPPY_PATH
+    description: >
+      explore_package tool against Babylon.js 3D engine. Explore Engines.
+    query: |
+      Explore the Engines and show its key types and functions
+    expected_state: COMPLETE
+    reference_answer: |
+      The Engines contains Engine, WebGPUEngine, rendering pipeline.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7190
+    name: babylonjs_explore_package_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      explore_package tool against Babylon.js 3D engine (test B). Explore Meshes.
+    query: |
+      Explore the Meshes and show its key types and functions
+    expected_state: COMPLETE
+    reference_answer: |
+      The Meshes contains Mesh, AbstractMesh, TransformNode, VertexData.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7191
+    name: babylonjs_explore_package_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      explore_package tool against Babylon.js 3D engine (test C). Explore Materials.
+    query: |
+      Explore the Materials and show its key types and functions
+    expected_state: COMPLETE
+    reference_answer: |
+      The Materials contains Material, StandardMaterial, ShaderMaterial, PBR.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7192
+    name: babylonjs_list_packages
+    category: TOOL_HAPPY_PATH
+    description: >
+      list_packages tool against Babylon.js 3D engine. List all packages.
+    query: |
+      List all packages in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Packages include Engines, Meshes, Materials, Cameras, Lights, Animations, Particles, PostProcesses, Maths.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7193
+    name: babylonjs_list_packages_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      list_packages tool against Babylon.js 3D engine (test B). Focus on count.
+    query: |
+      How many packages does this codebase have?
+    expected_state: COMPLETE
+    reference_answer: |
+      The codebase has multiple packages organized by concern,
+      including Engines, Meshes, Materials, Cameras, Lights, Animations, Particles, PostProcesses, Maths.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7194
+    name: babylonjs_list_packages_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      list_packages tool against Babylon.js 3D engine (test C). Focus on hierarchy.
+    query: |
+      Show the package hierarchy and how packages are organized
+    expected_state: COMPLETE
+    reference_answer: |
+      Packages are organized by concern with Engines, Meshes, Materials, Cameras, Lights, Animations, Particles, PostProcesses, Maths
+      as the main functional groupings.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7195
+    name: babylonjs_read
+    category: TOOL_HAPPY_PATH
+    description: >
+      Read tool against Babylon.js 3D engine.
+    query: |
+      Show me the contents of scene.ts
+    expected_state: COMPLETE
+    reference_answer: |
+      Scene class and render loop
+    validations:
+      - type: graph_tool_used
+
+  - id: 7196
+    name: babylonjs_read_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Read tool against Babylon.js 3D engine (test B).
+    query: |
+      Read the Engines/engine.ts file
+    expected_state: COMPLETE
+    reference_answer: |
+      Engine initialization
+    validations:
+      - type: graph_tool_used
+
+  - id: 7197
+    name: babylonjs_read_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Read tool against Babylon.js 3D engine (test C).
+    query: |
+      Show me the Meshes/mesh.ts file
+    expected_state: COMPLETE
+    reference_answer: |
+      Mesh creation and manipulation
+    validations:
+      - type: graph_tool_used
+
+  - id: 7198
+    name: babylonjs_trace_render_loop
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace the render loop pipeline in BabylonJS.
+    query: |
+      What is the complete call chain for a single frame render in BabylonJS?
+    expected_state: COMPLETE
+    reference_answer: |
+      Frame rendering flows through Engine.runRenderLoop, Scene.render
+      which evaluates active meshes, processes the render pipeline,
+      calls SubMesh.render, and submits draw calls to WebGL.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7199
+    name: babylonjs_trace_mesh_creation
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace mesh creation and registration in BabylonJS.
+    query: |
+      How does BabylonJS create and register a mesh in the scene graph?
+    expected_state: COMPLETE
+    reference_answer: |
+      Mesh creation flows through the Mesh constructor, which calls
+      AbstractMesh and TransformNode constructors, registers with the
+      Scene's mesh list, sets up geometry, and initializes bounding info.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7200
+    name: babylonjs_trace_material_compile
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace material shader compilation in BabylonJS.
+    query: |
+      Trace the call chain from material assignment to shader compilation
+    expected_state: COMPLETE
+    reference_answer: |
+      Material compilation flows through Material.isReady, which checks
+      shader availability, generates shader defines from material properties,
+      creates an Effect via the Engine, and compiles vertex/fragment shaders.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7201
+    name: babylonjs_trace_camera_input
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace camera input handling in BabylonJS.
+    query: |
+      What functions process user input events for camera movement?
+    expected_state: COMPLETE
+    reference_answer: |
+      Camera input flows through InputManager which dispatches pointer
+      and keyboard events to the active camera's input manager, which
+      routes to specific input classes like FreeCameraMouseInput that
+      update camera rotation and position.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7202
+    name: babylonjs_trace_physics_step
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace physics simulation step in BabylonJS.
+    query: |
+      How does BabylonJS execute a physics simulation step?
+    expected_state: COMPLETE
+    reference_answer: |
+      Physics stepping flows through PhysicsEngine.step which calls
+      the physics plugin (Cannon, Ammo, or Havok), updates impostor
+      transforms, synchronizes mesh positions with physics bodies,
+      and processes collision callbacks.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7203
+    name: babylonjs_trace_texture_load
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace texture loading flow in BabylonJS.
+    query: |
+      What is the call path for loading a texture from URL to GPU?
+    expected_state: COMPLETE
+    reference_answer: |
+      Texture loading flows through the Texture constructor, FileTools
+      for URL fetching, image decoding, Engine.createTexture for
+      WebGL texture allocation, and uploading pixel data to the GPU.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7204
+    name: babylonjs_glob
+    category: TOOL_HAPPY_PATH
+    description: >
+      Glob tool against Babylon.js 3D engine.
+    query: |
+      Find all files matching Meshes/*.ts
+    expected_state: COMPLETE
+    reference_answer: |
+      The Glob tool processes Meshes/*.ts for
+      the Babylon.js 3D engine codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7205
+    name: babylonjs_glob_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Glob tool against Babylon.js 3D engine (test B).
+    query: |
+      Find files matching Materials/*.ts
+    expected_state: COMPLETE
+    reference_answer: |
+      The Glob tool processes Materials/*.ts for
+      the Babylon.js 3D engine codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7206
+    name: babylonjs_glob_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Glob tool against Babylon.js 3D engine (test C).
+    query: |
+      Search for Engines/*.ts files
+    expected_state: COMPLETE
+    reference_answer: |
+      The Glob tool processes Engines/*.ts for
+      the Babylon.js 3D engine codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7207
+    name: babylonjs_grep
+    category: TOOL_HAPPY_PATH
+    description: >
+      Grep tool against Babylon.js 3D engine.
+    query: |
+      Search for dispose() method calls in the codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      The Grep tool processes dispose() method calls for
+      the Babylon.js 3D engine codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7208
+    name: babylonjs_grep_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Grep tool against Babylon.js 3D engine (test B).
+    query: |
+      Find all Observable usage
+    expected_state: COMPLETE
+    reference_answer: |
+      The Grep tool processes Observable usage for
+      the Babylon.js 3D engine codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7209
+    name: babylonjs_grep_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Grep tool against Babylon.js 3D engine (test C).
+    query: |
+      Search for registerBeforeRender
+    expected_state: COMPLETE
+    reference_answer: |
+      The Grep tool processes registerBeforeRender for
+      the Babylon.js 3D engine codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7210
+    name: babylonjs_diff
+    category: TOOL_HAPPY_PATH
+    description: >
+      Diff tool against Babylon.js 3D engine.
+    query: |
+      Compare StandardMaterial vs PBRMaterial
+    expected_state: COMPLETE
+    reference_answer: |
+      The Diff tool processes StandardMaterial vs PBRMaterial for
+      the Babylon.js 3D engine codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7211
+    name: babylonjs_diff_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Diff tool against Babylon.js 3D engine (test B).
+    query: |
+      Show differences between Mesh vs InstancedMesh
+    expected_state: COMPLETE
+    reference_answer: |
+      The Diff tool processes Mesh vs InstancedMesh for
+      the Babylon.js 3D engine codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7212
+    name: babylonjs_diff_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Diff tool against Babylon.js 3D engine (test C).
+    query: |
+      Compare Engine vs WebGPUEngine
+    expected_state: COMPLETE
+    reference_answer: |
+      The Diff tool processes Engine vs WebGPUEngine for
+      the Babylon.js 3D engine codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7213
+    name: babylonjs_tree
+    category: TOOL_HAPPY_PATH
+    description: >
+      Tree tool against Babylon.js 3D engine.
+    query: |
+      Show the src directory
+    expected_state: COMPLETE
+    reference_answer: |
+      The Tree tool processes src directory for
+      the Babylon.js 3D engine codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7214
+    name: babylonjs_tree_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Tree tool against Babylon.js 3D engine (test B).
+    query: |
+      Show the Meshes subdirectory structure
+    expected_state: COMPLETE
+    reference_answer: |
+      The Tree tool processes Meshes subdirectory for
+      the Babylon.js 3D engine codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7215
+    name: babylonjs_tree_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Tree tool against Babylon.js 3D engine (test C).
+    query: |
+      Display the Materials subdirectory layout
+    expected_state: COMPLETE
+    reference_answer: |
+      The Tree tool processes Materials subdirectory for
+      the Babylon.js 3D engine codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7216
+    name: babylonjs_trace_scene_serialize
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace scene serialization in BabylonJS.
+    query: |
+      How does BabylonJS serialize a scene to JSON format?
+    expected_state: COMPLETE
+    reference_answer: |
+      Scene serialization calls SceneSerializer.Serialize which iterates
+      cameras, lights, meshes, materials, and particle systems, calling
+      each entity's serialize method to produce a JSON representation.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7217
+    name: babylonjs_trace_animation_eval
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace animation evaluation in BabylonJS.
+    query: |
+      What functions evaluate animations during the render loop?
+    expected_state: COMPLETE
+    reference_answer: |
+      Animation evaluation flows through Scene._animate which processes
+      each Animatable, evaluates Animation key frames via interpolation,
+      applies easing functions, and sets target property values
+      through runtime animation paths.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7218
+    name: babylonjs_trace_picking
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace object picking/raycasting in BabylonJS.
+    query: |
+      How does scene.pick resolve which mesh was clicked?
+    expected_state: COMPLETE
+    reference_answer: |
+      Scene.pick creates a Ray from the screen coordinates, iterates
+      active meshes, tests bounding box intersection first, then
+      detailed triangle intersection, and returns the PickingInfo
+      with the closest hit mesh and intersection point.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7219
+    name: babylonjs_validate_syntax
+    category: TOOL_HAPPY_PATH
+    description: >
+      validate_syntax tool against Babylon.js 3D engine.
+    query: |
+      Validate the syntax of scene.ts
+    expected_state: COMPLETE
+    reference_answer: |
+      The validate_syntax tool processes scene.ts for
+      the Babylon.js 3D engine codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7220
+    name: babylonjs_validate_syntax_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      validate_syntax tool against Babylon.js 3D engine (test B).
+    query: |
+      Check the syntax of Engines/engine.ts
+    expected_state: COMPLETE
+    reference_answer: |
+      The validate_syntax tool processes Engines/engine.ts for
+      the Babylon.js 3D engine codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7221
+    name: babylonjs_validate_syntax_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      validate_syntax tool against Babylon.js 3D engine (test C).
+    query: |
+      Verify the syntax of Meshes/mesh.ts
+    expected_state: COMPLETE
+    reference_answer: |
+      The validate_syntax tool processes Meshes/mesh.ts for
+      the Babylon.js 3D engine codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 7222
+    name: babylonjs_find_entry_points_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_entry_points tool against Babylon.js 3D engine (test B). Focus on Engine creation.
+    query: |
+      Engine creation
+    expected_state: COMPLETE
+    reference_answer: |
+      new Engine(), createDefaultEngine, WebGPUEngine
+    validations:
+      - type: graph_tool_used
+
+  - id: 7223
+    name: babylonjs_find_entry_points_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_entry_points tool against Babylon.js 3D engine (test C). Focus on scene entry.
+    query: |
+      scene entry in Babylon.js 3D engine?
+    expected_state: COMPLETE
+    reference_answer: |
+      Scene constructor, scene.render, runRenderLoop
+    validations:
+      - type: graph_tool_used
+
+  - id: 7224
+    name: babylonjs_trace_data_flow_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      trace_data_flow tool against Babylon.js 3D engine (test B). Focus on render pipeline.
+    query: |
+      render pipeline in Babylon.js 3D engine?
+    expected_state: COMPLETE
+    reference_answer: |
+      Scene.render, RenderingManager, draw calls, GPU
+    validations:
+      - type: graph_tool_used
+
+  - id: 7225
+    name: babylonjs_trace_data_flow_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      trace_data_flow tool against Babylon.js 3D engine (test C). Focus on mesh creation.
+    query: |
+      mesh creation in Babylon.js 3D engine?
+    expected_state: COMPLETE
+    reference_answer: |
+      MeshBuilder, VertexData, VertexBuffer, GPU buffers
+    validations:
+      - type: graph_tool_used
+
+  - id: 7226
+    name: babylonjs_trace_error_flow_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      trace_error_flow tool against Babylon.js 3D engine (test B). Focus on shader compilation errors.
+    query: |
+      shader compilation errors in Babylon.js 3D engine?
+    expected_state: COMPLETE
+    reference_answer: |
+      Effect, shader compile, fallback materials
+    validations:
+      - type: graph_tool_used
+
+  - id: 7227
+    name: babylonjs_trace_error_flow_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      trace_error_flow tool against Babylon.js 3D engine (test C). Focus on resource loading errors.
+    query: |
+      resource loading errors in Babylon.js 3D engine?
+    expected_state: COMPLETE
+    reference_answer: |
+      SceneLoader, texture load failures, retry logic
+    validations:
+      - type: graph_tool_used
+
+  - id: 7228
+    name: babylonjs_build_minimal_context_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      build_minimal_context tool against Babylon.js 3D engine (test B). Focus on rendering.
+    query: |
+      rendering in Babylon.js 3D engine?
+    expected_state: COMPLETE
+    reference_answer: |
+      Scene, RenderingManager, SubMesh, DrawWrapper
+    validations:
+      - type: graph_tool_used
+
+  - id: 7229
+    name: babylonjs_build_minimal_context_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      build_minimal_context tool against Babylon.js 3D engine (test C). Focus on scene graph.
+    query: |
+      scene graph in Babylon.js 3D engine?
+    expected_state: COMPLETE
+    reference_answer: |
+      Node, TransformNode, AbstractMesh, parent-child hierarchy
+    validations:
+      - type: graph_tool_used
+
+  - id: 7230
+    name: babylonjs_find_similar_code_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_similar_code tool against Babylon.js 3D engine (test B). Focus on mesh builders.
+    query: |
+      mesh builders in Babylon.js 3D engine?
+    expected_state: COMPLETE
+    reference_answer: |
+      CreateBox/Sphere/Cylinder follow same VertexData pattern
+    validations:
+      - type: graph_tool_used
+
+  - id: 7231
+    name: babylonjs_find_similar_code_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_similar_code tool against Babylon.js 3D engine (test C). Focus on material types.
+    query: |
+      material types in Babylon.js 3D engine?
+    expected_state: COMPLETE
+    reference_answer: |
+      Standard/PBR/Node materials share base Material interface
+    validations:
+      - type: graph_tool_used
+
+  - id: 7232
+    name: babylonjs_find_config_usage_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_config_usage tool against Babylon.js 3D engine (test B). Focus on engine options.
+    query: |
+      engine options in Babylon.js 3D engine?
+    expected_state: COMPLETE
+    reference_answer: |
+      EngineOptions, antialiasing, WebGL/WebGPU settings
+    validations:
+      - type: graph_tool_used
+
+  - id: 7233
+    name: babylonjs_find_config_usage_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_config_usage tool against Babylon.js 3D engine (test C). Focus on scene options.
+    query: |
+      scene options in Babylon.js 3D engine?
+    expected_state: COMPLETE
+    reference_answer: |
+      autoClear, fogMode, ambientColor, physics settings
+    validations:
+      - type: graph_tool_used
+
+  - id: 7234
+    name: babylonjs_summarize_file_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      summarize_file tool against Babylon.js 3D engine (test B). Focus on Meshes/mesh.ts.
+    query: |
+      Meshes/mesh.ts
+    expected_state: COMPLETE
+    reference_answer: |
+      Mesh class, geometry, subMeshes, rendering
+    validations:
+      - type: graph_tool_used
+
+  - id: 7235
+    name: babylonjs_summarize_file_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      summarize_file tool against Babylon.js 3D engine (test C). Focus on Maths/math.vector.ts.
+    query: |
+      Maths/math.vector.ts
+    expected_state: COMPLETE
+    reference_answer: |
+      Vector3, Matrix, Quaternion, math utilities
+    validations:
+      - type: graph_tool_used
+
+  # -- GR-58: CRS TraceStep Verification Tests --
+
+  - id: 7236
+    name: babylonjs_crs_find_callers
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58: Verify find_callers produces CRS TraceStep. Target: Scene.render.
+    query: |
+      Who calls the Scene.render method?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_callers tool was used and produced a CRS TraceStep recording the query
+      for Scene.render with match_count, total_callers, and used_inheritance_path metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 7237
+    name: babylonjs_crs_find_callees
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58: Verify find_callees produces CRS TraceStep. Target: Engine.runRenderLoop.
+    query: |
+      What functions does Engine.runRenderLoop call?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_callees tool was used and produced a CRS TraceStep recording the query
+      for Engine.runRenderLoop with resolved_count, external_count, and total_count metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  # -- GR-58: CRS TraceStep Verification (IT-03 to IT-42) --
+
+  - id: 7238
+    name: babylonjs_crs_get_call_chain
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-05: Verify get_call_chain produces CRS TraceStep against Babylon.js.
+    query: |
+      Trace the call chain from Scene.render to Engine._renderFrame in Babylon.js.
+    expected_state: COMPLETE
+    reference_answer: |
+      get_call_chain tool was used and produced a CRS TraceStep with
+      chain_length, depth, direction, and truncated metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 7239
+    name: babylonjs_crs_find_cycles
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-09: Verify find_cycles produces CRS TraceStep against Babylon.js.
+    query: |
+      Find cyclic dependencies in Babylon.js's rendering pipeline.
+    expected_state: COMPLETE
+    reference_answer: |
+      find_cycles tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 7240
+    name: babylonjs_crs_find_loops
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-14: Verify find_loops produces CRS TraceStep against Babylon.js.
+    query: |
+      Find natural loops in the Babylon.js call graph.
+    expected_state: COMPLETE
+    reference_answer: |
+      find_loops tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 7241
+    name: babylonjs_crs_find_extractable_regions
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-18: Verify find_extractable_regions produces CRS TraceStep against Babylon.js.
+    query: |
+      Find extractable regions in the Scene class of Babylon.js.
+    expected_state: COMPLETE
+    reference_answer: |
+      find_extractable_regions tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 7242
+    name: babylonjs_crs_find_path
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-23: Verify find_path produces CRS TraceStep against Babylon.js.
+      Scene.render to _processSubCameras is a direct 1-hop call in scene.ts.
+      This guarantees find_path succeeds and produces CRS trace data.
+    query: |
+      Find the call path from Scene.render to _processSubCameras in Babylon.js.
+    expected_state: COMPLETE
+    reference_answer: |
+      find_path tool was used and produced a CRS TraceStep with appropriate metadata.
+      Scene.render directly calls _processSubCameras (1-hop path in scene.ts). The key
+      verification is that find_path executed successfully with a valid path
+      and produced CRS trace data with path_length and hop metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 7243
+    name: babylonjs_crs_summarize_file
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-27: Verify summarize_file produces CRS TraceStep against Babylon.js.
+    query: |
+      Summarize the scene.ts file in Babylon.js.
+    expected_state: COMPLETE
+    reference_answer: |
+      summarize_file tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 7244
+    name: babylonjs_crs_find_similar_code
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-32: Verify find_similar_code produces CRS TraceStep against Babylon.js.
+    query: |
+      Find code similar to the Mesh.render method in Babylon.js.
+    expected_state: COMPLETE
+    reference_answer: |
+      find_similar_code tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 7245
+    name: babylonjs_crs_trace_flow
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      CRS verification: trace analysis records CRS state correctly.
+    query: |
+      Trace how errors propagate through BabylonJS shader compilation
+    expected_state: COMPLETE
+    reference_answer: |
+      The trace analysis tool records CRS state for shader compilation
+      error propagation in the BabylonJS 3D engine codebase.
+    validations:
+      - type: crs_state_recorded
+
+  - id: 7246
+    name: babylonjs_crs_trace_render
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      CRS verification: trace render pipeline analysis records state.
+    query: |
+      Trace the render pipeline from scene evaluation to draw call submission
+    expected_state: COMPLETE
+    reference_answer: |
+      The trace analysis tool records CRS state for render pipeline
+      analysis in the BabylonJS 3D engine codebase.
+    validations:
+      - type: crs_state_recorded
+
+  # -- IT-01/IT-02/IT-03: Second CRS TraceStep Verification --
+
+  - id: 7247
+    name: babylonjs_crs_find_callers_b
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      IT-01: Second CRS verification for find_callers against Babylon.js. Target: Engine.runRenderLoop.
+    query: |
+      Who calls the Engine.runRenderLoop method in Babylon.js?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_callers tool was used and produced a CRS TraceStep with
+      match_count, total_callers, and used_inheritance_path metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 7248
+    name: babylonjs_crs_find_callees_b
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      IT-02: Second CRS verification for find_callees against Babylon.js. Target: Scene.render.
+    query: |
+      What functions does Scene.render call in Babylon.js?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_callees tool was used and produced a CRS TraceStep with
+      resolved_count, external_count, and total_count metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 7249
+    name: babylonjs_crs_find_implementations_a
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      IT-03: First CRS verification for find_implementations against Babylon.js. Target: AbstractMesh.
+    query: |
+      What classes extend the AbstractMesh class in Babylon.js?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_implementations tool was used and produced a CRS TraceStep with
+      match_count, total_implementations, and index_used metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 7250
+    name: babylonjs_crs_find_implementations_b
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      IT-03: Second CRS verification for find_implementations against Babylon.js. Target: Light.
+    query: |
+      What classes extend the Light base class in Babylon.js?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_implementations tool was used and produced a CRS TraceStep with
+      match_count, total_implementations, and index_used metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present

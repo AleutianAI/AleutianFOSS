@@ -14,6 +14,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -39,9 +41,40 @@ type FindHotspotsParams struct {
 	Top int
 
 	// Kind filters results by symbol kind.
-	// Values: "function", "type", "all"
+	// Values: "function", "method", "type", "class", "struct", "interface", "enum", "variable", "constant", "all"
 	// Default: "all"
 	Kind string
+
+	// Package filters results to a specific package or module path.
+	// When set, only hotspots in the matching package (or file path containing
+	// the package string) are returned.
+	Package string
+
+	// ExcludeTests filters out symbols from test files.
+	// When true (default), symbols in files matching test patterns
+	// (*_test.go, test_*.py, *.test.ts, *.spec.js, etc.) are excluded.
+	ExcludeTests bool
+
+	// SortBy controls the ranking dimension.
+	// Values: "score" (default, inDegree*2+outDegree), "in" (InDegree desc), "out" (OutDegree desc)
+	SortBy string
+}
+
+// ToolName returns the tool name for TypedParams interface.
+func (p FindHotspotsParams) ToolName() string { return "find_hotspots" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p FindHotspotsParams) ToMap() map[string]any {
+	m := map[string]any{
+		"top":           p.Top,
+		"kind":          p.Kind,
+		"exclude_tests": p.ExcludeTests,
+		"sort_by":       p.SortBy,
+	}
+	if p.Package != "" {
+		m["package"] = p.Package
+	}
+	return m
 }
 
 // FindHotspotsOutput contains the structured result.
@@ -161,10 +194,28 @@ func (t *findHotspotsTool) Definition() ToolDefinition {
 			},
 			"kind": {
 				Type:        ParamTypeString,
-				Description: "Filter by symbol kind: function, type, or all",
+				Description: "Filter by symbol kind",
 				Required:    false,
 				Default:     "all",
-				Enum:        []any{"function", "type", "all"},
+				Enum:        []any{"function", "method", "type", "class", "struct", "interface", "enum", "variable", "constant", "all"},
+			},
+			"package": {
+				Type:        ParamTypeString,
+				Description: "Filter to a specific package or module path",
+				Required:    false,
+			},
+			"exclude_tests": {
+				Type:        ParamTypeBool,
+				Description: "Exclude symbols from test files (default: true)",
+				Required:    false,
+				Default:     true,
+			},
+			"sort_by": {
+				Type:        ParamTypeString,
+				Description: "Sort dimension: score (default), in (by InDegree), out (by OutDegree)",
+				Required:    false,
+				Default:     "score",
+				Enum:        []any{"score", "in", "out"},
 			},
 		},
 		Category:    CategoryExploration,
@@ -172,11 +223,23 @@ func (t *findHotspotsTool) Definition() ToolDefinition {
 		Requires:    []string{"graph_initialized"},
 		SideEffects: false,
 		Timeout:     5 * time.Second,
+		WhenToUse: WhenToUse{
+			Keywords: []string{
+				"hotspots", "most connected", "high coupling",
+				"central functions", "heavily used", "most called",
+				"connectivity", "hub functions", "fan-in", "fan-out",
+			},
+			UseWhen: "User asks about the most connected, heavily used, or highest-coupling " +
+				"functions in the codebase. Use for connectivity-based ranking (inDegree + outDegree).",
+			AvoidWhen: "User asks about the most critical or risky functions considering structural " +
+				"importance (use find_weighted_criticality). User asks about PageRank importance " +
+				"only (use find_important).",
+		},
 	}
 }
 
 // Execute runs the find_hotspots tool.
-func (t *findHotspotsTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findHotspotsTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	start := time.Now()
 
 	// Validate analytics is available
@@ -188,7 +251,7 @@ func (t *findHotspotsTool) Execute(ctx context.Context, params map[string]any) (
 	}
 
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
 		return &Result{
 			Success: false,
@@ -202,6 +265,9 @@ func (t *findHotspotsTool) Execute(ctx context.Context, params map[string]any) (
 			attribute.String("tool", "find_hotspots"),
 			attribute.Int("top", p.Top),
 			attribute.String("kind", p.Kind),
+			attribute.String("package_filter", p.Package),
+			attribute.Bool("exclude_tests", p.ExcludeTests),
+			attribute.String("sort_by", p.SortBy),
 		),
 	)
 	defer span.End()
@@ -212,13 +278,18 @@ func (t *findHotspotsTool) Execute(ctx context.Context, params map[string]any) (
 		return nil, err
 	}
 
-	// Adaptive request size based on filter
+	// Adaptive request size based on filters.
+	// When filtering (kind, package, or test exclusion), we request more
+	// candidates than needed since many will be filtered out.
 	requestCount := p.Top
-	if p.Kind != "all" {
-		requestCount = p.Top * 3 // Request 3x when filtering
+	hasFilters := p.Kind != "all" || p.Package != "" || p.ExcludeTests
+	if hasFilters {
+		requestCount = p.Top * 5 // Request 5x when any filter is active
 		t.logger.Debug("hotspot request adjusted for filtering",
 			slog.String("tool", "find_hotspots"),
 			slog.String("kind_filter", p.Kind),
+			slog.String("package_filter", p.Package),
+			slog.Bool("exclude_tests", p.ExcludeTests),
 			slog.Int("top_requested", p.Top),
 			slog.Int("request_count", requestCount),
 		)
@@ -231,6 +302,34 @@ func (t *findHotspotsTool) Execute(ctx context.Context, params map[string]any) (
 		attribute.Int("raw_hotspots", len(hotspots)),
 		attribute.String("trace_action", traceStep.Action),
 	)
+
+	// IT-43d Fix A: Filter dunder methods from hotspot results.
+	// Dunder methods (__enter__, __exit__, __getitem__, etc.) are implicitly
+	// called by Python syntax. The graph builder's Strategy 3c collapses all
+	// unresolvable dunder calls to the first definition found, creating
+	// artificial super-hotspots (e.g., __enter__ with InDegree 8064 in pandas).
+	// Dunder methods are infrastructure, not domain-specific hotspots.
+	var nonDunder []graph.HotspotNode
+	dundarFiltered := 0
+	for _, hs := range hotspots {
+		if hs.Node == nil || hs.Node.Symbol == nil {
+			continue
+		}
+		name := hs.Node.Symbol.Name
+		if len(name) > 4 && strings.HasPrefix(name, "__") && strings.HasSuffix(name, "__") {
+			dundarFiltered++
+			continue
+		}
+		nonDunder = append(nonDunder, hs)
+	}
+	if dundarFiltered > 0 {
+		t.logger.Debug("IT-43d: filtered dunder methods from hotspots",
+			slog.String("tool", "find_hotspots"),
+			slog.Int("dunder_filtered", dundarFiltered),
+			slog.Int("remaining", len(nonDunder)),
+		)
+	}
+	hotspots = nonDunder
 
 	// Filter by kind if needed
 	var filtered []graph.HotspotNode
@@ -247,26 +346,106 @@ func (t *findHotspotsTool) Execute(ctx context.Context, params map[string]any) (
 		}
 	}
 
+	// IT-07 Bug 3 / IT-08 Run 3: Filter by package using boundary-aware matching.
+	//
+	// HISTORY (read before modifying — same pattern as find_important):
+	// - FIX-B previously fell back to global results when filter returned 0.
+	// - IT-Summary Round 2: Removed fallback (CR-11 principle). If the package
+	//   filter returns 0, that IS the answer. Conceptual scope names that don't
+	//   match real paths are an upstream problem (extractPackageContextFromQuery),
+	//   not a tool-layer problem. Falling back silently gives wrong-scope data.
+	packageFilterApplied := false
+	if p.Package != "" {
+		var pkgFiltered []graph.HotspotNode
+		for _, hs := range filtered {
+			if hs.Node == nil || hs.Node.Symbol == nil {
+				continue
+			}
+			if matchesPackageScope(hs.Node.Symbol, p.Package) {
+				pkgFiltered = append(pkgFiltered, hs)
+			}
+		}
+
+		t.logger.Info("IT-07: find_hotspots package filter applied",
+			slog.String("package", p.Package),
+			slog.Int("before", len(filtered)),
+			slog.Int("after", len(pkgFiltered)),
+		)
+		// CR-11: Unconditionally apply filter. Empty result = "no hotspots
+		// found in that scope." Do NOT fall back to global results.
+		filtered = pkgFiltered
+		packageFilterApplied = true
+	}
+	_ = packageFilterApplied // Used for future scope-aware output
+
+	// IT-07 Phase 3: Filter out test and documentation file symbols
+	if p.ExcludeTests {
+		var nonTestFiltered []graph.HotspotNode
+		for _, hs := range filtered {
+			if hs.Node == nil || hs.Node.Symbol == nil {
+				continue
+			}
+			filePath := hs.Node.Symbol.FilePath
+			// GR-60: Use graph-based file classification instead of heuristics
+			isProd := t.analytics.IsProductionFile(filePath)
+			// F-3: Safety net — _test.go is NEVER production regardless of classification
+			if isProd && strings.HasSuffix(filepath.Base(filePath), "_test.go") {
+				isProd = false
+			}
+			if isProd {
+				nonTestFiltered = append(nonTestFiltered, hs)
+			}
+		}
+		// IT-43d Fix B: Always apply the test filter, even if it removes all results.
+		// Returning zero production hotspots is more accurate than returning test
+		// infrastructure artifacts (e.g., test helper "raises" with InDegree 5807).
+		// The previous fallback kept test results when all were filtered out,
+		// which produced misleading "hotspot" output from test files.
+		filtered = nonTestFiltered
+	}
+
+	// IT-07 Phase 3: Re-sort by requested dimension
+	if p.SortBy == "in" || p.SortBy == "out" {
+		sort.Slice(filtered, func(i, j int) bool {
+			if p.SortBy == "in" {
+				if filtered[i].InDegree != filtered[j].InDegree {
+					return filtered[i].InDegree > filtered[j].InDegree
+				}
+				return filtered[i].Score > filtered[j].Score
+			}
+			// sort_by == "out"
+			if filtered[i].OutDegree != filtered[j].OutDegree {
+				return filtered[i].OutDegree > filtered[j].OutDegree
+			}
+			return filtered[i].Score > filtered[j].Score
+		})
+	}
+
 	// Trim to requested count
 	if len(filtered) > p.Top {
 		filtered = filtered[:p.Top]
 	}
 
-	span.SetAttributes(attribute.Int("filtered_hotspots", len(filtered)))
+	span.SetAttributes(
+		attribute.Int("filtered_hotspots", len(filtered)),
+		attribute.Int("dunder_filtered", dundarFiltered),
+	)
 
 	// Structured logging for edge cases
 	if len(hotspots) > 0 && len(filtered) == 0 {
-		t.logger.Debug("all hotspots filtered by kind",
+		t.logger.Debug("all hotspots filtered out",
 			slog.String("tool", "find_hotspots"),
 			slog.Int("raw_count", len(hotspots)),
 			slog.String("kind_filter", p.Kind),
+			slog.String("package_filter", p.Package),
 		)
-	} else if len(filtered) < p.Top && p.Kind != "all" {
+	} else if len(filtered) < p.Top && (p.Kind != "all" || p.Package != "") {
 		t.logger.Debug("fewer hotspots than requested after filtering",
 			slog.String("tool", "find_hotspots"),
 			slog.Int("requested", p.Top),
 			slog.Int("returned", len(filtered)),
 			slog.String("kind_filter", p.Kind),
+			slog.String("package_filter", p.Package),
 		)
 	}
 
@@ -274,7 +453,7 @@ func (t *findHotspotsTool) Execute(ctx context.Context, params map[string]any) (
 	output := t.buildOutput(filtered)
 
 	// Format text output
-	outputText := t.formatText(filtered)
+	outputText := t.formatText(filtered, p.Package, p.SortBy)
 
 	return &Result{
 		Success:    true,
@@ -289,8 +468,10 @@ func (t *findHotspotsTool) Execute(ctx context.Context, params map[string]any) (
 // parseParams validates and extracts typed parameters from the raw map.
 func (t *findHotspotsTool) parseParams(params map[string]any) (FindHotspotsParams, error) {
 	p := FindHotspotsParams{
-		Top:  10,
-		Kind: "all",
+		Top:          10,
+		Kind:         "all",
+		ExcludeTests: true,
+		SortBy:       "score",
 	}
 
 	// Extract top (optional)
@@ -316,7 +497,12 @@ func (t *findHotspotsTool) parseParams(params map[string]any) (FindHotspotsParam
 	// Extract kind (optional)
 	if kindRaw, ok := params["kind"]; ok {
 		if kind, ok := parseStringParam(kindRaw); ok {
-			validKinds := map[string]bool{"function": true, "type": true, "all": true}
+			validKinds := map[string]bool{
+				"function": true, "method": true,
+				"type": true, "class": true, "struct": true, "interface": true,
+				"enum": true, "variable": true, "constant": true,
+				"all": true,
+			}
 			if !validKinds[kind] {
 				t.logger.Warn("invalid kind filter, defaulting to all",
 					slog.String("tool", "find_hotspots"),
@@ -325,6 +511,37 @@ func (t *findHotspotsTool) parseParams(params map[string]any) (FindHotspotsParam
 				kind = "all"
 			}
 			p.Kind = kind
+		}
+	}
+
+	// IT-07 Bug 3: Extract package (optional)
+	if packageRaw, ok := params["package"]; ok {
+		if pkg, ok := parseStringParam(packageRaw); ok {
+			p.Package = pkg
+		}
+	}
+
+	// IT-07 Phase 3: Extract exclude_tests (optional, default: true)
+	if etRaw, ok := params["exclude_tests"]; ok {
+		if et, ok := etRaw.(bool); ok {
+			p.ExcludeTests = et
+		}
+	}
+
+	// IT-07 Phase 3: Extract sort_by (optional, default: "score")
+	if sbRaw, ok := params["sort_by"]; ok {
+		if sb, ok := parseStringParam(sbRaw); ok {
+			validSortBy := map[string]bool{
+				"score": true, "in": true, "out": true,
+			}
+			if !validSortBy[sb] {
+				t.logger.Warn("invalid sort_by value, defaulting to score",
+					slog.String("tool", "find_hotspots"),
+					slog.String("invalid_sort_by", sb),
+				)
+				sb = "score"
+			}
+			p.SortBy = sb
 		}
 	}
 
@@ -359,16 +576,42 @@ func (t *findHotspotsTool) buildOutput(hotspots []graph.HotspotNode) FindHotspot
 	}
 }
 
-// formatText creates a human-readable text summary.
-func (t *findHotspotsTool) formatText(hotspots []graph.HotspotNode) string {
+// formatText creates a human-readable text summary with graph markers.
+//
+// IT-07 Bug 1: Output must include graph markers so that getSingleFormattedResult()
+// can identify authoritative results and skip LLM synthesis:
+//   - Zero results: "## GRAPH RESULT" header + "Do NOT use Grep" footer
+//   - Positive results: "Found N" prefix + exhaustive footer + "Do NOT use Grep" footer
+func (t *findHotspotsTool) formatText(hotspots []graph.HotspotNode, packageFilter, sortBy string) string {
 	var sb strings.Builder
 
 	if len(hotspots) == 0 {
-		sb.WriteString("No hotspots found.\n")
+		sb.WriteString("## GRAPH RESULT: No hotspots found\n\n")
+		sb.WriteString("No symbols with connectivity score > 0 exist in the graph")
+		if packageFilter != "" {
+			sb.WriteString(fmt.Sprintf(" for package '%s'", packageFilter))
+		}
+		sb.WriteString(".\n\n")
+		sb.WriteString("---\n")
+		sb.WriteString("The graph has been fully indexed \u2014 these results are exhaustive.\n")
+		sb.WriteString("**Do NOT use Grep or Read to verify** \u2014 the graph already analyzed all source files.\n")
 		return sb.String()
 	}
 
-	sb.WriteString(fmt.Sprintf("Top %d Hotspots by Connectivity:\n\n", len(hotspots)))
+	// Describe the sort dimension in the header
+	sortLabel := "connectivity"
+	switch sortBy {
+	case "in":
+		sortLabel = "InDegree (fan-in)"
+	case "out":
+		sortLabel = "OutDegree (fan-out)"
+	}
+
+	if packageFilter != "" {
+		sb.WriteString(fmt.Sprintf("Found %d hotspots in package '%s' by %s:\n\n", len(hotspots), packageFilter, sortLabel))
+	} else {
+		sb.WriteString(fmt.Sprintf("Found %d hotspots by %s:\n\n", len(hotspots), sortLabel))
+	}
 
 	for i, hs := range hotspots {
 		if hs.Node == nil || hs.Node.Symbol == nil {
@@ -379,22 +622,35 @@ func (t *findHotspotsTool) formatText(hotspots []graph.HotspotNode) string {
 		sb.WriteString(fmt.Sprintf("   %s:%d\n", sym.FilePath, sym.StartLine))
 		sb.WriteString(fmt.Sprintf("   InDegree: %d, OutDegree: %d\n", hs.InDegree, hs.OutDegree))
 		if sym.Kind != ast.SymbolKindUnknown {
-			sb.WriteString(fmt.Sprintf("   Kind: %s\n", sym.Kind))
+			sb.WriteString(fmt.Sprintf("   Kind: %s, Package: %s\n", sym.Kind, sym.Package))
 		}
 		sb.WriteString("\n")
 	}
+
+	sb.WriteString("---\n")
+	sb.WriteString("The graph has been fully indexed \u2014 these results are exhaustive.\n")
+	sb.WriteString("**Do NOT use Grep or Read to verify** \u2014 the graph already analyzed all source files.\n")
 
 	return sb.String()
 }
 
 // matchesHotspotKind checks if a symbol kind matches a filter string for hotspots.
+//
+// IT-07 Bug 2: Expanded to handle all values that extractKindFromQuery() can produce:
+// "function", "method", "type", "class", "struct", "interface", "enum", "variable", "constant".
 func matchesHotspotKind(kind ast.SymbolKind, filter string) bool {
 	switch filter {
-	case "function":
-		return kind == ast.SymbolKindFunction || kind == ast.SymbolKindMethod
-	case "type":
-		return kind == ast.SymbolKindType || kind == ast.SymbolKindStruct || kind == ast.SymbolKindInterface
-	default:
+	case "function", "method":
+		return kind == ast.SymbolKindFunction || kind == ast.SymbolKindMethod ||
+			kind == ast.SymbolKindProperty // IT-08c: Python @property has callable body
+	case "type", "class", "struct", "interface":
+		return kind == ast.SymbolKindType || kind == ast.SymbolKindStruct ||
+			kind == ast.SymbolKindInterface || kind == ast.SymbolKindClass
+	case "enum":
+		return kind == ast.SymbolKindEnum
+	case "variable", "constant":
+		return kind == ast.SymbolKindVariable || kind == ast.SymbolKindConstant
+	default: // "all" or unrecognized
 		return true
 	}
 }

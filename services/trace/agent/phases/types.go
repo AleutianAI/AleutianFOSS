@@ -177,6 +177,11 @@ type Dependencies struct {
 	// Required for symbol resolution in parameter extraction (CB-31d).
 	// Optional - if nil, parameter extraction falls back to raw symbol names.
 	SymbolIndex *index.SymbolIndex
+
+	// ParamExtractor uses a fast LLM to extract tool parameters from queries.
+	// IT-08b: Optional - nil when LLM parameter extraction is not enabled.
+	// When available, enhances regex-based extraction with semantic understanding.
+	ParamExtractor agent.ParamExtractor
 }
 
 // GraphProvider initializes and provides access to the code graph.

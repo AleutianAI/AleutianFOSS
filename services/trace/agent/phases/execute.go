@@ -86,6 +86,10 @@ type ExecutePhase struct {
 	// Key: "sessionID:symbolName", Value: SymbolResolution
 	// Thread Safety: sync.Map is safe for concurrent use.
 	symbolCache sync.Map
+
+	// prefilter narrows tool candidates before the LLM router classifies (CB-38).
+	// nil = disabled (backward compatible, no behavior change).
+	prefilter *routing.PreFilter
 }
 
 // ExecutePhaseOption configures an ExecutePhase.
@@ -234,6 +238,27 @@ func WithQueryClassifier(c classifier.QueryClassifier) ExecutePhaseOption {
 	}
 }
 
+// WithPreFilter sets the pre-filter for narrowing tool candidates (CB-38).
+//
+// Description:
+//
+//	When set, the pre-filter runs before the LLM router to narrow
+//	55+ tools to 5-10 candidates (or force a selection outright).
+//	nil = disabled (backward compatible).
+//
+// Inputs:
+//
+//	pf - The pre-filter instance. May be nil to disable.
+//
+// Outputs:
+//
+//	ExecutePhaseOption - The configuration function.
+func WithPreFilter(pf *routing.PreFilter) ExecutePhaseOption {
+	return func(p *ExecutePhase) {
+		p.prefilter = pf
+	}
+}
+
 // NewExecutePhase creates a new execution phase.
 //
 // Inputs:
@@ -353,7 +378,69 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 		slog.Int("step", stepNumber),
 	)
 
-	// Build the LLM request
+	// IT-08e: Speculative parallel param extraction.
+	// Run pre-filter FIRST to get top candidate, then launch LLM extraction
+	// on a dedicated model (ministral-3:3b) in parallel with routing
+	// (granite4:micro-h on a separate Ollama model slot).
+	type llmParamResult struct {
+		params map[string]any
+		tool   string
+		err    error
+	}
+	llmCh := make(chan llmParamResult, 1)
+
+	var speculativeTool string
+	if deps.ParamExtractor != nil && deps.ParamExtractor.IsEnabled() && p.prefilter != nil {
+		var pfToolDefs []tools.ToolDefinition
+		if deps.ToolRegistry != nil {
+			pfToolDefs = deps.ToolRegistry.GetDefinitions()
+		}
+		pfSpecs := toolDefsToSpecs(pfToolDefs)
+		var speculativeSessionCounts map[string]int
+		if deps.Session != nil {
+			speculativeSessionCounts = buildToolCountMapFromSession(deps.Session)
+		}
+		pfResult := p.prefilter.FilterAgentSpecs(ctx, deps.Query, pfSpecs, speculativeSessionCounts)
+
+		if pfResult.ForcedTool != "" {
+			speculativeTool = pfResult.ForcedTool
+		} else if len(pfResult.NarrowedSpecs) > 0 {
+			speculativeTool = pfResult.NarrowedSpecs[0].Name
+		}
+
+		if speculativeTool != "" {
+			go func(tool string) {
+				var toolDef *tools.ToolDefinition
+				for i := range pfToolDefs {
+					if pfToolDefs[i].Name == tool {
+						toolDef = &pfToolDefs[i]
+						break
+					}
+				}
+				if toolDef == nil {
+					llmCh <- llmParamResult{nil, tool, fmt.Errorf("tool def not found: %s", tool)}
+					return
+				}
+				schemas := buildParamSchemas(toolDef)
+				if len(schemas) == 0 {
+					llmCh <- llmParamResult{nil, tool, fmt.Errorf("no schemas for %s", tool)}
+					return
+				}
+				// No regex hint — LLM extracts from scratch (parallel, no bias)
+				result, err := deps.ParamExtractor.ExtractParams(
+					ctx, deps.Query, tool, schemas, map[string]any{},
+				)
+				llmCh <- llmParamResult{result, tool, err}
+			}(speculativeTool)
+		} else {
+			llmCh <- llmParamResult{nil, "", fmt.Errorf("no prefilter candidate")}
+		}
+	} else {
+		llmCh <- llmParamResult{nil, "", fmt.Errorf("param extractor not available")}
+	}
+
+	// Build the LLM request (includes routing — ~570ms on granite4:micro-h).
+	// While this blocks, ministral-3:3b is extracting params in parallel.
 	request, hardForcing, buildErr := p.buildLLMRequest(deps)
 	if buildErr != nil {
 		// GR-44 Rev 2: Router errors are fatal - propagate up
@@ -362,6 +449,27 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 			slog.String("error", buildErr.Error()),
 		)
 		return agent.StateError, buildErr
+	}
+
+	// GR-59 Rev 4d: Pre-LLM synthesis check — MUST be before hardForcing block.
+	// If a forced graph tool already completed (flag set by executeToolDirectlyWithFallback),
+	// skip ALL further tool execution and force synthesis directly. This prevents the
+	// router from forcing Grep/Glob/Read after the graph already answered authoritatively.
+	// Previous placement (Rev 4c) was AFTER the hardForcing block, so it was bypassed
+	// when the router selected a non-graph tool (e.g., Grep) on subsequent steps.
+	if stepNumber >= 1 && deps.Session != nil && deps.Session.GraphToolHadSubstantiveResults() {
+		slog.Info("GR-59 Rev 4d: Pre-tool synthesis — forced graph tool already completed, skipping router-forced tool",
+			slog.String("session_id", deps.Session.ID),
+			slog.Int("step_number", stepNumber),
+			slog.String("router_suggested", func() string {
+				if hardForcing != nil {
+					return hardForcing.Tool
+				}
+				return "none"
+			}()),
+		)
+		deps.Session.SetCircuitBreakerActive(true)
+		return p.forceLLMSynthesis(ctx, deps, request, stepStart, stepNumber)
 	}
 
 	// O1.3 Fix: Capture semantic info for trace step metadata
@@ -442,7 +550,103 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 
 		// TR-1 Fix: Extract tool parameters from query/context
 		// CB-31d: Pass deps for symbol resolution
-		params, paramErr := p.extractToolParameters(deps.Query, hardForcing.Tool, toolDefs, deps.Context, deps)
+		params, paramErr := p.extractToolParameters(ctx, deps.Query, hardForcing.Tool, toolDefs, deps.Context, deps)
+
+		// IT-08e: Collect speculative LLM param result (already running in parallel).
+		// The goroutine was launched BEFORE buildLLMRequest, so it has had ~570ms
+		// to complete on ministral-3:3b (~150ms typical). Result is ready.
+		llmResult := <-llmCh
+		if llmResult.err == nil && llmResult.tool == hardForcing.Tool && llmResult.params != nil {
+			// Speculative hit: router confirmed our pre-filter prediction
+			converted, convErr := convertMapToTypedParams(hardForcing.Tool, llmResult.params)
+			if convErr == nil {
+				slog.Info("IT-08e: LLM param extraction succeeded (parallel, speculative hit)",
+					slog.String("tool", hardForcing.Tool),
+				)
+				// IT-Summary FIX-D: For find_path, preserve regex-extracted dot-notation
+				// names (Type.Method) when the LLM stripped them to bare names.
+				// The 3b model over-generalizes "strip package qualifiers" and removes
+				// Type prefixes like "Engine." from "Engine.ServeHTTP". The regex
+				// extraction preserves these correctly.
+				if hardForcing.Tool == "find_path" {
+					if regexParams, ok := params.(tools.FindPathParams); ok {
+						if llmParams, ok := converted.(tools.FindPathParams); ok {
+							if strings.Contains(regexParams.From, ".") && !strings.Contains(llmParams.From, ".") {
+								slog.Info("IT-Summary FIX-D: preserving regex dot-notation for 'from'",
+									slog.String("regex", regexParams.From),
+									slog.String("llm", llmParams.From),
+								)
+								llmParams.From = regexParams.From
+							}
+							if strings.Contains(regexParams.To, ".") && !strings.Contains(llmParams.To, ".") {
+								slog.Info("IT-Summary FIX-D: preserving regex dot-notation for 'to'",
+									slog.String("regex", regexParams.To),
+									slog.String("llm", llmParams.To),
+								)
+								llmParams.To = regexParams.To
+							}
+							converted = llmParams
+						}
+					}
+				}
+				params = converted
+				paramErr = nil
+			} else {
+				slog.Warn("IT-08e: LLM param conversion failed, using regex",
+					slog.String("tool", hardForcing.Tool),
+					slog.String("error", convErr.Error()),
+				)
+			}
+		} else if llmResult.tool != "" && llmResult.tool != hardForcing.Tool {
+			// Mispredict: router picked a different tool than pre-filter top
+			slog.Info("IT-08e: Speculative mispredict, discarding LLM params",
+				slog.String("speculated", llmResult.tool),
+				slog.String("actual", hardForcing.Tool),
+			)
+		} else if llmResult.err != nil {
+			slog.Debug("IT-08e: LLM param extraction unavailable, using regex",
+				slog.String("reason", llmResult.err.Error()),
+			)
+		}
+
+		// IT-12: Conceptual symbol resolution for tools with symbol name params.
+		// When IT-08e speculative LLM extraction provides names that don't exist
+		// in the codebase (e.g., "site_initialization" hallucinated for "call chain
+		// from site initialization to menu assembly"), search the symbol index for
+		// query keywords and ask the LLM to pick the best real symbol.
+		if paramErr == nil && params != nil &&
+			deps.SymbolIndex != nil && deps.ParamExtractor != nil && deps.ParamExtractor.IsEnabled() {
+			switch hardForcing.Tool {
+			case "get_call_chain":
+				if gccParams, ok := params.(tools.GetCallChainParams); ok && gccParams.FunctionName != "" {
+					resolved := resolveConceptualName(ctx, gccParams.FunctionName, deps.Query,
+						deps.SymbolIndex, deps.ParamExtractor, deps.GraphAnalytics)
+					if resolved != gccParams.FunctionName {
+						gccParams.FunctionName = resolved
+						params = gccParams
+					}
+				}
+			case "find_path":
+				if fpParams, ok := params.(tools.FindPathParams); ok {
+					if fpParams.From != "" {
+						resolved := resolveConceptualName(ctx, fpParams.From, deps.Query,
+							deps.SymbolIndex, deps.ParamExtractor, deps.GraphAnalytics)
+						if resolved != fpParams.From {
+							fpParams.From = resolved
+						}
+					}
+					if fpParams.To != "" {
+						resolved := resolveConceptualName(ctx, fpParams.To, deps.Query,
+							deps.SymbolIndex, deps.ParamExtractor, deps.GraphAnalytics)
+						if resolved != fpParams.To {
+							fpParams.To = resolved
+						}
+					}
+					params = fpParams
+				}
+			}
+		}
+
 		if paramErr != nil {
 			// TR-7 Fix: Fallback to Main LLM on parameter extraction failure
 			slog.Warn("Parameter extraction failed, falling back to Main LLM (CB-31d)",
@@ -492,7 +696,21 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 					p.emitToolRouting(deps, hardForcing)
 				}
 
-				// Convert PhaseResult to state and return
+				// GR-59 Rev 5: For graph tools, force synthesis immediately.
+				// Graph tools return authoritative results (positive or negative).
+				// Returning StateExecute lets the LLM spiral into Grep/Glob loops
+				// trying to verify graph results, which wastes steps and triggers
+				// circuit breakers. Force the LLM to synthesize from the graph
+				// result directly — no further tool calls needed.
+				if graphToolsWithSubstantiveResults[hardForcing.Tool] {
+					slog.Info("GR-59 Rev 5: Graph tool completed — forcing immediate synthesis",
+						slog.String("session_id", deps.Session.ID),
+						slog.String("tool", hardForcing.Tool),
+					)
+					return p.forceLLMSynthesis(ctx, deps, request, stepStart, stepNumber)
+				}
+
+				// Non-graph tools: return to execution loop for further processing
 				return execResult.NextState, nil
 			}
 		}
@@ -548,7 +766,15 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 	}
 
 	// Parse and execute tool calls
-	invocations := llm.ParseToolCalls(response)
+	// IT-05 R5: Use ParseToolCallsWithReAct which tries native JSON parsing first,
+	// then falls back to ReAct text parsing for models that emit raw text like
+	// "Read src/flask/app.py 1-200" instead of JSON tool calls.
+	invocations, usedReAct := llm.ParseToolCallsWithReAct(response)
+	if usedReAct {
+		slog.Info("IT-05 R5: ReAct fallback parsed tool call from text response",
+			slog.Int("invocations", len(invocations)),
+		)
+	}
 
 	// CRITICAL: Add assistant message with tool calls to conversation history BEFORE execution.
 	// This ensures the LLM sees "I requested tool X" followed by "tool X returned Y".
@@ -563,6 +789,18 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 	// Handle safety block
 	if blocked {
 		p.emitError(deps, fmt.Errorf("execution blocked by safety check"), true)
+
+		// IT-06c I-13: Early-exit when all tool calls in this batch were blocked.
+		// Without this, the loop continues futilely (steps 1-9 can loop with zero
+		// progress before reflection threshold at step 10). Force synthesis from
+		// any accumulated results instead of wasting time on blocked tool calls.
+		if deps.Session.IsCircuitBreakerActive() {
+			slog.Info("IT-06c I-13: All tool calls blocked, forcing synthesis",
+				slog.String("session_id", deps.Session.ID),
+				slog.Int("step_number", stepNumber),
+			)
+			return p.forceLLMSynthesis(ctx, deps, request, stepStart, stepNumber)
+		}
 	}
 
 	// Emit step complete event
@@ -579,12 +817,21 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 			slog.Int("tool_results", len(toolResults)),
 		)
 
-		// Build a synthesis from the graph tool results
+		// First try to synthesize from the current batch's tool results.
 		synthResult := p.synthesizeFromGraphToolResults(deps, toolResults, "graph_tool_completion")
 		if synthResult != "" {
 			response.Content = synthResult
 			return p.handleCompletion(ctx, deps, response, request, stepStart, stepNumber)
 		}
+
+		// GR-59 Rev 2: If current batch has no graph results (e.g., only CB errors),
+		// force the LLM to produce an answer from conversation history which already
+		// contains the graph tool results from prior steps.
+		slog.Info("GR-59 Rev 2: Current batch has no graph results, forcing LLM synthesis from history",
+			slog.String("session_id", deps.Session.ID),
+		)
+		deps.Session.SetCircuitBreakerActive(true)
+		return p.forceLLMSynthesis(ctx, deps, request, stepStart, stepNumber)
 	}
 
 	// Check if reflection is needed
@@ -704,6 +951,8 @@ func (p *ExecutePhase) buildLLMRequest(deps *Dependencies) (*llm.Request, *agent
 					// trace_logs_30 showed GLM-4.7-flash outputting malformed XML that
 					// crashed Ollama's parser.
 					if circuitBreakerFired {
+						// IT-3/10 FIX-3b: Anti-hallucination circuit breaker prompt.
+						// Addresses ISSUE-03, 09, 10, 12, 14, 17F.
 						synthesisPrompt := `You have gathered information from tools. Now provide a complete answer.
 
 MANDATORY: YOU MUST RESPOND
@@ -718,9 +967,21 @@ CRITICAL - DO NOT OUTPUT ANY XML OR TOOL CALLS:
 - No XML-formatted invocations
 - Tools are now disabled - you cannot call more tools
 
+CRITICAL - DO NOT FABRICATE:
+- ONLY report data that appeared in tool results above
+- Do NOT use training knowledge about this library/framework — even correct facts
+  about the upstream project are FABRICATION if not in the tool results
+- Do NOT invent file paths, function names, line numbers, or call chains
+- Do NOT add line numbers unless the tool provided them
+- Do NOT claim "all references are in one file" unless the tool returned exactly one file
+- If tool returned "not found" or empty, say so — do NOT fill in from memory
+- If tool returned data for a different question, state what was returned honestly
+- Words from the user's QUERY are NOT data — do NOT use query terms as graph nodes
+
 DO:
 - Synthesize a clear answer from the tool results above
 - State "not found" if results are empty
+- List every file the tool returned, even if there are many
 - Be concise (2-3 paragraphs maximum)
 
 Provide your answer now:`
@@ -746,10 +1007,11 @@ Provide your answer now:`
 						slog.String("tool", routerSelection.Tool),
 						slog.Float64("confidence", routerSelection.Confidence),
 					)
+					// GR-44 Rev 2: Set routerUsed before early return to satisfy enforcement check
+					routerUsed = true
 					// Return request with hard forcing selection
 					return request, routerSelection, nil
 				}
-
 				// Emit routing event if we didn't exit early
 				if routerUsed {
 					p.emitToolRouting(deps, routerSelection)
@@ -843,6 +1105,84 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 
 	// Convert tool definitions to ToolSpecs for the router
 	toolSpecs := toolDefsToSpecs(toolDefs)
+
+	// GR-61: Build session counts once for both the prefilter UCB1 penalty
+	// and the legacy circuit-breaker check below. Avoids iterating trace steps
+	// twice in the same function call.
+	var sessionCounts map[string]int
+	if deps.Session != nil {
+		sessionCounts = buildToolCountMapFromSession(deps.Session)
+	}
+
+	// CB-38: Pre-filter narrows candidate set before LLM router
+	if p.prefilter != nil {
+		pfResult := p.prefilter.FilterAgentSpecs(ctx, deps.Query, toolSpecs, sessionCounts)
+		if pfResult.ForcedTool != "" {
+			// CB-38: Check circuit breaker before accepting forced selection.
+			// A forced tool that has been called too many times should not bypass
+			// the circuit breaker — fall through to normal routing instead.
+			cbBlocked := false
+			if deps.Session != nil && deps.Session.HasCRS() {
+				cbResult := deps.Session.GetCRS().CheckCircuitBreaker(deps.Session.ID, pfResult.ForcedTool)
+				if cbResult.ShouldFire {
+					cbBlocked = true
+					slog.Warn("CB-38 prefilter forced tool blocked by circuit breaker",
+						slog.String("session_id", deps.Session.ID),
+						slog.String("tool", pfResult.ForcedTool),
+						slog.String("cb_reason", cbResult.Reason),
+					)
+				}
+			} else if deps.Session != nil {
+				// GR-61: reuse sessionCounts built above — no second iteration.
+				if sessionCounts[pfResult.ForcedTool] >= maxRepeatedToolCalls {
+					cbBlocked = true
+					slog.Warn("CB-38 prefilter forced tool blocked by circuit breaker (legacy)",
+						slog.String("session_id", deps.Session.ID),
+						slog.String("tool", pfResult.ForcedTool),
+						slog.Int("call_count", sessionCounts[pfResult.ForcedTool]),
+					)
+				}
+			}
+
+			if !cbBlocked {
+				slog.Info("CB-38 prefilter forced tool selection",
+					slog.String("session_id", deps.Session.ID),
+					slog.String("tool", pfResult.ForcedTool),
+					slog.String("reason", pfResult.ForcedReason),
+				)
+				span.SetAttributes(
+					attribute.String("prefilter_forced_tool", pfResult.ForcedTool),
+					attribute.String("prefilter_forced_reason", pfResult.ForcedReason),
+				)
+
+				// CB-38: Record forced selection as CRS TraceStep
+				deps.Session.RecordTraceStep(crs.TraceStep{
+					Timestamp: time.Now().UnixMilli(),
+					Action:    "prefilter_forced",
+					Target:    pfResult.ForcedTool,
+					Tool:      "prefilter",
+					Duration:  pfResult.Duration,
+					Metadata: map[string]string{
+						"reason":         pfResult.ForcedReason,
+						"original_count": fmt.Sprintf("%d", pfResult.OriginalCount),
+					},
+				})
+
+				return &agent.ToolRouterSelection{
+					Tool:       pfResult.ForcedTool,
+					Confidence: 1.0,
+					Reasoning:  fmt.Sprintf("Prefilter forced: %s", pfResult.ForcedReason),
+					Duration:   pfResult.Duration,
+				}, nil
+			}
+			// Circuit breaker fired — fall through to normal routing with narrowed specs
+		}
+		toolSpecs = pfResult.NarrowedSpecs // 5-10 instead of 55
+		span.SetAttributes(
+			attribute.Int("prefilter_original", pfResult.OriginalCount),
+			attribute.Int("prefilter_narrowed", pfResult.NarrowedCount),
+		)
+	}
 
 	// Build code context for the router
 	codeContext := p.buildCodeContext(deps)
@@ -1032,6 +1372,13 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 		attribute.Float64("confidence", selection.Confidence),
 		attribute.Int64("routing_duration_ms", selection.Duration.Milliseconds()),
 	)
+
+	// CRS-WIRE-01: Emit EventToolSelected to Coordinator for awareness/constraint checking.
+	// This runs BEFORE circuit breaker checks so activities can update CRS state
+	// (e.g., Awareness detects cycles, Constraint checks pre-conditions) before
+	// the circuit breaker evaluates proof numbers.
+	p.emitCoordinatorEvent(ctx, deps, integration.EventToolSelected,
+		&agent.ToolInvocation{Tool: selection.Tool}, nil, "", crs.ErrorCategoryNone)
 
 	// Circuit breaker: Check if the tool path is disproven or has been called too many times.
 	// CRS-02: Prefer CRS proof status check when available, fall back to count-based check.
@@ -1330,7 +1677,7 @@ func (p *ExecutePhase) callLLM(ctx context.Context, deps *Dependencies, request 
 			contentPreview = contentPreview[:200] + "..."
 		}
 
-		deps.Session.RecordTraceStep(crs.TraceStep{
+		step := crs.TraceStep{
 			Timestamp: time.Now().UnixMilli(),
 			Action:    "llm_call",
 			Target:    deps.LLMClient.Model(),
@@ -1342,12 +1689,23 @@ func (p *ExecutePhase) callLLM(ctx context.Context, deps *Dependencies, request 
 				"tool_count":        fmt.Sprintf("%d", len(request.Tools)),
 				"last_user_message": lastUserMsg,
 				"output_tokens":     fmt.Sprintf("%d", response.OutputTokens),
+				"input_tokens":      fmt.Sprintf("%d", response.InputTokens),
 				"content_len":       fmt.Sprintf("%d", len(response.Content)),
 				"content_preview":   contentPreview,
 				"stop_reason":       response.StopReason,
 				"tool_call_count":   fmt.Sprintf("%d", len(response.ToolCalls)),
+				"provider":          deps.LLMClient.Name(),
 			},
-		})
+		}
+		// Merge provider-level metadata from Response.TraceStep if present
+		if response.TraceStep != nil {
+			for k, v := range response.TraceStep.Metadata {
+				if _, exists := step.Metadata[k]; !exists {
+					step.Metadata[k] = v
+				}
+			}
+		}
+		deps.Session.RecordTraceStep(step)
 	}
 
 	return response, nil
@@ -1383,25 +1741,8 @@ func (p *ExecutePhase) handleLLMError(deps *Dependencies, err error) (agent.Agen
 			slog.Duration("duration", emptyErr.Duration),
 		)
 
-		// Build a summary response from tool results we already have
-		summary := p.synthesizeFromToolResults(deps)
-		if summary != "" {
-			slog.Info("Graceful recovery: synthesized response from tool results",
-				slog.String("session_id", deps.Session.ID),
-				slog.Int("summary_len", len(summary)),
-			)
-
-			// Add synthesized response to conversation history as assistant message
-			if deps.Context != nil {
-				deps.Context.ConversationHistory = append(deps.Context.ConversationHistory, agent.Message{
-					Role:    "assistant",
-					Content: summary,
-				})
-				deps.Session.SetCurrentContext(deps.Context)
-			}
-
-			p.emitError(deps, fmt.Errorf("recovered from empty response: synthesized from %d tool results", len(deps.Context.ToolResults)), false)
-			return agent.StateComplete, nil
+		if state, recovered := p.tryToolResultRecovery(deps, "empty_response"); recovered {
+			return state, nil
 		}
 
 		// No tool results to synthesize from - fall through to error
@@ -1410,8 +1751,75 @@ func (p *ExecutePhase) handleLLMError(deps *Dependencies, err error) (agent.Agen
 		)
 	}
 
+	// IT-05 R6: Check for Ollama tool-parsing errors.
+	// When the LLM (gpt-oss:20b) emits raw text that looks like a tool call during
+	// synthesis (e.g., find_callers("canActivate")), Ollama's internal parser tries
+	// to parse it as JSON and returns HTTP 500. This is not a real failure — the graph
+	// tool already produced good results. Recover by passing through tool results.
+	if isOllamaToolParsingError(err) {
+		slog.Warn("IT-05 R6: Ollama tool-parsing error detected, attempting graceful recovery",
+			slog.String("session_id", deps.Session.ID),
+			slog.String("error", err.Error()),
+		)
+
+		if state, recovered := p.tryToolResultRecovery(deps, "ollama_tool_parse_error"); recovered {
+			return state, nil
+		}
+	}
+
 	p.emitError(deps, err, false)
 	return agent.StateError, err
+}
+
+// isOllamaToolParsingError detects Ollama HTTP 500 errors caused by the LLM emitting
+// raw text that Ollama's internal parser interprets as a malformed tool call.
+//
+// Example error: "ollama chat failed with status 500: {"error":"error parsing tool call:
+// raw='find_callers(\"canActivate\")', err=invalid character 'i' ..."}"
+//
+// This happens when gpt-oss:20b generates function-call-like text during synthesis
+// despite being told not to request tool calls. Ollama tries to parse the output
+// as JSON tool calls and fails.
+func isOllamaToolParsingError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "error parsing tool call") ||
+		(strings.Contains(errStr, "status 500") && strings.Contains(errStr, "tool call"))
+}
+
+// tryToolResultRecovery attempts to recover from an LLM error by synthesizing
+// a response from previously gathered tool results.
+//
+// Returns (state, true) if recovery succeeded, or (0, false) if no recovery possible.
+func (p *ExecutePhase) tryToolResultRecovery(deps *Dependencies, reason string) (agent.AgentState, bool) {
+	summary := p.synthesizeFromToolResults(deps)
+	if summary == "" {
+		return "", false
+	}
+
+	slog.Info("Graceful recovery: synthesized response from tool results",
+		slog.String("session_id", deps.Session.ID),
+		slog.String("reason", reason),
+		slog.Int("summary_len", len(summary)),
+	)
+
+	// Add synthesized response to conversation history as assistant message
+	if deps.Context != nil {
+		deps.Context.ConversationHistory = append(deps.Context.ConversationHistory, agent.Message{
+			Role:    "assistant",
+			Content: summary,
+		})
+		deps.Session.SetCurrentContext(deps.Context)
+	}
+
+	toolResultCount := 0
+	if deps.Context != nil {
+		toolResultCount = len(deps.Context.ToolResults)
+	}
+	p.emitError(deps, fmt.Errorf("recovered from %s: synthesized from %d tool results", reason, toolResultCount), false)
+	return agent.StateComplete, true
 }
 
 // handleCompletion handles LLM responses with no tool calls.
@@ -1491,6 +1899,25 @@ func (p *ExecutePhase) handleCompletion(ctx context.Context, deps *Dependencies,
 		}
 	}
 
+	// GR-59 Group F: Detect LLM "surrender" responses ("I don't know") when tool results exist.
+	// If the LLM gives up despite having graph tool results, retry once with a synthesis directive.
+	if isSurrenderResponse(response.Content) && deps.Context != nil && len(deps.Context.ToolResults) > 0 {
+		surrenderRetries := deps.Session.GetMetric(agent.MetricSurrenderRetries)
+		if surrenderRetries < 1 {
+			slog.Info("GR-59: Surrender detected with tool results available, retrying synthesis",
+				slog.String("session_id", deps.Session.ID),
+				slog.String("response_preview", truncateForLog(response.Content, 50)),
+				slog.Int("tool_results", len(deps.Context.ToolResults)),
+			)
+			deps.Session.IncrementMetric(agent.MetricSurrenderRetries, 1)
+
+			synthesized := p.synthesizeFromToolResults(deps)
+			if synthesized != "" {
+				response.Content = synthesized
+			}
+		}
+	}
+
 	// Validate response for prohibited patterns (hybrid stack layer 4)
 	if p.responseValidator != nil {
 		// GR-Phase1 Fix: Use the actual tool_choice from the request instead of
@@ -1556,7 +1983,13 @@ func (p *ExecutePhase) handleCompletion(ctx context.Context, deps *Dependencies,
 
 	// Check if tool forcing should be applied (before grounding validation)
 	// GR-44: Skip tool forcing when circuit breaker has fired
-	if !deps.Session.IsCircuitBreakerActive() && p.shouldForceToolUsage(ctx, deps, stepNumber) {
+	// IT-11: Skip tool forcing when already in synthesis mode (ToolChoice=none).
+	// forceLLMSynthesis delegates to handleCompletion after a successful synthesis,
+	// but without this check, shouldForceToolUsage returns true (analytical query,
+	// step ≤ 2, retries < max) and triggers a redundant second EXECUTE loop that
+	// wastes ~9-18s on re-routing + a second LLM synthesis call.
+	isSynthesisMode := request.ToolChoice != nil && request.ToolChoice.Type == "none"
+	if !isSynthesisMode && !deps.Session.IsCircuitBreakerActive() && p.shouldForceToolUsage(ctx, deps, stepNumber) {
 		return p.forceToolUsage(ctx, deps, response, stepNumber)
 	}
 
@@ -1914,12 +2347,39 @@ func (p *ExecutePhase) buildEmptyResponseFallback(deps *Dependencies) string {
 
 // graphToolsWithSubstantiveResults are the graph tools that, when they return
 // results, indicate we have enough information to synthesize an answer.
+// IT-04 Audit: ALL graph tools must be in this map. Every graph tool analyzes the
+// complete code graph (every source file) and returns authoritative, exhaustive results.
+// The LLM should NEVER be allowed to spiral into Grep/Glob to "verify" graph results.
+//
+// Previously only 7 of 23 graph tools were listed, causing the LLM to spiral after
+// the other 16. Now all 23 are listed.
 var graphToolsWithSubstantiveResults = map[string]bool{
-	"find_callers":    true,
-	"find_callees":    true,
-	"find_references": true,
-	"find_path":       true,
-	"get_call_chain":  true,
+	// Core graph traversal
+	"find_callers":         true,
+	"find_callees":         true,
+	"find_implementations": true,
+	"find_references":      true,
+	"find_symbol":          true,
+	"find_path":            true,
+	"get_call_chain":       true,
+	// Graph analytics
+	"find_hotspots":             true,
+	"find_important":            true,
+	"find_weighted_criticality": true,
+	"find_dead_code":            true,
+	"find_cycles":               true,
+	"find_loops":                true,
+	"find_communities":          true,
+	"find_articulation_points":  true,
+	"find_merge_points":         true,
+	"find_dominators":           true,
+	"find_control_dependencies": true,
+	"find_critical_path":        true,
+	"find_common_dependency":    true,
+	"find_extractable_regions":  true,
+	"find_module_api":           true,
+	"check_reducibility":        true,
+	"find_similar_code":         true, // IT-06c I-11: Was missing, preventing forced synthesis
 }
 
 // shouldForceSynthesisAfterGraphTools determines if we should force synthesis
@@ -1952,7 +2412,18 @@ func (p *ExecutePhase) shouldForceSynthesisAfterGraphTools(deps *Dependencies, t
 		return false
 	}
 
-	// Check if any of the executed tools were graph tools with results
+	// GR-59 Rev 4: Direct session flag from forced tool execution.
+	// Set by executeToolDirectlyWithFallback when a graph tool returns
+	// substantive results. No metadata round-trip — most reliable signal.
+	if deps.Session != nil && deps.Session.GraphToolHadSubstantiveResults() {
+		slog.Info("GR-59 Rev 4: Forcing synthesis — forced graph tool had substantive results",
+			slog.String("session_id", deps.Session.ID),
+			slog.Int("step_number", stepNumber),
+		)
+		return true
+	}
+
+	// Check if any of the executed tools in the CURRENT batch were graph tools with results
 	for _, result := range toolResults {
 		if result == nil || result.Error != "" {
 			continue
@@ -1965,7 +2436,7 @@ func (p *ExecutePhase) shouldForceSynthesisAfterGraphTools(deps *Dependencies, t
 		if graphToolsWithSubstantiveResults[toolName] {
 			// Check if the result contains actual data (not "No X found" messages)
 			if hasSubstantiveGraphResult(result.OutputText) {
-				slog.Debug("GR-41b: Graph tool returned substantive results",
+				slog.Debug("GR-41b: Graph tool returned substantive results (current batch)",
 					slog.String("tool", toolName),
 					slog.Int("content_len", len(result.OutputText)),
 				)
@@ -1974,6 +2445,68 @@ func (p *ExecutePhase) shouldForceSynthesisAfterGraphTools(deps *Dependencies, t
 		}
 	}
 
+	// GR-59 Rev 2: Check session history for PREVIOUS graph tool results.
+	// The current batch may contain only Grep/Read (non-graph tools) while
+	// a graph tool returned substantive results in a prior step. Without this
+	// check, the LLM keeps calling Grep after find_implementations already answered.
+	if deps.Session != nil && p.sessionHasPriorGraphToolResults(deps) {
+		slog.Info("GR-59 Rev 2: Forcing synthesis — prior graph tool had substantive results",
+			slog.String("session_id", deps.Session.ID),
+			slog.Int("step_number", stepNumber),
+		)
+		return true
+	}
+
+	return false
+}
+
+// sessionHasPriorGraphToolResults checks session trace step history for any
+// previous graph tool execution that returned substantive results.
+//
+// Description:
+//
+//	This addresses the blind spot where shouldForceSynthesisAfterGraphTools only
+//	checked the current batch's tool results. When a graph tool (e.g., find_implementations)
+//	returned results at step 0 but the LLM called Grep at step 1, the current batch
+//	contained only Grep results — missing the graph tool's substantive output entirely.
+//
+// Inputs:
+//
+//	deps - Phase dependencies with session access.
+//
+// Outputs:
+//
+//	bool - True if any prior graph tool returned non-zero results.
+//
+// Thread Safety: Safe for concurrent use (read-only).
+func (p *ExecutePhase) sessionHasPriorGraphToolResults(deps *Dependencies) bool {
+	traceSteps := deps.Session.GetTraceSteps()
+	// Result count metadata keys used by graph tools to indicate substantive output.
+	resultCountKeys := []string{
+		"match_count",           // find_callers, find_implementations
+		"total_callers",         // find_callers
+		"total_implementations", // find_implementations
+		"resolved_count",        // find_callees
+		"total_count",           // find_callees
+		"reference_count",       // find_references
+		"chain_length",          // get_call_chain
+	}
+
+	for _, step := range traceSteps {
+		if !graphToolsWithSubstantiveResults[step.Tool] || step.Error != "" {
+			continue
+		}
+		for _, key := range resultCountKeys {
+			if val, ok := step.Metadata[key]; ok && val != "0" && val != "" {
+				slog.Debug("GR-59 Rev 2: Found prior graph tool with substantive results",
+					slog.String("tool", step.Tool),
+					slog.String("key", key),
+					slog.String("value", val),
+				)
+				return true
+			}
+		}
+	}
 	return false
 }
 
@@ -2002,6 +2535,9 @@ func getToolNameFromResult(result *tools.Result) string {
 	if strings.Contains(outputLower, "references found") || strings.Contains(outputLower, "referenced by") {
 		return "find_references"
 	}
+	if strings.Contains(outputLower, "implementations found") || strings.Contains(outputLower, "implements") || strings.Contains(outputLower, "classes that implement") || strings.Contains(outputLower, "classes extend") {
+		return "find_implementations"
+	}
 	if strings.Contains(outputLower, "call chain") {
 		return "get_call_chain"
 	}
@@ -2017,13 +2553,13 @@ func hasSubstantiveGraphResult(content string) bool {
 	}
 
 	// Check for common "no results" patterns
+	// GR-59 Rev 4 root cause fix: All graph tools now include "not found" in their
+	// zero-result headers (e.g., "Symbol 'X' not found", "Callers of 'X' not found",
+	// "Callees of 'X' not found", "Implementations of 'X' not found"). The universal
+	// "not found" pattern catches all of them without tool-specific workarounds.
 	noResultPatterns := []string{
-		"No callers found",
-		"No callees found",
-		"No references found",
-		"No path found",
-		"No call chain found",
 		"not found",
+		"No references found",
 		"No results",
 	}
 
@@ -2093,6 +2629,11 @@ func (p *ExecutePhase) synthesizeFromGraphToolResults(deps *Dependencies, toolRe
 			sb.WriteString(content)
 			sb.WriteString("\n\n")
 
+		case "find_implementations":
+			sb.WriteString("**Implementations found:**\n")
+			sb.WriteString(content)
+			sb.WriteString("\n\n")
+
 		case "get_call_chain":
 			sb.WriteString("**Call chain:**\n")
 			sb.WriteString(content)
@@ -2155,4 +2696,178 @@ func (p *ExecutePhase) synthesizeFromGraphToolResults(deps *Dependencies, toolRe
 	}
 
 	return ""
+}
+
+// forceLLMSynthesis forces the LLM to produce a final answer from conversation history.
+//
+// Description:
+//
+//	GR-59 Rev 2: When a graph tool returned substantive results in a prior step
+//	but the current batch contains only CB errors or non-graph tool results,
+//	force the LLM to synthesize an answer. The conversation history already
+//	contains the graph tool output, so the LLM has everything it needs.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation.
+//	deps - Phase dependencies.
+//	request - The original LLM request (used for signature compatibility).
+//	stepStart - When this step began (for duration tracking).
+//	stepNumber - Current step number.
+//
+// Outputs:
+//
+//	agent.AgentState - The next state.
+//	error - Non-nil on failure.
+//
+// Thread Safety: Safe for concurrent use.
+func (p *ExecutePhase) forceLLMSynthesis(
+	ctx context.Context,
+	deps *Dependencies,
+	request *llm.Request,
+	stepStart time.Time,
+	stepNumber int,
+) (agent.AgentState, error) {
+	slog.Info("GR-59 Rev 2: Forcing LLM synthesis from conversation history",
+		slog.String("session_id", deps.Session.ID),
+		slog.Int("step_number", stepNumber),
+	)
+
+	// Phase 20: Check if tool results already contain a single authoritative graph result.
+	// If so, return it directly — calling the LLM risks hallucination that contradicts
+	// the tool's definitive answer (e.g., "Symbol not found" → LLM fabricates details).
+	if deps.Context != nil && len(deps.Context.ToolResults) > 0 {
+		if singleResult, ok := getSingleFormattedResult(deps.Context.ToolResults); ok {
+			slog.Info("GR-59 Rev 2: Pass-through — authoritative graph result found, skipping LLM synthesis",
+				slog.String("session_id", deps.Session.ID),
+			)
+			// Record trace step for observability
+			if deps.Session != nil {
+				deps.Session.RecordTraceStep(crs.TraceStep{
+					Timestamp: time.Now().UnixMilli(),
+					Action:    "synthesis",
+					Tool:      "tool_results",
+					Metadata:  map[string]string{"reason": "graph_passthrough"},
+				})
+			}
+			// Create a synthetic response with the pass-through content and delegate
+			// to handleCompletion for proper session state updates.
+			passthroughResponse := &llm.Response{
+				Content: singleResult,
+			}
+			return p.handleCompletion(ctx, deps, passthroughResponse, request, stepStart, stepNumber)
+		}
+	}
+
+	// Build request without tools — force text-only response.
+	synthRequest := llm.BuildRequest(deps.Context, nil, p.maxTokens)
+
+	// IT-11: Strip code context and system prompt from synthesis request.
+	// BuildRequest includes the full RAG code context (8-25KB) and system prompt
+	// as messages. These are unnecessary for synthesis — the LLM only needs
+	// the user query + tool results + synthesis instruction. Sending the full
+	// context causes glm-4.7-flash to return empty responses non-deterministically
+	// on large codebases (BabylonJS, NestJS, Plottable).
+	stripped := make([]llm.Message, 0, len(synthRequest.Messages))
+	for _, msg := range synthRequest.Messages {
+		// Skip the code context message (injected by BuildRequest from CodeContext)
+		if msg.Role == "user" && strings.HasPrefix(msg.Content, "Here is relevant code from the codebase:") {
+			continue
+		}
+		stripped = append(stripped, msg)
+	}
+	synthRequest.Messages = stripped
+	synthRequest.SystemPrompt = "" // System prompt not needed for synthesis
+
+	totalInputLen := 0
+	for _, msg := range synthRequest.Messages {
+		totalInputLen += len(msg.Content)
+		for _, tr := range msg.ToolResults {
+			totalInputLen += len(tr.Content)
+		}
+	}
+	slog.Info("IT-11: Synthesis request after stripping code context",
+		slog.String("session_id", deps.Session.ID),
+		slog.Int("message_count", len(synthRequest.Messages)),
+		slog.Int("total_input_bytes", totalInputLen),
+	)
+
+	// IT-3/10 FIX-3a: Anti-hallucination synthesis prompt. Addresses ISSUE-03, 09, 10, 12, 14, 17F.
+	synthesisPrompt := `You have gathered information from tools. Now provide a complete answer.
+
+MANDATORY: YOU MUST RESPOND WITH A COMPLETE ANSWER based on the tool results in the conversation above.
+Graph tools have already provided exhaustive results — do NOT request more tool calls.
+Summarize the findings clearly and completely.
+
+CRITICAL RULES FOR SYNTHESIS — VIOLATING THESE PRODUCES HARMFUL OUTPUT:
+
+1. ONLY use data returned by tools. Do NOT use your training knowledge about this codebase,
+   library, or framework. The graph is the ONLY authoritative source. If the tool returned
+   no results or "not found", report that directly. A response of "X was not found in the
+   codebase graph" is CORRECT — do not fill in what you think the answer should be.
+
+2. Do NOT fabricate file paths, line numbers, function names, class names, or call chains
+   that were not in the tool output. Do not invent intermediate nodes in paths. Do not
+   add usage examples or references that were not returned by the tool.
+
+3. If tool output was TRUNCATED (e.g., "showing 10 of 20 communities"), state that
+   additional results exist but were not returned. Do NOT invent content for the
+   missing entries.
+
+4. When reporting IDs or labels from tool output (community numbers, rank positions),
+   quote them EXACTLY as returned. Do not renumber or reinterpret.
+
+5. If the tool returned data for a DIFFERENT question than what was asked (e.g., callee
+   data when cycles were requested), say "The tool returned [what it returned], which
+   does not directly answer the question about [what was asked]." Do NOT reinterpret
+   callee data as cycle analysis.
+
+6. Your training knowledge about open-source libraries IS fabrication in this context.
+   Even if you know that Badger has "defaultLogger" or Flask has "JSONResponse" or
+   Pandas has "Series in pandas/core/series.py", those facts are NOT in the tool results
+   and MUST NOT appear in your answer. The user is analyzing THEIR version of the code —
+   it may differ from upstream. Only tool-returned data is trustworthy.
+
+7. When reporting reference locations, list ONLY the files returned by the tool.
+   Do NOT add line numbers unless the tool provided them. Do NOT claim "all references
+   are in one file" unless the tool returned exactly one file. List every file the tool
+   returned, even if there are many.
+
+8. Words from the user's QUERY are NOT data. If the query mentions "Table layout" and
+   the tool returned "not found", do NOT construct a path using "Table" as a node.
+   Query terms describe what to SEARCH for, not what was FOUND. A "not found" result
+   means the graph has no node matching that name — do not improvise one.`
+
+	// Append synthesis instruction as the last user message.
+	synthRequest.Messages = append(synthRequest.Messages, llm.Message{
+		Role:    "user",
+		Content: synthesisPrompt,
+	})
+	synthRequest.ToolChoice = llm.ToolChoiceNone()
+	synthRequest.Tools = nil
+
+	response, err := p.callLLM(ctx, deps, synthRequest)
+	if err != nil {
+		slog.Error("GR-59 Rev 2: Synthesis LLM call failed",
+			slog.String("session_id", deps.Session.ID),
+			slog.String("error", err.Error()),
+		)
+		return p.handleLLMError(deps, err)
+	}
+
+	// Record trace step
+	if deps.Session != nil {
+		deps.Session.RecordTraceStep(crs.TraceStep{
+			Timestamp: time.Now().UnixMilli(),
+			Action:    "forced_synthesis",
+			Target:    "gr59_rev2_session_history",
+			Metadata: map[string]string{
+				"reason":        "prior_graph_tool_results",
+				"step_number":   fmt.Sprintf("%d", stepNumber),
+				"output_tokens": fmt.Sprintf("%d", response.OutputTokens),
+			},
+		})
+	}
+
+	return p.handleCompletion(ctx, deps, response, synthRequest, stepStart, stepNumber)
 }

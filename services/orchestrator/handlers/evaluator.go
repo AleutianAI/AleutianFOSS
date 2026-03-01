@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/rand"
 	"net/http"
 	"os"
@@ -35,6 +36,9 @@ const (
 	baseRetryDelay = 500 * time.Millisecond
 	maxRetryDelay  = 10 * time.Second
 )
+
+// schemaVersion is the InfluxDB measurement schema version tag for migration support.
+const schemaVersion = "1"
 
 // forecastServiceRequest is the typed request for the legacy forecast service.
 // This replaces map[string]interface{} to avoid runtime type errors.
@@ -518,6 +522,9 @@ func (e *Evaluator) RunScenario(ctx context.Context, scenario *datatypes.Backtes
 	initialValue := currentCash + currentPosition*fullHistory.Close[startIndex]
 	portfolioValues = append(portfolioValues, initialValue)
 
+	// Track peak portfolio value for drawdown calculation
+	peakValue := initialValue
+
 	// 5. Sequential trading loop using pre-fetched forecasts
 	for i := startIndex; i <= endIndex; i++ {
 		fr, ok := forecasts[i]
@@ -543,6 +550,33 @@ func (e *Evaluator) RunScenario(ctx context.Context, scenario *datatypes.Backtes
 			continue
 		}
 
+		// --- Store Forecast ---
+		forecastRecord := &datatypes.ForecastRecord{
+			Ticker:        ticker,
+			Model:         scenario.Forecast.Model,
+			ForecastPrice: predictedPrice,
+			CurrentPrice:  currentSimulatedPrice,
+			Horizon:       scenario.Forecast.HorizonSize,
+			ForecastDate:  currentDate.Format("20060102"),
+			Timestamp:     currentDate,
+		}
+		if fr.output.Metadata != nil {
+			forecastRecord.ModelFamily = fr.output.Metadata.ModelFamily
+			forecastRecord.InferenceTimeMs = fr.output.Metadata.InferenceTimeMs
+		}
+		// Extract confidence bounds from quantiles if available
+		for _, q := range fr.output.Quantiles {
+			if q.Quantile <= 0.1 && len(q.Values) > 0 {
+				forecastRecord.ConfidenceLower = q.Values[0]
+			}
+			if q.Quantile >= 0.9 && len(q.Values) > 0 {
+				forecastRecord.ConfidenceUpper = q.Values[0]
+			}
+		}
+		if err := e.storage.StoreForecast(ctx, runID, forecastRecord); err != nil {
+			slog.Warn("Failed to store forecast", "error", err)
+		}
+
 		// --- Execute Trade ---
 		tradingReq := datatypes.TradingSignalRequest{
 			Ticker:          ticker,
@@ -561,6 +595,26 @@ func (e *Evaluator) RunScenario(ctx context.Context, scenario *datatypes.Backtes
 			continue
 		}
 
+		// --- Store Trading Signal (before state update to capture "before" values) ---
+		if err := e.storage.StoreTradingSignal(ctx, runID, &datatypes.TradingSignalRecord{
+			Ticker:         ticker,
+			StrategyType:   scenario.Trading.StrategyType,
+			Action:         signal.Action,
+			ForecastPrice:  predictedPrice,
+			CurrentPrice:   currentSimulatedPrice,
+			PositionBefore: currentPosition,
+			PositionAfter:  signal.PositionAfter,
+			TradeSize:      signal.Size,
+			TradeValue:     signal.Value,
+			CashBefore:     currentCash,
+			CashAfter:      signal.AvailableCash,
+			Reason:         signal.Reason,
+			SignalDate:     currentDate.Format("20060102"),
+			Timestamp:      currentDate,
+		}); err != nil {
+			slog.Warn("Failed to store trading signal", "error", err)
+		}
+
 		// Update State
 		currentPosition = signal.PositionAfter
 		currentCash = signal.AvailableCash
@@ -568,6 +622,34 @@ func (e *Evaluator) RunScenario(ctx context.Context, scenario *datatypes.Backtes
 		// Track portfolio value AFTER trade execution
 		portfolioValue := currentCash + currentPosition*currentSimulatedPrice
 		portfolioValues = append(portfolioValues, portfolioValue)
+
+		// --- Store Portfolio State ---
+		if portfolioValue > peakValue {
+			peakValue = portfolioValue
+		}
+		var drawdown float64
+		if peakValue > 0 {
+			drawdown = (portfolioValue - peakValue) / peakValue
+		}
+		var cumulativeReturn float64
+		if initialValue > 0 {
+			cumulativeReturn = (portfolioValue - initialValue) / initialValue
+		}
+		if err := e.storage.StorePortfolioState(ctx, runID, &datatypes.PortfolioStateRecord{
+			Ticker:           ticker,
+			PortfolioValue:   portfolioValue,
+			Cash:             currentCash,
+			Position:         currentPosition,
+			PositionValue:    currentPosition * currentSimulatedPrice,
+			CurrentPrice:     currentSimulatedPrice,
+			CumulativeReturn: cumulativeReturn,
+			Drawdown:         drawdown,
+			StepIndex:        i - startIndex,
+			SnapshotDate:     currentDate.Format("20060102"),
+			Timestamp:        currentDate,
+		}); err != nil {
+			slog.Warn("Failed to store portfolio state", "error", err)
+		}
 
 		// Store Result with metadata (populated only in unified mode)
 		result := datatypes.EvaluationResult{
@@ -1601,6 +1683,92 @@ func (s *InfluxDBStorage) StoreMetrics(ctx context.Context, runID, ticker, model
 	slog.Info("Metrics stored to InfluxDB",
 		"run_id", runID,
 		"measurement", "backtest_metrics")
+
+	return nil
+}
+
+// sanitizeFloat replaces NaN and Inf with 0.0 for safe InfluxDB writes.
+func sanitizeFloat(v float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0.0
+	}
+	return v
+}
+
+// StoreForecast writes a forecast record to the "forecasts" InfluxDB measurement.
+func (s *InfluxDBStorage) StoreForecast(ctx context.Context, runID string, forecast *datatypes.ForecastRecord) error {
+	p := influxdb2.NewPointWithMeasurement("forecasts").
+		AddTag("run_id", runID).
+		AddTag("ticker", forecast.Ticker).
+		AddTag("model", forecast.Model).
+		AddTag("model_family", forecast.ModelFamily).
+		AddTag("schema_version", schemaVersion).
+		AddField("forecast_price", sanitizeFloat(forecast.ForecastPrice)).
+		AddField("current_price", sanitizeFloat(forecast.CurrentPrice)).
+		AddField("forecast_horizon", forecast.Horizon).
+		AddField("inference_time_ms", forecast.InferenceTimeMs).
+		AddField("forecast_date", forecast.ForecastDate).
+		SetTime(forecast.Timestamp)
+
+	if forecast.ConfidenceLower != 0 || forecast.ConfidenceUpper != 0 {
+		p.AddField("confidence_lower", sanitizeFloat(forecast.ConfidenceLower))
+		p.AddField("confidence_upper", sanitizeFloat(forecast.ConfidenceUpper))
+	}
+
+	if err := s.writeAPI.WritePoint(ctx, p); err != nil {
+		return fmt.Errorf("failed to write forecast to InfluxDB: %w", err)
+	}
+
+	return nil
+}
+
+// StoreTradingSignal writes a trading signal record to the "trading_signals" InfluxDB measurement.
+func (s *InfluxDBStorage) StoreTradingSignal(ctx context.Context, runID string, signal *datatypes.TradingSignalRecord) error {
+	p := influxdb2.NewPointWithMeasurement("trading_signals").
+		AddTag("run_id", runID).
+		AddTag("ticker", signal.Ticker).
+		AddTag("strategy_type", signal.StrategyType).
+		AddTag("action", signal.Action).
+		AddTag("schema_version", schemaVersion).
+		AddField("forecast_price", sanitizeFloat(signal.ForecastPrice)).
+		AddField("current_price", sanitizeFloat(signal.CurrentPrice)).
+		AddField("position_before", sanitizeFloat(signal.PositionBefore)).
+		AddField("position_after", sanitizeFloat(signal.PositionAfter)).
+		AddField("trade_size", sanitizeFloat(signal.TradeSize)).
+		AddField("trade_value", sanitizeFloat(signal.TradeValue)).
+		AddField("available_cash_before", sanitizeFloat(signal.CashBefore)).
+		AddField("available_cash_after", sanitizeFloat(signal.CashAfter)).
+		AddField("reason", signal.Reason).
+		AddField("signal_date", signal.SignalDate).
+		SetTime(signal.Timestamp)
+
+	if err := s.writeAPI.WritePoint(ctx, p); err != nil {
+		return fmt.Errorf("failed to write trading signal to InfluxDB: %w", err)
+	}
+
+	return nil
+}
+
+// StorePortfolioState writes a portfolio snapshot to the "portfolio_state" InfluxDB measurement.
+func (s *InfluxDBStorage) StorePortfolioState(ctx context.Context, runID string, state *datatypes.PortfolioStateRecord) error {
+	p := influxdb2.NewPointWithMeasurement("portfolio_state").
+		AddTag("run_id", runID).
+		AddTag("ticker", state.Ticker).
+		AddTag("schema_version", schemaVersion).
+		AddField("portfolio_value", sanitizeFloat(state.PortfolioValue)).
+		AddField("cash", sanitizeFloat(state.Cash)).
+		AddField("position", sanitizeFloat(state.Position)).
+		AddField("position_value", sanitizeFloat(state.PositionValue)).
+		AddField("current_price", sanitizeFloat(state.CurrentPrice)).
+		AddField("cumulative_return", sanitizeFloat(state.CumulativeReturn)).
+		AddField("drawdown", sanitizeFloat(state.Drawdown)).
+		AddField("step_index", state.StepIndex).
+		AddField("snapshot_date", state.SnapshotDate).
+		SetTime(state.Timestamp)
+
+	if err := s.writeAPI.WritePoint(ctx, p); err != nil {
+		return fmt.Errorf("failed to write portfolio state to InfluxDB: %w", err)
+	}
 
 	return nil
 }

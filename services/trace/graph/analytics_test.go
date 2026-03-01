@@ -410,6 +410,247 @@ func TestIsEntryPoint(t *testing.T) {
 			t.Error("nil symbol should not be entry point")
 		}
 	})
+
+	// IT-08 H-1: Python entry point tests
+	t.Run("Python test_function", func(t *testing.T) {
+		sym := &ast.Symbol{
+			ID:       "test_helpers.py:1:test_parse_input",
+			Name:     "test_parse_input",
+			Kind:     ast.SymbolKindFunction,
+			Language: "python",
+		}
+		if !isEntryPoint(sym) {
+			t.Error("Python test_ function should be entry point")
+		}
+	})
+
+	t.Run("Python __main__", func(t *testing.T) {
+		sym := &ast.Symbol{
+			ID:       "app.py:1:__main__",
+			Name:     "__main__",
+			Kind:     ast.SymbolKindFunction,
+			Language: "python",
+		}
+		if !isEntryPoint(sym) {
+			t.Error("Python __main__ should be entry point")
+		}
+	})
+
+	t.Run("Python __main__.py file", func(t *testing.T) {
+		sym := &ast.Symbol{
+			ID:       "__main__.py:1:run",
+			Name:     "run",
+			Kind:     ast.SymbolKindFunction,
+			Language: "python",
+			FilePath: "src/myapp/__main__.py",
+		}
+		if !isEntryPoint(sym) {
+			t.Error("function in __main__.py should be entry point")
+		}
+	})
+
+	t.Run("Python setUp/tearDown", func(t *testing.T) {
+		for _, name := range []string{"setUp", "tearDown", "setUpClass", "tearDownClass"} {
+			sym := &ast.Symbol{
+				ID:       "test.py:1:" + name,
+				Name:     name,
+				Kind:     ast.SymbolKindMethod,
+				Language: "python",
+			}
+			if !isEntryPoint(sym) {
+				t.Errorf("Python %s should be entry point", name)
+			}
+		}
+	})
+
+	t.Run("Python Flask route decorator", func(t *testing.T) {
+		sym := &ast.Symbol{
+			ID:       "views.py:1:get_users",
+			Name:     "get_users",
+			Kind:     ast.SymbolKindFunction,
+			Language: "python",
+			Metadata: &ast.SymbolMetadata{
+				Decorators: []string{"app.route"},
+			},
+		}
+		if !isEntryPoint(sym) {
+			t.Error("Flask route handler should be entry point")
+		}
+	})
+
+	t.Run("Python FastAPI decorator", func(t *testing.T) {
+		sym := &ast.Symbol{
+			ID:       "api.py:1:create_item",
+			Name:     "create_item",
+			Kind:     ast.SymbolKindFunction,
+			Language: "python",
+			Metadata: &ast.SymbolMetadata{
+				Decorators: []string{"app.post"},
+			},
+		}
+		if !isEntryPoint(sym) {
+			t.Error("FastAPI POST handler should be entry point")
+		}
+	})
+
+	t.Run("Python click command", func(t *testing.T) {
+		sym := &ast.Symbol{
+			ID:       "cli.py:1:deploy",
+			Name:     "deploy",
+			Kind:     ast.SymbolKindFunction,
+			Language: "python",
+			Metadata: &ast.SymbolMetadata{
+				Decorators: []string{"click.command"},
+			},
+		}
+		if !isEntryPoint(sym) {
+			t.Error("Click command should be entry point")
+		}
+	})
+
+	t.Run("Python pytest fixture", func(t *testing.T) {
+		sym := &ast.Symbol{
+			ID:       "conftest.py:1:db_session",
+			Name:     "db_session",
+			Kind:     ast.SymbolKindFunction,
+			Language: "python",
+			Metadata: &ast.SymbolMetadata{
+				Decorators: []string{"pytest.fixture"},
+			},
+		}
+		if !isEntryPoint(sym) {
+			t.Error("pytest fixture should be entry point")
+		}
+	})
+
+	t.Run("Python TestCase class", func(t *testing.T) {
+		sym := &ast.Symbol{
+			ID:       "test_views.py:1:TestUserAPI",
+			Name:     "TestUserAPI",
+			Kind:     ast.SymbolKindClass,
+			Language: "python",
+			Metadata: &ast.SymbolMetadata{
+				Extends: "unittest.TestCase",
+			},
+		}
+		if !isEntryPoint(sym) {
+			t.Error("unittest TestCase class should be entry point")
+		}
+	})
+
+	t.Run("Python regular function not entry point", func(t *testing.T) {
+		sym := &ast.Symbol{
+			ID:       "helpers.py:1:parse_config",
+			Name:     "parse_config",
+			Kind:     ast.SymbolKindFunction,
+			Language: "python",
+		}
+		if isEntryPoint(sym) {
+			t.Error("regular Python function should not be entry point")
+		}
+	})
+
+	// IT-08 H-1: JavaScript/TypeScript entry point tests
+	t.Run("JS test framework functions", func(t *testing.T) {
+		for _, name := range []string{"it", "test", "describe", "beforeEach", "afterEach", "beforeAll", "afterAll"} {
+			sym := &ast.Symbol{
+				ID:       "test.js:1:" + name,
+				Name:     name,
+				Kind:     ast.SymbolKindFunction,
+				Language: "javascript",
+			}
+			if !isEntryPoint(sym) {
+				t.Errorf("JS %s should be entry point", name)
+			}
+		}
+	})
+
+	t.Run("TS NestJS Controller decorator", func(t *testing.T) {
+		sym := &ast.Symbol{
+			ID:       "users.controller.ts:1:UsersController",
+			Name:     "UsersController",
+			Kind:     ast.SymbolKindClass,
+			Language: "typescript",
+			Metadata: &ast.SymbolMetadata{
+				Decorators: []string{"Controller"},
+			},
+		}
+		if !isEntryPoint(sym) {
+			t.Error("NestJS Controller should be entry point")
+		}
+	})
+
+	t.Run("TS NestJS route decorators", func(t *testing.T) {
+		for _, dec := range []string{"Get", "Post", "Put", "Delete", "Patch"} {
+			sym := &ast.Symbol{
+				ID:       "users.controller.ts:1:find",
+				Name:     "find",
+				Kind:     ast.SymbolKindMethod,
+				Language: "typescript",
+				Metadata: &ast.SymbolMetadata{
+					Decorators: []string{dec},
+				},
+			}
+			if !isEntryPoint(sym) {
+				t.Errorf("NestJS @%s handler should be entry point", dec)
+			}
+		}
+	})
+
+	t.Run("TS NestJS Injectable", func(t *testing.T) {
+		sym := &ast.Symbol{
+			ID:       "users.service.ts:1:UsersService",
+			Name:     "UsersService",
+			Kind:     ast.SymbolKindClass,
+			Language: "typescript",
+			Metadata: &ast.SymbolMetadata{
+				Decorators: []string{"Injectable"},
+			},
+		}
+		if !isEntryPoint(sym) {
+			t.Error("NestJS Injectable should be entry point")
+		}
+	})
+
+	t.Run("JS exported function", func(t *testing.T) {
+		sym := &ast.Symbol{
+			ID:       "utils.js:1:formatDate",
+			Name:     "formatDate",
+			Kind:     ast.SymbolKindFunction,
+			Language: "javascript",
+			Exported: true,
+		}
+		if !isEntryPoint(sym) {
+			t.Error("exported JS function should be entry point")
+		}
+	})
+
+	t.Run("JS non-exported internal function not entry point", func(t *testing.T) {
+		sym := &ast.Symbol{
+			ID:       "utils.js:1:_helper",
+			Name:     "_helper",
+			Kind:     ast.SymbolKindFunction,
+			Language: "javascript",
+			Exported: false,
+		}
+		if isEntryPoint(sym) {
+			t.Error("non-exported JS internal function should not be entry point")
+		}
+	})
+
+	t.Run("TS Next.js special exports", func(t *testing.T) {
+		for _, name := range []string{"getServerSideProps", "getStaticProps", "getStaticPaths"} {
+			sym := &ast.Symbol{
+				ID:       "page.tsx:1:" + name,
+				Name:     name,
+				Kind:     ast.SymbolKindFunction,
+				Language: "typescript",
+			}
+			if !isEntryPoint(sym) {
+				t.Errorf("Next.js %s should be entry point", name)
+			}
+		}
+	})
 }
 
 // =============================================================================

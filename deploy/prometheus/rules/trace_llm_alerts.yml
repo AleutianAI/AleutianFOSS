@@ -1,0 +1,41 @@
+groups:
+  - name: trace_llm_provider_alerts
+    rules:
+      # Error rate > 10% for any provider for 5 minutes.
+      - alert: TraceLLMHighErrorRate
+        expr: |
+          (
+            sum(rate(trace_llm_calls_total{status="error"}[5m])) by (provider)
+            /
+            sum(rate(trace_llm_calls_total[5m])) by (provider)
+          ) > 0.10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High LLM error rate for {{ $labels.provider }}"
+          description: "LLM error rate for {{ $labels.provider }} is {{ $value | humanizePercentage }} (>10%) for 5 minutes."
+
+      # P99 latency > 30s for any provider for 5 minutes.
+      - alert: TraceLLMHighLatency
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(trace_llm_call_duration_seconds_bucket[5m])) by (le, provider)
+          ) > 30
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High LLM P99 latency for {{ $labels.provider }}"
+          description: "LLM P99 latency for {{ $labels.provider }} is {{ $value }}s (>30s) for 5 minutes."
+
+      # Any provider returning auth failures (401/403).
+      - alert: TraceLLMAuthFailure
+        expr: |
+          sum(rate(trace_llm_errors_total{error_type="auth"}[5m])) by (provider) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "LLM authentication failure for {{ $labels.provider }}"
+          description: "{{ $labels.provider }} is returning authentication errors. Check API keys."

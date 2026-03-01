@@ -20,7 +20,7 @@ import (
 // Description:
 //
 //	This interface abstracts the graph initialization capability.
-//	Implementations can wrap code_buddy.Service or provide mock behavior.
+//	Implementations can wrap trace.Service or provide mock behavior.
 type GraphInitializer interface {
 	// InitGraph initializes a code graph for a project.
 	//

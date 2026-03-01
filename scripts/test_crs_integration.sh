@@ -27,6 +27,7 @@ SSH_CONTROL_SOCKET="$HOME/.ssh/crs_test_multiplex_%h_%p_%r"
 # Model configuration
 OLLAMA_MODEL="gpt-oss:20b"
 ROUTER_MODEL="granite4:micro-h"
+PARAM_EXTRACTOR_MODEL="ministral-3:3b"
 
 # Project to analyze on remote
 PROJECT_TO_ANALYZE="${TEST_PROJECT_ROOT:-/Users/jin/GolandProjects/AleutianOrchestrator}"
@@ -179,14 +180,18 @@ detect_language_from_tests() {
             lang="javascript"
         elif [ "$test_id" -ge 401 ] && [ "$test_id" -le 433 ]; then
             lang="typescript"
-        # Tool Happy Path ranges (5000-8139)
-        elif [ "$test_id" -ge 5000 ] && [ "$test_id" -le 5239 ]; then
+        # Tool Happy Path ranges — must match map_test_id_to_feature() ranges
+        # Go: Hugo=50xx, Badger=51xx, Gin=52xx-53xx
+        elif [ "$test_id" -ge 5000 ] && [ "$test_id" -le 5399 ]; then
             lang="go"
-        elif [ "$test_id" -ge 6000 ] && [ "$test_id" -le 6139 ]; then
+        # Python: Flask=60xx, Pandas=61xx-62xx
+        elif [ "$test_id" -ge 6000 ] && [ "$test_id" -le 6299 ]; then
             lang="python"
-        elif [ "$test_id" -ge 7000 ] && [ "$test_id" -le 7139 ]; then
+        # JavaScript: Express=70xx, BabylonJS=71xx-72xx
+        elif [ "$test_id" -ge 7000 ] && [ "$test_id" -le 7299 ]; then
             lang="javascript"
-        elif [ "$test_id" -ge 8000 ] && [ "$test_id" -le 8139 ]; then
+        # TypeScript: NestJS=80xx, Plottable=81xx-82xx
+        elif [ "$test_id" -ge 8000 ] && [ "$test_id" -le 8299 ]; then
             lang="typescript"
         fi
 
@@ -212,7 +217,7 @@ detect_language_from_tests() {
 
 # If specific tests were provided without --lang, auto-detect language
 if [ -n "$SPECIFIC_TESTS" ] && [ -z "$LANGUAGE_FILTER" ]; then
-    AUTO_DETECTED_LANG=$(detect_language_from_tests "$SPECIFIC_TESTS")
+    AUTO_DETECTED_LANG=$(detect_language_from_tests "$SPECIFIC_TESTS" || true)
     if [ -n "$AUTO_DETECTED_LANG" ]; then
         LANGUAGE_FILTER="$AUTO_DETECTED_LANG"
         echo -e "${CYAN}Auto-detected language from test IDs: ${BOLD}$LANGUAGE_FILTER${NC}"
@@ -220,35 +225,57 @@ if [ -n "$SPECIFIC_TESTS" ] && [ -z "$LANGUAGE_FILTER" ]; then
     fi
 fi
 
-# Auto-detect TOOL-HAPPY feature dir from test IDs in the 5000+ range
-# Maps test ID ranges to the correct TOOL-HAPPY-* feature directory
+# Map a single test ID to its TOOL-HAPPY-* feature directory.
+# Uses the "hundreds digit" to distinguish projects within the same language range.
+# Ranges: Hugo=50xx, Badger=51xx, Gin=52xx, Flask=60xx, Pandas=61xx,
+#          Express=70xx, BabylonJS=71xx, NestJS=80xx, Plottable=81xx
+map_test_id_to_feature() {
+    local tid="$1"
+    if [ "$tid" -ge 5000 ] && [ "$tid" -le 5099 ]; then echo "TOOL-HAPPY-HUGO"
+    elif [ "$tid" -ge 5100 ] && [ "$tid" -le 5199 ]; then echo "TOOL-HAPPY-BADGER"
+    elif [ "$tid" -ge 5200 ] && [ "$tid" -le 5399 ]; then echo "TOOL-HAPPY-GIN"
+    elif [ "$tid" -ge 6000 ] && [ "$tid" -le 6099 ]; then echo "TOOL-HAPPY-FLASK"
+    elif [ "$tid" -ge 6100 ] && [ "$tid" -le 6299 ]; then echo "TOOL-HAPPY-PANDAS"
+    elif [ "$tid" -ge 7000 ] && [ "$tid" -le 7099 ]; then echo "TOOL-HAPPY-EXPRESS"
+    elif [ "$tid" -ge 7100 ] && [ "$tid" -le 7299 ]; then echo "TOOL-HAPPY-BABYLONJS"
+    elif [ "$tid" -ge 8000 ] && [ "$tid" -le 8099 ]; then echo "TOOL-HAPPY-NESTJS"
+    elif [ "$tid" -ge 8100 ] && [ "$tid" -le 8299 ]; then echo "TOOL-HAPPY-PLOTTABLE"
+    fi
+}
+
+# Auto-detect TOOL-HAPPY feature dir(s) from test IDs in the 5000+ range.
+# When test IDs span multiple projects, sets MULTI_FEATURE_FILTERS (space-separated)
+# instead of a single FEATURE_FILTER, enabling cross-project mode.
+MULTI_FEATURE_FILTERS=""
 if [ -n "$SPECIFIC_TESTS" ] && [ -z "$FEATURE_FILTER" ]; then
-    first_test_id=$(expand_test_spec "$SPECIFIC_TESTS" | awk '{print $1}')
-    if [ "$first_test_id" -ge 5000 ] 2>/dev/null; then
-        auto_feature=""
-        if [ "$first_test_id" -ge 5000 ] && [ "$first_test_id" -le 5039 ]; then
-            auto_feature="TOOL-HAPPY-HUGO"
-        elif [ "$first_test_id" -ge 5100 ] && [ "$first_test_id" -le 5139 ]; then
-            auto_feature="TOOL-HAPPY-BADGER"
-        elif [ "$first_test_id" -ge 5200 ] && [ "$first_test_id" -le 5239 ]; then
-            auto_feature="TOOL-HAPPY-GIN"
-        elif [ "$first_test_id" -ge 6000 ] && [ "$first_test_id" -le 6039 ]; then
-            auto_feature="TOOL-HAPPY-FLASK"
-        elif [ "$first_test_id" -ge 6100 ] && [ "$first_test_id" -le 6139 ]; then
-            auto_feature="TOOL-HAPPY-PANDAS"
-        elif [ "$first_test_id" -ge 7000 ] && [ "$first_test_id" -le 7039 ]; then
-            auto_feature="TOOL-HAPPY-EXPRESS"
-        elif [ "$first_test_id" -ge 7100 ] && [ "$first_test_id" -le 7139 ]; then
-            auto_feature="TOOL-HAPPY-BABYLONJS"
-        elif [ "$first_test_id" -ge 8000 ] && [ "$first_test_id" -le 8039 ]; then
-            auto_feature="TOOL-HAPPY-NESTJS"
-        elif [ "$first_test_id" -ge 8100 ] && [ "$first_test_id" -le 8139 ]; then
-            auto_feature="TOOL-HAPPY-PLOTTABLE"
-        fi
+    _all_tests=($(expand_test_spec "$SPECIFIC_TESTS"))
+    _features_list=""
+    for tid in "${_all_tests[@]}"; do
+        auto_feature=$(map_test_id_to_feature "$tid")
         if [ -n "$auto_feature" ]; then
-            FEATURE_FILTER="$auto_feature"
-            echo -e "${CYAN}Auto-detected feature from test IDs: ${BOLD}$FEATURE_FILTER${NC}"
+            # Deduplicate: only add if not already in the list (bash 3 compatible)
+            case " $_features_list " in
+                *" $auto_feature "*)
+                    ;; # already present
+                *)
+                    _features_list="$_features_list $auto_feature"
+                    ;;
+            esac
         fi
+    done
+    # Trim leading space
+    _features_list="${_features_list# }"
+
+    # Count unique features
+    _feature_count=$(echo "$_features_list" | wc -w | tr -d ' ')
+    if [ "$_feature_count" -eq 1 ]; then
+        # Single project — use existing single-feature path
+        FEATURE_FILTER="$_features_list"
+        echo -e "${CYAN}Auto-detected feature from test IDs: ${BOLD}$FEATURE_FILTER${NC}"
+    elif [ "$_feature_count" -gt 1 ]; then
+        # Multiple projects — store for cross-project loading
+        MULTI_FEATURE_FILTERS="$_features_list"
+        echo -e "${CYAN}Auto-detected $_feature_count features from test IDs: ${BOLD}${MULTI_FEATURE_FILTERS}${NC}"
     fi
 fi
 
@@ -817,11 +844,22 @@ run_crs_test() {
 
     # Use REMOTE_PROJECT_PATH (set by setup_remote/sync_project_to_remote)
     local remote_project="${REMOTE_PROJECT_PATH:-/home/$REMOTE_USER/trace_test/$(basename "$PROJECT_TO_ANALYZE")}"
-    local response=$(ssh_cmd "curl -s -X POST 'http://localhost:8080/v1/codebuddy/agent/run' \
-        -H 'Content-Type: application/json' \
-        -H 'X-Session-ID: crs_test_${session_id}' \
-        -d '{\"project_root\": \"$remote_project\", \"query\": \"$query\", \"model\": \"$OLLAMA_MODEL\", \"router_model\": \"$ROUTER_MODEL\"}' \
-        --max-time 300")
+
+    # Build JSON payload safely using jq to handle special characters (apostrophes, quotes, etc.)
+    local json_payload
+    json_payload=$(jq -n \
+        --arg project_root "$remote_project" \
+        --arg query "$query" \
+        --arg model "$OLLAMA_MODEL" \
+        --arg router_model "$ROUTER_MODEL" \
+        '{project_root: $project_root, query: $query, model: $model, router_model: $router_model}')
+
+    # XC-6 fix: Use base64 encoding to avoid all shell quoting issues.
+    # Queries containing apostrophes (Flask's, NestJS's) caused 'unexpected EOF'
+    # errors when embedded via single-quote escaping through SSH.
+    local b64_payload
+    b64_payload=$(printf '%s' "$json_payload" | base64 | tr -d '\n')
+    local response=$(ssh_cmd "printf '%s' '$b64_payload' | base64 -d | curl -s -X POST 'http://localhost:8080/v1/trace/agent/run' -H 'Content-Type: application/json' -H 'X-Session-ID: crs_test_${session_id}' -d @- --max-time 300")
 
     local end_time=$(get_time_ms)
     local duration=$((end_time - start_time))
@@ -852,7 +890,7 @@ run_crs_test() {
     local trace_json="{}"
     local crs_details=""
     if [ "$session_actual" != "unknown" ]; then
-        local trace_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_actual/reasoning'" 2>/dev/null)
+        local trace_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/agent/$session_actual/reasoning'" 2>/dev/null)
         if echo "$trace_response" | jq . > /dev/null 2>&1; then
             trace_json="$trace_response"
             local trace_count=$(echo "$trace_response" | jq '.total_steps // 0')
@@ -1117,6 +1155,32 @@ run_crs_test() {
 
     echo ""
     if [ "$state" = "$expected_state" ]; then
+        # IT-03 C-1: Detect surrender/empty responses that technically reach COMPLETE state
+        # but don't actually answer the query. These should be flagged as FAILED.
+        local surrender_detected=false
+        local agent_response_lower=$(echo "$agent_response" | tr '[:upper:]' '[:lower:]')
+        local response_length=${#agent_response}
+
+        # Check for empty or near-empty responses (< 20 chars after trimming)
+        local trimmed_response=$(echo "$agent_response" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        if [ ${#trimmed_response} -lt 20 ]; then
+            surrender_detected=true
+            echo -e "  ${RED}════ FAILED (SURRENDER) ════${NC} Response too short (${#trimmed_response} chars)"
+        fi
+
+        # Check for explicit "I don't know" / surrender patterns
+        if [ "$surrender_detected" = false ]; then
+            if echo "$agent_response_lower" | grep -qE "(i don.t know|i cannot|i.m unable to|i am unable to|unable to determine|cannot determine|no information available|i have no|i lack|not enough information|insufficient information|i couldn.t find|i could not find|no results|no data available)"; then
+                surrender_detected=true
+                echo -e "  ${RED}════ FAILED (SURRENDER) ════${NC} Agent surrendered instead of answering"
+                echo "$agent_response" | head -3 | sed 's/^/    /'
+            fi
+        fi
+
+        if [ "$surrender_detected" = true ]; then
+            return 1
+        fi
+
         echo -e "  ${GREEN}════ PASSED ════${NC} State: $state (${duration}ms)"
 
         # Run extra checks if specified (M-3: guard against undefined function)
@@ -1195,7 +1259,91 @@ resolve_tool_indices() {
             continue
         fi
         if [ "$part" = "find_callees_all" ]; then
-            indices+=(1 42 43)
+            indices+=(1 44 45)
+            continue
+        fi
+        if [ "$part" = "find_implementations_all" ]; then
+            indices+=(2 42 43)
+            continue
+        fi
+        if [ "$part" = "find_symbol_all" ]; then
+            indices+=(3 46 47)
+            continue
+        fi
+        if [ "$part" = "find_references_all" ]; then
+            indices+=(4 48 49)
+            continue
+        fi
+        if [ "$part" = "get_call_chain_all" ]; then
+            indices+=(5 50 51)
+            continue
+        fi
+        if [ "$part" = "find_path_all" ]; then
+            indices+=(6 52 53)
+            continue
+        fi
+        if [ "$part" = "find_hotspots_all" ]; then
+            indices+=(7 54 55)
+            continue
+        fi
+        if [ "$part" = "find_dead_code_all" ]; then
+            indices+=(8 56 57)
+            continue
+        fi
+        if [ "$part" = "find_cycles_all" ]; then
+            indices+=(9 58 59)
+            continue
+        fi
+        if [ "$part" = "find_important_all" ]; then
+            indices+=(10 60 61)
+            continue
+        fi
+        if [ "$part" = "find_communities_all" ]; then
+            indices+=(11 62 63)
+            continue
+        fi
+        if [ "$part" = "find_articulation_points_all" ]; then
+            indices+=(12 64 65)
+            continue
+        fi
+        if [ "$part" = "find_dominators_all" ]; then
+            indices+=(13 66 67)
+            continue
+        fi
+        if [ "$part" = "find_loops_all" ]; then
+            indices+=(14 68 69)
+            continue
+        fi
+        if [ "$part" = "find_merge_points_all" ]; then
+            indices+=(15 70 71)
+            continue
+        fi
+        if [ "$part" = "find_common_dependency_all" ]; then
+            indices+=(16 72 73)
+            continue
+        fi
+        if [ "$part" = "find_control_dependencies_all" ]; then
+            indices+=(17 74 75)
+            continue
+        fi
+        if [ "$part" = "find_extractable_regions_all" ]; then
+            indices+=(18 76 77)
+            continue
+        fi
+        if [ "$part" = "check_reducibility_all" ]; then
+            indices+=(19 78 79)
+            continue
+        fi
+        if [ "$part" = "find_critical_path_all" ]; then
+            indices+=(20 80 81)
+            continue
+        fi
+        if [ "$part" = "find_module_api_all" ]; then
+            indices+=(21 82 83)
+            continue
+        fi
+        if [ "$part" = "find_weighted_criticality_all" ]; then
+            indices+=(22 84 85)
             continue
         fi
 
@@ -1214,7 +1362,8 @@ resolve_tool_indices() {
                 for i in "${!TOOL_NAMES[@]}"; do
                     printf "  %02d  %s\n" "$i" "${TOOL_NAMES[$i]}" >&2
                 done
-                echo -e "${YELLOW}Aliases: find_callers_all (= 0,40,41), find_callees_all (= 1,42,43)${NC}" >&2
+                echo -e "${YELLOW}Aliases: <tool_name>_all runs 3 tests per project for that tool.${NC}" >&2
+                echo -e "${YELLOW}  e.g., find_callers_all, find_symbol_all, find_hotspots_all, etc.${NC}" >&2
                 return 1
             fi
         fi
@@ -1482,6 +1631,65 @@ load_tool_across_projects() {
             tool_display=$(tool_index_to_name "$tool_idx")
             echo -e "  ${GREEN}✓${NC} ${file_project_name} (${file_language}): test $test_id — $tool_display"
         done
+
+        # Second pass: scan for TOOL_CRS_VERIFICATION entries matching the tool name.
+        # CRS entries live at the end of YAML files (not at positional indices 0-22),
+        # so we must search by name pattern (e.g., "*_crs_find_callers*").
+        for tool_idx in "${indices_arr[@]}"; do
+            local tool_name
+            tool_name=$(tool_index_to_name "$tool_idx")
+
+            # Use yq to find all CRS verification tests whose name contains "crs_<tool_name>"
+            local crs_indices
+            crs_indices=$(yq eval "[.tests | to_entries[] | select(.value.category == \"TOOL_CRS_VERIFICATION\" and (.value.name | test(\"crs_${tool_name}\"))) | .key] | .[]" "$yaml_file" 2>/dev/null)
+
+            for crs_idx in $crs_indices; do
+                local crs_test_id=$(yq eval ".tests[$crs_idx].id" "$yaml_file")
+
+                # Skip if already loaded (avoid duplicates with _all aliases)
+                local already_loaded=false
+                for existing_id in "${CRS_TEST_IDS[@]}"; do
+                    if [ "$existing_id" = "$crs_test_id" ]; then
+                        already_loaded=true
+                        break
+                    fi
+                done
+                if $already_loaded; then
+                    continue
+                fi
+
+                local crs_category=$(yq eval ".tests[$crs_idx].category" "$yaml_file")
+                local crs_name=$(yq eval ".tests[$crs_idx].name" "$yaml_file")
+                local crs_query=$(yq eval ".tests[$crs_idx].query" "$yaml_file")
+                local crs_expected=$(yq eval ".tests[$crs_idx].expected_state" "$yaml_file")
+
+                local crs_validations=""
+                local crs_num_val=$(yq eval ".tests[$crs_idx].validations | length" "$yaml_file")
+                if [ "$crs_num_val" != "null" ] && [ "$crs_num_val" -gt 0 ] 2>/dev/null; then
+                    for ((v=0; v<crs_num_val; v++)); do
+                        local val_type=$(yq eval ".tests[$crs_idx].validations[$v].type" "$yaml_file")
+                        if [ -n "$crs_validations" ]; then
+                            crs_validations="${crs_validations}|${val_type}"
+                        else
+                            crs_validations="$val_type"
+                        fi
+                    done
+                fi
+
+                local crs_test_string="$crs_category|$crs_name|$crs_query|$crs_expected"
+                if [ -n "$crs_validations" ]; then
+                    crs_test_string="${crs_test_string}|${crs_validations}"
+                fi
+
+                CRS_TESTS+=("$crs_test_string")
+                CRS_TEST_IDS+=("$crs_test_id")
+                CRS_TEST_PROJECT_ROOTS+=("$file_project_root")
+                CRS_TEST_PROJECT_NAMES+=("$file_project_name")
+                ((test_count++))
+
+                echo -e "  ${GREEN}✓${NC} ${file_project_name} (${file_language}): test $crs_test_id — ${tool_name} [CRS]"
+            done
+        done
     done
 
     if [ $test_count -eq 0 ]; then
@@ -1549,6 +1757,58 @@ main() {
         fi
         CROSS_PROJECT_MODE=true
         echo ""
+    elif [ -n "$MULTI_FEATURE_FILTERS" ]; then
+        # Cross-project mode via -t with test IDs spanning multiple projects
+        echo ""
+        echo -e "${CYAN}Loading tests from multiple features (cross-project)...${NC}"
+        echo "  Features: $MULTI_FEATURE_FILTERS"
+
+        # Load each feature's YAML files by temporarily setting FEATURE_FILTER
+        local _saved_feature="$FEATURE_FILTER"
+        local _first=true
+        for mf_feature in $MULTI_FEATURE_FILTERS; do
+            FEATURE_FILTER="$mf_feature"
+            if [ "$_first" = true ]; then
+                # First load: initializes CRS_TESTS arrays.
+                # Clear hardcoded arrays BEFORE attempting YAML load so that
+                # a failure doesn't leave stale hardcoded tests that misalign
+                # CRS_TESTS and CRS_TEST_IDS when subsequent features merge.
+                CRS_TESTS=()
+                CRS_TEST_IDS=()
+                CRS_TEST_PROJECT_ROOTS=()
+                CRS_TEST_PROJECT_NAMES=()
+                if ! load_yaml_tests; then
+                    echo -e "${YELLOW}Warning: failed to load $mf_feature${NC}"
+                fi
+                _first=false
+            else
+                # Subsequent loads: append to existing arrays
+                # We need to call load_yaml_tests but it resets arrays.
+                # Instead, save current state and merge after.
+                local _prev_tests=("${CRS_TESTS[@]}")
+                local _prev_ids=("${CRS_TEST_IDS[@]}")
+                local _prev_roots=("${CRS_TEST_PROJECT_ROOTS[@]}")
+                local _prev_names=("${CRS_TEST_PROJECT_NAMES[@]}")
+                if load_yaml_tests; then
+                    # Merge: prepend saved tests before newly loaded ones
+                    CRS_TESTS=("${_prev_tests[@]}" "${CRS_TESTS[@]}")
+                    CRS_TEST_IDS=("${_prev_ids[@]}" "${CRS_TEST_IDS[@]}")
+                    CRS_TEST_PROJECT_ROOTS=("${_prev_roots[@]}" "${CRS_TEST_PROJECT_ROOTS[@]}")
+                    CRS_TEST_PROJECT_NAMES=("${_prev_names[@]}" "${CRS_TEST_PROJECT_NAMES[@]}")
+                else
+                    # Load failed, restore
+                    CRS_TESTS=("${_prev_tests[@]}")
+                    CRS_TEST_IDS=("${_prev_ids[@]}")
+                    CRS_TEST_PROJECT_ROOTS=("${_prev_roots[@]}")
+                    CRS_TEST_PROJECT_NAMES=("${_prev_names[@]}")
+                    echo -e "${YELLOW}Warning: failed to load $mf_feature${NC}"
+                fi
+            fi
+        done
+        FEATURE_FILTER="$_saved_feature"
+        echo -e "${GREEN}Total loaded: ${#CRS_TESTS[@]} tests across ${MULTI_FEATURE_FILTERS}${NC}"
+        CROSS_PROJECT_MODE=true
+        echo ""
     elif [ -n "$FEATURE_FILTER" ] || [ -n "$LANGUAGE_FILTER" ]; then
         echo ""
         echo -e "${CYAN}Loading tests from YAML...${NC}"
@@ -1574,6 +1834,7 @@ main() {
         echo "Projects: ${#CRS_TESTS[@]} tests across multiple projects"
         echo "Main Agent: $OLLAMA_MODEL"
         echo "Router: $ROUTER_MODEL"
+        echo "ParamExtractor: $PARAM_EXTRACTOR_MODEL"
     else
         echo -e "${BLUE}═══════════════════════════════════════════════════${NC}"
         echo -e "${BLUE}  CRS Integration Tests - Remote GPU Mode${NC}"
@@ -1583,6 +1844,7 @@ main() {
         echo "Project: $PROJECT_TO_ANALYZE"
         echo "Main Agent: $OLLAMA_MODEL"
         echo "Router: $ROUTER_MODEL"
+        echo "ParamExtractor: $PARAM_EXTRACTOR_MODEL"
     fi
     echo ""
     echo "Output: $OUTPUT_FILE"
@@ -1838,7 +2100,7 @@ main() {
     echo -e "${BLUE}╠══════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${BLUE}║${NC}                                                                  ${BLUE}║${NC}"
     echo -e "${BLUE}║${NC}  Remote: $REMOTE_USER@$REMOTE_HOST:$REMOTE_PORT                             ${BLUE}║${NC}"
-    echo -e "${BLUE}║${NC}  Models: $OLLAMA_MODEL / $ROUTER_MODEL               ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}  Models: $OLLAMA_MODEL / $ROUTER_MODEL / $PARAM_EXTRACTOR_MODEL  ${BLUE}║${NC}"
     echo -e "${BLUE}║${NC}                                                                  ${BLUE}║${NC}"
     echo -e "${BLUE}╠══════════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${BLUE}║${NC}  RESULTS                                                         ${BLUE}║${NC}"

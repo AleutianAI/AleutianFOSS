@@ -58,8 +58,10 @@ tests:
       What types implement the IRouter interface?
     expected_state: COMPLETE
     reference_answer: |
-      The IRouter interface is implemented by Engine and RouterGroup,
-      providing route registration and middleware chaining.
+      Found 2 implementations/subclasses of 'IRouter':
+      Interface: routergroup.go:27:IRouter
+        - RouterGroup (struct) in routergroup.go:55
+        - Engine (struct) in gin.go:92
     validations:
       - type: graph_tool_used
 
@@ -91,17 +93,21 @@ tests:
     validations:
       - type: graph_tool_used
 
-  - id: 5205
+  - id: 5350
     name: gin_get_call_chain
     category: TOOL_HAPPY_PATH
     description: >
-      get_call_chain tool against Gin. From Engine.Run to handler execution.
+      get_call_chain tool against Gin. Downstream call tree from Engine.addRoute.
+      addRoute (gin.go:364) calls assert1, debugPrintRoute, get, countParams,
+      countSections and other route registration functions. 26 nodes, depth 3.
     query: |
-      Show the call chain from Engine.Run to handler execution
+      Show the downstream call chain from Engine.addRoute
     expected_state: COMPLETE
     reference_answer: |
-      Engine.Run -> http.ListenAndServe -> Engine.ServeHTTP ->
-      Engine.handleHTTPRequest -> Context.Next -> handler execution.
+      get_call_chain from Engine.addRoute shows a downstream tree of 26 nodes
+      at depth 3 including assert1, debugPrintRoute, get, countParams, and
+      countSections as direct callees. Deeper levels include IsDebugging,
+      nameOfFunction, debugPrint, and other route debugging utilities.
     validations:
       - type: graph_tool_used
 
@@ -347,88 +353,107 @@ tests:
 
   - id: 5223
     name: gin_find_entry_points
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: find_entry_points tool (not yet registered as standalone tool).
+      find_entry_points tool against Gin. Find execution entry points.
     query: |
       What are the entry points into this codebase?
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone. Entry points include
-      gin.New(), gin.Default(), Engine.Run(), and exported handler functions.
-    validations: []
+      Entry points include gin.New(), gin.Default(), Engine.Run(), and
+      Engine.ServeHTTP which is the HTTP handler interface implementation.
+    validations:
+      - type: graph_tool_used
 
   - id: 5224
     name: gin_trace_data_flow
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: trace_data_flow tool (not yet registered as standalone tool).
+      trace_data_flow tool against Gin. Trace request data through middleware.
     query: |
       Trace how request data flows through the middleware pipeline
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      Request data flows from Engine.ServeHTTP through the radix tree
+      router, into the middleware chain via Context, through each
+      HandlerFunc, with request/response data on the Context object.
+    validations:
+      - type: graph_tool_used
 
   - id: 5225
     name: gin_trace_error_flow
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: trace_error_flow tool (not yet registered as standalone tool).
+      trace_error_flow tool against Gin. Trace errors through handler chain.
     query: |
       Trace how errors propagate through the handler chain
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      Errors are collected on Context.Errors via Context.Error(). The
+      recovery middleware catches panics and converts them to 500 responses.
+      Custom error handlers can process accumulated errors.
+    validations:
+      - type: graph_tool_used
 
   - id: 5226
     name: gin_find_config_usage
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: find_config_usage tool (not yet registered as standalone tool).
+      find_config_usage tool against Gin. Find Engine config usage.
     query: |
       How is the Engine configuration used across Gin?
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      Engine configuration controls trusted proxies, redirect behavior,
+      HTML template settings, max multipart memory, and route handling
+      options like RedirectTrailingSlash and RedirectFixedPath.
+    validations:
+      - type: graph_tool_used
 
   - id: 5227
     name: gin_find_similar_code
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: find_similar_code tool (not yet registered as standalone tool).
+      find_similar_code tool against Gin. Similar to route matching.
     query: |
       Find code similar to the route matching logic
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      Code similar to route matching exists in the parameter parsing,
+      wildcard handling, and RouterGroup path joining — all using the
+      radix tree traversal pattern with path segment splitting.
+    validations:
+      - type: graph_tool_used
 
   - id: 5228
     name: gin_build_minimal_context
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: build_minimal_context tool (not yet registered as standalone tool).
+      build_minimal_context tool against Gin. Context for ServeHTTP.
     query: |
       Build minimal context needed to understand the Engine.ServeHTTP function
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      Minimal context includes Engine struct, the radix tree router,
+      Context pool, HandlerFunc chain, and the route lookup mechanism
+      that matches incoming requests to registered handlers.
+    validations:
+      - type: graph_tool_used
 
   - id: 5229
     name: gin_summarize_file
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: summarize_file tool (not yet registered as standalone tool).
+      summarize_file tool against Gin. Summarize context.go.
     query: |
       Summarize the context.go file
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      context.go defines the Context struct, the core of Gin's request
+      handling. It carries request/response, params, errors, and provides
+      methods for JSON/XML/HTML rendering, binding, and response writing.
+    validations:
+      - type: graph_tool_used
 
   - id: 5230
     name: gin_summarize_package
@@ -550,6 +575,38 @@ tests:
       TODO: Tool not yet registered as standalone.
     validations: []
 
+  # -- Additional find_implementations tests (44-45) -- expected_state: COMPLETE --
+  - id: 5244
+    name: gin_find_implementations_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_implementations tool against Gin (test B). Target: Render interface in render package.
+    query: |
+      What types implement the Render interface in the render package?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Render interface in render/render.go is implemented by JSON, IndentedJSON,
+      SecureJSON, JsonpJSON, AsciiJSON, PureJSON, XML, String, Redirect, Data,
+      HTML, YAML, Reader, TOML, and ProtoBuf renderers for different response formats.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5245
+    name: gin_find_implementations_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_implementations tool against Gin (test C). Target: Binding interface in binding package.
+    query: |
+      What types implement the Binding interface in the binding package?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Binding interface in binding/binding.go is implemented by jsonBinding,
+      xmlBinding, formBinding, formPostBinding, formMultipartBinding, queryBinding,
+      headerBinding, uriBinding, yamlBinding, tomlBinding, protobufBinding,
+      and other format-specific binders.
+    validations:
+      - type: graph_tool_used
+
   # -- Additional find_callers tests (40-41) -- expected_state: COMPLETE --
 
   - id: 5240
@@ -615,3 +672,1561 @@ tests:
       to ShouldBindWith to perform the actual data binding.
     validations:
       - type: graph_tool_used
+
+  # -- Additional find_symbol tests (46-47) -- expected_state: COMPLETE --
+
+  - id: 5246
+    name: gin_find_symbol_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_symbol tool against Gin (test B). Target: Engine struct.
+    query: |
+      Where is the Engine struct defined?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Engine struct is defined in gin.go. It is the main framework instance
+      that holds configuration, route trees, and the middleware chain, and
+      implements http.Handler via its ServeHTTP method.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5247
+    name: gin_find_symbol_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_symbol tool against Gin (test C). Target: RouterGroup struct.
+    query: |
+      Where is the RouterGroup struct defined?
+    expected_state: COMPLETE
+    reference_answer: |
+      The RouterGroup struct is defined in routergroup.go. It provides route
+      registration methods (GET, POST, etc.) and middleware grouping, and
+      is embedded within Engine to provide top-level route registration.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_references tests (48-49) -- expected_state: COMPLETE --
+
+  - id: 5248
+    name: gin_find_references_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_references tool against Gin (test B). Target: H type alias.
+    query: |
+      Where is the H type used across the Gin codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      The H type (alias for map[string]any) is defined in utils.go. In production
+      code it is referenced in 2 places: errors.go (Error.JSON method constructs
+      an H{} literal) and utils.go (MarshalXML receiver method). The remaining
+      ~45 usages are in test files (context_test.go, errors_test.go, gin_test.go,
+      middleware_test.go) which are excluded from the production graph.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5249
+    name: gin_find_references_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_references tool against Gin (test C). Target: responseWriter struct.
+    query: |
+      Where is the responseWriter struct referenced in the codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      The responseWriter struct is referenced only inside response_writer.go.
+      References at lines 57, 61, 67, 77, 84, 91, 98, 102, 106, 111, 124,
+      129, 136. The struct is defined at line 49 of the same file.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional get_call_chain tests (50-51) -- expected_state: COMPLETE --
+
+  - id: 5250
+    name: gin_get_call_chain_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      get_call_chain tool against Gin (test B). Target: from Default to middleware.
+    query: |
+      Show the call chain from gin.Default to Logger middleware execution
+    expected_state: COMPLETE
+    reference_answer: |
+      Found 84 nodes in call chain for 'Default' (downstream), depth 5:
+      Default() [gin.go:236] calls debugPrintWARNINGDefault(), New(),
+      Use(), Logger(), Recovery(), With(). New() calls debugPrintWARNINGNew(),
+      allocateContext(), rebuild404Handlers(), rebuild405Handlers().
+      Logger() calls LoggerWithConfig(). Recovery() calls RecoveryWithWriter().
+    validations:
+      - type: graph_tool_used
+
+  - id: 5251
+    name: gin_get_call_chain_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      get_call_chain tool against Gin (test C). Target: from Context.Bind to validation.
+    query: |
+      Show the call chain from Context.Bind to data validation
+    expected_state: COMPLETE
+    reference_answer: |
+      Context.Bind -> Context.MustBindWith -> binding.Bind -> specific binder
+      (e.g., jsonBinding.Bind) -> json.Decode -> validate with
+      binding.Validator.ValidateStruct for struct tag validation.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_path tests (52-53) -- expected_state: COMPLETE --
+
+  - id: 5252
+    name: gin_find_path_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_path tool against Gin (test B). Between RouterGroup.handle and
+      node.addRoute. Direct 1-hop call: RouterGroup.handle (routergroup.go:86)
+      calls node.addRoute directly.
+    query: |
+      Find the shortest path between RouterGroup.handle and node.addRoute
+    expected_state: COMPLETE
+    reference_answer: |
+      find_path returns a 1-hop path: RouterGroup.handle → node.addRoute.
+      RouterGroup.handle computes the absolute path and combines handlers,
+      then calls addRoute directly on the radix tree node to insert the route.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5253
+    name: gin_find_path_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_path tool against Gin (test C). Between Context.Query and URL parsing.
+    query: |
+      Find the shortest path between Context.Query and the underlying URL query parsing
+    expected_state: COMPLETE
+    reference_answer: |
+      Context.Query -> Context.GetQuery -> Context.queryCache (via initQueryCache)
+      -> url.ParseQuery on Request.URL.RawQuery to parse and cache query parameters.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_hotspots tests (54-55) -- expected_state: COMPLETE --
+
+  - id: 5254
+    name: gin_find_hotspots_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_hotspots tool against Gin (test B). Focus on the render subsystem.
+    query: |
+      What are the hotspot functions in the render package?
+    expected_state: COMPLETE
+    reference_answer: |
+      In the render package, the Render interface method and WriteContentType
+      are the most connected, as every renderer (JSON, XML, HTML, String, Data,
+      Redirect, YAML, ProtoBuf, TOML) implements both methods.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5255
+    name: gin_find_hotspots_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_hotspots tool against Gin (test C). Focus on the binding subsystem.
+    query: |
+      What are the hotspot functions in the Gin binding subsystem?
+    expected_state: COMPLETE
+    reference_answer: |
+      In the binding subsystem, the Binding interface methods (Name and Bind),
+      validate function, and binding.Default are the most connected. Each
+      binder (jsonBinding, xmlBinding, formBinding, etc.) connects through them.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_dead_code tests (56-57) -- expected_state: COMPLETE --
+
+  - id: 5256
+    name: gin_find_dead_code_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dead_code tool against Gin (test B). Focus on the render package.
+    query: |
+      Find unused or dead code in the render package
+    expected_state: COMPLETE
+    reference_answer: |
+      Dead code analysis in the render package may identify renderer types
+      that are defined but not directly invoked from the main gin package,
+      such as less common renderers like AsciiJSON or TOML.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5257
+    name: gin_find_dead_code_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dead_code tool against Gin (test C). Ask from the perspective of exported helpers.
+    query: |
+      Which exported helper functions in Gin have no internal callers?
+    expected_state: COMPLETE
+    reference_answer: |
+      Several exported utility functions like Dir, DisableBindValidation,
+      EnableJsonDecoderDisallowUnknownFields, and Mode functions are designed
+      for external consumers and may show zero internal callers.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_cycles tests (58-59) -- expected_state: COMPLETE --
+
+  - id: 5258
+    name: gin_find_cycles_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_cycles tool against Gin (test B). Focus on the routing subsystem.
+    query: |
+      Find circular call dependencies in the routing and tree subsystem
+    expected_state: COMPLETE
+    reference_answer: |
+      The routing subsystem may have cycles between tree node traversal
+      functions where insertChild, addRoute, and getValue have mutually
+      recursive patterns for handling wildcards and parameterized routes.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5259
+    name: gin_find_cycles_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_cycles tool against Gin (test C). Ask about cross-package cycles.
+    query: |
+      Are there any circular dependencies between gin, render, and binding packages?
+    expected_state: COMPLETE
+    reference_answer: |
+      Found circular dependencies within the gin and binding packages, but no
+      cross-package cycle involving the render package. Detected 4 cycles:
+      (1) initQueryCache -> GetQueryArray -> GetQuery -> Query -> initQueryCache in context.go,
+      (2) Bind -> ShouldBindWith -> MustBindWith -> Bind in context.go,
+      (3) setByMultipartFormFile -> setArrayOfMultipartFormFiles -> setByMultipartFormFile in binding/multipart_form_mapping.go,
+      (4) BindUri -> ShouldBindUri -> BindUri in context.go.
+      The render package does not appear in any of the cycles.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_important tests (60-61) -- expected_state: COMPLETE --
+
+  - id: 5260
+    name: gin_find_important_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_important tool against Gin (test B). Focus on the Context type methods.
+    query: |
+      Which Context methods are the most important by PageRank?
+    expected_state: COMPLETE
+    reference_answer: |
+      Among Context methods, Next, reset, Param, and JSON rank highest by
+      PageRank. Next is central to middleware execution, reset is called on
+      every request, and Param/JSON are heavily used in handler code.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5261
+    name: gin_find_important_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_important tool against Gin (test C). Ask about importance in the tree module.
+    query: |
+      What are the most important functions in the radix tree routing module?
+    expected_state: COMPLETE
+    reference_answer: |
+      In the radix tree module, addRoute and getValue are the most important
+      by PageRank. addRoute builds the tree during initialization, and getValue
+      is called on every request to match URLs to handlers.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_communities tests (62-63) -- expected_state: COMPLETE --
+
+  - id: 5262
+    name: gin_find_communities_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_communities tool against Gin (test B). Focus on internal package structure.
+    query: |
+      What code communities exist within the gin root package itself?
+    expected_state: COMPLETE
+    reference_answer: |
+      Within the gin root package, communities cluster around: request context
+      management (context.go methods), route registration (routergroup.go methods),
+      engine lifecycle (gin.go methods), and response writing (render calls).
+    validations:
+      - type: graph_tool_used
+
+  - id: 5263
+    name: gin_find_communities_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_communities tool against Gin (test C). Ask about how middleware forms communities.
+    query: |
+      Do the built-in middleware functions form their own code community?
+    expected_state: COMPLETE
+    reference_answer: |
+      Built-in middleware (Logger, Recovery, BasicAuth) form a loosely connected
+      community. They share patterns like accessing Context methods but each
+      operates independently, connecting to the main handler chain via Context.Next.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_articulation_points tests (64-65) -- expected_state: COMPLETE --
+
+  - id: 5264
+    name: gin_find_articulation_points_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_articulation_points tool against Gin (test B). Focus on request lifecycle.
+    query: |
+      What are the single points of failure in the HTTP request handling path?
+    expected_state: COMPLETE
+    reference_answer: |
+      In the request handling path, Engine.handleHTTPRequest is a critical
+      articulation point. If it fails, no route matching or handler execution
+      occurs. Context.reset is another, as every request depends on it.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5265
+    name: gin_find_articulation_points_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_articulation_points tool against Gin (test C). Focus on binding subsystem.
+    query: |
+      Are there single points of failure in the data binding pipeline?
+    expected_state: COMPLETE
+    reference_answer: |
+      In the binding pipeline, binding.Default is an articulation point that
+      selects the correct binder. The validate function is another, as all
+      binders that support validation must pass through it.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_dominators tests (66-67) -- expected_state: COMPLETE --
+
+  - id: 5266
+    name: gin_find_dominators_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dominators tool against Gin (test B). Target: Context.JSON execution.
+    query: |
+      What functions must be called before Context.JSON can write a response?
+    expected_state: COMPLETE
+    reference_answer: |
+      Dominators of Context.JSON include Engine.ServeHTTP, handleHTTPRequest,
+      and Context.Next which dispatches the handler. The Context must also be
+      initialized via reset before any response method can be called.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5267
+    name: gin_find_dominators_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dominators tool against Gin (test C). Target: binding validation.
+    query: |
+      What functions dominate the binding validation path?
+    expected_state: COMPLETE
+    reference_answer: |
+      The binding validation path is dominated by Context.ShouldBind or
+      Context.Bind, which call binding.Default to select the binder, then
+      the specific Bind method, and finally the validator.ValidateStruct.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_loops tests (68-69) -- expected_state: COMPLETE --
+
+  - id: 5268
+    name: gin_find_loops_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_loops tool against Gin (test B). Focus on the radix tree traversal.
+    query: |
+      Find recursive patterns in the radix tree route matching code
+    expected_state: COMPLETE
+    reference_answer: |
+      The radix tree in tree.go uses recursive or loop-based traversal in
+      getValue for URL matching, walking child nodes character by character.
+      insertChild also recurses when splitting nodes for new route segments.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5269
+    name: gin_find_loops_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_loops tool against Gin (test C). Ask about iteration patterns in middleware.
+    query: |
+      Find loop and iteration patterns in the middleware execution pipeline
+    expected_state: COMPLETE
+    reference_answer: |
+      The middleware pipeline uses an index-based loop in Context.Next, which
+      increments Context.index and calls handlers[index] sequentially. This
+      loop pattern allows middleware to yield via Next and resume after.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_merge_points tests (70-71) -- expected_state: COMPLETE --
+
+  - id: 5270
+    name: gin_find_merge_points_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_merge_points tool against Gin (test B). Focus on response writing.
+    query: |
+      Where do different response rendering paths converge?
+    expected_state: COMPLETE
+    reference_answer: |
+      Different rendering paths (JSON, XML, HTML, String, etc.) all converge
+      at Context.Render, which calls render.WriteContentType and then the
+      specific Render method, followed by writing the HTTP status code.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5271
+    name: gin_find_merge_points_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_merge_points tool against Gin (test C). Focus on error handling convergence.
+    query: |
+      Where do different error handling paths converge in Gin?
+    expected_state: COMPLETE
+    reference_answer: |
+      Error handling paths converge at Context.Error which appends to the
+      error list, and at Context.Abort-family methods which terminate the
+      handler chain. Recovery middleware catches panics and converges to AbortWithStatus.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_common_dependency tests (72-73) -- expected_state: COMPLETE --
+
+  - id: 5272
+    name: gin_find_common_dependency_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_common_dependency tool against Gin (test B). Target: JSON and XML renderers.
+    query: |
+      What shared dependency do the JSON and XML renderers have?
+    expected_state: COMPLETE
+    reference_answer: |
+      Both JSON and XML renderers share the Render interface and
+      WriteContentType helper. They both depend on Context.Render for
+      invocation and use writeContentType to set the Content-Type header.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5273
+    name: gin_find_common_dependency_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_common_dependency tool against Gin (test C). Target: Logger and Recovery middleware.
+    query: |
+      What common dependencies do the Logger and Recovery middleware share?
+    expected_state: COMPLETE
+    reference_answer: |
+      Logger and Recovery middleware both depend on Context.Next to continue
+      the handler chain, Context methods for request/response metadata,
+      and the HandlerFunc type signature for registration via Engine.Use.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_control_dependencies tests (74-75) -- expected_state: COMPLETE --
+
+  - id: 5274
+    name: gin_find_control_dependencies_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_control_dependencies tool against Gin (test B). Target: route matching.
+    query: |
+      What conditionals control which route handler is selected during dispatch?
+    expected_state: COMPLETE
+    reference_answer: |
+      Route selection is controlled by HTTP method matching in handleHTTPRequest,
+      the radix tree getValue traversal which checks path segments and
+      wildcard/param node types, and the RedirectTrailingSlash/RedirectFixedPath options.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5275
+    name: gin_find_control_dependencies_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_control_dependencies tool against Gin (test C). Target: response rendering.
+    query: |
+      What conditionals determine which response renderer is used?
+    expected_state: COMPLETE
+    reference_answer: |
+      The renderer selection depends on which Context method the handler calls
+      (JSON, XML, HTML, etc.). For content negotiation, Context.Negotiate
+      checks the Accept header via NegotiateFormat to select the renderer.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_extractable_regions tests (76-77) -- expected_state: COMPLETE --
+
+  - id: 5276
+    name: gin_find_extractable_regions_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_extractable_regions tool against Gin (test B). Focus on Engine methods.
+    query: |
+      Find extractable regions within Engine methods in gin.go
+    expected_state: COMPLETE
+    reference_answer: |
+      In gin.go, handleHTTPRequest contains extractable regions for route tree
+      lookup, 404/405 handling, and redirect logic. Engine.Run has extractable
+      address resolution logic that could be a separate helper.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5277
+    name: gin_find_extractable_regions_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_extractable_regions tool against Gin (test C). Focus on Context methods.
+    query: |
+      Which Context methods have regions that could be safely extracted into helpers?
+    expected_state: COMPLETE
+    reference_answer: |
+      Context methods like SaveUploadedFile, ShouldBindWith, and Negotiate
+      contain distinct SESE regions. The content negotiation logic in Negotiate
+      and file handling in SaveUploadedFile are candidates for extraction.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional check_reducibility tests (78-79) -- expected_state: COMPLETE --
+
+  - id: 5278
+    name: gin_check_reducibility_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      check_reducibility tool against Gin (test B). Focus on the tree package.
+    query: |
+      Check the control flow reducibility of the radix tree routing code
+    expected_state: COMPLETE
+    reference_answer: |
+      The radix tree code in tree.go has complex control flow in getValue
+      with multiple goto-like jumps for backtracking during route matching.
+      This may introduce irreducible regions that complicate static analysis.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5279
+    name: gin_check_reducibility_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      check_reducibility tool against Gin (test C). Ask about overall structural quality.
+    query: |
+      Is the control flow graph of Gin's request handling pipeline well-structured?
+    expected_state: COMPLETE
+    reference_answer: |
+      The request handling pipeline (ServeHTTP -> handleHTTPRequest -> Next)
+      is largely reducible with clean loops and conditionals. The middleware
+      chain uses a simple index-increment pattern that is well-structured.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_critical_path tests (80-81) -- expected_state: COMPLETE --
+
+  - id: 5280
+    name: gin_find_critical_path_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_critical_path tool against Gin (test B). Target: route registration path.
+    query: |
+      What is the critical path for registering a new route in Gin?
+    expected_state: COMPLETE
+    reference_answer: |
+      The critical registration path is RouterGroup.GET (or POST, etc.) ->
+      RouterGroup.handle -> combineHandlers -> Engine.addRoute -> tree.addRoute,
+      which inserts the path pattern and handler chain into the radix tree.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5281
+    name: gin_find_critical_path_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_critical_path tool against Gin (test C). Target: JSON response writing.
+    query: |
+      What is the mandatory call sequence to write a JSON response?
+    expected_state: COMPLETE
+    reference_answer: |
+      The critical path for JSON response is Context.JSON -> Context.Render ->
+      render.JSON.Render -> json.Marshal -> ResponseWriter.Write, with
+      WriteContentType setting application/json before the body is written.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_module_api tests (82-83) -- expected_state: COMPLETE --
+
+  - id: 5282
+    name: gin_find_module_api_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_module_api tool against Gin (test B). Target: render package.
+    query: |
+      What is the public API of the render package?
+    expected_state: COMPLETE
+    reference_answer: |
+      The render package exports the Render interface with Render and
+      WriteContentType methods, plus concrete types JSON, IndentedJSON,
+      SecureJSON, XML, String, Redirect, Data, HTML, Reader, YAML, TOML,
+      and ProtoBuf for different response formats.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5283
+    name: gin_find_module_api_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_module_api tool against Gin (test C). Target: binding package.
+    query: |
+      What is the public API of the binding package?
+    expected_state: COMPLETE
+    reference_answer: |
+      The binding package exports the Binding and BindingBody interfaces,
+      the Default function for content-type-based binder selection, and
+      exported variables (JSON, XML, Form, Query, Header, URI) for direct use.
+      It also exports StructValidator for custom validation.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_weighted_criticality tests (84-85) -- expected_state: COMPLETE --
+
+  - id: 5284
+    name: gin_find_weighted_criticality_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_weighted_criticality tool against Gin (test B). Focus on the routing layer.
+    query: |
+      What are the most critical functions in Gin's routing layer by weighted importance?
+    expected_state: COMPLETE
+    reference_answer: |
+      In the routing layer, handleHTTPRequest, tree.getValue, and tree.addRoute
+      score highest in weighted criticality. They combine high PageRank (many
+      callers), high betweenness (bridging request to handler), and high degree.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5285
+    name: gin_find_weighted_criticality_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_weighted_criticality tool against Gin (test C). Ask about criticality from a maintenance angle.
+    query: |
+      Which Gin functions would cause the most widespread breakage if modified?
+    expected_state: COMPLETE
+    reference_answer: |
+      Functions with highest weighted criticality for breakage risk include
+      Context.reset (called every request), Engine.ServeHTTP (entry point for
+      all HTTP handling), and RouterGroup.handle (used by all route registrations).
+    validations:
+      - type: graph_tool_used
+
+
+  # ── IT-24 through IT-42: New tool tests ──
+
+  - id: 5286
+    name: gin_graph_overview
+    category: TOOL_HAPPY_PATH
+    description: >
+      graph_overview tool against Gin web framework. Get overall graph statistics.
+    query: |
+      Give me an overview of this codebase's call graph
+    expected_state: COMPLETE
+    reference_answer: |
+      The Gin web framework call graph contains HTTP routing and middleware
+      spanning packages like Engine, Context, Router, binding.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5287
+    name: gin_graph_overview_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      graph_overview tool against Gin web framework (test B). Focus on graph density.
+    query: |
+      How dense is the call graph and what is the average connectivity?
+    expected_state: COMPLETE
+    reference_answer: |
+      The graph has moderate density with most functions having 2-5 callees.
+      Hotspot functions have significantly higher degree reflecting the
+      core architecture of Gin web framework.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5288
+    name: gin_graph_overview_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      graph_overview tool against Gin web framework (test C). Focus on package distribution.
+    query: |
+      How are functions distributed across packages in the call graph?
+    expected_state: COMPLETE
+    reference_answer: |
+      Functions are distributed across Engine, Context, Router, binding,
+      with the core package containing the most edges due to
+      orchestration responsibilities.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5289
+    name: gin_explore_package
+    category: TOOL_HAPPY_PATH
+    description: >
+      explore_package tool against Gin web framework. Explore main gin package.
+    query: |
+      Explore the main gin package and show its key types and functions
+    expected_state: COMPLETE
+    reference_answer: |
+      The main gin package contains Engine, Context, RouterGroup, HandlerFunc.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5290
+    name: gin_explore_package_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      explore_package tool against Gin web framework (test B). Explore binding package.
+    query: |
+      Explore the binding package and show its key types and functions
+    expected_state: COMPLETE
+    reference_answer: |
+      The binding package contains JSON, XML, Form, Query binding implementations.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5291
+    name: gin_explore_package_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      explore_package tool against Gin web framework (test C). Explore render package.
+    query: |
+      Explore the render package and show its key types and functions
+    expected_state: COMPLETE
+    reference_answer: |
+      The render package contains JSON, XML, HTML, String, Data renderers.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5292
+    name: gin_list_packages
+    category: TOOL_HAPPY_PATH
+    description: >
+      list_packages tool against Gin web framework. List all packages.
+    query: |
+      List all packages in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Packages include gin (core), binding, render, internal/bytesconv, internal/json.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5293
+    name: gin_list_packages_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      list_packages tool against Gin web framework (test B). Focus on count.
+    query: |
+      How many packages does this codebase have?
+    expected_state: COMPLETE
+    reference_answer: |
+      The codebase has multiple packages organized by concern,
+      including gin (core), binding, render, internal/bytesconv, internal/json.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5294
+    name: gin_list_packages_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      list_packages tool against Gin web framework (test C). Focus on hierarchy.
+    query: |
+      Show the package hierarchy and how packages are organized
+    expected_state: COMPLETE
+    reference_answer: |
+      Packages are organized by concern with gin (core), binding, render, internal/bytesconv, internal/json
+      as the main functional groupings.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5295
+    name: gin_read
+    category: TOOL_HAPPY_PATH
+    description: >
+      Read tool against Gin web framework.
+    query: |
+      Show me the contents of gin.go
+    expected_state: COMPLETE
+    reference_answer: |
+      Engine struct and New/Default
+    validations:
+      - type: graph_tool_used
+
+  - id: 5296
+    name: gin_read_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Read tool against Gin web framework (test B).
+    query: |
+      Read the context.go file
+    expected_state: COMPLETE
+    reference_answer: |
+      Context and request handling
+    validations:
+      - type: graph_tool_used
+
+  - id: 5297
+    name: gin_read_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Read tool against Gin web framework (test C).
+    query: |
+      Show me the routergroup.go file
+    expected_state: COMPLETE
+    reference_answer: |
+      route registration
+    validations:
+      - type: graph_tool_used
+
+  - id: 5298
+    name: gin_trace_request_lifecycle
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace the HTTP request lifecycle through Gin's engine.
+    query: |
+      What is the complete call chain from incoming HTTP request to response in Gin?
+    expected_state: COMPLETE
+    reference_answer: |
+      Request lifecycle flows through Engine.ServeHTTP, router tree lookup,
+      context creation, middleware chain execution, handler invocation,
+      and response writing back to the client.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5299
+    name: gin_trace_middleware_chain
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace how middleware handlers chain together in Gin.
+    query: |
+      How does Gin's middleware chain execute handlers in sequence?
+    expected_state: COMPLETE
+    reference_answer: |
+      Middleware chaining works through Context.Next which increments
+      the handler index and calls the next handler in the chain,
+      allowing pre/post processing around the main handler.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5300
+    name: gin_trace_route_registration
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace route registration and tree building in Gin.
+    query: |
+      Trace the call chain from router.GET to the radix tree insertion
+    expected_state: COMPLETE
+    reference_answer: |
+      Route registration flows from RouterGroup.GET through handle(),
+      which calculates the absolute path, combines group handlers with
+      route handlers, and inserts into the radix tree via addRoute.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5301
+    name: gin_trace_param_binding
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace parameter binding and validation flow in Gin.
+    query: |
+      What functions are involved when Gin binds JSON request body to a struct?
+    expected_state: COMPLETE
+    reference_answer: |
+      JSON binding flows through Context.ShouldBindJSON, which delegates
+      to the JSON binding implementation, uses json.Decoder to parse the
+      request body, and runs struct validation via the validator package.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5302
+    name: gin_trace_error_handling
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace error handling and recovery in Gin.
+    query: |
+      How does Gin's Recovery middleware handle panics in handlers?
+    expected_state: COMPLETE
+    reference_answer: |
+      Recovery middleware uses defer/recover to catch panics, logs the
+      stack trace, writes a 500 response via Context.AbortWithStatus,
+      and prevents the panic from crashing the server.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5303
+    name: gin_trace_response_render
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace the response rendering pipeline in Gin.
+    query: |
+      What is the call path from Context.JSON to the actual HTTP response write?
+    expected_state: COMPLETE
+    reference_answer: |
+      Context.JSON creates a JSON render object, sets content type header,
+      calls Render which marshals the data to JSON bytes, writes the
+      status code, and flushes the response to the client.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5304
+    name: gin_glob
+    category: TOOL_HAPPY_PATH
+    description: >
+      Glob tool against Gin web framework.
+    query: |
+      Find all files matching *_test.go
+    expected_state: COMPLETE
+    reference_answer: |
+      The Glob tool processes *_test.go for
+      the Gin web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5305
+    name: gin_glob_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Glob tool against Gin web framework (test B).
+    query: |
+      Find files matching binding/*.go
+    expected_state: COMPLETE
+    reference_answer: |
+      The Glob tool processes binding/*.go for
+      the Gin web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5306
+    name: gin_glob_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Glob tool against Gin web framework (test C).
+    query: |
+      Search for render/*.go files
+    expected_state: COMPLETE
+    reference_answer: |
+      The Glob tool processes render/*.go for
+      the Gin web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5307
+    name: gin_grep
+    category: TOOL_HAPPY_PATH
+    description: >
+      Grep tool against Gin web framework.
+    query: |
+      Search for Context.Next() usage in the codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      The Grep tool processes Context.Next() usage for
+      the Gin web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5308
+    name: gin_grep_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Grep tool against Gin web framework (test B).
+    query: |
+      Find all panic recovery
+    expected_state: COMPLETE
+    reference_answer: |
+      The Grep tool processes panic recovery for
+      the Gin web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5309
+    name: gin_grep_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Grep tool against Gin web framework (test C).
+    query: |
+      Search for HandlerFunc type usage
+    expected_state: COMPLETE
+    reference_answer: |
+      The Grep tool processes HandlerFunc type usage for
+      the Gin web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5310
+    name: gin_diff
+    category: TOOL_HAPPY_PATH
+    description: >
+      Diff tool against Gin web framework.
+    query: |
+      Compare gin.New vs gin.Default
+    expected_state: COMPLETE
+    reference_answer: |
+      The Diff tool processes gin.New vs gin.Default for
+      the Gin web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5311
+    name: gin_diff_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Diff tool against Gin web framework (test B).
+    query: |
+      Show differences between JSON vs XML binding
+    expected_state: COMPLETE
+    reference_answer: |
+      The Diff tool processes JSON vs XML binding for
+      the Gin web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5312
+    name: gin_diff_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Diff tool against Gin web framework (test C).
+    query: |
+      Compare debug vs release mode
+    expected_state: COMPLETE
+    reference_answer: |
+      The Diff tool processes debug vs release mode for
+      the Gin web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5313
+    name: gin_tree
+    category: TOOL_HAPPY_PATH
+    description: >
+      Tree tool against Gin web framework.
+    query: |
+      Show the top-level structure
+    expected_state: COMPLETE
+    reference_answer: |
+      The Tree tool processes top-level structure for
+      the Gin web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5314
+    name: gin_tree_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Tree tool against Gin web framework (test B).
+    query: |
+      Show the binding subdirectory structure
+    expected_state: COMPLETE
+    reference_answer: |
+      The Tree tool processes binding subdirectory for
+      the Gin web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5315
+    name: gin_tree_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Tree tool against Gin web framework (test C).
+    query: |
+      Display the render subdirectory layout
+    expected_state: COMPLETE
+    reference_answer: |
+      The Tree tool processes render subdirectory for
+      the Gin web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5316
+    name: gin_trace_tree_lookup
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace radix tree route lookup in Gin.
+    query: |
+      How does Gin's radix tree resolve a URL path to a handler?
+    expected_state: COMPLETE
+    reference_answer: |
+      Route lookup traverses the radix tree node by node, matching
+      path segments, extracting named parameters and wildcards,
+      and returning the matched handlers and parameter values.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5317
+    name: gin_trace_context_pool
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace Context pool management in Gin.
+    query: |
+      How does Gin reuse Context objects via sync.Pool?
+    expected_state: COMPLETE
+    reference_answer: |
+      Gin uses sync.Pool to recycle Context objects. On each request,
+      Engine.ServeHTTP gets a Context from the pool, resets it with
+      the new request/response, processes the request, then returns
+      the Context to the pool.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5318
+    name: gin_trace_group_nesting
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace router group nesting and path computation in Gin.
+    query: |
+      How do nested router groups combine paths and middleware?
+    expected_state: COMPLETE
+    reference_answer: |
+      RouterGroup.Group creates a new group with the combined base path
+      and a copy of the parent's handlers. When routes are added to the
+      nested group, paths are joined and handler chains are concatenated.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5319
+    name: gin_validate_syntax
+    category: TOOL_HAPPY_PATH
+    description: >
+      validate_syntax tool against Gin web framework.
+    query: |
+      Validate the syntax of gin.go
+    expected_state: COMPLETE
+    reference_answer: |
+      The validate_syntax tool processes gin.go for
+      the Gin web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5320
+    name: gin_validate_syntax_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      validate_syntax tool against Gin web framework (test B).
+    query: |
+      Check the syntax of context.go
+    expected_state: COMPLETE
+    reference_answer: |
+      The validate_syntax tool processes context.go for
+      the Gin web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5321
+    name: gin_validate_syntax_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      validate_syntax tool against Gin web framework (test C).
+    query: |
+      Verify the syntax of tree.go
+    expected_state: COMPLETE
+    reference_answer: |
+      The validate_syntax tool processes tree.go for
+      the Gin web framework codebase.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5322
+    name: gin_find_entry_points_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_entry_points tool against Gin web framework (test B). Focus on HTTP handler interface.
+    query: |
+      HTTP handler interface
+    expected_state: COMPLETE
+    reference_answer: |
+      Engine.ServeHTTP, Engine.Run, RunTLS
+    validations:
+      - type: graph_tool_used
+
+  - id: 5323
+    name: gin_find_entry_points_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_entry_points tool against Gin web framework (test C). Focus on middleware entry.
+    query: |
+      middleware entry in Gin web framework?
+    expected_state: COMPLETE
+    reference_answer: |
+      Logger, Recovery, BasicAuth entry points
+    validations:
+      - type: graph_tool_used
+
+  - id: 5324
+    name: gin_trace_data_flow_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      trace_data_flow tool against Gin web framework (test B). Focus on request binding.
+    query: |
+      request binding in Gin web framework?
+    expected_state: COMPLETE
+    reference_answer: |
+      Context.Bind, ShouldBind, binding validators
+    validations:
+      - type: graph_tool_used
+
+  - id: 5325
+    name: gin_trace_data_flow_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      trace_data_flow tool against Gin web framework (test C). Focus on response rendering.
+    query: |
+      response rendering in Gin web framework?
+    expected_state: COMPLETE
+    reference_answer: |
+      Context.JSON, Context.HTML, render.Render interface
+    validations:
+      - type: graph_tool_used
+
+  - id: 5326
+    name: gin_trace_error_flow_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      trace_error_flow tool against Gin web framework (test B). Focus on middleware errors.
+    query: |
+      middleware errors in Gin web framework?
+    expected_state: COMPLETE
+    reference_answer: |
+      Context.Error, Context.Errors, AbortWithError
+    validations:
+      - type: graph_tool_used
+
+  - id: 5327
+    name: gin_trace_error_flow_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      trace_error_flow tool against Gin web framework (test C). Focus on binding errors.
+    query: |
+      binding errors in Gin web framework?
+    expected_state: COMPLETE
+    reference_answer: |
+      ShouldBind validation errors, error response
+    validations:
+      - type: graph_tool_used
+
+  - id: 5328
+    name: gin_build_minimal_context_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      build_minimal_context tool against Gin web framework (test B). Focus on route matching.
+    query: |
+      route matching in Gin web framework?
+    expected_state: COMPLETE
+    reference_answer: |
+      radix tree, node, params, handlers lookup
+    validations:
+      - type: graph_tool_used
+
+  - id: 5329
+    name: gin_build_minimal_context_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      build_minimal_context tool against Gin web framework (test C). Focus on middleware chain.
+    query: |
+      middleware chain in Gin web framework?
+    expected_state: COMPLETE
+    reference_answer: |
+      HandlerFunc slice, Context.Next, Context.Abort
+    validations:
+      - type: graph_tool_used
+
+  - id: 5330
+    name: gin_find_similar_code_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_similar_code tool against Gin web framework (test B). Focus on binding implementations.
+    query: |
+      binding implementations in Gin web framework?
+    expected_state: COMPLETE
+    reference_answer: |
+      JSON/XML/Form/Query all implement Binding interface
+    validations:
+      - type: graph_tool_used
+
+  - id: 5331
+    name: gin_find_similar_code_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_similar_code tool against Gin web framework (test C). Focus on render implementations.
+    query: |
+      render implementations in Gin web framework?
+    expected_state: COMPLETE
+    reference_answer: |
+      JSON/XML/HTML all implement Render interface
+    validations:
+      - type: graph_tool_used
+
+  - id: 5332
+    name: gin_find_config_usage_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_config_usage tool against Gin web framework (test B). Focus on Engine options.
+    query: |
+      Engine options
+    expected_state: COMPLETE
+    reference_answer: |
+      RedirectTrailingSlash, ForwardedByClientIP, TrustedProxies
+    validations:
+      - type: graph_tool_used
+
+  - id: 5333
+    name: gin_find_config_usage_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_config_usage tool against Gin web framework (test C). Focus on debug mode.
+    query: |
+      debug mode in Gin web framework?
+    expected_state: COMPLETE
+    reference_answer: |
+      DebugPrintRouteFunc, IsDebugging, SetMode
+    validations:
+      - type: graph_tool_used
+
+  - id: 5334
+    name: gin_summarize_file_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      summarize_file tool against Gin web framework (test B). Focus on tree.go.
+    query: |
+      tree.go in Gin web framework?
+    expected_state: COMPLETE
+    reference_answer: |
+      radix tree router, node insertion, route matching
+    validations:
+      - type: graph_tool_used
+
+  - id: 5335
+    name: gin_summarize_file_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      summarize_file tool against Gin web framework (test C). Focus on routergroup.go.
+    query: |
+      routergroup.go in Gin web framework?
+    expected_state: COMPLETE
+    reference_answer: |
+      RouterGroup, route registration, middleware stacking
+    validations:
+      - type: graph_tool_used
+
+  # -- GR-58: CRS TraceStep Verification Tests --
+
+  - id: 5336
+    name: gin_crs_find_callers
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58: Verify find_callers produces CRS TraceStep. Target: Context.JSON.
+    query: |
+      Who calls the Context.JSON method?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_callers tool was used and produced a CRS TraceStep recording the query
+      for Context.JSON with match_count, total_callers, and used_inheritance_path metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 5337
+    name: gin_crs_find_callees
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58: Verify find_callees produces CRS TraceStep. Target: Engine.Run.
+    query: |
+      What functions does Engine.Run call?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_callees tool was used and produced a CRS TraceStep recording the query
+      for Engine.Run with resolved_count, external_count, and total_count metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  # -- GR-58: CRS TraceStep Verification (IT-03 to IT-42) --
+
+  - id: 5338
+    name: gin_crs_find_implementations
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-03: Verify find_implementations produces CRS TraceStep against Gin.
+    query: |
+      What types implement the IRouter interface in Gin?
+    expected_state: COMPLETE
+    reference_answer: |
+      Found 2 implementations/subclasses of 'IRouter':
+      Interface: routergroup.go:27:IRouter
+        - Engine (struct) in gin.go:92
+        - RouterGroup (struct) in routergroup.go:55
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 5339
+    name: gin_crs_find_dead_code
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-08: Verify find_dead_code produces CRS TraceStep against Gin.
+    query: |
+      Find dead code or unreachable functions in the Gin codebase.
+    expected_state: COMPLETE
+    reference_answer: |
+      find_dead_code tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 5340
+    name: gin_crs_find_articulation_points
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-12: Verify find_articulation_points produces CRS TraceStep against Gin.
+    query: |
+      Find single points of failure (articulation points) in Gin's call graph.
+    expected_state: COMPLETE
+    reference_answer: |
+      find_articulation_points tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 5341
+    name: gin_crs_find_control_dependencies
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-17: Verify find_control_dependencies produces CRS TraceStep against Gin.
+    query: |
+      What are the control dependencies of the Engine.handleHTTPRequest function in Gin?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_control_dependencies tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 5342
+    name: gin_crs_find_module_api
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-21: Verify find_module_api produces CRS TraceStep against Gin.
+    query: |
+      Show the public API of the gin package.
+    expected_state: COMPLETE
+    reference_answer: |
+      find_module_api tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 5343
+    name: gin_crs_list_packages
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-26: Verify list_packages produces CRS TraceStep against Gin.
+    query: |
+      List all packages in the Gin codebase.
+    expected_state: COMPLETE
+    reference_answer: |
+      list_packages tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 5344
+    name: gin_crs_trace_error_flow
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-30: Verify trace_error_flow produces CRS TraceStep against Gin.
+    query: |
+      Trace how errors propagate from Context.AbortWithError in Gin.
+    expected_state: COMPLETE
+    reference_answer: |
+      trace_error_flow tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 5345
+    name: gin_crs_trace_flow
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      CRS verification: trace analysis records CRS state correctly.
+    query: |
+      Trace how errors propagate through Gin's middleware chain
+    expected_state: COMPLETE
+    reference_answer: |
+      The trace analysis tool records CRS state for middleware error
+      propagation in the Gin web framework codebase.
+    validations:
+      - type: crs_state_recorded
+
+  - id: 5346
+    name: gin_crs_diff
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-39: Verify diff tool produces CRS TraceStep against Gin.
+    query: |
+      Show the diff of recent changes to context.go in Gin.
+    expected_state: COMPLETE
+    reference_answer: |
+      diff tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  # -- IT-01/IT-02/IT-03: Second CRS TraceStep Verification --
+
+  - id: 5347
+    name: gin_crs_find_callers_b
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      IT-01: Second CRS verification for find_callers against Gin. Target: Engine.handleHTTPRequest.
+    query: |
+      Who calls the Engine.handleHTTPRequest method in Gin?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_callers tool was used and produced a CRS TraceStep with
+      match_count, total_callers, and used_inheritance_path metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 5348
+    name: gin_crs_find_callees_b
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      IT-02: Second CRS verification for find_callees against Gin. Target: Context.Bind.
+    query: |
+      What functions does Context.Bind call in Gin?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_callees tool was used and produced a CRS TraceStep with
+      resolved_count, external_count, and total_count metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 5349
+    name: gin_crs_find_implementations_b
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      IT-03: Second CRS verification for find_implementations against Gin. Target: IRoutes.
+    query: |
+      What types implement the IRoutes interface in Gin?
+    expected_state: COMPLETE
+    reference_answer: |
+      Found 3 implementations/subclasses of 'IRoutes':
+      Interface: routergroup.go:33:IRoutes
+        - IRouter (interface) in routergroup.go:27
+        - Engine (struct) in gin.go:92
+        - RouterGroup (struct) in routergroup.go:55
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present

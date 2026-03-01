@@ -126,10 +126,10 @@ func TestGenerateID(t *testing.T) {
 		},
 		{
 			name:      "nested path",
-			filePath:  "services/code_buddy/ast/parser.go",
+			filePath:  "services/trace/ast/parser.go",
 			startLine: 1,
 			symName:   "Parser",
-			expected:  "services/code_buddy/ast/parser.go:1:Parser",
+			expected:  "services/trace/ast/parser.go:1:Parser",
 		},
 		{
 			name:      "special characters in name",
@@ -190,11 +190,11 @@ func TestLocation_String(t *testing.T) {
 		{
 			name: "nested path",
 			loc: Location{
-				FilePath:  "services/code_buddy/ast/parser.go",
+				FilePath:  "services/trace/ast/parser.go",
 				StartLine: 100,
 				StartCol:  0,
 			},
-			expected: "services/code_buddy/ast/parser.go:100:0",
+			expected: "services/trace/ast/parser.go:100:0",
 		},
 	}
 

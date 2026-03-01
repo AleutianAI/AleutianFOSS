@@ -99,18 +99,19 @@ func (t *JSONTool) Definition() tools.ToolDefinition {
 }
 
 // Execute queries or validates a JSON file.
-func (t *JSONTool) Execute(ctx context.Context, params map[string]any) (*tools.Result, error) {
+func (t *JSONTool) Execute(ctx context.Context, params tools.TypedParams) (*tools.Result, error) {
 	start := time.Now()
 
 	// Parse parameters
+	m := params.ToMap()
 	p := &JSONParams{}
-	if filePath, ok := params["file_path"].(string); ok {
+	if filePath, ok := m["file_path"].(string); ok {
 		p.FilePath = filePath
 	}
-	if query, ok := params["query"].(string); ok {
+	if query, ok := m["query"].(string); ok {
 		p.Query = query
 	}
-	if validate, ok := params["validate"].(bool); ok {
+	if validate, ok := m["validate"].(bool); ok {
 		p.Validate = validate
 	}
 

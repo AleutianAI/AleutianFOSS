@@ -36,7 +36,7 @@ run_extra_check() {
             if [ -z "$session_id" ]; then
                 session_id=$(echo "$response" | jq -r '.session_id')
             fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/agent/$session_id/reasoning'" 2>/dev/null)
             if echo "$trace" | jq . > /dev/null 2>&1; then
                 local has_analytics=$(echo "$trace" | jq '[.trace[] | select(.action == "analytics_query" or .action == "tool_call")] | length')
                 if [ "$has_analytics" -gt 0 ]; then
@@ -49,7 +49,7 @@ run_extra_check() {
 
         generation_incremented)
             # Check CRS generation was incremented
-            local gen_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/crs/generation'" 2>/dev/null)
+            local gen_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/debug/crs/generation'" 2>/dev/null)
             if echo "$gen_response" | jq . > /dev/null 2>&1; then
                 local gen=$(echo "$gen_response" | jq '.generation // 0')
                 if [ "$gen" -gt 0 ]; then
@@ -67,7 +67,7 @@ run_extra_check() {
             if [ -z "$session_id" ]; then
                 session_id=$(echo "$response" | jq -r '.session_id')
             fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/agent/$session_id/reasoning'" 2>/dev/null)
             if echo "$trace" | jq . > /dev/null 2>&1; then
                 local graph_tools=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool | test("find_callers|find_callees|find_implementations|find_symbol"))] | length')
                 if [ "$graph_tools" -gt 0 ]; then
@@ -106,7 +106,7 @@ run_extra_check() {
             if [ -z "$session_id" ]; then
                 session_id=$(echo "$response" | jq -r '.session_id')
             fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/agent/$session_id/reasoning'" 2>/dev/null)
             local agent_resp=$(echo "$response" | jq -r '.response // ""')
 
             # Check if find_implementations was used
@@ -147,7 +147,7 @@ run_extra_check() {
             if [ -z "$session_id" ]; then
                 session_id=$(echo "$response" | jq -r '.session_id')
             fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/agent/$session_id/reasoning'" 2>/dev/null)
             local agent_resp=$(echo "$response" | jq -r '.response // ""')
 
             # Check if find_important was used
@@ -189,7 +189,7 @@ run_extra_check() {
             if [ -z "$session_id" ]; then
                 session_id=$(echo "$response" | jq -r '.session_id')
             fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/agent/$session_id/reasoning'" 2>/dev/null)
 
             local grep_calls=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "Grep")] | length' 2>/dev/null || echo "0")
             local impl_calls=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_implementations")] | length' 2>/dev/null || echo "0")
@@ -302,7 +302,7 @@ run_extra_check() {
 
         cache_miss_expected)
             # GR-10: First query should be a cache miss
-            local cache_stats=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/cache'" 2>/dev/null || echo "{}")
+            local cache_stats=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/debug/cache'" 2>/dev/null || echo "{}")
             local miss_count=$(echo "$cache_stats" | jq '.misses // 0' 2>/dev/null || echo "0")
             local hit_count=$(echo "$cache_stats" | jq '.hits // 0' 2>/dev/null || echo "0")
 
@@ -323,7 +323,7 @@ run_extra_check() {
 
         cache_hit_expected)
             # GR-10: Second identical query should be a cache hit
-            local cache_stats=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/cache'" 2>/dev/null || echo "{}")
+            local cache_stats=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/debug/cache'" 2>/dev/null || echo "{}")
             local hit_count=$(echo "$cache_stats" | jq '.hits // 0' 2>/dev/null || echo "0")
             local miss_count=$(echo "$cache_stats" | jq '.misses // 0' 2>/dev/null || echo "0")
 
@@ -347,7 +347,7 @@ run_extra_check() {
         cache_speedup_expected)
             # GR-10: Cached query should be significantly faster
             # Compare this runtime to the first test runtime
-            local cache_stats=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/cache'" 2>/dev/null || echo "{}")
+            local cache_stats=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/debug/cache'" 2>/dev/null || echo "{}")
             local avg_hit_time=$(echo "$cache_stats" | jq '.avg_hit_time_ms // 0' 2>/dev/null || echo "0")
             local avg_miss_time=$(echo "$cache_stats" | jq '.avg_miss_time_ms // 0' 2>/dev/null || echo "0")
 
@@ -459,7 +459,7 @@ run_extra_check() {
             if [ -z "$session_id" ]; then
                 session_id=$(echo "$response" | jq -r '.session_id')
             fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/agent/$session_id/reasoning'" 2>/dev/null)
 
             # Check if find_communities was used
             local fc_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_communities")] | length' 2>/dev/null || echo "0")
@@ -518,7 +518,7 @@ run_extra_check() {
             if [ -z "$session_id" ]; then
                 session_id=$(echo "$response" | jq -r '.session_id')
             fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/agent/$session_id/reasoning'" 2>/dev/null)
             local agent_resp=$(echo "$response" | jq -r '.response // ""')
 
             # Check if find_communities was used
@@ -550,7 +550,7 @@ run_extra_check() {
             if [ -z "$session_id" ]; then
                 session_id=$(echo "$response" | jq -r '.session_id')
             fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/agent/$session_id/reasoning'" 2>/dev/null)
 
             # Check if find_communities was used with parameters
             local fc_calls=$(echo "$trace" | jq '[.trace[] | select(.tool == "find_communities")]' 2>/dev/null || echo "[]")
@@ -602,7 +602,7 @@ run_extra_check() {
             if [ -z "$session_id" ]; then
                 session_id=$(echo "$response" | jq -r '.session_id')
             fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/agent/$session_id/reasoning'" 2>/dev/null)
             local agent_resp=$(echo "$response" | jq -r '.response // ""')
 
             # Check if find_loops was used
@@ -663,7 +663,7 @@ run_extra_check() {
             if [ -z "$session_id" ]; then
                 session_id=$(echo "$response" | jq -r '.session_id')
             fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/agent/$session_id/reasoning'" 2>/dev/null)
             local agent_resp=$(echo "$response" | jq -r '.response // ""')
 
             # Check if find_control_dependencies was used
@@ -722,7 +722,7 @@ run_extra_check() {
             if [ -z "$session_id" ]; then
                 session_id=$(echo "$response" | jq -r '.session_id')
             fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/agent/$session_id/reasoning'" 2>/dev/null)
             local agent_resp=$(echo "$response" | jq -r '.response // ""')
 
             # Check if find_extractable_regions was used
@@ -779,7 +779,7 @@ run_extra_check() {
             if [ -z "$session_id" ]; then
                 session_id=$(echo "$response" | jq -r '.session_id')
             fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/agent/$session_id/reasoning'" 2>/dev/null)
             local agent_resp=$(echo "$response" | jq -r '.response // ""')
 
             # Check if check_reducibility was used
@@ -863,7 +863,7 @@ run_extra_check() {
             if [ -z "$session_id" ]; then
                 session_id=$(echo "$response" | jq -r '.session_id')
             fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/agent/$session_id/reasoning'" 2>/dev/null)
             local agent_resp=$(echo "$response" | jq -r '.response // ""')
 
             # Check if find_critical_path was used
@@ -895,7 +895,7 @@ run_extra_check() {
             if [ -z "$session_id" ]; then
                 session_id=$(echo "$response" | jq -r '.session_id')
             fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/agent/$session_id/reasoning'" 2>/dev/null)
             local agent_resp=$(echo "$response" | jq -r '.response // ""')
 
             # Check tool calls for entry parameter
@@ -1010,7 +1010,7 @@ run_extra_check() {
                 return 0
             fi
 
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/agent/$session_id/reasoning'" 2>/dev/null)
             if ! echo "$trace" | jq . > /dev/null 2>&1; then
                 echo -e "    ${YELLOW}⚠ GR-17a: Cannot validate (trace fetch failed)${NC}"
                 return 0
@@ -1052,7 +1052,7 @@ run_extra_check() {
                 return 0
             fi
 
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/agent/$session_id/reasoning'" 2>/dev/null)
             if ! echo "$trace" | jq . > /dev/null 2>&1; then
                 echo -e "    ${YELLOW}⚠ GR-16b: Cannot validate (trace fetch failed)${NC}"
                 return 0
@@ -1083,7 +1083,7 @@ run_extra_check() {
             if [ -z "$session_id" ]; then
                 session_id=$(echo "$response" | jq -r '.session_id')
             fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/agent/$session_id/reasoning'" 2>/dev/null)
             if echo "$trace" | jq . > /dev/null 2>&1; then
                 local tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_merge_points")] | length')
                 if [ "$tool_used" -gt 0 ]; then
@@ -1110,7 +1110,7 @@ run_extra_check() {
             if [ -z "$session_id" ]; then
                 session_id=$(echo "$response" | jq -r '.session_id')
             fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/agent/$session_id/reasoning'" 2>/dev/null)
             if echo "$trace" | jq . > /dev/null 2>&1; then
                 local tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_loops")] | length')
                 if [ "$tool_used" -gt 0 ]; then
@@ -1137,7 +1137,7 @@ run_extra_check() {
             if [ -z "$session_id" ]; then
                 session_id=$(echo "$response" | jq -r '.session_id')
             fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/agent/$session_id/reasoning'" 2>/dev/null)
             if echo "$trace" | jq . > /dev/null 2>&1; then
                 local tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_common_dependency")] | length')
                 if [ "$tool_used" -gt 0 ]; then
@@ -1164,7 +1164,7 @@ run_extra_check() {
             if [ -z "$session_id" ]; then
                 session_id=$(echo "$response" | jq -r '.session_id')
             fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/agent/$session_id/reasoning'" 2>/dev/null)
             if echo "$trace" | jq . > /dev/null 2>&1; then
                 local tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_control_dependencies")] | length')
                 if [ "$tool_used" -gt 0 ]; then
@@ -1191,7 +1191,7 @@ run_extra_check() {
             if [ -z "$session_id" ]; then
                 session_id=$(echo "$response" | jq -r '.session_id')
             fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/agent/$session_id/reasoning'" 2>/dev/null)
             if echo "$trace" | jq . > /dev/null 2>&1; then
                 local tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_extractable_regions")] | length')
                 if [ "$tool_used" -gt 0 ]; then
@@ -1218,7 +1218,7 @@ run_extra_check() {
             if [ -z "$session_id" ]; then
                 session_id=$(echo "$response" | jq -r '.session_id')
             fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/agent/$session_id/reasoning'" 2>/dev/null)
             if echo "$trace" | jq . > /dev/null 2>&1; then
                 local tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "check_reducibility")] | length')
                 if [ "$tool_used" -gt 0 ]; then
@@ -1245,7 +1245,7 @@ run_extra_check() {
             if [ -z "$session_id" ]; then
                 session_id=$(echo "$response" | jq -r '.session_id')
             fi
-            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/agent/$session_id/reasoning'" 2>/dev/null)
+            local trace=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/agent/$session_id/reasoning'" 2>/dev/null)
             if echo "$trace" | jq . > /dev/null 2>&1; then
                 local tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_critical_path")] | length')
                 if [ "$tool_used" -gt 0 ]; then

@@ -88,10 +88,10 @@ func TestFindCriticalPathTool_Execute(t *testing.T) {
 	tool := NewFindCriticalPathTool(analytics, idx)
 
 	t.Run("finds critical path from entry to deep target", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"target": "D",
 			"entry":  "cmd/main.go:10:main",
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -139,10 +139,10 @@ func TestFindCriticalPathTool_Execute(t *testing.T) {
 	})
 
 	t.Run("finds shorter critical path to different target", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"target": "C",
 			"entry":  "cmd/main.go:10:main",
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -171,10 +171,10 @@ func TestFindCriticalPathTool_Execute(t *testing.T) {
 	})
 
 	t.Run("auto-detects entry point", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"target": "D",
 			// entry not provided - should auto-detect
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -200,10 +200,10 @@ func TestFindCriticalPathTool_Execute(t *testing.T) {
 	})
 
 	t.Run("handles direct path (entry to immediate child)", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"target": "init",
 			"entry":  "cmd/main.go:10:main",
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -258,10 +258,10 @@ func TestFindCriticalPathTool_Execute(t *testing.T) {
 		analytics := graph.NewGraphAnalytics(hg)
 		tool := NewFindCriticalPathTool(analytics, idx)
 
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"target": "Isolated",
 			"entry":  "cmd/main.go:10:main",
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -302,10 +302,10 @@ func TestFindCriticalPathTool_ParameterValidation(t *testing.T) {
 	tool := NewFindCriticalPathTool(analytics, idx)
 
 	t.Run("missing target parameter", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"entry": "cmd/main.go:10:main",
 			// target missing
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -319,10 +319,10 @@ func TestFindCriticalPathTool_ParameterValidation(t *testing.T) {
 	})
 
 	t.Run("empty target parameter", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"target": "",
 			"entry":  "cmd/main.go:10:main",
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -336,10 +336,10 @@ func TestFindCriticalPathTool_ParameterValidation(t *testing.T) {
 	})
 
 	t.Run("invalid target type", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"target": 123, // number instead of string
 			"entry":  "cmd/main.go:10:main",
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -353,10 +353,10 @@ func TestFindCriticalPathTool_ParameterValidation(t *testing.T) {
 	})
 
 	t.Run("target not found in graph", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"target": "NonExistent",
 			"entry":  "cmd/main.go:10:main",
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -370,10 +370,10 @@ func TestFindCriticalPathTool_ParameterValidation(t *testing.T) {
 	})
 
 	t.Run("entry not found in graph", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"target": "D",
 			"entry":  "NonExistent",
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -401,10 +401,10 @@ func TestFindCriticalPathTool_ContextCancellation(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel() // Cancel immediately
 
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"target": "D",
 			"entry":  "cmd/main.go:10:main",
-		})
+		}})
 
 		// Should return error when context is canceled
 		if err == nil && result.Success {
@@ -424,10 +424,10 @@ func TestFindCriticalPathTool_TextOutput(t *testing.T) {
 	analytics := graph.NewGraphAnalytics(hg)
 	tool := NewFindCriticalPathTool(analytics, idx)
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 		"target": "D",
 		"entry":  "cmd/main.go:10:main",
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -466,10 +466,10 @@ func TestFindCriticalPathTool_TraceStepIntegration(t *testing.T) {
 	analytics := graph.NewGraphAnalytics(hg)
 	tool := NewFindCriticalPathTool(analytics, idx)
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 		"target": "D",
 		"entry":  "cmd/main.go:10:main",
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)

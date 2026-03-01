@@ -61,19 +61,19 @@ func TestExtractQueryTerms(t *testing.T) {
 			name:  "path with slashes",
 			query: "pkg/api/handlers",
 			expected: map[string]bool{
-				"pkg":      true,
-				"api":      true,
-				"handlers": true,
+				"pkg":     true,
+				"api":     true,
+				"handler": true, // "handlers" → stemmed to "handler"
 			},
 		},
 		{
 			name:  "mixed delimiters",
 			query: "pkg.api_handlers-v2",
 			expected: map[string]bool{
-				"pkg":      true,
-				"api":      true,
-				"handlers": true,
-				"v2":       true,
+				"pkg":     true,
+				"api":     true,
+				"handler": true, // "handlers" → stemmed to "handler"
+				"v2":      true,
 			},
 		},
 		{
@@ -990,6 +990,92 @@ func TestExtractQueryFromMetadata(t *testing.T) {
 					tt.metadata, result, tt.expected)
 			}
 		})
+	}
+}
+
+// TestStemTerm verifies the lightweight suffix-stripping stemmer used by
+// ExtractQueryTerms to normalize singular/plural and verb forms for BM25.
+// IT-16/ISSUE-01: "extend" vs "extends" caused BM25 to miss find_implementations.
+func TestStemTerm(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		// Plural "s" stripping
+		{"extends", "extend"},
+		{"implements", "implement"},
+		{"callers", "caller"},
+		{"functions", "function"},
+		{"symbols", "symbol"},
+		// "es" stripping
+		{"classes", "class"},
+		{"subclasses", "subclass"},
+		{"references", "reference"},
+		{"interfaces", "interfac"},
+		// "ies" → "y"
+		{"dependencies", "dependency"},
+		{"hierarchies", "hierarchy"},
+		// "ches"/"shes"/"sses" → drop "es"
+		{"matches", "match"},
+		{"pushes", "push"},
+		// "ing" stripping
+		{"calling", "call"},
+		{"extending", "extend"},
+		{"implementing", "implement"},
+		// "ed" stripping
+		{"called", "call"},
+		{"extended", "extend"},
+		{"implemented", "implement"},
+		// Short words unchanged
+		{"go", "go"},
+		{"is", "is"},
+		{"as", "as"},
+		{"bus", "bus"},
+		// Words that shouldn't be overstemmed
+		{"class", "class"},
+		{"stress", "stress"},   // "ss" ending preserved
+		{"pass", "pass"},       // "ss" ending preserved
+		{"process", "process"}, // ends in "ss" — preserved
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := stemTerm(tt.input)
+			if got != tt.expected {
+				t.Errorf("stemTerm(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestExtractQueryTerms_Stemming verifies that stemming normalizes query terms
+// so that "extends" and "extend" match the same BM25 document terms.
+func TestExtractQueryTerms_Stemming(t *testing.T) {
+	// The ISSUE-01 query: "What classes extend the Light base class?"
+	terms := ExtractQueryTerms("What classes extend the Light base class")
+	if !terms["extend"] {
+		t.Errorf("expected 'extend' in terms, got: %v", terms)
+	}
+	if !terms["class"] {
+		t.Errorf("expected 'class' in terms, got: %v", terms)
+	}
+	if !terms["light"] {
+		t.Errorf("expected 'light' in terms, got: %v", terms)
+	}
+	if !terms["base"] {
+		t.Errorf("expected 'base' in terms, got: %v", terms)
+	}
+
+	// "extends" in keyword should also stem to "extend"
+	kwTerms := ExtractQueryTerms("extends subclasses implements")
+	if !kwTerms["extend"] {
+		t.Errorf("expected 'extend' from 'extends', got: %v", kwTerms)
+	}
+	if !kwTerms["subclass"] {
+		t.Errorf("expected 'subclass' from 'subclasses', got: %v", kwTerms)
+	}
+	if !kwTerms["implement"] {
+		t.Errorf("expected 'implement' from 'implements', got: %v", kwTerms)
 	}
 }
 

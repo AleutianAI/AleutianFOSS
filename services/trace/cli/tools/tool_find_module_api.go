@@ -147,6 +147,18 @@ type FindModuleAPIParams struct {
 	MinCommunitySize int
 }
 
+// ToolName returns the tool name for TypedParams interface.
+func (p FindModuleAPIParams) ToolName() string { return "find_module_api" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p FindModuleAPIParams) ToMap() map[string]any {
+	return map[string]any{
+		"community_id":       p.CommunityID,
+		"top":                p.Top,
+		"min_community_size": p.MinCommunitySize,
+	}
+}
+
 // FindModuleAPIOutput contains the structured result.
 type FindModuleAPIOutput struct {
 	// Modules is the list of analyzed modules.
@@ -311,11 +323,11 @@ func (t *findModuleAPITool) Definition() ToolDefinition {
 }
 
 // Execute runs the find_module_api tool.
-func (t *findModuleAPITool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findModuleAPITool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	start := time.Now()
 
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
 		return &Result{
 			Success: false,

@@ -165,7 +165,7 @@ For Go files, also validates with 'go build -n' for type checking.`,
 //
 //	*tools.Result - Validation result with errors/warnings.
 //	error - Non-nil if validation fails catastrophically.
-func (t *SyntaxTool) Execute(ctx context.Context, params map[string]any) (*tools.Result, error) {
+func (t *SyntaxTool) Execute(ctx context.Context, params tools.TypedParams) (*tools.Result, error) {
 	start := time.Now()
 
 	// Start tracing span
@@ -177,14 +177,15 @@ func (t *SyntaxTool) Execute(ctx context.Context, params map[string]any) (*tools
 	defer span.End()
 
 	// Parse parameters
+	m := params.ToMap()
 	input := &SyntaxInput{}
-	if filePath, ok := params["file_path"].(string); ok && filePath != "" {
+	if filePath, ok := m["file_path"].(string); ok && filePath != "" {
 		input.FilePath = filePath
 	}
-	if content, ok := params["content"].(string); ok && content != "" {
+	if content, ok := m["content"].(string); ok && content != "" {
 		input.Content = content
 	}
-	if language, ok := params["language"].(string); ok && language != "" {
+	if language, ok := m["language"].(string); ok && language != "" {
 		input.Language = language
 	}
 

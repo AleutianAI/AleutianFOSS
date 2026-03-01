@@ -43,6 +43,17 @@ type FindMergePointsParams struct {
 	MinSources int
 }
 
+// ToolName returns the tool name for TypedParams interface.
+func (p FindMergePointsParams) ToolName() string { return "find_merge_points" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p FindMergePointsParams) ToMap() map[string]any {
+	return map[string]any{
+		"top":         p.Top,
+		"min_sources": p.MinSources,
+	}
+}
+
 // FindMergePointsOutput contains the structured result.
 type FindMergePointsOutput struct {
 	// MergePoints is the list of detected merge points.
@@ -176,9 +187,9 @@ func (t *findMergePointsTool) Definition() ToolDefinition {
 }
 
 // Execute runs the find_merge_points tool.
-func (t *findMergePointsTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findMergePointsTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
 		return &Result{
 			Success: false,

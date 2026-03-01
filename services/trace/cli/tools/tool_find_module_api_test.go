@@ -149,9 +149,9 @@ func TestFindModuleAPITool_Execute_AllCommunities(t *testing.T) {
 	tool := NewFindModuleAPITool(analytics, g, idx)
 
 	ctx := context.Background()
-	params := map[string]any{
+	params := MapParams{Params: map[string]any{
 		// Default: all communities, top 10, min_size 3
-	}
+	}}
 
 	result, err := tool.Execute(ctx, params)
 	if err != nil {
@@ -192,9 +192,9 @@ func TestFindModuleAPITool_Execute_SpecificCommunity(t *testing.T) {
 	tool := NewFindModuleAPITool(analytics, g, idx)
 
 	ctx := context.Background()
-	params := map[string]any{
+	params := MapParams{Params: map[string]any{
 		"community_id": 0, // Request specific community
-	}
+	}}
 
 	result, err := tool.Execute(ctx, params)
 	if err != nil {
@@ -227,10 +227,10 @@ func TestFindModuleAPITool_Execute_TopN(t *testing.T) {
 	tool := NewFindModuleAPITool(analytics, g, idx)
 
 	ctx := context.Background()
-	params := map[string]any{
+	params := MapParams{Params: map[string]any{
 		"top":                2,
 		"min_community_size": 1, // Lower threshold to ensure we find communities
-	}
+	}}
 
 	result, err := tool.Execute(ctx, params)
 	if err != nil {
@@ -263,9 +263,9 @@ func TestFindModuleAPITool_Execute_MinCommunitySize(t *testing.T) {
 	tool := NewFindModuleAPITool(analytics, g, idx)
 
 	ctx := context.Background()
-	params := map[string]any{
+	params := MapParams{Params: map[string]any{
 		"min_community_size": 100, // Very high threshold - should filter all
-	}
+	}}
 
 	result, err := tool.Execute(ctx, params)
 	if err != nil {
@@ -308,7 +308,7 @@ func TestFindModuleAPITool_Execute_EmptyGraph(t *testing.T) {
 	tool := NewFindModuleAPITool(analytics, g, idx)
 
 	ctx := context.Background()
-	params := map[string]any{}
+	params := MapParams{Params: map[string]any{}}
 
 	result, err := tool.Execute(ctx, params)
 	if err != nil {
@@ -339,7 +339,7 @@ func TestFindModuleAPITool_Execute_NilAnalytics(t *testing.T) {
 	tool := NewFindModuleAPITool(nil, g, idx)
 
 	ctx := context.Background()
-	params := map[string]any{}
+	params := MapParams{Params: map[string]any{}}
 
 	result, err := tool.Execute(ctx, params)
 	if err != nil {
@@ -368,7 +368,7 @@ func TestFindModuleAPITool_Execute_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately
 
-	params := map[string]any{}
+	params := MapParams{Params: map[string]any{}}
 
 	result, err := tool.Execute(ctx, params)
 
@@ -395,14 +395,14 @@ func TestFindModuleAPITool_Execute_ParameterValidation(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		params map[string]any
+		params MapParams
 		check  func(t *testing.T, result *Result)
 	}{
 		{
 			name: "negative top clamped to 1",
-			params: map[string]any{
+			params: MapParams{Params: map[string]any{
 				"top": -5,
-			},
+			}},
 			check: func(t *testing.T, result *Result) {
 				// Should succeed with clamped value
 				if !result.Success && result.Error != "" {
@@ -412,9 +412,9 @@ func TestFindModuleAPITool_Execute_ParameterValidation(t *testing.T) {
 		},
 		{
 			name: "top > 50 clamped to 50",
-			params: map[string]any{
+			params: MapParams{Params: map[string]any{
 				"top": 100,
-			},
+			}},
 			check: func(t *testing.T, result *Result) {
 				// Should succeed with clamped value
 				output, ok := result.Output.(FindModuleAPIOutput)
@@ -425,9 +425,9 @@ func TestFindModuleAPITool_Execute_ParameterValidation(t *testing.T) {
 		},
 		{
 			name: "min_community_size < 1 clamped to 1",
-			params: map[string]any{
+			params: MapParams{Params: map[string]any{
 				"min_community_size": 0,
-			},
+			}},
 			check: func(t *testing.T, result *Result) {
 				// Should succeed with clamped value
 				if !result.Success && result.Error != "" {

@@ -8,7 +8,7 @@
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
 
-package code_buddy
+package trace
 
 import (
 	"context"
@@ -195,7 +195,7 @@ func TestSymbolKindToString(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.expected, func(t *testing.T) {
-			// Import lsp package types through code_buddy
+			// Import lsp package types through trace
 			// Since we can't import lsp directly, we test via the function
 			// This is a limitation of the test structure
 		})

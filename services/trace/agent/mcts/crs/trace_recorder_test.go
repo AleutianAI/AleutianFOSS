@@ -8,6 +8,7 @@
 package crs
 
 import (
+	"context"
 	"encoding/json"
 	"sync"
 	"testing"
@@ -600,6 +601,140 @@ func TestTraceRecorder_WithoutSanitizer(t *testing.T) {
 // contains checks if s contains substr (helper for tests)
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))
+}
+
+// =============================================================================
+// CRS-WIRE-01: TraceStepToStepRecord bridge tests
+// =============================================================================
+
+func TestTraceStepToStepRecord_Success(t *testing.T) {
+	step := TraceStep{
+		Step:      3,
+		Timestamp: 1709000000000,
+		Action:    "tool_call",
+		Target:    "find_callers",
+		Tool:      "find_callers",
+		Duration:  250 * time.Millisecond,
+		Metadata:  map[string]string{"function_name": "main"},
+	}
+
+	record := TraceStepToStepRecord(step, "session-123")
+
+	if record.SessionID != "session-123" {
+		t.Errorf("SessionID = %q, want %q", record.SessionID, "session-123")
+	}
+	if record.StepNumber != 3 {
+		t.Errorf("StepNumber = %d, want 3", record.StepNumber)
+	}
+	if record.Timestamp != 1709000000000 {
+		t.Errorf("Timestamp = %d, want 1709000000000", record.Timestamp)
+	}
+	if record.Actor != ActorSystem {
+		t.Errorf("Actor = %q, want %q", record.Actor, ActorSystem)
+	}
+	if record.Decision != DecisionExecuteTool {
+		t.Errorf("Decision = %q, want %q", record.Decision, DecisionExecuteTool)
+	}
+	if record.Tool != "find_callers" {
+		t.Errorf("Tool = %q, want %q", record.Tool, "find_callers")
+	}
+	if record.Outcome != OutcomeSuccess {
+		t.Errorf("Outcome = %q, want %q", record.Outcome, OutcomeSuccess)
+	}
+	if record.ErrorMessage != "" {
+		t.Errorf("ErrorMessage = %q, want empty", record.ErrorMessage)
+	}
+	if record.DurationMs != 250 {
+		t.Errorf("DurationMs = %d, want 250", record.DurationMs)
+	}
+	if record.ResultSummary != "tool_call: find_callers" {
+		t.Errorf("ResultSummary = %q, want %q", record.ResultSummary, "tool_call: find_callers")
+	}
+	if !record.Propagate {
+		t.Error("Propagate should be true")
+	}
+}
+
+func TestTraceStepToStepRecord_Error(t *testing.T) {
+	step := TraceStep{
+		Action:   "tool_call",
+		Tool:     "find_path",
+		Duration: 100 * time.Millisecond,
+		Error:    "symbol not found",
+	}
+
+	record := TraceStepToStepRecord(step, "session-456")
+
+	if record.Outcome != OutcomeFailure {
+		t.Errorf("Outcome = %q, want %q", record.Outcome, OutcomeFailure)
+	}
+	if record.ErrorMessage != "symbol not found" {
+		t.Errorf("ErrorMessage = %q, want %q", record.ErrorMessage, "symbol not found")
+	}
+	if record.ErrorCategory != ErrorCategoryInternal {
+		t.Errorf("ErrorCategory = %q, want %q", record.ErrorCategory, ErrorCategoryInternal)
+	}
+}
+
+func TestTraceStepToStepRecord_ZeroTimestamp(t *testing.T) {
+	step := TraceStep{
+		Action: "tool_call",
+		Tool:   "grep",
+	}
+
+	record := TraceStepToStepRecord(step, "session-789")
+
+	// Should auto-assign current time when timestamp is 0
+	if record.Timestamp == 0 {
+		t.Error("Timestamp should be auto-assigned when input is 0")
+	}
+	now := time.Now().UnixMilli()
+	if record.Timestamp > now || record.Timestamp < now-1000 {
+		t.Errorf("Timestamp %d should be close to now %d", record.Timestamp, now)
+	}
+}
+
+func TestTraceStepToStepRecord_IntegrationWithCRS(t *testing.T) {
+	// End-to-end: record steps via bridge → verify CountToolExecutions works
+	ctx := context.Background()
+	c := New(nil)
+
+	step1 := TraceStep{
+		Action: "tool_call",
+		Tool:   "find_callers",
+	}
+	step2 := TraceStep{
+		Action: "tool_call",
+		Tool:   "find_callers",
+	}
+	step3 := TraceStep{
+		Action: "tool_call",
+		Tool:   "find_path",
+	}
+
+	sessionID := "test-session"
+	for _, step := range []TraceStep{step1, step2, step3} {
+		record := TraceStepToStepRecord(step, sessionID)
+		if err := c.RecordStep(ctx, record); err != nil {
+			t.Fatalf("RecordStep() error = %v", err)
+		}
+	}
+
+	// Verify counts
+	callersCount := c.CountToolExecutions(sessionID, "find_callers")
+	if callersCount != 2 {
+		t.Errorf("CountToolExecutions(find_callers) = %d, want 2", callersCount)
+	}
+
+	pathCount := c.CountToolExecutions(sessionID, "find_path")
+	if pathCount != 1 {
+		t.Errorf("CountToolExecutions(find_path) = %d, want 1", pathCount)
+	}
+
+	grepCount := c.CountToolExecutions(sessionID, "grep")
+	if grepCount != 0 {
+		t.Errorf("CountToolExecutions(grep) = %d, want 0", grepCount)
+	}
 }
 
 func containsHelper(s, substr string) bool {

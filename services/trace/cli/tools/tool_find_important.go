@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -42,6 +43,36 @@ type FindImportantParams struct {
 	// Values: "function", "type", "all"
 	// Default: "all"
 	Kind string
+
+	// Package filters results to a specific package or module scope.
+	// Uses matchesPackageScope() with 3 strategies: Package field match,
+	// FilePath segment match, and file stem match.
+	// IT-07: Added to match find_hotspots package filter capability.
+	// Default: "" (no filter)
+	Package string
+
+	// ExcludeTests filters out symbols from test and documentation files.
+	// Default: true
+	ExcludeTests bool
+
+	// Reverse returns lowest-ranked symbols first (peripheral functions).
+	// IT-R2c Fix E: Supports "lowest PageRank" / "peripheral" queries.
+	// Default: false
+	Reverse bool
+}
+
+// ToolName returns the tool name for TypedParams interface.
+func (p FindImportantParams) ToolName() string { return "find_important" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p FindImportantParams) ToMap() map[string]any {
+	return map[string]any{
+		"top":           p.Top,
+		"kind":          p.Kind,
+		"package":       p.Package,
+		"exclude_tests": p.ExcludeTests,
+		"reverse":       p.Reverse,
+	}
 }
 
 // FindImportantOutput contains the structured result.
@@ -154,6 +185,24 @@ func (t *findImportantTool) Definition() ToolDefinition {
 				Default:     "all",
 				Enum:        []any{"function", "type", "all"},
 			},
+			"package": {
+				Type:        ParamTypeString,
+				Description: "Filter results to a specific package or module (e.g., 'helpers', 'router'). Leave empty for project-wide results.",
+				Required:    false,
+				Default:     "",
+			},
+			"exclude_tests": {
+				Type:        ParamTypeBool,
+				Description: "Exclude symbols from test and documentation files (default: true)",
+				Required:    false,
+				Default:     true,
+			},
+			"reverse": {
+				Type:        ParamTypeBool,
+				Description: "Return lowest-ranked symbols first (for finding peripheral/least important functions). Default: false (highest first).",
+				Required:    false,
+				Default:     false,
+			},
 		},
 		Category:    CategoryExploration,
 		Priority:    89,
@@ -164,11 +213,11 @@ func (t *findImportantTool) Definition() ToolDefinition {
 }
 
 // Execute runs the find_important tool.
-func (t *findImportantTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	start := time.Now()
 
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
 		return &Result{
 			Success: false,
@@ -190,6 +239,9 @@ func (t *findImportantTool) Execute(ctx context.Context, params map[string]any) 
 			attribute.String("tool", "find_important"),
 			attribute.Int("top", p.Top),
 			attribute.String("kind", p.Kind),
+			attribute.String("package", p.Package),
+			attribute.Bool("exclude_tests", p.ExcludeTests),
+			attribute.Bool("reverse", p.Reverse),
 		),
 	)
 	defer span.End()
@@ -200,13 +252,20 @@ func (t *findImportantTool) Execute(ctx context.Context, params map[string]any) 
 		return nil, err
 	}
 
-	// Adaptive request size based on filter
+	// Adaptive request size based on filters.
+	// F-5: When filtering by kind or excluding tests/docs, request 10x to ensure
+	// enough results survive. PageRank computes scores for ALL nodes anyway —
+	// the only cost of requesting more is iterating a larger slice in the filter loop.
+	// Previous 5x multiplier was insufficient for projects like NestJS where
+	// Phase 4 reclassifies 576 integration/ files as non-production.
+	hasFilters := p.Kind != "all" || p.ExcludeTests || p.Package != ""
 	requestCount := p.Top
-	if p.Kind != "all" {
-		requestCount = p.Top * 3 // Request 3x when filtering to ensure enough results
+	if hasFilters {
+		requestCount = p.Top * 10 // Request 10x when filtering (test+doc+kind)
 		t.logger.Debug("pagerank request adjusted for filtering",
 			slog.String("tool", "find_important"),
 			slog.String("kind_filter", p.Kind),
+			slog.Bool("exclude_tests", p.ExcludeTests),
 			slog.Int("top_requested", p.Top),
 			slog.Int("request_count", requestCount),
 		)
@@ -220,7 +279,94 @@ func (t *findImportantTool) Execute(ctx context.Context, params map[string]any) 
 		attribute.String("trace_action", traceStep.Action),
 	)
 
-	// Filter by kind if needed
+	// Phase 1: Filter out test and documentation files
+	var sourceOnly []graph.PageRankNode
+	if p.ExcludeTests {
+		filteredCount := 0
+		for _, prn := range pageRankNodes {
+			if prn.Node == nil || prn.Node.Symbol == nil {
+				continue
+			}
+			filePath := prn.Node.Symbol.FilePath
+			// GR-60: Use graph-based file classification instead of heuristics
+			isProd := t.analytics.IsProductionFile(filePath)
+			// F-3: Safety net — _test.go is NEVER production regardless of classification.
+			// Defense-in-depth for cases where graph classification misses a test file
+			// (e.g., file path normalization issues).
+			if isProd && strings.HasSuffix(filepath.Base(filePath), "_test.go") {
+				isProd = false
+			}
+			if !isProd {
+				filteredCount++
+				// GR-60c: Debug log for classification decisions on top results
+				if filteredCount <= 10 {
+					t.logger.Info("GR-60c: filtered non-production file from find_important",
+						slog.String("file", filePath),
+						slog.String("symbol", prn.Node.Symbol.Name),
+						slog.Float64("pagerank", prn.Score),
+					)
+				}
+				continue
+			}
+			sourceOnly = append(sourceOnly, prn)
+		}
+		if filteredCount > 0 {
+			t.logger.Info("GR-60c: find_important filter summary",
+				slog.Int("raw_results", len(pageRankNodes)),
+				slog.Int("filtered_out", filteredCount),
+				slog.Int("kept", len(sourceOnly)),
+			)
+		}
+		if len(sourceOnly) > 0 {
+			pageRankNodes = sourceOnly
+		}
+		// If ALL results are test/doc files, keep original to avoid empty results.
+		span.SetAttributes(attribute.Int("after_test_doc_filter", len(sourceOnly)))
+	}
+
+	// Phase 2: Filter by package scope if specified.
+	// IT-07: Uses matchesPackageScope() with 3 strategies (Package field, FilePath
+	// segment, file stem) to match find_hotspots package filter capability.
+	//
+	// HISTORY (read before modifying):
+	// - FIX-6 (original): Added this filter phase. Package param added to struct,
+	//   Definition(), parseParams(). BUT never wired into execute_execution.go
+	//   extractToolParameters() or convertMapToTypedParams(). So p.Package was
+	//   ALWAYS "" and this block never executed. FIX-6 was incorrectly marked DONE.
+	// - CR-11: Said "no matches = correct answer, return empty." Correct principle.
+	// - FIX-B: Overrode CR-11 with fallback to global results, arguing the param
+	//   extractor sends conceptual names ("materials") that can't match. But the
+	//   real bug was upstream: Package was never populated. FIX-B was solving a
+	//   phantom problem and broke CR-11's correct behavior.
+	// - IT-Summary Round 2: Discovered Package was never wired. Fixed upstream in
+	//   execute_execution.go. Restored CR-11 behavior here (no fallback).
+	//
+	// RULE: If the package filter returns 0 results, that IS the correct answer.
+	// Do NOT fall back to global results — that silently gives wrong-scope data
+	// to the LLM. If conceptual scope names ("materials", "write path") don't
+	// match, the fix belongs in extractPackageContextFromQuery(), not here.
+	if p.Package != "" {
+		var packageFiltered []graph.PageRankNode
+		for _, prn := range pageRankNodes {
+			if prn.Node == nil || prn.Node.Symbol == nil {
+				continue
+			}
+			if matchesPackageScope(prn.Node.Symbol, p.Package) {
+				packageFiltered = append(packageFiltered, prn)
+			}
+		}
+		t.logger.Info("IT-07: find_important package filter applied",
+			slog.String("package", p.Package),
+			slog.Int("before", len(pageRankNodes)),
+			slog.Int("after", len(packageFiltered)),
+		)
+		span.SetAttributes(attribute.Int("after_package_filter", len(packageFiltered)))
+		// CR-11: Unconditionally apply filter. Empty result = "no important
+		// symbols found in that scope." Do NOT fall back to global results.
+		pageRankNodes = packageFiltered
+	}
+
+	// Phase 3: Filter by kind if needed
 	var filtered []graph.PageRankNode
 	if p.Kind == "all" {
 		filtered = pageRankNodes
@@ -235,26 +381,44 @@ func (t *findImportantTool) Execute(ctx context.Context, params map[string]any) 
 		}
 	}
 
+	// IT-R2c Fix E: Reverse order for "lowest PageRank" / "peripheral" queries.
+	// PageRank results arrive sorted descending. Reverse to ascending before trim.
+	if p.Reverse && len(filtered) > 0 {
+		for i, j := 0, len(filtered)-1; i < j; i, j = i+1, j-1 {
+			filtered[i], filtered[j] = filtered[j], filtered[i]
+		}
+	}
+
 	// Trim to requested count
 	if len(filtered) > p.Top {
 		filtered = filtered[:p.Top]
 	}
 
+	// Phase 4: Re-assign ranks sequentially after filtering (XC-4 fix).
+	// Without this, kind="function" results show ranks 12, 15, 18... instead of 1, 2, 3...
+	for i := range filtered {
+		filtered[i].Rank = i + 1
+	}
+
 	span.SetAttributes(attribute.Int("filtered_results", len(filtered)))
 
-	// Structured logging for edge cases
+	// F-5: Warn when filtering removes too many results — indicates the project
+	// has a high test-to-production ratio and the multiplier may need further tuning.
 	if len(pageRankNodes) > 0 && len(filtered) == 0 {
-		t.logger.Debug("all PageRank results filtered by kind",
+		t.logger.Warn("F-5: all PageRank results filtered — project may have very few production symbols",
 			slog.String("tool", "find_important"),
 			slog.Int("raw_count", len(pageRankNodes)),
 			slog.String("kind_filter", p.Kind),
+			slog.Bool("exclude_tests", p.ExcludeTests),
 		)
-	} else if len(filtered) < p.Top && p.Kind != "all" {
-		t.logger.Debug("fewer results than requested after filtering",
+	} else if len(filtered) < p.Top && hasFilters {
+		t.logger.Warn("F-5: fewer results than requested after filtering",
 			slog.String("tool", "find_important"),
 			slog.Int("requested", p.Top),
 			slog.Int("returned", len(filtered)),
+			slog.Int("raw_count", len(pageRankNodes)),
 			slog.String("kind_filter", p.Kind),
+			slog.Bool("exclude_tests", p.ExcludeTests),
 		)
 	}
 
@@ -262,7 +426,7 @@ func (t *findImportantTool) Execute(ctx context.Context, params map[string]any) 
 	output := t.buildOutput(filtered)
 
 	// Format text output
-	outputText := t.formatText(filtered)
+	outputText := t.formatText(filtered, p.Package)
 
 	return &Result{
 		Success:    true,
@@ -277,8 +441,9 @@ func (t *findImportantTool) Execute(ctx context.Context, params map[string]any) 
 // parseParams validates and extracts typed parameters from the raw map.
 func (t *findImportantTool) parseParams(params map[string]any) (FindImportantParams, error) {
 	p := FindImportantParams{
-		Top:  10,
-		Kind: "all",
+		Top:          10,
+		Kind:         "all",
+		ExcludeTests: true,
 	}
 
 	// Extract top (optional)
@@ -316,16 +481,47 @@ func (t *findImportantTool) parseParams(params map[string]any) (FindImportantPar
 		}
 	}
 
+	// Extract package (optional, default: "")
+	// IT-07: Package scope filter for find_important.
+	if pkgRaw, ok := params["package"]; ok {
+		if pkg, ok := parseStringParam(pkgRaw); ok {
+			p.Package = pkg
+		}
+	}
+
+	// Extract exclude_tests (optional, default: true)
+	if etRaw, ok := params["exclude_tests"]; ok {
+		if et, ok := etRaw.(bool); ok {
+			p.ExcludeTests = et
+		}
+	}
+
+	// Extract reverse (optional, default: false)
+	// IT-R2c Fix E: Support "lowest PageRank" / "peripheral" queries.
+	if revRaw, ok := params["reverse"]; ok {
+		if rev, ok := revRaw.(bool); ok {
+			p.Reverse = rev
+		}
+	}
+
 	return p, nil
 }
 
 // matchesKind checks if a symbol kind matches a filter string.
+//
+// IT-08c: Aligned with matchesKindFilter in symbol_resolution.go and
+// matchesHotspotKind in tool_find_hotspots.go for cross-language consistency.
 func (t *findImportantTool) matchesKind(kind ast.SymbolKind, filter string) bool {
 	switch filter {
 	case "function":
-		return kind == ast.SymbolKindFunction || kind == ast.SymbolKindMethod
+		return kind == ast.SymbolKindFunction ||
+			kind == ast.SymbolKindMethod ||
+			kind == ast.SymbolKindProperty // IT-08c: Python @property has callable body
 	case "type":
-		return kind == ast.SymbolKindType || kind == ast.SymbolKindStruct || kind == ast.SymbolKindInterface
+		return kind == ast.SymbolKindType ||
+			kind == ast.SymbolKindStruct ||
+			kind == ast.SymbolKindInterface ||
+			kind == ast.SymbolKindClass // IT-08c: JS/TS/Python classes
 	default:
 		return true
 	}
@@ -359,16 +555,37 @@ func (t *findImportantTool) buildOutput(nodes []graph.PageRankNode) FindImportan
 	}
 }
 
-// formatText creates a human-readable text summary.
-func (t *findImportantTool) formatText(nodes []graph.PageRankNode) string {
+// formatText creates a human-readable text summary with graph markers.
+//
+// F-4: Output must include graph markers so that getSingleFormattedResult()
+// can identify authoritative results and skip LLM synthesis:
+//   - Zero results: "## GRAPH RESULT" header + "Do NOT use Grep" footer
+//   - Positive results: "Found N" prefix + exhaustive footer + "Do NOT use Grep" footer
+//
+// This matches the pattern used by find_hotspots and find_dead_code.
+func (t *findImportantTool) formatText(nodes []graph.PageRankNode, packageFilter string) string {
 	var sb strings.Builder
 
+	// CR-12: Include package scope in output header when filter is active.
+	scopeLabel := ""
+	if packageFilter != "" {
+		scopeLabel = fmt.Sprintf(" in package '%s'", packageFilter)
+	}
+
 	if len(nodes) == 0 {
-		sb.WriteString("No important symbols found.\n")
+		sb.WriteString(fmt.Sprintf("## GRAPH RESULT: No important symbols found%s\n\n", scopeLabel))
+		if packageFilter != "" {
+			sb.WriteString(fmt.Sprintf("No symbols matching package '%s' were found in the PageRank results.\n\n", packageFilter))
+		} else {
+			sb.WriteString("No symbols with PageRank score > 0 exist in the graph.\n\n")
+		}
+		sb.WriteString("---\n")
+		sb.WriteString("The graph has been fully indexed — these results are exhaustive.\n")
+		sb.WriteString("**Do NOT use Grep or Read to verify** — the graph already analyzed all source files.\n")
 		return sb.String()
 	}
 
-	sb.WriteString(fmt.Sprintf("Top %d Most Important Symbols (PageRank):\n\n", len(nodes)))
+	sb.WriteString(fmt.Sprintf("Found %d most important symbols%s (PageRank):\n\n", len(nodes), scopeLabel))
 
 	for _, prn := range nodes {
 		if prn.Node == nil || prn.Node.Symbol == nil {
@@ -385,7 +602,9 @@ func (t *findImportantTool) formatText(nodes []graph.PageRankNode) string {
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString("Note: PageRank considers caller importance, not just caller count.\n")
+	sb.WriteString("---\n")
+	sb.WriteString("The graph has been fully indexed — these results are exhaustive.\n")
+	sb.WriteString("**Do NOT use Grep or Read to verify** — the graph already analyzed all source files.\n")
 
 	return sb.String()
 }

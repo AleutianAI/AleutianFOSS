@@ -75,10 +75,10 @@ func main() {
 }
 `
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"content":  validGo,
 		"language": "go",
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -112,10 +112,10 @@ func main() {
 	// Missing closing brace
 `
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"content":  invalidGo,
 		"language": "go",
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -155,10 +155,10 @@ class Greeter:
         return f"{self.prefix} {name}"
 `
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"content":  validPython,
 		"language": "python",
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -182,10 +182,10 @@ func TestSyntaxTool_Execute_InvalidPython(t *testing.T) {
     return "Hello"
 `
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"content":  invalidPython,
 		"language": "python",
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -217,10 +217,10 @@ function greet(user: User): string {
 const users: User[] = [];
 `
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"content":  validTS,
 		"language": "typescript",
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -257,10 +257,10 @@ impl Point {
 }
 `
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"content":  validRust,
 		"language": "rust",
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -294,10 +294,10 @@ else
 fi
 `
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"content":  validBash,
 		"language": "bash",
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -330,9 +330,9 @@ func main() {}
 	tool := NewSyntaxTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_path": tmpFile,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -378,9 +378,9 @@ func TestSyntaxTool_Execute_RelativePath(t *testing.T) {
 	ctx := context.Background()
 
 	// Use relative path
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_path": "src/test.py",
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -404,7 +404,7 @@ func TestSyntaxTool_Execute_MissingInput(t *testing.T) {
 	tool := NewSyntaxTool(DefaultConfig())
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{})
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{}})
 
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -423,10 +423,10 @@ func TestSyntaxTool_Execute_UnsupportedLanguage(t *testing.T) {
 	tool := NewSyntaxTool(DefaultConfig())
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"content":  "some code",
 		"language": "cobol",
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -441,9 +441,9 @@ func TestSyntaxTool_Execute_FileNotFound(t *testing.T) {
 	tool := NewSyntaxTool(DefaultConfig())
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_path": "/nonexistent/path/to/file.go",
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -473,11 +473,11 @@ func TestSyntaxTool_Execute_ContentTakesPrecedence(t *testing.T) {
 
 func main() {}
 `
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_path": tmpFile,
 		"content":   validGo,
 		"language":  "go",
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -500,10 +500,10 @@ func TestSyntaxTool_Execute_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"content":  "package main\n\nfunc main() {}",
 		"language": "go",
-	})
+	}})
 
 	// Should not return an error, but parsing may fail
 	if err != nil {
@@ -549,10 +549,10 @@ func TestSyntaxOutput_Metadata(t *testing.T) {
 	tool := NewSyntaxTool(DefaultConfig())
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"content":  "package main\n\nfunc main() {}",
 		"language": "go",
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -592,10 +592,10 @@ func main() {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = tool.Execute(ctx, map[string]any{
+		_, _ = tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 			"content":  content,
 			"language": "go",
-		})
+		}})
 	}
 }
 
@@ -612,9 +612,9 @@ func BenchmarkSyntaxTool_Execute_LargeGo(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = tool.Execute(ctx, map[string]any{
+		_, _ = tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 			"content":  content,
 			"language": "go",
-		})
+		}})
 	}
 }

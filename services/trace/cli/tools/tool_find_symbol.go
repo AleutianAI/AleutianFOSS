@@ -21,6 +21,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
@@ -42,6 +43,21 @@ type FindSymbolParams struct {
 
 	// Package filters by package path (optional).
 	Package string
+}
+
+// ToolName returns the tool name for TypedParams interface.
+func (p FindSymbolParams) ToolName() string { return "find_symbol" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p FindSymbolParams) ToMap() map[string]any {
+	m := map[string]any{
+		"name": p.Name,
+		"kind": p.Kind,
+	}
+	if p.Package != "" {
+		m["package"] = p.Package
+	}
+	return m
 }
 
 // FindSymbolOutput contains the structured result.
@@ -152,10 +168,10 @@ func (t *findSymbolTool) Definition() ToolDefinition {
 			},
 			"kind": {
 				Type:        ParamTypeString,
-				Description: "Filter by symbol kind: function, type, interface, variable, constant, method, or all",
+				Description: "Filter by symbol kind: function, method, class, struct, interface, type, variable, constant, enum, decorator, property, field, component, or all",
 				Required:    false,
 				Default:     "all",
-				Enum:        []any{"function", "type", "interface", "variable", "constant", "method", "all"},
+				Enum:        []any{"function", "method", "class", "struct", "interface", "type", "variable", "constant", "enum", "decorator", "property", "field", "component", "all"},
 			},
 			"package": {
 				Type:        ParamTypeString,
@@ -172,15 +188,23 @@ func (t *findSymbolTool) Definition() ToolDefinition {
 }
 
 // Execute runs the find_symbol tool.
-func (t *findSymbolTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findSymbolTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	start := time.Now()
 
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
+		errStep := crs.NewTraceStepBuilder().
+			WithAction("tool_find_symbol").
+			WithTool("find_symbol").
+			WithDuration(time.Since(start)).
+			WithError(err.Error()).
+			Build()
 		return &Result{
-			Success: false,
-			Error:   err.Error(),
+			Success:   false,
+			Error:     err.Error(),
+			TraceStep: &errStep,
+			Duration:  time.Since(start),
 		}, nil
 	}
 
@@ -256,12 +280,26 @@ func (t *findSymbolTool) Execute(ctx context.Context, params map[string]any) (*R
 		attribute.Bool("used_fuzzy", usedFuzzy),
 	)
 
+	duration := time.Since(start)
+
+	// Build CRS TraceStep for reasoning trace continuity
+	toolStep := crs.NewTraceStepBuilder().
+		WithAction("tool_find_symbol").
+		WithTarget(p.Name).
+		WithTool("find_symbol").
+		WithDuration(duration).
+		WithMetadata("match_count", fmt.Sprintf("%d", len(filtered))).
+		WithMetadata("used_fuzzy", fmt.Sprintf("%v", usedFuzzy)).
+		WithMetadata("kind_filter", p.Kind).
+		Build()
+
 	return &Result{
 		Success:    true,
 		Output:     output,
 		OutputText: outputText,
 		TokensUsed: estimateTokens(outputText),
-		Duration:   time.Since(start),
+		TraceStep:  &toolStep,
+		Duration:   duration,
 	}, nil
 }
 
@@ -277,8 +315,8 @@ func (t *findSymbolTool) parseParams(params map[string]any) (FindSymbolParams, e
 			p.Name = name
 		}
 	}
-	if p.Name == "" {
-		return p, fmt.Errorf("name is required")
+	if err := ValidateSymbolName(p.Name, "name", "'Router', 'handleRequest', 'Config'"); err != nil {
+		return p, err
 	}
 
 	// Extract kind (optional)
@@ -357,20 +395,50 @@ func (t *findSymbolTool) formatText(searchName string, symbols []*ast.Symbol) st
 }
 
 // matchesSymbolKind checks if a symbol kind matches a filter string.
+//
+// IT-04 Audit: Comprehensive kind matching across Go, Python, TypeScript, JavaScript.
+//   - "type" now matches Type, Struct, Class, AND Interface (all are type-level constructs)
+//   - "class" matches Class (Python/JS/TS class definitions)
+//   - "struct" matches Struct (Go struct definitions)
+//   - Added "decorator", "property", "field", "component" filters
+//   - "all" or any unrecognized value matches everything
 func matchesSymbolKind(kind ast.SymbolKind, filter string) bool {
 	switch filter {
 	case "function":
 		return kind == ast.SymbolKindFunction
 	case "method":
 		return kind == ast.SymbolKindMethod
+	case "class":
+		// IT-04: "class" matches both Class and Struct. The router may send "class"
+		// for Go codebases where the actual kind is Struct, or vice versa.
+		return kind == ast.SymbolKindClass || kind == ast.SymbolKindStruct
+	case "struct":
+		// IT-04: "struct" matches both Struct and Class. JS/Python/TS don't have structs;
+		// the router (trained on Go) sends "struct" for constructor functions that the
+		// JS parser classifies as SymbolKindClass.
+		return kind == ast.SymbolKindStruct || kind == ast.SymbolKindClass
 	case "type":
-		return kind == ast.SymbolKindType || kind == ast.SymbolKindStruct
+		// "type" is the broadest type-level filter: matches all type-defining constructs
+		return kind == ast.SymbolKindType || kind == ast.SymbolKindStruct ||
+			kind == ast.SymbolKindClass || kind == ast.SymbolKindInterface
 	case "interface":
 		return kind == ast.SymbolKindInterface
 	case "variable":
 		return kind == ast.SymbolKindVariable
 	case "constant":
 		return kind == ast.SymbolKindConstant
+	case "enum":
+		return kind == ast.SymbolKindEnum
+	case "decorator":
+		return kind == ast.SymbolKindDecorator
+	case "property":
+		return kind == ast.SymbolKindProperty
+	case "field":
+		return kind == ast.SymbolKindField
+	case "component":
+		return kind == ast.SymbolKindComponent
+	case "all":
+		return true
 	default:
 		return true
 	}

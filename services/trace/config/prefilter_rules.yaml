@@ -1,0 +1,376 @@
+# Pre-filter rules for tool routing (CB-38, CB-62).
+# Narrows 55+ tools to candidates before the LLM router classifies.
+#
+# CB-62: scoring_mode=embedding_primary uses pure embedding scoring.
+# BM25 is no longer in the scoring path. Forced mappings and confusion pairs
+# below are deterministic cheap insurance for unambiguous patterns and
+# genuine semantic overlap. Embeddings handle morphological variants,
+# misspellings, and synonyms naturally.
+
+enabled: true
+min_candidates: 3
+max_candidates: 20
+scoring_mode: embedding_primary
+score_gap_threshold: 0.15
+score_floor: 0.30
+negation_proximity: 3
+always_include:
+  - answer
+
+forced_mappings:
+  # IT-12 Rev 4: "call chain from X to Y" is two-endpoint → find_path.
+  # Must appear before get_call_chain so the more specific pattern matches first.
+  - patterns:
+      - "call chain from .* to"
+    tool: find_path
+    reason: "Two-endpoint call chain query"
+
+  - patterns:
+      - "call chain from"
+      - "call chain of"
+      - "full call hierarchy"
+      - "transitive callers"
+      - "transitive callees"
+    tool: get_call_chain
+    reason: "Explicit call chain request"
+
+  - patterns:
+      - "shortest path between"
+      - "path from .* to"
+    tool: find_path
+    reason: "Path query is unambiguous"
+
+  # IT-R2c Fix B: Force find_important when query explicitly says "most important"
+  # or "PageRank". Without this, the LLM router misclassifies subsystem-scoped
+  # importance queries (e.g., "most important in compaction") as find_weighted_criticality.
+  # Tests affected: 5160, 5161, and ~5 others across projects.
+  - patterns:
+      - "most important.*pagerank"
+      - "pagerank.*most important"
+      - "most important functions in"
+      - "most important.*by pagerank"
+      - "important.*by pagerank"
+      - "pagerank.*in the"
+      - "lowest pagerank"
+      - "peripheral functions"
+      - "least important"
+      - "most important in the"
+      - "functions are most important"
+      - "which.*most important"
+    tool: find_important
+    reason: "Explicit importance/PageRank query — always find_important, not find_weighted_criticality"
+
+  # GR-61 Option L: Intent templates for reference vs symbol disambiguation.
+  #
+  # Ordering constraint: Phase 1 (forced mappings) fires BEFORE Phase 2
+  # (negation detection). Patterns here must therefore be structurally
+  # specific enough that they cannot appear in negated form in practice.
+  #
+  # Design choice: broad patterns like "where is .* referenced" are
+  # intentionally EXCLUDED because they would match "where is X not
+  # referenced" before the negation phase fires — wrongly forcing
+  # find_references when find_dead_code is correct.
+  #
+  # Go regexp uses RE2, which does NOT support lookaheads (?!...) or \b.
+  # The specificity of the prepositional phrase ("across", "in", "throughout")
+  # is the negation guard: these phrases are not idiomatic with negation.
+  - patterns:
+      - "where is .* referenced across"
+      - "where is .* referenced in"
+      - "where is .* referenced throughout"
+      - "how is .* referenced"
+      - "find all references to"
+      - "referenced across the codebase"
+      - "referenced throughout"
+      - "all usages of"
+      - "all uses of"
+    tool: find_references
+    reason: "Passive-voice reference query with prepositional context — subject is being referenced"
+
+  - patterns:
+      - "where is .* defined"
+      - "where is .* declared"
+      - "where is it defined"
+      - "find the definition of"
+      - "locate the .* definition"
+    tool: find_symbol
+    reason: "Definition lookup — asking for declaration site, not call sites"
+
+  # CB-62 Rev 1: Re-added find_implementations forced mapping. Embeddings
+  # DO NOT reliably rank "extend" → find_implementations in the top 3-5
+  # candidates. The embedding model's cosine similarity for inheritance
+  # queries is too low, causing the prefilter gap cutoff to exclude
+  # find_implementations. Without this forced mapping, the router correctly
+  # picks find_implementations but the prefilter already excluded it,
+  # triggering the string-matching fallback to a random tool (find_loops).
+  - patterns:
+      - "what .*extend"
+      - "classes extend"
+      - "extends the"
+      - "what implements"
+      - "classes implement"
+      - "what inherits"
+      - "inherits from"
+      - "subclass"
+      - "child class"
+      - "class hierarchy"
+      - "concrete types that"
+      - "types that implement"
+    tool: find_implementations
+    reason: "Class inheritance/interface implementation query"
+
+negation_rules:
+  - negation_words: ["no", "not", "never", "zero", "without"]
+    trigger_keywords: ["callers", "incoming calls", "called", "referenced"]
+    wrong_tool: find_callers
+    correct_tool: find_dead_code
+    action: force
+    reason: "Negated caller = dead code"
+
+  - negation_words: ["no", "not", "never", "zero"]
+    trigger_keywords: ["references", "usages", "uses"]
+    wrong_tool: find_references
+    correct_tool: find_dead_code
+    action: force
+    reason: "Negated reference = unreferenced code"
+
+confusion_pairs:
+  - tool_a: find_callers
+    tool_b: find_callees
+    tool_a_patterns:
+      - "who calls"
+      - "what calls"
+      - "callers of"
+      - "call sites for"
+    tool_b_patterns:
+      - "what does .* call"
+      - "what functions does"
+      - "dependencies of"
+    boost_amount: 3.0
+
+  - tool_a: find_callers
+    tool_b: find_references
+    tool_a_patterns:
+      - "who calls"
+      - "what calls"
+      - "call sites"
+    tool_b_patterns:
+      - "where is .* used"
+      - "references to"
+      - "usages of"
+      - "find all uses"
+    boost_amount: 3.0
+
+  - tool_a: find_hotspots
+    tool_b: find_weighted_criticality
+    tool_a_patterns:
+      - "most connected"
+      - "coupling"
+      - "fan-in"
+      - "fan-out"
+      - "hotspot"
+    tool_b_patterns:
+      - "most critical"
+      - "highest risk"
+      - "would break"
+      - "stability"
+    boost_amount: 3.0
+
+  - tool_a: find_cycles
+    tool_b: find_circular_deps
+    tool_a_patterns:
+      - "function cycles"
+      - "call cycles"
+      - "mutual recursion"
+    tool_b_patterns:
+      - "circular dependencies"
+      - "package cycles"
+      - "dependency cycle"
+    boost_amount: 2.0
+
+  # IT-Summary Round 2: find_important vs find_weighted_criticality.
+  # "most important" / "PageRank" → find_important (centrality ranking).
+  # "most critical" / "crash risk" / "would break" → find_weighted_criticality (risk assessment).
+  # Without this pair, "most important by PageRank" can match find_weighted_criticality's
+  # "critical functions" keyword. Tests affected: 5260, 6161.
+  - tool_a: find_important
+    tool_b: find_weighted_criticality
+    tool_a_patterns:
+      - "most important"
+      - "pagerank"
+      - "structural importance"
+      - "influential"
+      - "centrality"
+      - "peripheral"
+      - "least important"
+      - "lowest pagerank"
+    tool_b_patterns:
+      - "crash risk"
+      - "would break"
+      - "highest risk"
+      - "stability"
+      - "production criticality"
+    boost_amount: 3.0
+
+  # IT-Summary Round 2: find_important vs find_communities for "bridges".
+  # "important bridges between subsystems" → find_important (PageRank centrality).
+  # "bridges between communities" → find_communities (community boundary analysis).
+  # The word "bridges" alone is ambiguous. "communities" is the deciding factor.
+  # Test affected: 5061.
+  - tool_a: find_important
+    tool_b: find_communities
+    tool_a_patterns:
+      - "important.*bridges"
+      - "bridges between subsystems"
+      - "bridges between modules"
+    tool_b_patterns:
+      - "bridges between communities"
+      - "community bridges"
+      - "cross-community"
+    boost_amount: 3.0
+
+  # CB-62: Removed confusion pairs that embeddings handle naturally:
+  # - find_callers/find_implementations (IT-16)
+  # - find_callees/find_cycles (IT-16)
+  # - find_communities/find_articulation_points (IT-11)
+
+# =============================================================================
+# CB-62 Rev 2: Routing Encyclopedia
+# =============================================================================
+#
+# Structured intent-to-tool mappings with tiered actions. Phase 0 of the
+# prefilter pipeline — runs BEFORE forced_mappings and negation_rules.
+#
+# Tiers:
+#   force  — deterministic. Skip the router entirely. Use for unambiguous queries.
+#   boost  — add score bonus. Ensures tool makes it into candidate set. Router decides.
+#   hint   — ensure in candidate set (min_candidates fill). No score change.
+#
+# Anti-signals: if ANY anti-signal matches, the entry is suppressed.
+#
+# Migration plan: entries here will gradually replace forced_mappings and
+# confusion_pairs. Both systems coexist during the transition.
+
+routing_encyclopedia:
+  - tool: find_implementations
+    tier: boost
+    boost_amount: 0.25
+    intents:
+      - pattern: "what .*extend"
+        description: "Classes extending a base"
+      - pattern: "classes extend"
+      - pattern: "extends the"
+      - pattern: "what implements"
+      - pattern: "classes implement"
+      - pattern: "what inherits"
+      - pattern: "inherits from"
+      - pattern: "subclass"
+      - pattern: "child class"
+      - pattern: "class hierarchy"
+      - pattern: "concrete types that"
+      - pattern: "types that implement"
+    anti_signals:
+      - "mock implementation"
+      - "stub implementation"
+      - "test double"
+    reason: "Class inheritance/interface implementation query"
+
+  # IT-12 Rev 4: "call chain from X to Y" is a two-endpoint query → find_path.
+  # This entry MUST appear before get_call_chain so the more specific pattern
+  # matches first. Single-endpoint "call chain from X" still hits get_call_chain.
+  - tool: find_path
+    tier: force
+    intents:
+      - pattern: "call chain from .* to"
+    reason: "Two-endpoint call chain query — route to find_path"
+
+  - tool: get_call_chain
+    tier: force
+    intents:
+      - pattern: "call chain from"
+      - pattern: "call chain of"
+      - pattern: "full call hierarchy"
+      - pattern: "transitive callers"
+      - pattern: "transitive callees"
+    reason: "Explicit call chain request — unambiguous"
+
+  - tool: find_path
+    tier: force
+    intents:
+      - pattern: "shortest path between"
+      - pattern: "path from .* to"
+    reason: "Path query — unambiguous"
+
+  - tool: find_references
+    tier: boost
+    boost_amount: 0.20
+    intents:
+      - pattern: "where is .* referenced across"
+      - pattern: "where is .* referenced in"
+      - pattern: "where is .* referenced throughout"
+      - pattern: "how is .* referenced"
+      - pattern: "find all references to"
+      - pattern: "referenced across the codebase"
+      - pattern: "referenced throughout"
+      - pattern: "all usages of"
+      - pattern: "all uses of"
+    anti_signals:
+      - "no references"
+      - "not referenced"
+      - "never referenced"
+      - "zero references"
+      - "without references"
+      - "unreferenced"
+    conflict_with: find_dead_code
+    reason: "Passive-voice reference query"
+
+  - tool: find_symbol
+    tier: boost
+    boost_amount: 0.20
+    intents:
+      - pattern: "where is .* defined"
+      - pattern: "where is .* declared"
+      - pattern: "where is it defined"
+      - pattern: "find the definition of"
+      - pattern: "locate the .* definition"
+    reason: "Definition lookup"
+
+  # IT-R2c Fix B: Ensure find_important wins over find_weighted_criticality
+  # for importance/PageRank queries. Tests: 5160, 5161, 5260, 5261, 6161, 8060, 8160.
+  - tool: find_important
+    tier: force
+    intents:
+      - pattern: "most important.*pagerank"
+      - pattern: "pagerank.*most important"
+      - pattern: "most important functions in"
+      - pattern: "most important.*by pagerank"
+      - pattern: "important.*by pagerank"
+      - pattern: "lowest pagerank"
+      - pattern: "peripheral functions"
+      - pattern: "least important"
+      - pattern: "most important in the"
+      - pattern: "functions are most important"
+      - pattern: "which.*most important"
+    anti_signals:
+      - "crash risk"
+      - "would break"
+      - "highest risk"
+      - "production criticality"
+    conflict_with: find_weighted_criticality
+    reason: "Explicit importance/PageRank query — always find_important"
+
+  - tool: find_dead_code
+    tier: force
+    intents:
+      - pattern: "no callers"
+      - pattern: "not called"
+      - pattern: "never called"
+      - pattern: "zero callers"
+      - pattern: "no references"
+      - pattern: "not referenced"
+      - pattern: "never referenced"
+      - pattern: "unreferenced"
+      - pattern: "dead code"
+      - pattern: "unused function"
+      - pattern: "unused method"
+    reason: "Negated caller/reference = dead code detection"

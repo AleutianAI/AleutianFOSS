@@ -451,3 +451,84 @@ func TestGR44_CircuitBreakerSkipsToolRequirement(t *testing.T) {
 		}
 	})
 }
+
+// TestGR59Rev4_GraphToolSubstantiveResults tests the session-level flag that
+// prevents LLM Grep/Glob loops after forced graph tools return authoritative results.
+func TestGR59Rev4_GraphToolSubstantiveResults(t *testing.T) {
+	t.Run("default is false", func(t *testing.T) {
+		session, err := agent.NewSession("/test/project", nil)
+		if err != nil {
+			t.Fatalf("Failed to create session: %v", err)
+		}
+
+		if session.GraphToolHadSubstantiveResults() {
+			t.Error("Expected GraphToolHadSubstantiveResults to be false by default")
+		}
+	})
+
+	t.Run("can be set to true", func(t *testing.T) {
+		session, err := agent.NewSession("/test/project", nil)
+		if err != nil {
+			t.Fatalf("Failed to create session: %v", err)
+		}
+
+		session.SetGraphToolHadSubstantiveResults(true)
+
+		if !session.GraphToolHadSubstantiveResults() {
+			t.Error("Expected GraphToolHadSubstantiveResults to be true after setting")
+		}
+	})
+
+	t.Run("can be reset to false", func(t *testing.T) {
+		session, err := agent.NewSession("/test/project", nil)
+		if err != nil {
+			t.Fatalf("Failed to create session: %v", err)
+		}
+
+		session.SetGraphToolHadSubstantiveResults(true)
+		session.SetGraphToolHadSubstantiveResults(false)
+
+		if session.GraphToolHadSubstantiveResults() {
+			t.Error("Expected GraphToolHadSubstantiveResults to be false after reset")
+		}
+	})
+}
+
+// TestGR59Rev4_HasSubstantiveGraphResult_NoImplementations verifies that
+// find_implementations zero-result output is correctly detected as non-substantive.
+func TestGR59Rev4_HasSubstantiveGraphResult_NoImplementations(t *testing.T) {
+	t.Run("zero implementations symbol not found", func(t *testing.T) {
+		output := "## GRAPH RESULT: Symbol 'Router' not found\n\nNo interface or class named 'Router' exists in this codebase.\nThe graph has been fully indexed - this is the definitive answer.\n\n**Do NOT use Grep to search further** - the graph already analyzed all source files."
+		if hasSubstantiveGraphResult(output) {
+			t.Error("Expected false for zero-result find_implementations output (symbol not found)")
+		}
+	})
+
+	t.Run("zero implementations type exists", func(t *testing.T) {
+		output := "## GRAPH RESULT: Implementations of 'Router' not found\n\nThe type 'Router' exists but has no implementing or extending types.\nThe graph has been fully indexed - this is the definitive answer.\n\n**Do NOT use Grep to search further** - the graph already analyzed all source files."
+		if hasSubstantiveGraphResult(output) {
+			t.Error("Expected false for zero-result find_implementations output (type exists, no implementations)")
+		}
+	})
+
+	t.Run("positive implementations are substantive", func(t *testing.T) {
+		output := "Found 3 implementations/subclasses of 'Iterator':\n\nInterface: y/iterator.go:74:Iterator\n  - Iterator (struct) in table/iterator.go:165\n  - UniIterator (struct) in skl/skl.go:461\n  - SimpleIterator (struct) in table/merge_iterator_test.go:17\n\n---\nThe graph has been fully indexed — these results are exhaustive."
+		if !hasSubstantiveGraphResult(output) {
+			t.Error("Expected true for positive find_implementations results")
+		}
+	})
+
+	t.Run("zero callers still detected", func(t *testing.T) {
+		output := "## GRAPH RESULT: Callers of 'doSomething' not found\n\nThe function 'doSomething' is not called anywhere (dead code or entry point)."
+		if hasSubstantiveGraphResult(output) {
+			t.Error("Expected false for zero callers")
+		}
+	})
+
+	t.Run("zero callees still detected", func(t *testing.T) {
+		output := "## GRAPH RESULT: Callees of 'leafFunc' not found\n\nThe function 'leafFunc' does not call any other functions."
+		if hasSubstantiveGraphResult(output) {
+			t.Error("Expected false for zero callees")
+		}
+	})
+}

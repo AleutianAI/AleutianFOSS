@@ -329,6 +329,144 @@ func TestGoParser_Parse_Struct(t *testing.T) {
 	}
 }
 
+// TestGoParser_Parse_StructEmbedding verifies that the Go parser detects embedded
+// (anonymous) fields and sets Metadata.Extends on the parent struct symbol.
+// IT-03 H-3: Promoted method resolution depends on this.
+func TestGoParser_Parse_StructEmbedding(t *testing.T) {
+	parser := NewGoParser()
+	ctx := context.Background()
+
+	t.Run("single embedded type", func(t *testing.T) {
+		content := `package main
+
+type RouterGroup struct {
+	basePath string
+}
+
+type Engine struct {
+	RouterGroup
+	pool int
+}
+`
+		result, err := parser.Parse(ctx, []byte(content), "engine.go")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		var engine *Symbol
+		for _, sym := range result.Symbols {
+			if sym.Name == "Engine" && sym.Kind == SymbolKindStruct {
+				engine = sym
+				break
+			}
+		}
+		if engine == nil {
+			t.Fatal("expected to find Engine struct")
+		}
+		if engine.Metadata == nil {
+			t.Fatal("expected Engine to have Metadata")
+		}
+		if engine.Metadata.Extends != "RouterGroup" {
+			t.Errorf("expected Extends='RouterGroup', got %q", engine.Metadata.Extends)
+		}
+	})
+
+	t.Run("pointer embedded type", func(t *testing.T) {
+		content := `package main
+
+type Base struct{}
+
+type Child struct {
+	*Base
+	Name string
+}
+`
+		result, err := parser.Parse(ctx, []byte(content), "child.go")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		var child *Symbol
+		for _, sym := range result.Symbols {
+			if sym.Name == "Child" && sym.Kind == SymbolKindStruct {
+				child = sym
+				break
+			}
+		}
+		if child == nil {
+			t.Fatal("expected to find Child struct")
+		}
+		if child.Metadata == nil {
+			t.Fatal("expected Child to have Metadata")
+		}
+		if child.Metadata.Extends != "Base" {
+			t.Errorf("expected Extends='Base', got %q", child.Metadata.Extends)
+		}
+	})
+
+	t.Run("qualified embedded type", func(t *testing.T) {
+		content := `package main
+
+import "sync"
+
+type SafeMap struct {
+	sync.Mutex
+	data map[string]string
+}
+`
+		result, err := parser.Parse(ctx, []byte(content), "safemap.go")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		var safeMap *Symbol
+		for _, sym := range result.Symbols {
+			if sym.Name == "SafeMap" && sym.Kind == SymbolKindStruct {
+				safeMap = sym
+				break
+			}
+		}
+		if safeMap == nil {
+			t.Fatal("expected to find SafeMap struct")
+		}
+		if safeMap.Metadata == nil {
+			t.Fatal("expected SafeMap to have Metadata")
+		}
+		if safeMap.Metadata.Extends != "Mutex" {
+			t.Errorf("expected Extends='Mutex', got %q", safeMap.Metadata.Extends)
+		}
+	})
+
+	t.Run("no embedded type", func(t *testing.T) {
+		content := `package main
+
+type Plain struct {
+	Name string
+	Age  int
+}
+`
+		result, err := parser.Parse(ctx, []byte(content), "plain.go")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		var plain *Symbol
+		for _, sym := range result.Symbols {
+			if sym.Name == "Plain" && sym.Kind == SymbolKindStruct {
+				plain = sym
+				break
+			}
+		}
+		if plain == nil {
+			t.Fatal("expected to find Plain struct")
+		}
+		// Plain struct has no embeds — Metadata should be nil or Extends should be empty
+		if plain.Metadata != nil && plain.Metadata.Extends != "" {
+			t.Errorf("expected no Extends for Plain, got %q", plain.Metadata.Extends)
+		}
+	})
+}
+
 func TestGoParser_Parse_Imports(t *testing.T) {
 	parser := NewGoParser()
 	ctx := context.Background()
@@ -733,6 +871,14 @@ func filterByKind(symbols []*Symbol, kind SymbolKind) []*Symbol {
 		}
 	}
 	return result
+}
+
+func symbolNames(symbols []*Symbol) []string {
+	names := make([]string, len(symbols))
+	for i, s := range symbols {
+		names[i] = s.Name
+	}
+	return names
 }
 
 // === GR-40: Go Interface Implementation Detection Tests ===
@@ -1412,4 +1558,525 @@ func TestCallSite_Validate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// IT-03a Phase 16 G-1: Multiple struct embed tests
+
+func TestGoParser_MultipleStructEmbeds(t *testing.T) {
+	parser := NewGoParser()
+
+	src := []byte(`package main
+
+type Reader interface {
+	Read(p []byte) (n int, err error)
+}
+
+type Writer interface {
+	Write(p []byte) (n int, err error)
+}
+
+type Closer interface {
+	Close() error
+}
+
+type ReadWriteCloser struct {
+	Reader
+	Writer
+	Closer
+}
+`)
+
+	result, err := parser.Parse(context.Background(), src, "multi_embed.go")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	var rwc *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "ReadWriteCloser" {
+			rwc = sym
+			break
+		}
+	}
+	if rwc == nil {
+		t.Fatal("expected symbol 'ReadWriteCloser'")
+	}
+	if rwc.Kind != SymbolKindStruct {
+		t.Errorf("expected kind Struct, got %v", rwc.Kind)
+	}
+	if rwc.Metadata == nil {
+		t.Fatal("expected ReadWriteCloser to have metadata")
+	}
+
+	// First embed in Extends
+	if rwc.Metadata.Extends != "Reader" {
+		t.Errorf("expected Extends='Reader', got %q", rwc.Metadata.Extends)
+	}
+
+	// Additional embeds in Implements
+	if len(rwc.Metadata.Implements) != 2 {
+		t.Fatalf("expected 2 additional embeds in Implements, got %d: %v", len(rwc.Metadata.Implements), rwc.Metadata.Implements)
+	}
+	implSet := make(map[string]bool)
+	for _, impl := range rwc.Metadata.Implements {
+		implSet[impl] = true
+	}
+	if !implSet["Writer"] {
+		t.Error("expected 'Writer' in additional embeds")
+	}
+	if !implSet["Closer"] {
+		t.Error("expected 'Closer' in additional embeds")
+	}
+}
+
+// Phase 18: Test that the parser extracts embedded interface names into Metadata.Extends/Implements.
+func TestGoParser_InterfaceEmbeddedInterfaces(t *testing.T) {
+	src := `package example
+
+type Reader interface {
+	Read(p []byte) (n int, err error)
+}
+
+type Writer interface {
+	Write(p []byte) (n int, err error)
+}
+
+type ReadWriter interface {
+	Reader
+	Writer
+}
+
+type ReadCloser interface {
+	Reader
+	Close() error
+}
+`
+
+	parser := NewGoParser()
+	ctx := context.Background()
+
+	result, err := parser.Parse(ctx, []byte(src), "iface_embed.go")
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+
+	interfaces := filterByKind(result.Symbols, SymbolKindInterface)
+	if len(interfaces) != 4 {
+		t.Fatalf("expected 4 interfaces, got %d", len(interfaces))
+	}
+
+	findIface := func(name string) *Symbol {
+		for _, sym := range interfaces {
+			if sym.Name == name {
+				return sym
+			}
+		}
+		t.Fatalf("interface %q not found", name)
+		return nil
+	}
+
+	t.Run("Reader has methods but no embeds", func(t *testing.T) {
+		reader := findIface("Reader")
+		if reader.Metadata == nil {
+			t.Fatal("Reader.Metadata is nil")
+		}
+		if len(reader.Metadata.Methods) != 1 || reader.Metadata.Methods[0].Name != "Read" {
+			t.Errorf("expected [{Read}], got %v", reader.Metadata.Methods)
+		}
+		if reader.Metadata.Extends != "" {
+			t.Errorf("expected Extends='', got %q", reader.Metadata.Extends)
+		}
+	})
+
+	t.Run("Writer has methods but no embeds", func(t *testing.T) {
+		writer := findIface("Writer")
+		if writer.Metadata == nil {
+			t.Fatal("Writer.Metadata is nil")
+		}
+		if len(writer.Metadata.Methods) != 1 || writer.Metadata.Methods[0].Name != "Write" {
+			t.Errorf("expected [{Write}], got %v", writer.Metadata.Methods)
+		}
+		if writer.Metadata.Extends != "" {
+			t.Errorf("expected Extends='', got %q", writer.Metadata.Extends)
+		}
+	})
+
+	t.Run("ReadWriter has no direct methods but embeds Reader and Writer", func(t *testing.T) {
+		rw := findIface("ReadWriter")
+		if rw.Metadata == nil {
+			t.Fatal("ReadWriter.Metadata is nil")
+		}
+		if len(rw.Metadata.Methods) != 0 {
+			t.Errorf("expected no direct methods, got %v", rw.Metadata.Methods)
+		}
+		if rw.Metadata.Extends != "Reader" {
+			t.Errorf("expected Extends='Reader', got %q", rw.Metadata.Extends)
+		}
+		if len(rw.Metadata.Implements) != 1 || rw.Metadata.Implements[0] != "Writer" {
+			t.Errorf("expected Implements=['Writer'], got %v", rw.Metadata.Implements)
+		}
+	})
+
+	t.Run("ReadCloser has Close method and embeds Reader", func(t *testing.T) {
+		rc := findIface("ReadCloser")
+		if rc.Metadata == nil {
+			t.Fatal("ReadCloser.Metadata is nil")
+		}
+		if len(rc.Metadata.Methods) != 1 || rc.Metadata.Methods[0].Name != "Close" {
+			t.Errorf("expected [{Close}], got %v", rc.Metadata.Methods)
+		}
+		if rc.Metadata.Extends != "Reader" {
+			t.Errorf("expected Extends='Reader', got %q", rc.Metadata.Extends)
+		}
+	})
+}
+
+// Phase 18: Test that cross-package embedded interfaces are extracted correctly.
+func TestGoParser_InterfaceEmbeddedQualifiedType(t *testing.T) {
+	src := `package example
+
+import "fmt"
+
+type Stringer interface {
+	fmt.Stringer
+	MyMethod() string
+}
+`
+
+	parser := NewGoParser()
+	ctx := context.Background()
+
+	result, err := parser.Parse(ctx, []byte(src), "qualified_embed.go")
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+
+	interfaces := filterByKind(result.Symbols, SymbolKindInterface)
+	if len(interfaces) != 1 {
+		t.Fatalf("expected 1 interface, got %d", len(interfaces))
+	}
+
+	stringer := interfaces[0]
+	if stringer.Name != "Stringer" {
+		t.Fatalf("expected 'Stringer', got %q", stringer.Name)
+	}
+	if stringer.Metadata == nil {
+		t.Fatal("Stringer.Metadata is nil")
+	}
+
+	// Should have MyMethod as a direct method
+	if len(stringer.Metadata.Methods) != 1 || stringer.Metadata.Methods[0].Name != "MyMethod" {
+		t.Errorf("expected [{MyMethod}], got %v", stringer.Metadata.Methods)
+	}
+
+	// Should have "Stringer" (from fmt.Stringer qualified_type) as an embed
+	if stringer.Metadata.Extends != "Stringer" {
+		t.Errorf("expected Extends='Stringer' (from fmt.Stringer), got %q", stringer.Metadata.Extends)
+	}
+}
+
+// Phase 20-C: Test that type aliases preserve the declared name, not the aliased type.
+// Bug: `type nopPage int` was producing a symbol named "int" instead of "nopPage"
+// because the second type_identifier child overwrote the first.
+func TestGoParser_TypeAlias(t *testing.T) {
+	src := `package example
+
+type MyInt int
+
+type MyString string
+
+type Duration int64
+`
+
+	parser := NewGoParser()
+	ctx := context.Background()
+
+	result, err := parser.Parse(ctx, []byte(src), "type_alias.go")
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+
+	types := filterByKind(result.Symbols, SymbolKindType)
+	if len(types) != 3 {
+		t.Fatalf("expected 3 type symbols, got %d: %v", len(types), symbolNames(types))
+	}
+
+	expected := map[string]bool{"MyInt": false, "MyString": false, "Duration": false}
+	for _, sym := range types {
+		if _, ok := expected[sym.Name]; !ok {
+			t.Errorf("unexpected type symbol %q (should not be 'int', 'string', or 'int64')", sym.Name)
+		} else {
+			expected[sym.Name] = true
+		}
+		if sym.Kind != SymbolKindType {
+			t.Errorf("expected SymbolKindType for %q, got %v", sym.Name, sym.Kind)
+		}
+	}
+	for name, found := range expected {
+		if !found {
+			t.Errorf("missing expected type symbol %q", name)
+		}
+	}
+}
+
+// Phase 20-C: Test that methods on type aliases are correctly associated.
+func TestGoParser_TypeAliasWithMethods(t *testing.T) {
+	src := `package example
+
+type nopPage int
+
+func (p nopPage) Title() string {
+	return ""
+}
+
+func (p nopPage) IsNode() {}
+`
+
+	parser := NewGoParser(WithParseOptions(ParseOptions{IncludePrivate: true}))
+	ctx := context.Background()
+
+	result, err := parser.Parse(ctx, []byte(src), "nop_page.go")
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+
+	// Verify the type symbol has the correct name
+	types := filterByKind(result.Symbols, SymbolKindType)
+	if len(types) != 1 {
+		t.Fatalf("expected 1 type symbol, got %d: %v", len(types), symbolNames(types))
+	}
+	if types[0].Name != "nopPage" {
+		t.Errorf("expected type name 'nopPage', got %q", types[0].Name)
+	}
+
+	// Verify methods are extracted (Go parser uses SymbolKindMethod for methods)
+	methods := filterByKind(result.Symbols, SymbolKindMethod)
+	if len(methods) != 2 {
+		t.Fatalf("expected 2 method symbols, got %d: %v", len(methods), symbolNames(methods))
+	}
+
+	methodNames := make(map[string]bool)
+	for _, m := range methods {
+		methodNames[m.Name] = true
+		if m.Receiver != "nopPage" {
+			t.Errorf("method %q should have receiver 'nopPage', got %q",
+				m.Name, m.Receiver)
+		}
+	}
+	if !methodNames["Title"] {
+		t.Error("missing method 'Title'")
+	}
+	if !methodNames["IsNode"] {
+		t.Error("missing method 'IsNode'")
+	}
+}
+
+// TestGoParser_CompositeLiteralTypeRefs verifies that composite literal usages
+// (e.g., H{...}, Config{...}) produce TypeReference entries.
+// IT-16: Without this, types used only via composite literals are invisible
+// to find_references.
+func TestGoParser_CompositeLiteralTypeRefs(t *testing.T) {
+	t.Run("simple_composite_literal", func(t *testing.T) {
+		src := `package example
+
+type Config struct {
+	Name string
+}
+
+func NewConfig() Config {
+	return Config{Name: "default"}
+}
+`
+		parser := NewGoParser(WithParseOptions(ParseOptions{IncludePrivate: true}))
+		result, err := parser.Parse(context.Background(), []byte(src), "config.go")
+		if err != nil {
+			t.Fatalf("parse failed: %v", err)
+		}
+
+		fn := findSymbolByName(result.Symbols, "NewConfig")
+		if fn == nil {
+			t.Fatal("expected to find NewConfig")
+		}
+
+		// Config appears in return type AND in composite literal body
+		found := false
+		for _, ref := range fn.TypeReferences {
+			if ref.Name == "Config" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected TypeReference for 'Config' from composite literal, got: %v", fn.TypeReferences)
+		}
+	})
+
+	t.Run("qualified_composite_literal", func(t *testing.T) {
+		// Simulates gin.H{...} — the type_identifier inside qualified_type
+		// is "H" after stripping the package qualifier
+		src := `package example
+
+import "gin"
+
+type H map[string]any
+
+func handler() {
+	_ = H{"key": "value"}
+}
+`
+		parser := NewGoParser(WithParseOptions(ParseOptions{IncludePrivate: true}))
+		result, err := parser.Parse(context.Background(), []byte(src), "handler.go")
+		if err != nil {
+			t.Fatalf("parse failed: %v", err)
+		}
+
+		fn := findSymbolByName(result.Symbols, "handler")
+		if fn == nil {
+			t.Fatal("expected to find handler")
+		}
+
+		found := false
+		for _, ref := range fn.TypeReferences {
+			if ref.Name == "H" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected TypeReference for 'H' from composite literal, got: %v", fn.TypeReferences)
+		}
+	})
+
+	t.Run("builtin_types_excluded", func(t *testing.T) {
+		src := `package example
+
+func makeMap() {
+	_ = map[string]int{"a": 1}
+}
+`
+		parser := NewGoParser(WithParseOptions(ParseOptions{IncludePrivate: true}))
+		result, err := parser.Parse(context.Background(), []byte(src), "maps.go")
+		if err != nil {
+			t.Fatalf("parse failed: %v", err)
+		}
+
+		fn := findSymbolByName(result.Symbols, "makeMap")
+		if fn == nil {
+			t.Fatal("expected to find makeMap")
+		}
+
+		// map[string]int should not produce any TypeReferences (all builtins)
+		for _, ref := range fn.TypeReferences {
+			t.Errorf("unexpected TypeReference from builtin composite literal: %q", ref.Name)
+		}
+	})
+
+	t.Run("multiple_composite_literals_deduped", func(t *testing.T) {
+		src := `package example
+
+type Opts struct {
+	X int
+}
+
+func build() {
+	a := Opts{X: 1}
+	b := Opts{X: 2}
+	_ = a
+	_ = b
+}
+`
+		parser := NewGoParser(WithParseOptions(ParseOptions{IncludePrivate: true}))
+		result, err := parser.Parse(context.Background(), []byte(src), "build.go")
+		if err != nil {
+			t.Fatalf("parse failed: %v", err)
+		}
+
+		fn := findSymbolByName(result.Symbols, "build")
+		if fn == nil {
+			t.Fatal("expected to find build")
+		}
+
+		// Should have exactly 1 TypeReference for Opts (deduped)
+		optsCount := 0
+		for _, ref := range fn.TypeReferences {
+			if ref.Name == "Opts" {
+				optsCount++
+			}
+		}
+		if optsCount != 1 {
+			t.Errorf("expected 1 deduped TypeReference for 'Opts', got %d (refs: %v)", optsCount, fn.TypeReferences)
+		}
+	})
+
+	t.Run("nested_composite_literal", func(t *testing.T) {
+		src := `package example
+
+type Inner struct {
+	Val int
+}
+
+type Outer struct {
+	In Inner
+}
+
+func makeNested() Outer {
+	return Outer{In: Inner{Val: 42}}
+}
+`
+		parser := NewGoParser(WithParseOptions(ParseOptions{IncludePrivate: true}))
+		result, err := parser.Parse(context.Background(), []byte(src), "nested.go")
+		if err != nil {
+			t.Fatalf("parse failed: %v", err)
+		}
+
+		fn := findSymbolByName(result.Symbols, "makeNested")
+		if fn == nil {
+			t.Fatal("expected to find makeNested")
+		}
+
+		names := make(map[string]bool)
+		for _, ref := range fn.TypeReferences {
+			names[ref.Name] = true
+		}
+		if !names["Outer"] {
+			t.Error("expected TypeReference for 'Outer'")
+		}
+		if !names["Inner"] {
+			t.Error("expected TypeReference for 'Inner'")
+		}
+	})
+
+	t.Run("slice_of_structs_composite_literal", func(t *testing.T) {
+		src := `package example
+
+type Item struct {
+	Name string
+}
+
+func makeSlice() []Item {
+	return []Item{{Name: "a"}, {Name: "b"}}
+}
+`
+		parser := NewGoParser(WithParseOptions(ParseOptions{IncludePrivate: true}))
+		result, err := parser.Parse(context.Background(), []byte(src), "slice.go")
+		if err != nil {
+			t.Fatalf("parse failed: %v", err)
+		}
+
+		fn := findSymbolByName(result.Symbols, "makeSlice")
+		if fn == nil {
+			t.Fatal("expected to find makeSlice")
+		}
+
+		found := false
+		for _, ref := range fn.TypeReferences {
+			if ref.Name == "Item" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected TypeReference for 'Item' from []Item{...} composite literal, got: %v", fn.TypeReferences)
+		}
+	})
 }

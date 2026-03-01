@@ -64,18 +64,25 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
+	"github.com/AleutianAI/AleutianFOSS/services/policy_engine"
 	"github.com/AleutianAI/AleutianFOSS/services/trace"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/events"
-	agentllm "github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/phases"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/providers"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/providers/egress"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/routing"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/safety"
+	traceconfig "github.com/AleutianAI/AleutianFOSS/services/trace/config"
+	badgerstore "github.com/AleutianAI/AleutianFOSS/services/trace/storage/badger"
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 	"go.opentelemetry.io/otel"
@@ -86,19 +93,19 @@ import (
 )
 
 // IsWarmupComplete checks if the main model warmup has finished.
-// Delegates to the code_buddy package's warmup registry.
+// Delegates to the trace package's warmup registry.
 //
 // Thread Safety: This function is safe for concurrent use.
 func IsWarmupComplete() bool {
-	return code_buddy.IsWarmupComplete()
+	return trace.IsWarmupComplete()
 }
 
 // markWarmupComplete marks the warmup as complete.
-// Delegates to the code_buddy package's warmup registry.
+// Delegates to the trace package's warmup registry.
 //
 // Thread Safety: This function is safe for concurrent use.
 func markWarmupComplete() {
-	code_buddy.MarkWarmupComplete()
+	trace.MarkWarmupComplete()
 }
 
 // WarmupGuardMiddleware returns 503 Service Unavailable for agent endpoints
@@ -190,11 +197,11 @@ func main() {
 	))
 
 	// Create service with default config
-	cfg := code_buddy.DefaultServiceConfig()
-	svc := code_buddy.NewService(cfg)
+	cfg := trace.DefaultServiceConfig()
+	svc := trace.NewService(cfg)
 
 	// Create handlers
-	handlers := code_buddy.NewHandlers(svc)
+	handlers := trace.NewHandlers(svc)
 
 	// Setup router
 	router := gin.New()
@@ -207,12 +214,42 @@ func main() {
 		router.Use(gin.Logger())
 	}
 
-	// Register routes under /v1/trace (aliased from code_buddy for compatibility)
+	// Register routes under /v1/trace
 	v1 := router.Group("/v1")
-	code_buddy.RegisterRoutes(v1, handlers)
+	trace.RegisterRoutes(v1, handlers)
+
+	// GR-61: Open routing cache BadgerDB for tool embedding persistence.
+	// Separate from per-project CRS journals — service-global, in ~/.aleutian/cache/routing/.
+	// Graceful degradation: if unavailable, routing continues in in-memory-only mode.
+	var routingStore routing.RouterCacheStore
+	routingCacheDir := os.Getenv("ROUTING_CACHE_DIR")
+	if routingCacheDir == "" {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			routingCacheDir = filepath.Join(home, ".aleutian", "cache", "routing")
+		}
+	}
+	var routingDB *badgerstore.DB
+	if routingCacheDir != "" {
+		cfg := badgerstore.DefaultConfig()
+		cfg.Path = routingCacheDir
+		db, err := badgerstore.OpenDB(cfg)
+		if err != nil {
+			slog.Warn("Routing cache BadgerDB unavailable, embedding persistence disabled",
+				slog.String("path", routingCacheDir),
+				slog.String("error", err.Error()),
+			)
+		} else {
+			routingDB = db
+			routingStore = routing.NewBadgerRouterCacheStore(db, 0, slog.Default())
+			slog.Info("Routing cache BadgerDB opened",
+				slog.String("path", routingCacheDir),
+			)
+		}
+	}
 
 	// Setup agent loop and register routes
-	agentEnabled := setupAgentLoop(v1, svc, *withContext, *withTools)
+	agentEnabled := setupAgentLoop(v1, svc, *withContext, *withTools, routingStore)
 
 	// Print startup banner
 	printBanner(*port, agentEnabled)
@@ -224,6 +261,11 @@ func main() {
 	go func() {
 		<-quit
 		slog.Info("Shutting down Aleutian Trace server")
+		if routingDB != nil {
+			if err := routingDB.Close(); err != nil {
+				slog.Warn("Failed to close routing cache BadgerDB", slog.String("error", err.Error()))
+			}
+		}
 		os.Exit(0)
 	}()
 
@@ -238,62 +280,152 @@ func main() {
 
 // setupAgentLoop initializes the agent loop and registers routes.
 //
+// routingStore is the optional BadgerDB cache for tool embedding vectors.
+// Pass nil to disable persistence (e.g. when routing cache directory is unavailable).
+//
 // Returns true if the agent is fully enabled with LLM support.
-func setupAgentLoop(v1 *gin.RouterGroup, svc *code_buddy.Service, withContext, withTools bool) bool {
-	ollamaClient, err := llm.NewOllamaClient()
+func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTools bool, routingStore routing.RouterCacheStore) bool {
+	// CB-60: Load per-role provider configuration from environment variables.
+	// Falls back to Ollama with existing env vars for backward compatibility.
+	mainModelFallback := os.Getenv("OLLAMA_MODEL")
+	if mainModelFallback == "" {
+		mainModelFallback = "glm-4.7-flash"
+	}
+
+	roleConfig, err := providers.LoadRoleConfig(mainModelFallback, "", "")
 	if err != nil {
-		slog.Warn("Ollama not available", slog.String("error", err.Error()))
-		slog.Info("Agent endpoints will use mock mode (default state transitions only)")
-		slog.Info("Set OLLAMA_BASE_URL and OLLAMA_MODEL to enable LLM-powered agent")
-
-		// Mark warmup complete immediately for mock mode (no model to warm)
+		slog.Error("Failed to load role config", slog.String("error", err.Error()))
 		markWarmupComplete()
-
-		// Create agent loop without LLM (uses default phase execution)
 		agentLoop := agent.NewDefaultAgentLoop()
-		agentHandlers := code_buddy.NewAgentHandlers(agentLoop, svc)
-		// No warmup guard needed for mock mode since warmup is already complete
-		code_buddy.RegisterAgentRoutesWithMiddleware(v1, agentHandlers, nil)
+		agentHandlers := trace.NewAgentHandlers(agentLoop, svc)
+		trace.RegisterAgentRoutesWithMiddleware(v1, agentHandlers, nil)
 		return false
 	}
 
-	model := os.Getenv("OLLAMA_MODEL")
-	if model == "" {
-		model = "glm-4.7-flash"
+	// CB-60b: Create provider factory. For Ollama roles, create the shared model manager.
+	// Uses ResolveOllamaURL for consistent URL resolution across all components.
+	var ollamaModelManager *llm.MultiModelManager
+	if roleConfig.Main.Provider == providers.ProviderOllama ||
+		roleConfig.Router.Provider == providers.ProviderOllama ||
+		roleConfig.ParamExtractor.Provider == providers.ProviderOllama {
+
+		ollamaURL := providers.ResolveOllamaURL()
+		ollamaModelManager = llm.NewMultiModelManager(ollamaURL)
 	}
-	slog.Info("Ollama connected", slog.String("model", model))
 
-	// Create LLM adapter
-	llmClient := agentllm.NewOllamaAdapter(ollamaClient, model)
+	// CB-60d: Load egress config and create guard builder for data egress control.
+	egressCfg := egress.LoadEgressConfig()
+	var egressBuilder *egress.EgressGuardBuilder
+	{
+		var classifier egress.DataClassifier
+		policyEngine, peErr := policy_engine.NewPolicyEngine()
+		if peErr != nil {
+			slog.Warn("PolicyEngine unavailable, egress classifier will use NoOp (all data treated as public)",
+				slog.String("error", peErr.Error()))
+			classifier = egress.NewNoOpClassifier()
+		} else {
+			classifier = egress.NewPolicyEngineClassifier(policyEngine)
+		}
+		egressBuilder = egress.NewEgressGuardBuilder(egressCfg, classifier)
+		slog.Info("Egress guard initialized",
+			slog.Bool("enabled", egressCfg.Enabled),
+			slog.Bool("local_only", egressCfg.LocalOnly),
+			slog.Bool("audit", egressCfg.AuditEnabled))
+	}
 
-	// S-1: Move warmup to background goroutine for non-blocking startup.
-	// Server starts immediately and responds with 503 if warmup not complete.
-	// The WarmupGuardMiddleware protects agent endpoints during warmup.
-	slog.Info("Server starting, model warmup in progress...",
+	factory := providers.NewProviderFactory(ollamaModelManager, providers.WithEgressGuard(egressBuilder))
+
+	// CB-60: Create main agent client using the factory.
+	llmClient, err := factory.CreateAgentClient(roleConfig.Main)
+	if err != nil {
+		slog.Warn("Main LLM provider not available",
+			slog.String("provider", roleConfig.Main.Provider),
+			slog.String("error", err.Error()))
+		slog.Info("Agent endpoints will use mock mode (default state transitions only)")
+
+		markWarmupComplete()
+		agentLoop := agent.NewDefaultAgentLoop()
+		agentHandlers := trace.NewAgentHandlers(agentLoop, svc)
+		trace.RegisterAgentRoutesWithMiddleware(v1, agentHandlers, nil)
+		return false
+	}
+
+	model := roleConfig.Main.Model
+	slog.Info("Main LLM provider connected",
+		slog.String("provider", roleConfig.Main.Provider),
 		slog.String("model", model))
 
-	go func() {
-		warmupCtx, warmupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer warmupCancel()
-
-		startTime := time.Now()
-		if warmErr := warmMainModel(warmupCtx, ollamaClient, model); warmErr != nil {
-			slog.Warn("Main model warmup failed, LLM classifier may fall back to regex",
-				slog.String("model", model),
-				slog.String("error", warmErr.Error()),
-				slog.Duration("duration", time.Since(startTime)))
-		} else {
-			slog.Info("Model warmup completed successfully",
-				slog.String("model", model),
-				slog.Duration("duration", time.Since(startTime)))
-		}
-
-		// Mark warmup complete regardless of success/failure.
-		// If warmup failed, the LLM classifier will fall back to regex on first call.
+	// CB-60: Create lifecycle manager for main model warmup.
+	mainLifecycle, err := factory.CreateLifecycleManager(roleConfig.Main)
+	if err != nil {
+		slog.Warn("Could not create lifecycle manager, skipping warmup",
+			slog.String("error", err.Error()))
 		markWarmupComplete()
-		slog.Info("Server ready to accept agent requests",
+	} else {
+		// S-1: Move warmup to background goroutine for non-blocking startup.
+		slog.Info("Server starting, model warmup in progress...",
+			slog.String("provider", roleConfig.Main.Provider),
 			slog.String("model", model))
-	}()
+
+		go func() {
+			// CB-60a H-6: Panic recovery ensures markWarmupComplete is always called.
+			// Without this, a panic in warmup (from Ollama client, HTTP transport, etc.)
+			// would leave the server permanently in "warming up" state.
+			defer func() {
+				if r := recover(); r != nil {
+					buf := make([]byte, 4096)
+					n := runtime.Stack(buf, false)
+					slog.Error("Panic in warmup goroutine recovered",
+						slog.Any("panic", r),
+						slog.String("stack", string(buf[:n])),
+					)
+					markWarmupComplete()
+				}
+			}()
+
+			warmupCtx, warmupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer warmupCancel()
+
+			startTime := time.Now()
+
+			if mainLifecycle.IsLocal() {
+				// Ollama: warm model into VRAM with full warmup procedure
+				ollamaClient, ollamaErr := llm.NewOllamaClient()
+				if ollamaErr != nil {
+					slog.Warn("Could not create Ollama client for warmup",
+						slog.String("error", ollamaErr.Error()))
+					markWarmupComplete()
+					return
+				}
+				if warmErr := warmMainModel(warmupCtx, ollamaClient, model); warmErr != nil {
+					slog.Warn("Main model warmup failed, LLM classifier may fall back to regex",
+						slog.String("model", model),
+						slog.String("error", warmErr.Error()),
+						slog.Duration("duration", time.Since(startTime)))
+				} else {
+					slog.Info("Model warmup completed successfully",
+						slog.String("model", model),
+						slog.Duration("duration", time.Since(startTime)))
+				}
+			} else {
+				// Cloud: just verify connectivity (auth check)
+				if warmErr := mainLifecycle.WarmModel(warmupCtx, model, providers.WarmupOptions{}); warmErr != nil {
+					slog.Warn("Cloud provider auth check failed",
+						slog.String("provider", roleConfig.Main.Provider),
+						slog.String("error", warmErr.Error()))
+				} else {
+					slog.Info("Cloud provider ready",
+						slog.String("provider", roleConfig.Main.Provider),
+						slog.Duration("duration", time.Since(startTime)))
+				}
+			}
+
+			markWarmupComplete()
+			slog.Info("Server ready to accept agent requests",
+				slog.String("provider", roleConfig.Main.Provider),
+				slog.String("model", model))
+		}()
+	}
 
 	// GR-Phase1: Query classification architecture
 	//
@@ -309,16 +441,45 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *code_buddy.Service, withContext, w
 
 	// Create phase registry with actual phase implementations
 	registry := agent.NewPhaseRegistry()
-	registry.Register(agent.StateInit, code_buddy.NewPhaseAdapter(phases.NewInitPhase()))
-	registry.Register(agent.StatePlan, code_buddy.NewPhaseAdapter(phases.NewPlanPhase()))
-	registry.Register(agent.StateExecute, code_buddy.NewPhaseAdapter(phases.NewExecutePhase()))
+	registry.Register(agent.StateInit, trace.NewPhaseAdapter(phases.NewInitPhase()))
+	registry.Register(agent.StatePlan, trace.NewPhaseAdapter(phases.NewPlanPhase()))
+	// Pre-filter: load config and registry (singletons, ~0ms after first load).
+	// If either fails, proceed without pre-filter (graceful degradation).
+	pfCtx := context.Background()
+	pfCfg, pfErr := traceconfig.GetPreFilterConfig(pfCtx)
+	if pfErr != nil {
+		slog.Warn("Pre-filter config load failed, pre-filter disabled",
+			slog.String("error", pfErr.Error()))
+	}
+	toolRegistry, trErr := traceconfig.GetToolRoutingRegistry(pfCtx)
+	if trErr != nil {
+		slog.Warn("Tool routing registry load failed, pre-filter disabled",
+			slog.String("error", trErr.Error()))
+	}
 
-	registry.Register(agent.StateReflect, code_buddy.NewPhaseAdapter(phases.NewReflectPhase()))
-	registry.Register(agent.StateClarify, code_buddy.NewPhaseAdapter(phases.NewClarifyPhase()))
+	var executeOpts []phases.ExecutePhaseOption
+	if pfErr == nil && trErr == nil && pfCfg.Enabled {
+		pf := routing.NewPreFilter(toolRegistry, pfCfg, slog.Default(), routingStore)
+		executeOpts = append(executeOpts, phases.WithPreFilter(pf))
+		slog.Info("Pre-filter enabled",
+			slog.Int("forced_mappings", len(pfCfg.ForcedMappings)),
+			slog.Int("negation_rules", len(pfCfg.NegationRules)),
+			slog.Int("confusion_pairs", len(pfCfg.ConfusionPairs)),
+			slog.String("scoring_mode", pfCfg.ScoringMode))
+		// CB-62: Embedding warm-up happens synchronously on the first scored call
+		// in scoreHybrid (10s timeout). BadgerDB cache makes this ~100µs on restart;
+		// Ollama cold start ~300ms. No startup warm-up needed — specs aren't available
+		// until the first query arrives with tool definitions.
+	}
+
+	registry.Register(agent.StateExecute, trace.NewPhaseAdapter(phases.NewExecutePhase(executeOpts...)))
+
+	registry.Register(agent.StateReflect, trace.NewPhaseAdapter(phases.NewReflectPhase()))
+	registry.Register(agent.StateClarify, trace.NewPhaseAdapter(phases.NewClarifyPhase()))
 	slog.Info("Registered phases", slog.Int("count", registry.Count()))
 
 	// Create graph provider wrapping the service
-	serviceAdapter := code_buddy.NewServiceAdapter(svc)
+	serviceAdapter := trace.NewServiceAdapter(svc)
 	graphProvider := agent.NewServiceGraphProvider(serviceAdapter)
 
 	// Create event emitter
@@ -329,16 +490,16 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *code_buddy.Service, withContext, w
 
 	// Create dependencies factory
 	// GR-39: Enable Coordinator and Session Restore for CRS persistence
-	depsFactory := code_buddy.NewDependenciesFactory(
-		code_buddy.WithLLMClient(llmClient),
-		code_buddy.WithGraphProvider(graphProvider),
-		code_buddy.WithEventEmitter(eventEmitter),
-		code_buddy.WithSafetyGate(safetyGate),
-		code_buddy.WithService(svc),
-		code_buddy.WithContextEnabled(withContext),
-		code_buddy.WithToolsEnabled(withTools),
-		code_buddy.WithCoordinatorEnabled(true),
-		code_buddy.WithSessionRestoreEnabled(true),
+	depsFactory := trace.NewDependenciesFactory(
+		trace.WithLLMClient(llmClient),
+		trace.WithGraphProvider(graphProvider),
+		trace.WithEventEmitter(eventEmitter),
+		trace.WithSafetyGate(safetyGate),
+		trace.WithService(svc),
+		trace.WithContextEnabled(withContext),
+		trace.WithToolsEnabled(withTools),
+		trace.WithCoordinatorEnabled(true),
+		trace.WithSessionRestoreEnabled(true),
 	)
 
 	if withContext {
@@ -353,11 +514,15 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *code_buddy.Service, withContext, w
 		agent.WithPhaseRegistry(registry),
 		agent.WithDependenciesFactory(depsFactory),
 	)
-	agentHandlers := code_buddy.NewAgentHandlers(agentLoop, svc)
+	agentHandlers := trace.NewAgentHandlers(agentLoop, svc,
+		trace.WithProviderFactory(factory),
+		trace.WithModelManager(ollamaModelManager),
+		trace.WithRoleConfig(roleConfig),
+	)
 
 	// S-1: Apply warmup guard middleware to agent routes.
 	// This returns 503 Service Unavailable for agent requests during model warmup.
-	code_buddy.RegisterAgentRoutesWithMiddleware(v1, agentHandlers, WarmupGuardMiddleware())
+	trace.RegisterAgentRoutesWithMiddleware(v1, agentHandlers, WarmupGuardMiddleware())
 	return true
 }
 
@@ -378,18 +543,18 @@ func printBanner(port int, agentEnabled bool) {
 ║  Quick Start:                                                     ║
 ║  ┌─────────────────────────────────────────────────────────────┐  ║
 ║  │ # Health check                                              │  ║
-║  │ curl http://localhost:%d/v1/codebuddy/health              │  ║
+║  │ curl http://localhost:%d/v1/trace/health              │  ║
 ║  │                                                             │  ║
 ║  │ # List all 30+ agentic tools                                │  ║
-║  │ curl http://localhost:%d/v1/codebuddy/tools | jq          │  ║
+║  │ curl http://localhost:%d/v1/trace/tools | jq          │  ║
 ║  │                                                             │  ║
 ║  │ # Initialize a graph (required first!)                      │  ║
-║  │ curl -X POST http://localhost:%d/v1/codebuddy/init \      │  ║
+║  │ curl -X POST http://localhost:%d/v1/trace/init \      │  ║
 ║  │   -H "Content-Type: application/json" \                     │  ║
 ║  │   -d '{"project_root": "/your/project/path"}'               │  ║
 ║  │                                                             │  ║
 ║  │ # Run agent query (requires Ollama)                         │  ║
-║  │ curl -X POST http://localhost:%d/v1/codebuddy/agent/run \ │  ║
+║  │ curl -X POST http://localhost:%d/v1/trace/agent/run \ │  ║
 ║  │   -H "Content-Type: application/json" \                     │  ║
 ║  │   -d '{"project_root": ".", "query": "What does this do?"}' │  ║
 ║  └─────────────────────────────────────────────────────────────┘  ║

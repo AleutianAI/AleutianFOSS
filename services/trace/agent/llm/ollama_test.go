@@ -297,14 +297,11 @@ func TestChatWithToolsResult(t *testing.T) {
 	result := llm.ChatWithToolsResult{
 		Content:    "I'll read the file for you.",
 		StopReason: "tool_use",
-		ToolCalls: []llm.OllamaToolCall{
+		ToolCalls: []llm.ToolCallResponse{
 			{
-				ID:   "call_1",
-				Type: "function",
-				Function: llm.OllamaFunctionCall{
-					Name:      "read_file",
-					Arguments: json.RawMessage(`{"path": "/main.go"}`),
-				},
+				ID:        "call_1",
+				Name:      "read_file",
+				Arguments: json.RawMessage(`{"path": "/main.go"}`),
 			},
 		},
 	}

@@ -458,7 +458,7 @@ func TestRelationshipChecker_Integration(t *testing.T) {
 	checker := NewRelationshipChecker(nil)
 
 	idx := NewEvidenceIndex()
-	idx.Imports["services/code_buddy/agent/grounding/grounder.go"] = []ImportInfo{
+	idx.Imports["services/trace/agent/grounding/grounder.go"] = []ImportInfo{
 		{Path: "context", Alias: "context"},
 		{Path: "fmt", Alias: "fmt"},
 		{Path: "strings", Alias: "strings"},

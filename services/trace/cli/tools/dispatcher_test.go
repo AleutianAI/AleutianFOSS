@@ -27,8 +27,8 @@ func setupTestDispatcher(t *testing.T) (*Dispatcher, *Registry, *Executor) {
 
 	// Register test tools
 	echoTool := NewMockTool("echo", CategoryExploration)
-	echoTool.ExecuteFunc = func(ctx context.Context, params map[string]any) (*Result, error) {
-		msg, _ := params["message"].(string)
+	echoTool.ExecuteFunc = func(ctx context.Context, params TypedParams) (*Result, error) {
+		msg, _ := params.ToMap()["message"].(string)
 		return &Result{
 			Success:    true,
 			OutputText: "Echo: " + msg,
@@ -40,7 +40,7 @@ func setupTestDispatcher(t *testing.T) (*Dispatcher, *Registry, *Executor) {
 	registry.Register(echoTool)
 
 	slowTool := NewMockTool("slow_tool", CategoryExploration)
-	slowTool.ExecuteFunc = func(ctx context.Context, params map[string]any) (*Result, error) {
+	slowTool.ExecuteFunc = func(ctx context.Context, params TypedParams) (*Result, error) {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -51,14 +51,14 @@ func setupTestDispatcher(t *testing.T) (*Dispatcher, *Registry, *Executor) {
 	registry.Register(slowTool)
 
 	failingTool := NewMockTool("failing_tool", CategoryExploration)
-	failingTool.ExecuteFunc = func(ctx context.Context, params map[string]any) (*Result, error) {
+	failingTool.ExecuteFunc = func(ctx context.Context, params TypedParams) (*Result, error) {
 		return nil, errors.New("intentional failure")
 	}
 	registry.Register(failingTool)
 
 	sideEffectTool := NewMockTool("side_effect_tool", CategoryFile)
 	sideEffectTool.definition.SideEffects = true
-	sideEffectTool.ExecuteFunc = func(ctx context.Context, params map[string]any) (*Result, error) {
+	sideEffectTool.ExecuteFunc = func(ctx context.Context, params TypedParams) (*Result, error) {
 		return &Result{Success: true, OutputText: "Side effect executed"}, nil
 	}
 	registry.Register(sideEffectTool)
@@ -327,7 +327,7 @@ func TestDispatcher_ExecuteParallel_Concurrency(t *testing.T) {
 	var maxConcurrent int32
 
 	concurrentTool := NewMockTool("concurrent", CategoryExploration)
-	concurrentTool.ExecuteFunc = func(ctx context.Context, params map[string]any) (*Result, error) {
+	concurrentTool.ExecuteFunc = func(ctx context.Context, params TypedParams) (*Result, error) {
 		c := atomic.AddInt32(&current, 1)
 		defer atomic.AddInt32(&current, -1)
 
@@ -613,7 +613,7 @@ func TestDispatcher_DispatchWithRetry(t *testing.T) {
 	// Create a tool that fails on first attempt but succeeds on retry
 	var attemptCount int32
 	retryTool := NewMockTool("retry_tool", CategoryExploration)
-	retryTool.ExecuteFunc = func(ctx context.Context, params map[string]any) (*Result, error) {
+	retryTool.ExecuteFunc = func(ctx context.Context, params TypedParams) (*Result, error) {
 		count := atomic.AddInt32(&attemptCount, 1)
 		if count == 1 {
 			// Return a result with error that looks like a timeout (retryable)
@@ -660,7 +660,7 @@ func TestDispatcher_DispatchWithRetry_NonRetryable(t *testing.T) {
 	// Create a tool that always fails with non-retryable error
 	nonRetryTool := NewMockTool("non_retry_tool", CategoryExploration)
 	attemptCount := 0
-	nonRetryTool.ExecuteFunc = func(ctx context.Context, params map[string]any) (*Result, error) {
+	nonRetryTool.ExecuteFunc = func(ctx context.Context, params TypedParams) (*Result, error) {
 		attemptCount++
 		return nil, errors.New("validation failed")
 	}

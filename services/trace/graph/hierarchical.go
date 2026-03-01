@@ -175,6 +175,11 @@ type HierarchicalGraph struct {
 
 	// internalEdges contains edges within the same package.
 	internalEdges []*Edge
+
+	// fileClassification holds the GR-60 graph-based file classification.
+	// When non-nil, IsProductionFile delegates to this classification.
+	// When nil, IsProductionFile falls back to heuristic isTestFilePath/isDocFilePath.
+	fileClassification *FileClassification
 }
 
 // WrapGraph creates a HierarchicalGraph from an existing frozen Graph.
@@ -929,6 +934,56 @@ func (hg *HierarchicalGraph) DrillDownWithCRS(ctx context.Context, level int, id
 		Build()
 
 	return nodes, step
+}
+
+// =============================================================================
+// GR-60: File Classification Methods
+// =============================================================================
+
+// SetFileClassification stores a computed file classification on the graph.
+//
+// Description:
+//
+//	Called after ClassifyFiles() to attach the classification to the graph.
+//	Subsequent calls to IsProductionFile() will use this classification
+//	instead of the heuristic fallback.
+//
+// Inputs:
+//
+//	fc - The file classification to store. May be nil (clears classification).
+//
+// Thread Safety: NOT safe for concurrent use with IsProductionFile reads.
+// Must be called during initialization (RegisterExploreTools) before any
+// tool execution begins. After this call, IsProductionFile is safe for
+// concurrent reads.
+func (hg *HierarchicalGraph) SetFileClassification(fc *FileClassification) {
+	hg.fileClassification = fc
+}
+
+// IsProductionFile returns true if the file is classified as production code.
+//
+// Description:
+//
+//	If a FileClassification has been set (via SetFileClassification), delegates
+//	to fc.IsProduction(filePath). If no classification is set, falls back to
+//	heuristic checks: !isTestFilePath(filePath) && !isDocFilePath(filePath).
+//	This preserves existing behavior when the classification feature is not used.
+//
+// Inputs:
+//
+//	filePath - The file path to check.
+//
+// Outputs:
+//
+//	bool - True if the file is production code.
+//
+// Thread Safety: Safe for concurrent use.
+func (hg *HierarchicalGraph) IsProductionFile(filePath string) bool {
+	if hg.fileClassification != nil {
+		return hg.fileClassification.IsProduction(filePath)
+	}
+	// Fallback: heuristic-based classification
+	return !isTestFilePath(filePath) && !isDocFilePath(filePath)
 }
 
 // =============================================================================

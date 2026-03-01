@@ -101,21 +101,22 @@ func (t *EditTool) Definition() tools.ToolDefinition {
 }
 
 // Execute performs a surgical edit on a file.
-func (t *EditTool) Execute(ctx context.Context, params map[string]any) (*tools.Result, error) {
+func (t *EditTool) Execute(ctx context.Context, params tools.TypedParams) (*tools.Result, error) {
 	start := time.Now()
 
 	// Parse parameters
+	m := params.ToMap()
 	p := &EditParams{}
-	if filePath, ok := params["file_path"].(string); ok {
+	if filePath, ok := m["file_path"].(string); ok {
 		p.FilePath = filePath
 	}
-	if oldString, ok := params["old_string"].(string); ok {
+	if oldString, ok := m["old_string"].(string); ok {
 		p.OldString = oldString
 	}
-	if newString, ok := params["new_string"].(string); ok {
+	if newString, ok := m["new_string"].(string); ok {
 		p.NewString = newString
 	}
-	if replaceAll, ok := params["replace_all"].(bool); ok {
+	if replaceAll, ok := m["replace_all"].(bool); ok {
 		p.ReplaceAll = replaceAll
 	}
 

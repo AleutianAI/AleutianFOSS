@@ -67,6 +67,65 @@ type TraceStep struct {
 // NOTE: ProofUpdate, ConstraintUpdate, and DependencyEdge are now defined in types.go
 // with typed fields instead of string fields. This change is part of CRS-02.
 
+// TraceStepToStepRecord converts a lightweight TraceStep into a full StepRecord.
+//
+// Description:
+//
+//	Bridge function connecting the execute phase's TraceStep recording with the
+//	CRS StepRecord system. Maps available TraceStep fields to StepRecord fields
+//	and provides sensible defaults for fields not present in TraceStep.
+//	This enables CRS.CountToolExecutions() to return accurate counts,
+//	which the circuit breaker uses as a fallback when no proof data exists.
+//
+// Inputs:
+//
+//   - step: The TraceStep to convert. Should have non-empty Tool field for
+//     the conversion to be meaningful for execution counting.
+//   - sessionID: The session ID to attach. Must not be empty.
+//
+// Outputs:
+//
+//   - StepRecord: The converted record ready for CRS.RecordStep().
+//
+// Limitations:
+//
+//   - TraceStep does not carry Actor or Decision context; defaults to
+//     ActorSystem / DecisionExecuteTool.
+//   - ToolParams are not available in TraceStep; left nil in StepRecord.
+//   - Confidence is not available; defaults to 0.
+func TraceStepToStepRecord(step TraceStep, sessionID string) StepRecord {
+	outcome := OutcomeSuccess
+	errorMsg := ""
+	var errorCat ErrorCategory
+	if step.Error != "" {
+		outcome = OutcomeFailure
+		errorMsg = step.Error
+		errorCat = ErrorCategoryInternal
+	}
+
+	ts := step.Timestamp
+	if ts == 0 {
+		ts = time.Now().UnixMilli()
+	}
+
+	return StepRecord{
+		StepNumber:       step.Step,
+		Timestamp:        ts,
+		SessionID:        sessionID,
+		Actor:            ActorSystem,
+		Decision:         DecisionExecuteTool,
+		Tool:             step.Tool,
+		Outcome:          outcome,
+		ErrorMessage:     errorMsg,
+		ErrorCategory:    errorCat,
+		DurationMs:       step.Duration.Milliseconds(),
+		ResultSummary:    step.Action + ": " + step.Target,
+		Propagate:        true,
+		ProofUpdates:     step.ProofUpdates,
+		ConstraintsAdded: step.ConstraintsAdded,
+	}
+}
+
 // ReasoningTrace is the exportable trace format.
 type ReasoningTrace struct {
 	// SessionID identifies the session this trace belongs to.

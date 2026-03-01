@@ -99,7 +99,7 @@ type Request struct {
 	// Language is the programming language (go, python, typescript).
 	Language string `json:"language"`
 
-	// GraphID is an optional existing Code Buddy graph ID.
+	// GraphID is an optional existing Trace graph ID.
 	GraphID string `json:"graph_id,omitempty"`
 
 	// TargetFile is an optional hint for which file contains the bug.

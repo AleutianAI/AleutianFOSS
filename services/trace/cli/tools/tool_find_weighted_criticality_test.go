@@ -138,10 +138,10 @@ func TestFindWeightedCriticalityTool_ParameterValidation(t *testing.T) {
 	tool := NewFindWeightedCriticalityTool(analytics, idx)
 
 	t.Run("valid parameters succeed", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"top":           10,
 			"show_quadrant": true,
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -152,7 +152,7 @@ func TestFindWeightedCriticalityTool_ParameterValidation(t *testing.T) {
 	})
 
 	t.Run("top parameter defaults to 20", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{})
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -173,9 +173,9 @@ func TestFindWeightedCriticalityTool_ParameterValidation(t *testing.T) {
 	})
 
 	t.Run("top parameter too small is clamped", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"top": 0,
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() returned error: %v", err)
@@ -195,9 +195,9 @@ func TestFindWeightedCriticalityTool_ParameterValidation(t *testing.T) {
 	})
 
 	t.Run("top parameter too large is clamped", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"top": 101,
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() returned error: %v", err)
@@ -218,9 +218,9 @@ func TestFindWeightedCriticalityTool_ParameterValidation(t *testing.T) {
 	})
 
 	t.Run("negative top parameter is clamped", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"top": -5,
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() returned error: %v", err)
@@ -240,9 +240,9 @@ func TestFindWeightedCriticalityTool_ParameterValidation(t *testing.T) {
 	})
 
 	t.Run("explicit entry parameter is used", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"entry": "pkg/init.go:10:init",
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -262,9 +262,9 @@ func TestFindWeightedCriticalityTool_ParameterValidation(t *testing.T) {
 	})
 
 	t.Run("show_quadrant parameter controls quadrant output", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"show_quadrant": false,
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -296,9 +296,9 @@ func TestFindWeightedCriticalityTool_Execute(t *testing.T) {
 	tool := NewFindWeightedCriticalityTool(analytics, idx)
 
 	t.Run("returns all critical functions with scores", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"top": 20,
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -338,7 +338,7 @@ func TestFindWeightedCriticalityTool_Execute(t *testing.T) {
 	})
 
 	t.Run("first function has highest criticality score", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{})
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -368,7 +368,7 @@ func TestFindWeightedCriticalityTool_Execute(t *testing.T) {
 	})
 
 	t.Run("results are sorted by criticality descending", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{})
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -394,7 +394,7 @@ func TestFindWeightedCriticalityTool_Execute(t *testing.T) {
 	})
 
 	t.Run("quadrant summary is correct", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{})
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -419,7 +419,7 @@ func TestFindWeightedCriticalityTool_Execute(t *testing.T) {
 	})
 
 	t.Run("summary statistics are correct", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{})
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -442,9 +442,9 @@ func TestFindWeightedCriticalityTool_Execute(t *testing.T) {
 	})
 
 	t.Run("top parameter limits results", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"top": 3,
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -482,7 +482,7 @@ func TestFindWeightedCriticalityTool_EdgeCases(t *testing.T) {
 		idx := index.NewSymbolIndex()
 		tool := NewFindWeightedCriticalityTool(analytics, idx)
 
-		result, err := tool.Execute(ctx, map[string]any{})
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{}})
 
 		if err != nil {
 			t.Fatalf("Execute() returned error: %v", err)
@@ -520,7 +520,7 @@ func TestFindWeightedCriticalityTool_EdgeCases(t *testing.T) {
 		analytics := graph.NewGraphAnalytics(hg)
 		tool := NewFindWeightedCriticalityTool(analytics, idx)
 
-		result, err := tool.Execute(ctx, map[string]any{})
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -556,7 +556,7 @@ func TestFindWeightedCriticalityTool_EdgeCases(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel() // Cancel immediately
 
-		result, err := tool.Execute(ctx, map[string]any{})
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{}})
 
 		// Should handle context cancellation gracefully
 		if err == nil && result.Success {
@@ -757,7 +757,7 @@ func TestFindWeightedCriticalityTool_OutputFormat(t *testing.T) {
 	tool := NewFindWeightedCriticalityTool(analytics, idx)
 
 	t.Run("text output contains key sections", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{})
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -782,9 +782,9 @@ func TestFindWeightedCriticalityTool_OutputFormat(t *testing.T) {
 	})
 
 	t.Run("text output without quadrants omits quadrant section", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 			"show_quadrant": false,
-		})
+		}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
@@ -800,7 +800,7 @@ func TestFindWeightedCriticalityTool_OutputFormat(t *testing.T) {
 	})
 
 	t.Run("structured output is correct type", func(t *testing.T) {
-		result, err := tool.Execute(ctx, map[string]any{})
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{}})
 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)

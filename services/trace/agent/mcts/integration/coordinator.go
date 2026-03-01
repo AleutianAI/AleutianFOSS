@@ -160,7 +160,7 @@ func (c *Coordinator) Register(activity activities.Activity) {
 	defer c.mu.Unlock()
 
 	c.activities[activity.Name()] = activity
-	c.logger.Info("activity registered",
+	c.logger.Debug("activity registered",
 		slog.String("activity", activity.Name()),
 	)
 }

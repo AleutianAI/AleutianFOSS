@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -42,6 +43,25 @@ type FindDeadCodeParams struct {
 	// Limit is the maximum number of results to return.
 	// Default: 50, Max: 500
 	Limit int
+
+	// ExcludeTests filters out symbols from test files (default: true).
+	ExcludeTests bool
+}
+
+// ToolName returns the tool name for TypedParams interface.
+func (p FindDeadCodeParams) ToolName() string { return "find_dead_code" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p FindDeadCodeParams) ToMap() map[string]any {
+	m := map[string]any{
+		"include_exported": p.IncludeExported,
+		"limit":            p.Limit,
+		"exclude_tests":    p.ExcludeTests,
+	}
+	if p.Package != "" {
+		m["package"] = p.Package
+	}
+	return m
 }
 
 // FindDeadCodeOutput contains the structured result.
@@ -105,7 +125,7 @@ type findDeadCodeTool struct {
 //   - Cannot detect usage via reflection or dynamic calls
 //   - Exported symbols may be used by external packages (use include_exported=true carefully)
 //   - Maximum 500 results per query
-//   - Package filter uses exact match on package path
+//   - Package filter matches exact package name or file path substring
 //
 // Assumptions:
 //
@@ -151,21 +171,43 @@ func (t *findDeadCodeTool) Definition() ToolDefinition {
 				Required:    false,
 				Default:     50,
 			},
+			"exclude_tests": {
+				Type:        ParamTypeBool,
+				Description: "Exclude symbols from test files",
+				Required:    false,
+				Default:     true,
+			},
 		},
 		Category:    CategoryExploration,
 		Priority:    84,
 		Requires:    []string{"graph_initialized"},
 		SideEffects: false,
 		Timeout:     10 * time.Second,
+		WhenToUse: WhenToUse{
+			Keywords: []string{
+				"dead code", "unused code", "unreferenced", "orphan code",
+				"unused functions", "not called", "no callers", "no references",
+				"no incoming calls", "no internal callers", "never called",
+				"zero callers", "not referenced",
+			},
+			UseWhen: "User asks about dead code, unused functions, unreferenced symbols, " +
+				"or wants to find code that is never called. IMPORTANT: Negated caller queries " +
+				"like 'functions with no callers', 'no incoming calls', or 'never called' mean " +
+				"dead code — use this tool, NOT find_callers.",
+			AvoidWhen: "User asks about most connected or heavily used functions " +
+				"(use find_hotspots). User asks about code complexity or structure " +
+				"(use find_communities). User asks WHO calls a specific function " +
+				"(use find_callers — but 'no callers' means dead code, not find_callers).",
+		},
 	}
 }
 
 // Execute runs the find_dead_code tool.
-func (t *findDeadCodeTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findDeadCodeTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	start := time.Now()
 
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
 		return &Result{
 			Success: false,
@@ -188,6 +230,7 @@ func (t *findDeadCodeTool) Execute(ctx context.Context, params map[string]any) (
 			attribute.Bool("include_exported", p.IncludeExported),
 			attribute.String("package_filter", p.Package),
 			attribute.Int("limit", p.Limit),
+			attribute.Bool("exclude_tests", p.ExcludeTests),
 		),
 	)
 	defer span.End()
@@ -207,27 +250,83 @@ func (t *findDeadCodeTool) Execute(ctx context.Context, params map[string]any) (
 	)
 
 	// Apply filters
+	// IT-08 Run 3: Filter order is package scope FIRST, then export filter.
+	// In library codebases, most symbols are exported. If export filter runs first,
+	// it depletes the candidate set before package scoping can select the right area.
 	var filtered []graph.DeadCodeNode
+
+	// Phase 1: Filter by package scope (boundary-aware, cross-language)
+	var pkgScoped []graph.DeadCodeNode
 	for _, dc := range deadCode {
 		if dc.Node == nil || dc.Node.Symbol == nil {
 			continue
 		}
-		sym := dc.Node.Symbol
+		if matchesPackageScope(dc.Node.Symbol, p.Package) {
+			pkgScoped = append(pkgScoped, dc)
+		}
+	}
 
-		// Filter by exported status
+	// CR-11 restored: If package filter returns 0 results, that IS the correct
+	// answer. Do NOT fall back to global results — that gives wrong-scope data.
+	// FIX-B previously fell back here, but the real fix is upstream in
+	// extractPackageContextFromQuery() sending valid scope names.
+	if p.Package != "" && len(pkgScoped) == 0 {
+		t.logger.Info("CR-11: package filter returned 0 results, returning empty (no fallback)",
+			slog.String("tool", "find_dead_code"),
+			slog.String("package_filter", p.Package),
+			slog.Int("raw_count", len(deadCode)),
+		)
+	}
+
+	// Phase 2: Filter by exported status
+	for _, dc := range pkgScoped {
+		sym := dc.Node.Symbol
 		if !p.IncludeExported && sym.Exported {
 			continue
 		}
-
-		// Filter by package
-		if p.Package != "" && sym.Package != p.Package {
-			continue
-		}
-
 		filtered = append(filtered, dc)
-		if len(filtered) >= p.Limit {
-			break
+	}
+
+	// Phase 2b: Fallback — if package+unexported yields 0 results but
+	// package-only had results, fall back to include exported in that scope.
+	// This prevents empty results when the user asks about a specific area
+	// where all symbols happen to be exported (common in library codebases).
+	if p.Package != "" && len(filtered) == 0 && len(pkgScoped) > 0 && !p.IncludeExported {
+		t.logger.Debug("package scope fallback: including exported symbols in scoped results",
+			slog.String("tool", "find_dead_code"),
+			slog.String("package_filter", p.Package),
+			slog.Int("scoped_count", len(pkgScoped)),
+		)
+		filtered = pkgScoped
+	}
+
+	// Phase 3: Filter out test and documentation file symbols
+	if p.ExcludeTests {
+		var nonTest []graph.DeadCodeNode
+		for _, dc := range filtered {
+			if dc.Node == nil || dc.Node.Symbol == nil {
+				continue
+			}
+			filePath := dc.Node.Symbol.FilePath
+			// GR-60: Use graph-based file classification instead of heuristics
+			isProd := t.analytics.IsProductionFile(filePath)
+			// F-3: Safety net — _test.go is NEVER production regardless of classification
+			if isProd && strings.HasSuffix(filepath.Base(filePath), "_test.go") {
+				isProd = false
+			}
+			if isProd {
+				nonTest = append(nonTest, dc)
+			}
 		}
+		if len(nonTest) > 0 {
+			filtered = nonTest
+		}
+		// If ALL results are from test/doc files, keep them rather than returning empty.
+	}
+
+	// Apply limit after all filters
+	if len(filtered) > p.Limit {
+		filtered = filtered[:p.Limit]
 	}
 
 	span.SetAttributes(attribute.Int("filtered_count", len(filtered)))
@@ -239,6 +338,7 @@ func (t *findDeadCodeTool) Execute(ctx context.Context, params map[string]any) (
 			slog.Int("raw_count", len(deadCode)),
 			slog.Bool("include_exported", p.IncludeExported),
 			slog.String("package_filter", p.Package),
+			slog.Bool("exclude_tests", p.ExcludeTests),
 		)
 	} else if len(filtered) >= p.Limit {
 		t.logger.Debug("dead code results limited",
@@ -271,6 +371,7 @@ func (t *findDeadCodeTool) parseParams(params map[string]any) (FindDeadCodeParam
 		IncludeExported: false,
 		Package:         "",
 		Limit:           50,
+		ExcludeTests:    true,
 	}
 
 	// Extract include_exported (optional)
@@ -307,6 +408,13 @@ func (t *findDeadCodeTool) parseParams(params map[string]any) (FindDeadCodeParam
 		}
 	}
 
+	// Extract exclude_tests (optional, default: true)
+	if etRaw, ok := params["exclude_tests"]; ok {
+		if et, ok := parseBoolParam(etRaw); ok {
+			p.ExcludeTests = et
+		}
+	}
+
 	return p, nil
 }
 
@@ -336,13 +444,21 @@ func (t *findDeadCodeTool) buildOutput(deadCode []graph.DeadCodeNode) FindDeadCo
 	}
 }
 
-// formatText creates a human-readable text summary.
+// formatText creates a human-readable text summary with GR-59 graph markers.
+//
+// IT-08: Output must include graph markers so that getSingleFormattedResult()
+// can identify authoritative results and skip LLM synthesis:
+//   - Zero results: "## GRAPH RESULT" header + "Do NOT use Grep" footer
+//   - Positive results: "Found N" prefix + exhaustive footer + "Do NOT use Grep" footer
 func (t *findDeadCodeTool) formatText(deadCode []graph.DeadCodeNode, totalCount int) string {
 	var sb strings.Builder
 
 	if len(deadCode) == 0 {
-		sb.WriteString("No potentially dead code found.\n")
-		sb.WriteString("This is good news! All symbols appear to be used.\n")
+		sb.WriteString("## GRAPH RESULT: No dead code found\n\n")
+		sb.WriteString("No potentially dead code symbols exist in the graph.\n\n")
+		sb.WriteString("---\n")
+		sb.WriteString("The graph has been fully indexed \u2014 these results are exhaustive.\n")
+		sb.WriteString("**Do NOT use Grep or Read to verify** \u2014 the graph already analyzed all source files.\n")
 		return sb.String()
 	}
 
@@ -362,6 +478,10 @@ func (t *findDeadCodeTool) formatText(deadCode []graph.DeadCodeNode, totalCount 
 		sb.WriteString(fmt.Sprintf("   Reason: %s\n", dc.Reason))
 		sb.WriteString("\n")
 	}
+
+	sb.WriteString("---\n")
+	sb.WriteString("The graph has been fully indexed \u2014 these results are exhaustive.\n")
+	sb.WriteString("**Do NOT use Grep or Read to verify** \u2014 the graph already analyzed all source files.\n")
 
 	return sb.String()
 }

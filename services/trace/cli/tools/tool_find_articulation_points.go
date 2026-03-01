@@ -42,6 +42,17 @@ type FindArticulationPointsParams struct {
 	IncludeBridges bool
 }
 
+// ToolName returns the tool name for TypedParams interface.
+func (p FindArticulationPointsParams) ToolName() string { return "find_articulation_points" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p FindArticulationPointsParams) ToMap() map[string]any {
+	return map[string]any{
+		"top":             p.Top,
+		"include_bridges": p.IncludeBridges,
+	}
+}
+
 // FindArticulationPointsOutput contains the structured result.
 type FindArticulationPointsOutput struct {
 	// ArticulationPoints is the list of detected articulation points.
@@ -189,11 +200,11 @@ func (t *findArticulationPointsTool) Definition() ToolDefinition {
 }
 
 // Execute runs the find_articulation_points tool.
-func (t *findArticulationPointsTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findArticulationPointsTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	start := time.Now()
 
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
 		return &Result{
 			Success: false,
@@ -264,6 +275,13 @@ func (t *findArticulationPointsTool) Execute(ctx context.Context, params map[str
 		slog.Int("total_points", len(result.Points)),
 		slog.Float64("fragility_score", fragilityScore),
 	)
+
+	// RE-4: Enhance TraceStep metadata with fragility metrics
+	if traceStep.Metadata == nil {
+		traceStep.Metadata = make(map[string]string)
+	}
+	traceStep.Metadata["fragility_score"] = fmt.Sprintf("%.4f", fragilityScore)
+	traceStep.Metadata["fragility_level"] = output.FragilityLevel
 
 	return &Result{
 		Success:    true,
@@ -401,6 +419,24 @@ func (t *findArticulationPointsTool) getFragilityLevel(score float64) string {
 	default:
 		return "MINIMAL - well-connected architecture"
 	}
+}
+
+// detectLanguage attempts to infer the project's primary language.
+func (t *findArticulationPointsTool) detectLanguage() string {
+	if t.index == nil {
+		return ""
+	}
+
+	// Sample a few symbols to see what language they are
+	// Use common names that are likely to exist
+	for _, query := range []string{"main", "handler", "App", "config"} {
+		syms, err := t.index.Search(context.Background(), query, 1)
+		if err == nil && len(syms) > 0 && syms[0].Language != "" {
+			return strings.ToLower(syms[0].Language)
+		}
+	}
+
+	return ""
 }
 
 // formatText creates a human-readable text summary.

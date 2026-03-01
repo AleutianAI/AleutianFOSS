@@ -593,7 +593,7 @@ func TestNewInputValidator_NilOptions(t *testing.T) {
 // Benchmark tests
 func BenchmarkValidateFilePath(b *testing.B) {
 	v := NewInputValidator(nil)
-	path := "services/code_buddy/analysis/blast_radius.go"
+	path := "services/trace/analysis/blast_radius.go"
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -603,7 +603,7 @@ func BenchmarkValidateFilePath(b *testing.B) {
 
 func BenchmarkValidateSymbolID(b *testing.B) {
 	v := NewInputValidator(nil)
-	id := "services/code_buddy/analysis/blast_radius.go:42:Analyze"
+	id := "services/trace/analysis/blast_radius.go:42:Analyze"
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

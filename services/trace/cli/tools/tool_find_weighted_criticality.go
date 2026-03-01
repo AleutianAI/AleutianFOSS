@@ -50,6 +50,21 @@ type FindWeightedCriticalityParams struct {
 	ShowQuadrant bool
 }
 
+// ToolName returns the tool name for TypedParams interface.
+func (p FindWeightedCriticalityParams) ToolName() string { return "find_weighted_criticality" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p FindWeightedCriticalityParams) ToMap() map[string]any {
+	m := map[string]any{
+		"top":           p.Top,
+		"show_quadrant": p.ShowQuadrant,
+	}
+	if p.Entry != "" {
+		m["entry"] = p.Entry
+	}
+	return m
+}
+
 // WeightedCriticalityOutput contains the structured result.
 type WeightedCriticalityOutput struct {
 	CriticalFunctions []CriticalFunction `json:"critical_functions"`
@@ -166,18 +181,21 @@ func (t *findWeightedCriticalityTool) Definition() ToolDefinition {
 			},
 			UseWhen: "User asks about the most critical or risky functions " +
 				"considering both structural importance and dependency relationships.",
-			AvoidWhen: "User asks only about dominators or only about PageRank. " +
-				"Use find_dominators or find_important for single-dimension analysis.",
+			AvoidWhen: "User asks about the most connected, highest-coupling, highest-degree, " +
+				"or hub functions based on connectivity (use find_hotspots for degree-based ranking). " +
+				"User asks about fan-in or fan-out counts (use find_hotspots). " +
+				"User asks only about dominators or only about PageRank " +
+				"(use find_dominators or find_important for single-dimension analysis).",
 		},
 	}
 }
 
 // Execute runs the find_weighted_criticality tool.
-func (t *findWeightedCriticalityTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findWeightedCriticalityTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	start := time.Now()
 
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
 		return &Result{
 			Success: false,

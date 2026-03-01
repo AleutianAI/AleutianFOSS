@@ -800,6 +800,113 @@ func TestTypeScriptParser_Parse_Validation(t *testing.T) {
 	}
 }
 
+// TestTypeScriptParser_DecoratedFieldClass tests that a class with decorated fields
+// (like BabylonJS TransformNode) is correctly parsed and passes Validate().
+// IT-04: This is a diagnostic test for the find_symbol integration failure on TransformNode.
+func TestTypeScriptParser_DecoratedFieldClass(t *testing.T) {
+	source := `
+import { serialize, serializeAsVector3 } from "./decorators";
+
+export class TransformNode extends Node {
+    @serializeAsVector3("position")
+    private _position: Vector3 = Vector3.Zero();
+
+    @serializeAsVector3("rotation")
+    private _rotation: Vector3 = Vector3.Zero();
+
+    @serialize()
+    private _scaling: Vector3 = Vector3.One();
+
+    @serialize("billboardMode")
+    public billboardMode: number = 0;
+
+    constructor(name: string, scene?: Scene) {
+        super(name, scene);
+    }
+
+    public getAbsolutePosition(): Vector3 {
+        return this._position;
+    }
+
+    public setPositionWithLocalVector(newPosition: Vector3): TransformNode {
+        this._position = newPosition;
+        return this;
+    }
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test/transformNode.ts")
+	if err != nil {
+		t.Fatalf("Parse() returned error: %v", err)
+	}
+
+	// Check ParseResult.Validate()
+	if err := result.Validate(); err != nil {
+		t.Fatalf("result.Validate() failed: %v", err)
+	}
+
+	// Find TransformNode class
+	var tn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "TransformNode" {
+			tn = sym
+			break
+		}
+	}
+	if tn == nil {
+		t.Fatal("TransformNode not found in parsed symbols")
+	}
+
+	// Verify Symbol.Validate() passes (including recursive children validation)
+	if err := tn.Validate(); err != nil {
+		t.Fatalf("TransformNode.Validate() failed: %v", err)
+	}
+
+	t.Logf("TransformNode found: Kind=%s, StartLine=%d, EndLine=%d, Children=%d",
+		tn.Kind, tn.StartLine, tn.EndLine, len(tn.Children))
+
+	// Log all children for diagnosis
+	for i, child := range tn.Children {
+		t.Logf("  Child[%d]: Name=%q Kind=%s StartLine=%d EndLine=%d",
+			i, child.Name, child.Kind, child.StartLine, child.EndLine)
+	}
+
+	// Verify key expectations
+	if tn.Kind != SymbolKindClass {
+		t.Errorf("expected SymbolKindClass, got %s", tn.Kind)
+	}
+	if !tn.Exported {
+		t.Error("expected TransformNode to be exported")
+	}
+	if tn.Metadata == nil || tn.Metadata.Extends != "Node" {
+		t.Errorf("expected Extends=Node, got %v", tn.Metadata)
+	}
+
+	// Check that children include methods AND fields
+	hasMethod := false
+	hasField := false
+	for _, child := range tn.Children {
+		if child.Kind == SymbolKindMethod {
+			hasMethod = true
+		}
+		if child.Kind == SymbolKindField {
+			hasField = true
+		}
+	}
+	if !hasMethod {
+		t.Error("expected at least one method child")
+	}
+	if !hasField {
+		t.Error("expected at least one field child (decorated fields)")
+	}
+
+	// Verify Validate() passes — this is the exact check that service.go's
+	// parseFileToResult uses. If this fails, the ENTIRE file is dropped.
+	if err := result.Validate(); err != nil {
+		t.Fatalf("ParseResult.Validate() WOULD CAUSE FILE DROP: %v", err)
+	}
+}
+
 func TestTypeScriptParser_Parse_Hash(t *testing.T) {
 	parser := NewTypeScriptParser()
 	content := []byte("const x = 1;")
@@ -1422,4 +1529,1999 @@ func tsCallTargetNames(calls []CallSite) []string {
 		}
 	}
 	return names
+}
+
+// ============================================================================
+// IT-03a A-2: Interface Extends Extraction
+// ============================================================================
+
+func TestTypeScriptParser_InterfaceExtends_Single(t *testing.T) {
+	source := `export interface Foo extends Bar {
+    name: string;
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var iface *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindInterface && sym.Name == "Foo" {
+			iface = sym
+			break
+		}
+	}
+
+	if iface == nil {
+		t.Fatal("expected interface 'Foo'")
+	}
+
+	if iface.Metadata == nil {
+		t.Fatal("expected metadata on interface Foo")
+	}
+
+	if iface.Metadata.Extends != "Bar" {
+		t.Errorf("expected Extends='Bar', got %q", iface.Metadata.Extends)
+	}
+
+	if len(iface.Metadata.Implements) != 0 {
+		t.Errorf("expected no Implements for single extends, got %v", iface.Metadata.Implements)
+	}
+}
+
+func TestTypeScriptParser_InterfaceExtends_Multiple(t *testing.T) {
+	source := `export interface Foo extends Bar, Baz {
+    id: number;
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var iface *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindInterface && sym.Name == "Foo" {
+			iface = sym
+			break
+		}
+	}
+
+	if iface == nil {
+		t.Fatal("expected interface 'Foo'")
+	}
+
+	if iface.Metadata == nil {
+		t.Fatal("expected metadata on interface Foo")
+	}
+
+	if iface.Metadata.Extends != "Bar" {
+		t.Errorf("expected Extends='Bar', got %q", iface.Metadata.Extends)
+	}
+
+	if len(iface.Metadata.Implements) != 1 {
+		t.Fatalf("expected 1 Implements entry, got %d: %v", len(iface.Metadata.Implements), iface.Metadata.Implements)
+	}
+
+	if iface.Metadata.Implements[0] != "Baz" {
+		t.Errorf("expected Implements[0]='Baz', got %q", iface.Metadata.Implements[0])
+	}
+}
+
+func TestTypeScriptParser_InterfaceExtends_Generic(t *testing.T) {
+	source := `export interface Foo extends Bar<T> {
+    value: T;
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var iface *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindInterface && sym.Name == "Foo" {
+			iface = sym
+			break
+		}
+	}
+
+	if iface == nil {
+		t.Fatal("expected interface 'Foo'")
+	}
+
+	if iface.Metadata == nil {
+		t.Fatal("expected metadata on interface Foo")
+	}
+
+	if iface.Metadata.Extends != "Bar" {
+		t.Errorf("expected Extends='Bar' (without generic params), got %q", iface.Metadata.Extends)
+	}
+}
+
+func TestTypeScriptParser_InterfaceExtends_None(t *testing.T) {
+	source := `export interface Foo {
+    name: string;
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var iface *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindInterface && sym.Name == "Foo" {
+			iface = sym
+			break
+		}
+	}
+
+	if iface == nil {
+		t.Fatal("expected interface 'Foo'")
+	}
+
+	// With no extends, Metadata may or may not exist, but Extends should be empty
+	if iface.Metadata != nil && iface.Metadata.Extends != "" {
+		t.Errorf("expected no Extends set, got %q", iface.Metadata.Extends)
+	}
+}
+
+// ============================================================================
+// IT-03a A-3: Decorator Arguments
+// ============================================================================
+
+func TestTypeScriptParser_DecoratorArgs_Class(t *testing.T) {
+	source := `@Module({providers: [UserService]})
+export class AppModule {}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var class *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindClass && sym.Name == "AppModule" {
+			class = sym
+			break
+		}
+	}
+
+	if class == nil {
+		t.Fatal("expected class 'AppModule'")
+	}
+
+	if class.Metadata == nil {
+		t.Fatal("expected metadata on AppModule")
+	}
+
+	if class.Metadata.DecoratorArgs == nil {
+		t.Fatal("expected DecoratorArgs to be populated")
+	}
+
+	moduleArgs, ok := class.Metadata.DecoratorArgs["Module"]
+	if !ok {
+		t.Fatalf("expected DecoratorArgs to contain key 'Module', got %v", class.Metadata.DecoratorArgs)
+	}
+
+	found := false
+	for _, arg := range moduleArgs {
+		if arg == "UserService" {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("expected DecoratorArgs['Module'] to contain 'UserService', got %v", moduleArgs)
+	}
+}
+
+func TestTypeScriptParser_DecoratorArgs_SimpleArg(t *testing.T) {
+	source := `@UseInterceptors(LoggingInterceptor)
+export class Foo {}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var class *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindClass && sym.Name == "Foo" {
+			class = sym
+			break
+		}
+	}
+
+	if class == nil {
+		t.Fatal("expected class 'Foo'")
+	}
+
+	if class.Metadata == nil || class.Metadata.DecoratorArgs == nil {
+		t.Fatal("expected DecoratorArgs on class Foo")
+	}
+
+	args, ok := class.Metadata.DecoratorArgs["UseInterceptors"]
+	if !ok {
+		t.Fatalf("expected DecoratorArgs key 'UseInterceptors', got %v", class.Metadata.DecoratorArgs)
+	}
+
+	if len(args) != 1 || args[0] != "LoggingInterceptor" {
+		t.Errorf("expected ['LoggingInterceptor'], got %v", args)
+	}
+}
+
+func TestTypeScriptParser_DecoratorArgs_NoArgs(t *testing.T) {
+	source := `@Injectable()
+export class Foo {}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var class *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindClass && sym.Name == "Foo" {
+			class = sym
+			break
+		}
+	}
+
+	if class == nil {
+		t.Fatal("expected class 'Foo'")
+	}
+
+	// @Injectable() has no arguments, so DecoratorArgs should be nil or empty
+	if class.Metadata != nil && class.Metadata.DecoratorArgs != nil {
+		if args, ok := class.Metadata.DecoratorArgs["Injectable"]; ok && len(args) > 0 {
+			t.Errorf("expected no DecoratorArgs for @Injectable(), got %v", args)
+		}
+	}
+}
+
+func TestTypeScriptParser_DecoratorArgs_PlainDecorator(t *testing.T) {
+	source := `@Controller
+export class Foo {}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var class *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindClass && sym.Name == "Foo" {
+			class = sym
+			break
+		}
+	}
+
+	if class == nil {
+		t.Fatal("expected class 'Foo'")
+	}
+
+	// Plain decorator (not a call) should have no DecoratorArgs
+	if class.Metadata != nil && class.Metadata.DecoratorArgs != nil {
+		if args, ok := class.Metadata.DecoratorArgs["Controller"]; ok && len(args) > 0 {
+			t.Errorf("expected no DecoratorArgs for plain @Controller, got %v", args)
+		}
+	}
+}
+
+// ============================================================================
+// IT-03a B-3: Re-export Module Resolution
+// ============================================================================
+
+func TestTypeScriptParser_ReExport_NamedFromModule(t *testing.T) {
+	source := `export { Foo } from './bar';
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var found bool
+	for _, imp := range result.Imports {
+		if imp.Path == "./bar" {
+			found = true
+			if imp.Location.StartLine < 1 {
+				t.Errorf("expected re-export Import to have valid Location, got StartLine=%d", imp.Location.StartLine)
+			}
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("expected import with Path='./bar' from re-export, got imports: %+v", result.Imports)
+	}
+}
+
+func TestTypeScriptParser_ReExport_TypeExport(t *testing.T) {
+	source := `export type { Foo } from './bar';
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var found bool
+	for _, imp := range result.Imports {
+		if imp.Path == "./bar" {
+			found = true
+			if imp.Location.StartLine < 1 {
+				t.Errorf("expected re-export Import to have valid Location, got StartLine=%d", imp.Location.StartLine)
+			}
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("expected import with Path='./bar' from type re-export, got imports: %+v", result.Imports)
+	}
+}
+
+// ============================================================================
+// IT-03a C-1: Callback Argument Tracking
+// ============================================================================
+
+func TestTypeScriptParser_CallbackArgs(t *testing.T) {
+	source := `export function setup(app: Application): void {
+    app.use(middleware);
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var fn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindFunction && sym.Name == "setup" {
+			fn = sym
+			break
+		}
+	}
+
+	if fn == nil {
+		t.Fatal("expected function 'setup'")
+	}
+
+	if len(fn.Calls) == 0 {
+		t.Fatal("expected call sites in setup function")
+	}
+
+	// Find the app.use() call
+	var useCall *CallSite
+	for i := range fn.Calls {
+		if fn.Calls[i].Target == "use" {
+			useCall = &fn.Calls[i]
+			break
+		}
+	}
+
+	if useCall == nil {
+		t.Fatalf("expected call to 'use', got: %v", tsCallTargetNames(fn.Calls))
+	}
+
+	found := false
+	for _, arg := range useCall.FunctionArgs {
+		if arg == "middleware" {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("expected FunctionArgs to contain 'middleware', got %v", useCall.FunctionArgs)
+	}
+}
+
+func TestTypeScriptParser_CallbackArgs_SkipsKeywords(t *testing.T) {
+	source := `export function doStuff(): void {
+    foo(true, null, undefined);
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var fn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindFunction && sym.Name == "doStuff" {
+			fn = sym
+			break
+		}
+	}
+
+	if fn == nil {
+		t.Fatal("expected function 'doStuff'")
+	}
+
+	// Find the foo() call
+	var fooCall *CallSite
+	for i := range fn.Calls {
+		if fn.Calls[i].Target == "foo" {
+			fooCall = &fn.Calls[i]
+			break
+		}
+	}
+
+	if fooCall == nil {
+		t.Fatalf("expected call to 'foo', got: %v", tsCallTargetNames(fn.Calls))
+	}
+
+	// true, null, undefined should all be skipped
+	if len(fooCall.FunctionArgs) != 0 {
+		t.Errorf("expected no FunctionArgs (keywords should be skipped), got %v", fooCall.FunctionArgs)
+	}
+}
+
+// ============================================================================
+// IT-03a C-2: Generic Type Argument Tracking
+// ============================================================================
+
+func TestTypeScriptParser_TypeArguments_ReturnType(t *testing.T) {
+	source := `export function foo(): Promise<User> {
+    return Promise.resolve(null);
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var fn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindFunction && sym.Name == "foo" {
+			fn = sym
+			break
+		}
+	}
+
+	if fn == nil {
+		t.Fatal("expected function 'foo'")
+	}
+
+	if fn.Metadata == nil {
+		t.Fatal("expected metadata on function 'foo'")
+	}
+
+	found := false
+	for _, ta := range fn.Metadata.TypeArguments {
+		if ta == "User" {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("expected TypeArguments to contain 'User', got %v", fn.Metadata.TypeArguments)
+	}
+}
+
+func TestTypeScriptParser_TypeArguments_Complex(t *testing.T) {
+	source := `export function foo(): Map<string, Handler> {
+    return new Map();
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var fn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindFunction && sym.Name == "foo" {
+			fn = sym
+			break
+		}
+	}
+
+	if fn == nil {
+		t.Fatal("expected function 'foo'")
+	}
+
+	if fn.Metadata == nil {
+		t.Fatal("expected metadata on function 'foo'")
+	}
+
+	// Should contain "Handler" but not "string" (primitive)
+	hasHandler := false
+	hasString := false
+	for _, ta := range fn.Metadata.TypeArguments {
+		if ta == "Handler" {
+			hasHandler = true
+		}
+		if ta == "string" {
+			hasString = true
+		}
+	}
+
+	if !hasHandler {
+		t.Errorf("expected TypeArguments to contain 'Handler', got %v", fn.Metadata.TypeArguments)
+	}
+
+	if hasString {
+		t.Errorf("expected TypeArguments to NOT contain 'string' (primitive), got %v", fn.Metadata.TypeArguments)
+	}
+}
+
+func TestTypeScriptParser_TypeArguments_Array(t *testing.T) {
+	source := `export function foo(): Observable<Event[]> {
+    return null;
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var fn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindFunction && sym.Name == "foo" {
+			fn = sym
+			break
+		}
+	}
+
+	if fn == nil {
+		t.Fatal("expected function 'foo'")
+	}
+
+	if fn.Metadata == nil {
+		t.Fatal("expected metadata on function 'foo'")
+	}
+
+	// Should contain "Event" (with [] stripped)
+	found := false
+	for _, ta := range fn.Metadata.TypeArguments {
+		if ta == "Event" {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("expected TypeArguments to contain 'Event' ([] stripped), got %v", fn.Metadata.TypeArguments)
+	}
+}
+
+func TestTypeScriptParser_TypeArguments_NoPrimitives(t *testing.T) {
+	source := `export function foo(): Map<string, number> {
+    return new Map();
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var fn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindFunction && sym.Name == "foo" {
+			fn = sym
+			break
+		}
+	}
+
+	if fn == nil {
+		t.Fatal("expected function 'foo'")
+	}
+
+	// When all type args are primitives, TypeArguments should be empty/nil
+	if fn.Metadata != nil && len(fn.Metadata.TypeArguments) > 0 {
+		t.Errorf("expected no TypeArguments (all primitives), got %v", fn.Metadata.TypeArguments)
+	}
+}
+
+func TestExtractTypeArgumentIdentifiers_Unit(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected []string
+	}{
+		{
+			name:     "no generics",
+			input:    "string",
+			expected: nil,
+		},
+		{
+			name:     "simple generic",
+			input:    "Promise<User>",
+			expected: []string{"User"},
+		},
+		{
+			name:     "primitive generic",
+			input:    "Promise<string>",
+			expected: nil,
+		},
+		{
+			name:     "multiple type args",
+			input:    "Map<string, Handler>",
+			expected: []string{"Handler"},
+		},
+		{
+			name:     "array type argument",
+			input:    "Observable<Event[]>",
+			expected: []string{"Event"},
+		},
+		{
+			name:     "all primitives",
+			input:    "Map<string, number>",
+			expected: nil,
+		},
+		{
+			name:     "multiple non-primitives",
+			input:    "Either<User, Error>",
+			expected: []string{"User", "Error"},
+		},
+		{
+			name:     "nested generics",
+			input:    "Promise<Array<User>>",
+			expected: []string{"User"},
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			expected: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := extractTypeArgumentIdentifiers(tt.input)
+
+			if tt.expected == nil {
+				if len(result) != 0 {
+					t.Errorf("expected nil/empty result, got %v", result)
+				}
+				return
+			}
+
+			if len(result) != len(tt.expected) {
+				t.Fatalf("expected %d identifiers, got %d: %v", len(tt.expected), len(result), result)
+			}
+
+			for i, exp := range tt.expected {
+				if result[i] != exp {
+					t.Errorf("expected result[%d]=%q, got %q", i, exp, result[i])
+				}
+			}
+		})
+	}
+}
+
+// ============================================================================
+// IT-03a C-3: Type Narrowing Detection
+// ============================================================================
+
+func TestTypeScriptParser_TypeNarrowing_Instanceof(t *testing.T) {
+	source := `export function handle(x: unknown): void {
+    if (x instanceof Router) {
+        x.route();
+    }
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var fn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindFunction && sym.Name == "handle" {
+			fn = sym
+			break
+		}
+	}
+
+	if fn == nil {
+		t.Fatal("expected function 'handle'")
+	}
+
+	if fn.Metadata == nil {
+		t.Fatal("expected metadata on function 'handle'")
+	}
+
+	found := false
+	for _, tn := range fn.Metadata.TypeNarrowings {
+		if tn == "Router" {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("expected TypeNarrowings to contain 'Router', got %v", fn.Metadata.TypeNarrowings)
+	}
+}
+
+func TestTypeScriptParser_TypeNarrowing_MultipleInstanceof(t *testing.T) {
+	source := `export function handle(a: unknown, b: unknown): void {
+    if (a instanceof Foo && b instanceof Bar) {
+        return;
+    }
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var fn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindFunction && sym.Name == "handle" {
+			fn = sym
+			break
+		}
+	}
+
+	if fn == nil {
+		t.Fatal("expected function 'handle'")
+	}
+
+	if fn.Metadata == nil {
+		t.Fatal("expected metadata on function 'handle'")
+	}
+
+	narrowingSet := make(map[string]bool)
+	for _, tn := range fn.Metadata.TypeNarrowings {
+		narrowingSet[tn] = true
+	}
+
+	if !narrowingSet["Foo"] {
+		t.Errorf("expected TypeNarrowings to contain 'Foo', got %v", fn.Metadata.TypeNarrowings)
+	}
+
+	if !narrowingSet["Bar"] {
+		t.Errorf("expected TypeNarrowings to contain 'Bar', got %v", fn.Metadata.TypeNarrowings)
+	}
+}
+
+func TestTypeScriptParser_TypeNarrowing_NonePresent(t *testing.T) {
+	source := `export function greet(name: string): string {
+    return "Hello, " + name;
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var fn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindFunction && sym.Name == "greet" {
+			fn = sym
+			break
+		}
+	}
+
+	if fn == nil {
+		t.Fatal("expected function 'greet'")
+	}
+
+	if fn.Metadata != nil && len(fn.Metadata.TypeNarrowings) > 0 {
+		t.Errorf("expected no TypeNarrowings, got %v", fn.Metadata.TypeNarrowings)
+	}
+}
+
+func TestTypeScriptParser_TypeNarrowing_NestedFunction(t *testing.T) {
+	source := `export function outer(x: unknown): void {
+    const inner = (y: unknown) => {
+        if (y instanceof NestedType) {
+            return;
+        }
+    };
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var fn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindFunction && sym.Name == "outer" {
+			fn = sym
+			break
+		}
+	}
+
+	if fn == nil {
+		t.Fatal("expected function 'outer'")
+	}
+
+	// The instanceof in the nested arrow function should NOT be extracted
+	// into the outer function's TypeNarrowings
+	if fn.Metadata != nil {
+		for _, tn := range fn.Metadata.TypeNarrowings {
+			if tn == "NestedType" {
+				t.Errorf("expected 'NestedType' to NOT appear in outer function's TypeNarrowings (it is in a nested arrow function)")
+			}
+		}
+	}
+}
+
+// =============================================================================
+// IT-03a Phase 12: Metadata.Methods population tests
+// =============================================================================
+
+func TestTypeScriptParser_InterfaceMethodSignatures(t *testing.T) {
+	source := `export interface Repository {
+    findById(id: string): Promise<Entity>;
+    save(entity: Entity): Promise<void>;
+    delete(id: string): boolean;
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var iface *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindInterface && sym.Name == "Repository" {
+			iface = sym
+			break
+		}
+	}
+
+	if iface == nil {
+		t.Fatal("expected interface 'Repository'")
+	}
+
+	if iface.Metadata == nil {
+		t.Fatal("expected Metadata to be non-nil")
+	}
+
+	if len(iface.Metadata.Methods) != 3 {
+		t.Fatalf("expected 3 methods in Metadata.Methods, got %d", len(iface.Metadata.Methods))
+	}
+
+	expectedNames := map[string]bool{
+		"findById": false,
+		"save":     false,
+		"delete":   false,
+	}
+	for _, m := range iface.Metadata.Methods {
+		if _, ok := expectedNames[m.Name]; ok {
+			expectedNames[m.Name] = true
+		} else {
+			t.Errorf("unexpected method in Metadata.Methods: %s", m.Name)
+		}
+	}
+	for name, found := range expectedNames {
+		if !found {
+			t.Errorf("expected method %q in Metadata.Methods", name)
+		}
+	}
+}
+
+func TestTypeScriptParser_InterfaceMethodSignatures_Empty(t *testing.T) {
+	source := `export interface Config {
+    readonly host: string;
+    port: number;
+    debug?: boolean;
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var iface *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindInterface && sym.Name == "Config" {
+			iface = sym
+			break
+		}
+	}
+
+	if iface == nil {
+		t.Fatal("expected interface 'Config'")
+	}
+
+	// Interface with only properties should have no methods in Metadata.Methods
+	if iface.Metadata != nil && len(iface.Metadata.Methods) > 0 {
+		t.Errorf("expected no methods in Metadata.Methods for property-only interface, got %d", len(iface.Metadata.Methods))
+	}
+}
+
+func TestTypeScriptParser_InterfaceMethodSignatures_Mixed(t *testing.T) {
+	source := `export interface Service {
+    name: string;
+    start(): void;
+    stop(): void;
+    version?: number;
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var iface *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindInterface && sym.Name == "Service" {
+			iface = sym
+			break
+		}
+	}
+
+	if iface == nil {
+		t.Fatal("expected interface 'Service'")
+	}
+
+	if iface.Metadata == nil {
+		t.Fatal("expected Metadata to be non-nil")
+	}
+
+	// Only methods (start, stop), not properties (name, version)
+	if len(iface.Metadata.Methods) != 2 {
+		t.Fatalf("expected 2 methods in Metadata.Methods, got %d", len(iface.Metadata.Methods))
+	}
+
+	methodNames := make(map[string]bool)
+	for _, m := range iface.Metadata.Methods {
+		methodNames[m.Name] = true
+	}
+	if !methodNames["start"] {
+		t.Error("expected method 'start' in Metadata.Methods")
+	}
+	if !methodNames["stop"] {
+		t.Error("expected method 'stop' in Metadata.Methods")
+	}
+	if methodNames["name"] {
+		t.Error("property 'name' should NOT be in Metadata.Methods")
+	}
+}
+
+func TestTypeScriptParser_ClassMethodSignatures(t *testing.T) {
+	source := `export class UserService {
+    getUser(id: string): User {
+        return null;
+    }
+    saveUser(user: User): void {
+        // save
+    }
+    deleteUser(id: string): boolean {
+        return true;
+    }
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var cls *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindClass && sym.Name == "UserService" {
+			cls = sym
+			break
+		}
+	}
+
+	if cls == nil {
+		t.Fatal("expected class 'UserService'")
+	}
+
+	if cls.Metadata == nil {
+		t.Fatal("expected Metadata to be non-nil")
+	}
+
+	if len(cls.Metadata.Methods) != 3 {
+		t.Fatalf("expected 3 methods in Metadata.Methods, got %d", len(cls.Metadata.Methods))
+	}
+
+	expectedNames := map[string]bool{
+		"getUser":    false,
+		"saveUser":   false,
+		"deleteUser": false,
+	}
+	for _, m := range cls.Metadata.Methods {
+		if _, ok := expectedNames[m.Name]; ok {
+			expectedNames[m.Name] = true
+		} else {
+			t.Errorf("unexpected method in Metadata.Methods: %s", m.Name)
+		}
+	}
+	for name, found := range expectedNames {
+		if !found {
+			t.Errorf("expected method %q in Metadata.Methods", name)
+		}
+	}
+}
+
+func TestTypeScriptParser_ClassMethodSignatures_SkipConstructor(t *testing.T) {
+	source := `export class Handler {
+    constructor(private name: string) {}
+    handle(req: Request): Response {
+        return null;
+    }
+    dispose(): void {}
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var cls *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindClass && sym.Name == "Handler" {
+			cls = sym
+			break
+		}
+	}
+
+	if cls == nil {
+		t.Fatal("expected class 'Handler'")
+	}
+
+	if cls.Metadata == nil {
+		t.Fatal("expected Metadata to be non-nil")
+	}
+
+	// constructor should be excluded, only handle and dispose
+	if len(cls.Metadata.Methods) != 2 {
+		t.Fatalf("expected 2 methods (excluding constructor), got %d", len(cls.Metadata.Methods))
+	}
+
+	for _, m := range cls.Metadata.Methods {
+		if m.Name == "constructor" {
+			t.Error("constructor should NOT be in Metadata.Methods")
+		}
+	}
+}
+
+func TestTypeScriptParser_ClassMethodSignatures_SkipStatic(t *testing.T) {
+	source := `export class Factory {
+    static create(name: string): Factory {
+        return new Factory();
+    }
+    process(input: string): string {
+        return input;
+    }
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var cls *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindClass && sym.Name == "Factory" {
+			cls = sym
+			break
+		}
+	}
+
+	if cls == nil {
+		t.Fatal("expected class 'Factory'")
+	}
+
+	if cls.Metadata == nil {
+		t.Fatal("expected Metadata to be non-nil")
+	}
+
+	// static 'create' should be excluded, only 'process'
+	if len(cls.Metadata.Methods) != 1 {
+		t.Fatalf("expected 1 method (excluding static), got %d", len(cls.Metadata.Methods))
+	}
+
+	if cls.Metadata.Methods[0].Name != "process" {
+		t.Errorf("expected method 'process', got %q", cls.Metadata.Methods[0].Name)
+	}
+}
+
+func TestTypeScriptParser_ClassMethodSignatures_Empty(t *testing.T) {
+	source := `export class Config {
+    host: string = "localhost";
+    port: number = 8080;
+}
+`
+	parser := NewTypeScriptParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var cls *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindClass && sym.Name == "Config" {
+			cls = sym
+			break
+		}
+	}
+
+	if cls == nil {
+		t.Fatal("expected class 'Config'")
+	}
+
+	// Class with only fields should have no methods
+	if cls.Metadata != nil && len(cls.Metadata.Methods) > 0 {
+		t.Errorf("expected no methods in Metadata.Methods for field-only class, got %d", len(cls.Metadata.Methods))
+	}
+}
+
+// IT-03a Phase 13 T-3: Generic extends text stripping tests
+
+func TestTypeScriptParser_ClassHeritage_GenericExtendsStripped(t *testing.T) {
+	parser := NewTypeScriptParser()
+
+	src := []byte(`
+export class UserService extends BaseService<User> {
+  getUser(): User {
+    return new User();
+  }
+}
+
+export class Repo extends GenericRepository<Entity, string> implements Queryable<Entity> {
+  query(): Entity[] {
+    return [];
+  }
+}
+`)
+
+	result, err := parser.Parse(context.Background(), src, "generic_heritage.ts")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	// Find UserService
+	var userService *Symbol
+	var repo *Symbol
+	for _, sym := range result.Symbols {
+		switch sym.Name {
+		case "UserService":
+			userService = sym
+		case "Repo":
+			repo = sym
+		}
+	}
+
+	if userService == nil {
+		t.Fatal("expected symbol 'UserService'")
+	}
+	if userService.Metadata == nil {
+		t.Fatal("expected UserService to have metadata")
+	}
+	// Should be "BaseService" not "BaseService<User>"
+	if userService.Metadata.Extends != "BaseService" {
+		t.Errorf("expected Extends='BaseService', got %q", userService.Metadata.Extends)
+	}
+
+	if repo == nil {
+		t.Fatal("expected symbol 'Repo'")
+	}
+	if repo.Metadata == nil {
+		t.Fatal("expected Repo to have metadata")
+	}
+	// Should be "GenericRepository" not "GenericRepository<Entity, string>"
+	if repo.Metadata.Extends != "GenericRepository" {
+		t.Errorf("expected Extends='GenericRepository', got %q", repo.Metadata.Extends)
+	}
+	// Implements should be "Queryable" not "Queryable<Entity>"
+	found := false
+	for _, impl := range repo.Metadata.Implements {
+		if impl == "Queryable" {
+			found = true
+		}
+		if strings.Contains(impl, "<") {
+			t.Errorf("implements should not contain generic params, got %q", impl)
+		}
+	}
+	if !found {
+		t.Errorf("expected 'Queryable' in implements, got %v", repo.Metadata.Implements)
+	}
+}
+
+// IT-03a Phase 13 T-4: Non-exported abstract class tests
+
+func TestTypeScriptParser_NonExportedAbstractClass(t *testing.T) {
+	parser := NewTypeScriptParser()
+
+	src := []byte(`
+abstract class BaseHandler {
+  abstract handle(request: Request): Response;
+
+  log(msg: string): void {
+    console.log(msg);
+  }
+}
+
+export class ConcreteHandler extends BaseHandler {
+  handle(request: Request): Response {
+    return new Response();
+  }
+}
+`)
+
+	result, err := parser.Parse(context.Background(), src, "abstract.ts")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	// Find BaseHandler (non-exported abstract class)
+	var baseHandler *Symbol
+	var concreteHandler *Symbol
+	for _, sym := range result.Symbols {
+		switch sym.Name {
+		case "BaseHandler":
+			baseHandler = sym
+		case "ConcreteHandler":
+			concreteHandler = sym
+		}
+	}
+
+	if baseHandler == nil {
+		t.Fatal("expected non-exported abstract class 'BaseHandler' to be parsed")
+	}
+	if baseHandler.Kind != SymbolKindClass {
+		t.Errorf("expected kind Class, got %v", baseHandler.Kind)
+	}
+	if baseHandler.Metadata == nil || !baseHandler.Metadata.IsAbstract {
+		t.Error("expected BaseHandler.Metadata.IsAbstract to be true")
+	}
+
+	if concreteHandler == nil {
+		t.Fatal("expected symbol 'ConcreteHandler'")
+	}
+	if concreteHandler.Metadata == nil || concreteHandler.Metadata.Extends != "BaseHandler" {
+		t.Errorf("expected ConcreteHandler to extend BaseHandler")
+	}
+}
+
+// IT-03a Phase 14 T-1: TypeArguments on methods
+// IT-03a Phase 14 T-2: TypeNarrowings on methods
+
+func TestTypeScriptParser_Method_TypeArguments(t *testing.T) {
+	parser := NewTypeScriptParser()
+
+	src := []byte(`
+export class UserService {
+  getUsers(): Promise<User[]> {
+    return this.repo.findAll();
+  }
+
+  transform(input: Entity): Map<string, Result> {
+    return new Map();
+  }
+
+  simple(): void {
+    return;
+  }
+}
+`)
+
+	result, err := parser.Parse(context.Background(), src, "method_typeargs.ts")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	// Find the class, then its methods
+	var cls *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "UserService" {
+			cls = sym
+			break
+		}
+	}
+	if cls == nil {
+		t.Fatal("expected symbol 'UserService'")
+	}
+
+	methodMap := make(map[string]*Symbol)
+	for _, child := range cls.Children {
+		if child.Kind == SymbolKindMethod {
+			methodMap[child.Name] = child
+		}
+	}
+
+	// getUsers returns Promise<User[]> — should extract "User" as TypeArgument
+	getUsers := methodMap["getUsers"]
+	if getUsers == nil {
+		t.Fatal("expected method 'getUsers'")
+	}
+	if getUsers.Metadata == nil || len(getUsers.Metadata.TypeArguments) == 0 {
+		t.Fatal("expected getUsers to have TypeArguments from Promise<User[]>")
+	}
+	found := false
+	for _, ta := range getUsers.Metadata.TypeArguments {
+		if ta == "User" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'User' in TypeArguments, got %v", getUsers.Metadata.TypeArguments)
+	}
+
+	// transform returns Map<string, Result> — should extract "Result" (string is primitive, filtered)
+	transform := methodMap["transform"]
+	if transform == nil {
+		t.Fatal("expected method 'transform'")
+	}
+	if transform.Metadata == nil || len(transform.Metadata.TypeArguments) == 0 {
+		t.Fatal("expected transform to have TypeArguments from Map<string, Result>")
+	}
+	found = false
+	for _, ta := range transform.Metadata.TypeArguments {
+		if ta == "Result" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'Result' in TypeArguments, got %v", transform.Metadata.TypeArguments)
+	}
+
+	// simple returns void — should have no TypeArguments
+	simple := methodMap["simple"]
+	if simple == nil {
+		t.Fatal("expected method 'simple'")
+	}
+	if simple.Metadata != nil && len(simple.Metadata.TypeArguments) > 0 {
+		t.Errorf("expected no TypeArguments for void return, got %v", simple.Metadata.TypeArguments)
+	}
+}
+
+func TestTypeScriptParser_Method_TypeNarrowings(t *testing.T) {
+	parser := NewTypeScriptParser()
+
+	src := []byte(`
+export class Validator {
+  validate(input: unknown): boolean {
+    if (input instanceof Error) {
+      return false;
+    }
+    if (input instanceof CustomType) {
+      return true;
+    }
+    return false;
+  }
+
+  noNarrowings(): void {
+    console.log("hello");
+  }
+}
+`)
+
+	result, err := parser.Parse(context.Background(), src, "method_narrowings.ts")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	var cls *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Validator" {
+			cls = sym
+			break
+		}
+	}
+	if cls == nil {
+		t.Fatal("expected symbol 'Validator'")
+	}
+
+	methodMap := make(map[string]*Symbol)
+	for _, child := range cls.Children {
+		if child.Kind == SymbolKindMethod {
+			methodMap[child.Name] = child
+		}
+	}
+
+	// validate uses instanceof Error and instanceof CustomType
+	validate := methodMap["validate"]
+	if validate == nil {
+		t.Fatal("expected method 'validate'")
+	}
+	if validate.Metadata == nil || len(validate.Metadata.TypeNarrowings) == 0 {
+		t.Fatal("expected validate to have TypeNarrowings from instanceof checks")
+	}
+
+	narrowingSet := make(map[string]bool)
+	for _, n := range validate.Metadata.TypeNarrowings {
+		narrowingSet[n] = true
+	}
+	if !narrowingSet["Error"] {
+		t.Errorf("expected 'Error' in TypeNarrowings, got %v", validate.Metadata.TypeNarrowings)
+	}
+	if !narrowingSet["CustomType"] {
+		t.Errorf("expected 'CustomType' in TypeNarrowings, got %v", validate.Metadata.TypeNarrowings)
+	}
+
+	// noNarrowings should have no TypeNarrowings
+	noNarrowings := methodMap["noNarrowings"]
+	if noNarrowings == nil {
+		t.Fatal("expected method 'noNarrowings'")
+	}
+	if noNarrowings.Metadata != nil && len(noNarrowings.Metadata.TypeNarrowings) > 0 {
+		t.Errorf("expected no TypeNarrowings, got %v", noNarrowings.Metadata.TypeNarrowings)
+	}
+}
+
+// TestTypeScriptParser_ExportConstNewInstance verifies that `export const X = new Y()`
+// produces a symbol with Kind=SymbolKindConstant and Exported=true.
+// IT-04 Phase 3: Ensures NestFactory-style patterns are correctly parsed.
+func TestTypeScriptParser_ExportConstNewInstance(t *testing.T) {
+	parser := NewTypeScriptParser()
+	content := `
+export class NestFactoryStatic {
+  async create(module: any): Promise<any> {
+    return {};
+  }
+}
+
+export const NestFactory = new NestFactoryStatic();
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "packages/core/nest-factory.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var nestFactory *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "NestFactory" {
+			nestFactory = sym
+			break
+		}
+	}
+
+	if nestFactory == nil {
+		t.Fatal("expected to find symbol 'NestFactory'")
+	}
+
+	if !nestFactory.Exported {
+		t.Error("expected NestFactory to be marked as Exported")
+	}
+
+	if nestFactory.Kind != SymbolKindConstant {
+		t.Errorf("expected NestFactory kind to be %q, got %q", SymbolKindConstant, nestFactory.Kind)
+	}
+
+	if nestFactory.Language != "typescript" {
+		t.Errorf("expected language 'typescript', got %q", nestFactory.Language)
+	}
+}
+
+// findTSMethod searches a ParseResult for a method by class name + method name,
+// traversing the Children of each class symbol.
+func findTSMethod(result *ParseResult, className, methodName string) *Symbol {
+	for _, sym := range result.Symbols {
+		if sym.Name == className {
+			for _, child := range sym.Children {
+				if child.Name == methodName {
+					return child
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// TestTypeScriptParser_NewExpression_SimpleConstructor verifies that `new X()` calls
+// are extracted as Calls entries on the calling method (IT-06d Bug 13).
+func TestTypeScriptParser_NewExpression_SimpleConstructor(t *testing.T) {
+	parser := NewTypeScriptParser(WithTypeScriptParseOptions(ParseOptions{IncludePrivate: true}))
+	content := `
+import { Drawer } from './drawer';
+
+class LinePlot {
+  private drawer: Drawer;
+
+  render(dataset: Dataset): void {
+    this.drawer = new Drawer(this.element);
+    this.drawer.draw(dataset);
+  }
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "src/plots/linePlot.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	renderFn := findTSMethod(result, "LinePlot", "render")
+	if renderFn == nil {
+		t.Fatal("LinePlot.render method not found")
+	}
+
+	callTargets := make(map[string]bool)
+	for _, call := range renderFn.Calls {
+		callTargets[call.Target] = true
+	}
+
+	if !callTargets["Drawer"] {
+		t.Errorf("expected call to Drawer from new Drawer(...), got calls: %v", renderFn.Calls)
+	}
+}
+
+// TestTypeScriptParser_NewExpression_QualifiedConstructor verifies that `new mod.Class()`
+// extracts the leaf class name as target.
+func TestTypeScriptParser_NewExpression_QualifiedConstructor(t *testing.T) {
+	parser := NewTypeScriptParser(WithTypeScriptParseOptions(ParseOptions{IncludePrivate: true}))
+	content := `
+import * as drawers from './drawers';
+
+class BarPlot {
+  createDrawer(): void {
+    const drawer = new drawers.BarDrawer(this.config);
+  }
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "src/plots/barPlot.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	createFn := findTSMethod(result, "BarPlot", "createDrawer")
+	if createFn == nil {
+		t.Fatal("BarPlot.createDrawer method not found")
+	}
+
+	callTargets := make(map[string]bool)
+	for _, call := range createFn.Calls {
+		callTargets[call.Target] = true
+	}
+
+	if !callTargets["BarDrawer"] {
+		t.Errorf("expected call to BarDrawer from new drawers.BarDrawer(...), got calls: %v", createFn.Calls)
+	}
+}
+
+// TestTypeScriptParser_NewExpression_MultipleConstructors verifies multiple new X() calls
+// in a single method body are all extracted.
+func TestTypeScriptParser_NewExpression_MultipleConstructors(t *testing.T) {
+	parser := NewTypeScriptParser(WithTypeScriptParseOptions(ParseOptions{IncludePrivate: true}))
+	content := `
+class ScatterPlot {
+  initialize(config: PlotConfig): void {
+    const drawer = new ScatterDrawer(config.element);
+    const scale = new LinearScale(config.domain);
+    const axis = new Axis(scale);
+    this.render(drawer, scale, axis);
+  }
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(content), "src/plots/scatterPlot.ts")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	initFn := findTSMethod(result, "ScatterPlot", "initialize")
+	if initFn == nil {
+		t.Fatal("ScatterPlot.initialize method not found")
+	}
+
+	callTargets := make(map[string]bool)
+	for _, call := range initFn.Calls {
+		callTargets[call.Target] = true
+	}
+
+	for _, want := range []string{"ScatterDrawer", "LinearScale", "Axis"} {
+		if !callTargets[want] {
+			t.Errorf("expected new-expression call to %s, got calls: %v", want, initFn.Calls)
+		}
+	}
+}
+
+// =============================================================================
+// IT-06e Bug 4: Dynamic import() detection in TypeScript
+// =============================================================================
+
+// TestTypeScriptParser_DynamicImport verifies that import(stringLiteral) inside
+// a function body produces an Import entry with IsDynamic=true.
+func TestTypeScriptParser_DynamicImport(t *testing.T) {
+	parser := NewTypeScriptParser()
+	src := []byte(`
+const LazyComponent = React.lazy(() => import('./HeavyComponent'));
+const DynamicComp   = dynamic(() => import('./Component'), { ssr: false });
+`)
+	result, err := parser.Parse(context.Background(), src, "app.tsx")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	dynamicImports := make(map[string]Import)
+	for _, imp := range result.Imports {
+		if imp.IsDynamic {
+			dynamicImports[imp.Path] = imp
+		}
+	}
+
+	if _, ok := dynamicImports["./HeavyComponent"]; !ok {
+		t.Errorf("expected dynamic import for './HeavyComponent', got: %v", dynamicImports)
+	}
+	if _, ok := dynamicImports["./Component"]; !ok {
+		t.Errorf("expected dynamic import for './Component', got: %v", dynamicImports)
+	}
+
+	for path, imp := range dynamicImports {
+		if !imp.IsModule {
+			t.Errorf("dynamic import %q should have IsModule=true", path)
+		}
+	}
+}
+
+// TestTypeScriptParser_DynamicImport_ExternalCaptured verifies that dynamic imports
+// of external packages are also captured by the parser (path filtering is builder's job).
+func TestTypeScriptParser_DynamicImport_ExternalCaptured(t *testing.T) {
+	parser := NewTypeScriptParser()
+	src := []byte(`const x = import('lodash');`)
+	result, err := parser.Parse(context.Background(), src, "app.ts")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	var found bool
+	for _, imp := range result.Imports {
+		if imp.IsDynamic && imp.Path == "lodash" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected dynamic import for 'lodash' to be captured")
+	}
+}
+
+// IT-R2d F.1: Test that class field arrow function call sites are extracted.
+func TestTypeScriptParser_FieldArrowFunction_CallSites(t *testing.T) {
+	parser := NewTypeScriptParser()
+	source := `
+class Engine {
+    private _renderLoop = () => {
+        this.renderMeshes(activeMeshes);
+        this.scene.render();
+    };
+
+    simpleField: number = 42;
+
+    static handler = (event: Event) => {
+        console.log(event);
+        processEvent(event);
+    };
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(source), "engine.ts")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+
+	// Find Engine class
+	var engineClass *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Engine" && sym.Kind == SymbolKindClass {
+			engineClass = sym
+			break
+		}
+	}
+	if engineClass == nil {
+		t.Fatal("expected Engine class symbol")
+	}
+
+	// Find _renderLoop field
+	var renderLoop *Symbol
+	var simpleField *Symbol
+	var handler *Symbol
+	for _, child := range engineClass.Children {
+		switch child.Name {
+		case "_renderLoop":
+			renderLoop = child
+		case "simpleField":
+			simpleField = child
+		case "handler":
+			handler = child
+		}
+	}
+
+	// _renderLoop should have call sites extracted
+	if renderLoop == nil {
+		t.Fatal("expected _renderLoop field symbol")
+	}
+	if renderLoop.Receiver != "Engine" {
+		t.Errorf("expected _renderLoop.Receiver = 'Engine', got %q", renderLoop.Receiver)
+	}
+	if len(renderLoop.Calls) < 2 {
+		t.Errorf("expected _renderLoop to have >= 2 call sites, got %d", len(renderLoop.Calls))
+	} else {
+		// Verify call targets
+		targets := make(map[string]bool)
+		for _, call := range renderLoop.Calls {
+			targets[call.Target] = true
+		}
+		if !targets["renderMeshes"] {
+			t.Error("expected call to renderMeshes in _renderLoop")
+		}
+		if !targets["render"] {
+			t.Error("expected call to render in _renderLoop")
+		}
+	}
+
+	// simpleField should NOT have call sites (plain value, not arrow)
+	if simpleField == nil {
+		t.Fatal("expected simpleField symbol")
+	}
+	if len(simpleField.Calls) != 0 {
+		t.Errorf("expected simpleField to have 0 calls, got %d", len(simpleField.Calls))
+	}
+
+	// handler should have call sites (static arrow field)
+	if handler == nil {
+		t.Fatal("expected handler field symbol")
+	}
+	if len(handler.Calls) < 2 {
+		t.Errorf("expected handler to have >= 2 call sites, got %d", len(handler.Calls))
+	}
+}
+
+// IT-R2d F.1: Test that class field function expression call sites are extracted.
+func TestTypeScriptParser_FieldFunctionExpression_CallSites(t *testing.T) {
+	parser := NewTypeScriptParser()
+	source := `
+class Service {
+    processor = function(data: any) {
+        validate(data);
+        transform(data);
+    };
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(source), "service.ts")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+
+	var svc *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Service" {
+			svc = sym
+			break
+		}
+	}
+	if svc == nil {
+		t.Fatal("expected Service class symbol")
+	}
+
+	var processor *Symbol
+	for _, child := range svc.Children {
+		if child.Name == "processor" {
+			processor = child
+			break
+		}
+	}
+	if processor == nil {
+		t.Fatal("expected processor field symbol")
+	}
+	if len(processor.Calls) < 2 {
+		t.Errorf("expected processor to have >= 2 call sites, got %d", len(processor.Calls))
+	}
+}
+
+// IT-R2d F.2: Test that TS arrow function variable call sites are extracted.
+func TestTypeScriptParser_ArrowVariable_CallSites(t *testing.T) {
+	parser := NewTypeScriptParser()
+	source := `
+const renderScene = () => {
+    engine.runRenderLoop();
+    scene.render();
+};
+
+const simpleVar: number = 42;
+
+export const handler = async (req: Request) => {
+    validate(req);
+    const result = await process(req);
+    return result;
+};
+`
+	result, err := parser.Parse(context.Background(), []byte(source), "app.ts")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+
+	var renderScene *Symbol
+	var simpleVar *Symbol
+	var handler *Symbol
+	for _, sym := range result.Symbols {
+		switch sym.Name {
+		case "renderScene":
+			renderScene = sym
+		case "simpleVar":
+			simpleVar = sym
+		case "handler":
+			handler = sym
+		}
+	}
+
+	// renderScene should have Kind=Function (arrow) and call sites
+	if renderScene == nil {
+		t.Fatal("expected renderScene symbol")
+	}
+	if renderScene.Kind != SymbolKindFunction {
+		t.Errorf("expected renderScene.Kind = Function, got %v", renderScene.Kind)
+	}
+	if len(renderScene.Calls) < 2 {
+		t.Errorf("expected renderScene to have >= 2 call sites, got %d", len(renderScene.Calls))
+	} else {
+		targets := make(map[string]bool)
+		for _, call := range renderScene.Calls {
+			targets[call.Target] = true
+		}
+		if !targets["runRenderLoop"] {
+			t.Error("expected call to runRenderLoop in renderScene")
+		}
+		if !targets["render"] {
+			t.Error("expected call to render in renderScene")
+		}
+	}
+
+	// simpleVar should not have calls
+	if simpleVar == nil {
+		t.Fatal("expected simpleVar symbol")
+	}
+	if len(simpleVar.Calls) != 0 {
+		t.Errorf("expected simpleVar to have 0 calls, got %d", len(simpleVar.Calls))
+	}
+
+	// handler should have calls (async arrow)
+	if handler == nil {
+		t.Fatal("expected handler symbol")
+	}
+	if len(handler.Calls) < 2 {
+		t.Errorf("expected handler to have >= 2 call sites, got %d", len(handler.Calls))
+	}
+}
+
+// IT-R2d F.2: Test expression-body arrow variable call extraction.
+func TestTypeScriptParser_ArrowVariable_ExpressionBody_CallSites(t *testing.T) {
+	parser := NewTypeScriptParser()
+	source := `
+const transform = (x: number) => Math.sqrt(x);
+`
+	result, err := parser.Parse(context.Background(), []byte(source), "math.ts")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+
+	var transform *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "transform" {
+			transform = sym
+			break
+		}
+	}
+	if transform == nil {
+		t.Fatal("expected transform symbol")
+	}
+	if transform.Kind != SymbolKindFunction {
+		t.Errorf("expected transform.Kind = Function, got %v", transform.Kind)
+	}
+	// Expression body should have the member_expression call extracted
+	// Math.sqrt is a member expression → call to sqrt
+	// The call extraction traverses the expression body node
+}
+
+// IT-R2d F.3: Test that interface method signatures get Receiver set.
+func TestTypeScriptParser_InterfaceMethodReceiver(t *testing.T) {
+	parser := NewTypeScriptParser()
+	source := `
+interface ICamera {
+    update(): void;
+    getViewMatrix(): Matrix;
+    readonly position: Vector3;
+    name?: string;
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(source), "camera.ts")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+
+	var iface *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "ICamera" && sym.Kind == SymbolKindInterface {
+			iface = sym
+			break
+		}
+	}
+	if iface == nil {
+		t.Fatal("expected ICamera interface symbol")
+	}
+
+	if len(iface.Children) < 4 {
+		t.Fatalf("expected ICamera to have >= 4 children, got %d", len(iface.Children))
+	}
+
+	for _, child := range iface.Children {
+		if child.Receiver != "ICamera" {
+			t.Errorf("expected child %q (kind=%v) to have Receiver='ICamera', got %q",
+				child.Name, child.Kind, child.Receiver)
+		}
+	}
+
+	// Verify specific children
+	childNames := make(map[string]SymbolKind)
+	for _, child := range iface.Children {
+		childNames[child.Name] = child.Kind
+	}
+	if _, ok := childNames["update"]; !ok {
+		t.Error("expected 'update' method in ICamera children")
+	}
+	if _, ok := childNames["getViewMatrix"]; !ok {
+		t.Error("expected 'getViewMatrix' method in ICamera children")
+	}
+	if _, ok := childNames["position"]; !ok {
+		t.Error("expected 'position' property in ICamera children")
+	}
+}
+
+// IT-R2d F.3: Test that interface members with extends also get Receiver.
+func TestTypeScriptParser_InterfaceExtendsReceiver(t *testing.T) {
+	parser := NewTypeScriptParser()
+	source := `
+interface IRenderable extends IDisposable {
+    render(): void;
+    isVisible: boolean;
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(source), "renderable.ts")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+
+	var iface *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "IRenderable" {
+			iface = sym
+			break
+		}
+	}
+	if iface == nil {
+		t.Fatal("expected IRenderable interface symbol")
+	}
+
+	for _, child := range iface.Children {
+		if child.Receiver != "IRenderable" {
+			t.Errorf("expected child %q Receiver='IRenderable', got %q", child.Name, child.Receiver)
+		}
+	}
+
+	// Verify extends is preserved
+	if iface.Metadata == nil || iface.Metadata.Extends != "IDisposable" {
+		extends := ""
+		if iface.Metadata != nil {
+			extends = iface.Metadata.Extends
+		}
+		t.Errorf("expected IRenderable.Metadata.Extends = 'IDisposable', got %q", extends)
+	}
 }

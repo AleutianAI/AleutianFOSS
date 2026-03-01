@@ -27,7 +27,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-const tracerName = "code_buddy.eval.benchmark"
+const tracerName = "trace.eval.benchmark"
 
 // -----------------------------------------------------------------------------
 // Runner Options

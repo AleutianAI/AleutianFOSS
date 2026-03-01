@@ -13,7 +13,10 @@ package tools
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"strings"
 
+	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
 )
@@ -240,4 +243,236 @@ func parseStringParam(value any) (string, bool) {
 		return s, true
 	}
 	return "", false
+}
+
+// =============================================================================
+// Package Scope Matching
+// =============================================================================
+
+// matchesPackageScope checks if a symbol matches a package filter using
+// boundary-aware matching across multiple strategies.
+//
+// Description:
+//
+//	Determines whether a symbol belongs to a given package scope. This function
+//	handles cross-language scoping: Go symbols have Package populated from the
+//	package declaration, while Python/JS/TS symbols have Package="" and must be
+//	matched via file path or file stem.
+//
+//	Uses containsPackageSegment() (from symbol_resolution.go) for boundary-aware
+//	matching that avoids false positives like "log" matching "dialog".
+//
+// Inputs:
+//   - sym: The symbol to check. Must not be nil.
+//   - packageFilter: The package/scope name to match against. If empty, returns true.
+//
+// Outputs:
+//   - bool: True if the symbol matches the package filter.
+//
+// Match strategies (tried in order):
+//  1. Boundary-aware match on sym.Package (Go symbols where Package is populated)
+//  2. Boundary-aware match on sym.FilePath (all languages — matches directory segments)
+//  3. File stem match: base name without extension == filter (handles "engine.ts" matching "engine")
+//
+// Thread Safety: Safe for concurrent use (read-only operations).
+func matchesPackageScope(sym *ast.Symbol, packageFilter string) bool {
+	if packageFilter == "" {
+		return true
+	}
+	if sym == nil {
+		return false
+	}
+
+	// IT-08d: Strip trailing slash so "src/utils/" matches "src/utils/file.ts"
+	// via boundary check (haystack[endPos]='/') instead of failing (haystack[endPos]='m').
+	lowerFilter := strings.ToLower(strings.TrimRight(packageFilter, "/"))
+
+	// Strategy 1: Boundary-aware match on sym.Package (Go symbols)
+	if sym.Package != "" {
+		if containsPackageSegment(strings.ToLower(sym.Package), lowerFilter) {
+			return true
+		}
+	}
+
+	// Strategy 2: Boundary-aware match on sym.FilePath (all languages)
+	if sym.FilePath != "" {
+		if containsPackageSegment(strings.ToLower(sym.FilePath), lowerFilter) {
+			return true
+		}
+	}
+
+	// Strategy 3: File stem match (base name without extension)
+	// Handles single-file modules: "engine" matches "engine.ts"
+	if sym.FilePath != "" {
+		base := filepath.Base(sym.FilePath)
+		ext := filepath.Ext(base)
+		stem := strings.ToLower(strings.TrimSuffix(base, ext))
+		if stem == lowerFilter {
+			return true
+		}
+	}
+
+	return false
+}
+
+// =============================================================================
+// Symbol Name Validation
+// =============================================================================
+
+// genericWords is the set of common English words that are never valid symbol names.
+// When an LLM extracts a parameter from a natural-language query, it sometimes picks up
+// a generic noun (e.g., "classes" from "What classes extend Scale?") instead of the
+// actual symbol name ("Scale"). This set catches those misextractions early so the tool
+// can return a clear error message guiding the LLM to retry with the correct name.
+//
+// The set is intentionally broad: a false positive (rejecting a real symbol named
+// "function") is far less costly than a false negative (querying the graph for "classes"
+// and returning zero results with no explanation).
+var genericWords = map[string]bool{
+	// Programming construct nouns — the most common misextractions
+	"class":      true,
+	"classes":    true,
+	"interface":  true,
+	"interfaces": true,
+	"struct":     true,
+	"structs":    true,
+	"type":       true,
+	"types":      true,
+	"function":   true,
+	"functions":  true,
+	"method":     true,
+	"methods":    true,
+	"module":     true,
+	"modules":    true,
+	"package":    true,
+	"packages":   true,
+	"variable":   true,
+	"variables":  true,
+	"constant":   true,
+	"constants":  true,
+	"prototype":  true,
+	"prototypes": true,
+	// IT-R2b Fix 2: Removed "constructor"/"constructors" — valid JS/TS symbol name.
+	// Resolution pipeline handles disambiguation of multiple constructor symbols.
+	"object":     true,
+	"objects":    true,
+	"property":   true,
+	"properties": true,
+	"field":      true,
+	"fields":     true,
+	"parameter":  true,
+	"parameters": true,
+	"argument":   true,
+	"arguments":  true,
+	"enum":       true,
+	"enums":      true,
+
+	// Relationship nouns — LLM picks these from "find all X" queries
+	"implementation":  true,
+	"implementations": true,
+	"extension":       true,
+	"extensions":      true,
+	"subclass":        true,
+	"subclasses":      true,
+	"superclass":      true,
+	"superclasses":    true,
+	"derivative":      true,
+	"derivatives":     true,
+	"caller":          true,
+	"callers":         true,
+	"callee":          true,
+	"callees":         true,
+	"reference":       true,
+	"references":      true,
+	"dependency":      true,
+	"dependencies":    true,
+	"parent":          true,
+	"parents":         true,
+	"child":           true,
+	"children":        true,
+
+	// English articles, pronouns, and prepositions that slip through
+	"the":     true,
+	"a":       true,
+	"an":      true,
+	"all":     true,
+	"any":     true,
+	"some":    true,
+	"every":   true,
+	"each":    true,
+	"this":    true,
+	"that":    true,
+	"it":      true,
+	"them":    true,
+	"what":    true,
+	"which":   true,
+	"who":     true,
+	"how":     true,
+	"where":   true,
+	"when":    true,
+	"from":    true,
+	"into":    true,
+	"with":    true,
+	"base":    true,
+	"given":   true,
+	"code":    true,
+	"file":    true,
+	"files":   true,
+	"symbol":  true,
+	"symbols": true,
+	"name":    true,
+	"names":   true,
+}
+
+// isGenericWord returns true if the lowercased input matches a known generic English
+// word that should never be used as a symbol name in a graph query.
+//
+// Description:
+//
+//	Checks whether a candidate symbol name is actually a generic English word
+//	that the LLM misextracted from a natural-language query. For example, given
+//	the query "What classes extend Scale?", an LLM might extract "classes" as the
+//	symbol name instead of "Scale". This function catches that mistake.
+//
+// Inputs:
+//   - name: The candidate symbol name. Must not be empty.
+//
+// Outputs:
+//   - bool: True if the name is a known generic word, false otherwise.
+//
+// Thread Safety: Safe for concurrent use (read-only map access).
+func isGenericWord(name string) bool {
+	return genericWords[strings.ToLower(strings.TrimSpace(name))]
+}
+
+// ValidateSymbolName checks that a symbol name parameter is non-empty and not a
+// generic English word. Returns a user-facing error message that guides the LLM
+// to retry with the correct symbol name.
+//
+// Description:
+//
+//	Shared validation for all tools that accept a symbol/function/type name
+//	parameter from LLM-extracted input. Rejects empty strings and generic words
+//	with an error message that includes example symbol names to help the LLM
+//	self-correct on retry.
+//
+// Inputs:
+//   - name: The candidate symbol name to validate.
+//   - paramName: The parameter name for error messages (e.g., "function_name", "interface_name").
+//   - examples: Example valid symbol names for the error hint (e.g., "handleRequest", "Router").
+//
+// Outputs:
+//   - error: Non-nil if validation fails, with a descriptive message.
+//
+// Thread Safety: Safe for concurrent use.
+func ValidateSymbolName(name, paramName string, examples string) error {
+	if name == "" {
+		return fmt.Errorf("%s is required", paramName)
+	}
+	if isGenericWord(name) {
+		return fmt.Errorf("%s '%s' appears to be a generic word, not a symbol name. "+
+			"Please extract the actual symbol name from the query "+
+			"(e.g., %s)", paramName, name, examples)
+	}
+	return nil
 }

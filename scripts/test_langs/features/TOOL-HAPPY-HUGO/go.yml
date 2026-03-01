@@ -54,11 +54,17 @@ tests:
     description: >
       find_implementations tool against Hugo. Target: page.Page interface.
     query: |
-      What types implement the Page interface in the resources/page package?
+      What types implement the Page interface?
     expected_state: COMPLETE
     reference_answer: |
-      The Page interface in resources/page/page.go has implementations including
-      pageState in hugolib/page.go and other page-related types.
+      Found 22 implementations/subclasses of 'Page':
+      Interface: resources/page/page.go:171:Page
+        - PageWithContext (struct) in resources/page/page.go:469
+        - pageWithOrdinal (struct) in hugolib/page.go:751
+        - pageState (struct) in hugolib/page.go:95
+        - nopPage (type) in resources/page/page_nop.go:60
+        - pageForShortcode, pageForRenderHooks, pageHeadingsFiltered, etc.
+      Also matches navigation/menu.go:81:Page interface.
     validations:
       - type: graph_tool_used
 
@@ -94,13 +100,18 @@ tests:
     name: hugo_get_call_chain
     category: TOOL_HAPPY_PATH
     description: >
-      get_call_chain tool against Hugo. From main to render.
+      get_call_chain tool against Hugo. Downstream from LoadConfigFromDir.
+      This is a duplicate-target test with 5050 but using get_call_chain
+      to verify call chain tool produces consistent results.
+      LoadConfigFromDir (configLoader.go:119) has a rich downstream tree.
     query: |
-      Show the call chain from the main function to the page rendering logic
+      Show the downstream call chain from assemblePagesStep1
     expected_state: COMPLETE
     reference_answer: |
-      main -> commands.Execute -> hugobuilder.build -> HugoSites.Build ->
-      site rendering pipeline through pageOutput and template execution.
+      get_call_chain from assemblePagesStep1 shows a downstream tree
+      of page assembly functions. assemblePagesStep1 is defined in
+      hugolib/content_map_page.go and orchestrates page construction
+      including content mapping, page creation, and metadata assignment.
     validations:
       - type: graph_tool_used
 
@@ -108,13 +119,16 @@ tests:
     name: hugo_find_path
     category: TOOL_HAPPY_PATH
     description: >
-      find_path tool against Hugo. Between commands and tpl packages.
+      find_path tool against Hugo. Between LoadConfigFromDir and RenameKeys.
+      LoadConfigFromDir (configLoader.go:119) directly calls RenameKeys
+      (configLoader.go:229). 1-hop path, both in config/configLoader.go.
     query: |
-      Find the shortest path between the server command and template execution
+      Find the shortest path between LoadConfigFromDir and RenameKeys
     expected_state: COMPLETE
     reference_answer: |
-      commands/server.go -> hugobuilder -> HugoSites.Build -> site.render ->
-      tpl execution pipeline.
+      find_path returns a 1-hop path: LoadConfigFromDir → RenameKeys.
+      LoadConfigFromDir loads configuration from a directory and calls
+      RenameKeys to normalize configuration key names during processing.
     validations:
       - type: graph_tool_used
 
@@ -155,8 +169,12 @@ tests:
       Find circular call dependencies in this codebase
     expected_state: COMPLETE
     reference_answer: |
-      Hugo has circular dependencies in areas like page rendering where
-      pages reference site and site references pages.
+      Found multiple circular call dependency cycles. The largest cycle has 19 nodes
+      involving page content rendering: ContentWithoutSummary -> Summary -> fragmentsHTML
+      -> TableOfContents -> mustContentToC -> Fragments -> Content -> Render -> nodeContent
+      spanning hugolib/page__content.go, hugolib/page__per_output.go, and
+      markup/asciidocext/internal/converter.go. Additional cycles exist in the
+      page rendering and template execution paths.
     validations:
       - type: graph_tool_used
 
@@ -346,88 +364,107 @@ tests:
 
   - id: 5023
     name: hugo_find_entry_points
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: find_entry_points tool (not yet registered as standalone tool).
+      find_entry_points tool against Hugo. Find execution entry points.
     query: |
       What are the entry points into this codebase?
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone. Entry points include
-      main(), init() functions, and HTTP handler registrations.
-    validations: []
+      Entry points include main() in commands/hugo.go, init() functions across
+      packages, and the Execute() command entry point that starts the CLI.
+    validations:
+      - type: graph_tool_used
 
   - id: 5024
     name: hugo_trace_data_flow
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: trace_data_flow tool (not yet registered as standalone tool).
+      trace_data_flow tool against Hugo. Trace config data through build.
     query: |
       Trace how configuration data flows through the build pipeline
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      Configuration flows from config.FromFile through Deps initialization
+      into HugoSites, then to individual Site objects for rendering decisions
+      like output formats, template selection, and content processing.
+    validations:
+      - type: graph_tool_used
 
   - id: 5025
     name: hugo_trace_error_flow
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: trace_error_flow tool (not yet registered as standalone tool).
+      trace_error_flow tool against Hugo. Trace errors in template rendering.
     query: |
       Trace how errors propagate through the template rendering system
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      Template errors propagate from tpl execution through the rendering
+      pipeline back to HugoSites.Build, where they are collected and
+      reported. Partial rendering errors are accumulated rather than halting.
+    validations:
+      - type: graph_tool_used
 
   - id: 5026
     name: hugo_find_config_usage
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: find_config_usage tool (not yet registered as standalone tool).
+      find_config_usage tool against Hugo. Find where site config is used.
     query: |
       How is the site configuration used across Hugo?
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      Site configuration is used in hugolib for build settings, tpl for
+      template configuration, resources for asset pipeline options, and
+      commands for CLI flag processing and environment setup.
+    validations:
+      - type: graph_tool_used
 
   - id: 5027
     name: hugo_find_similar_code
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: find_similar_code tool (not yet registered as standalone tool).
+      find_similar_code tool against Hugo. Find code similar to page rendering.
     query: |
       Find code similar to the page rendering logic
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      Code structurally similar to page rendering exists in taxonomy rendering,
+      section list rendering, and RSS feed generation, all following the
+      pattern of template lookup, context building, and output writing.
+    validations:
+      - type: graph_tool_used
 
   - id: 5028
     name: hugo_build_minimal_context
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: build_minimal_context tool (not yet registered as standalone tool).
+      build_minimal_context tool against Hugo. Context for Build function.
     query: |
       Build minimal context needed to understand the Build function
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      Minimal context for Build includes HugoSites struct definition,
+      Site struct, Deps initialization, and the render pipeline steps.
+      Key dependencies are the page collection and template handler.
+    validations:
+      - type: graph_tool_used
 
   - id: 5029
     name: hugo_summarize_file
-    category: TOOL_HAPPY_PATH_TODO
+    category: TOOL_HAPPY_PATH
     description: >
-      TODO: summarize_file tool (not yet registered as standalone tool).
+      summarize_file tool against Hugo. Summarize hugo_sites.go.
     query: |
       Summarize the hugolib/hugo_sites.go file
     expected_state: COMPLETE
     reference_answer: |
-      TODO: Tool not yet registered as standalone.
-    validations: []
+      hugo_sites.go defines the HugoSites struct, the top-level container
+      for all Hugo sites. It contains Build, Assemble, and Render methods
+      that orchestrate the full site generation pipeline.
+    validations:
+      - type: graph_tool_used
 
   - id: 5030
     name: hugo_summarize_package
@@ -583,6 +620,55 @@ tests:
       by newPage and related factory functions.
     validations:
       - type: graph_tool_used
+  # -- Additional find_implementations tests (44-45) -- expected_state: COMPLETE --
+  - id: 5044
+    name: hugo_find_implementations_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_implementations tool against Hugo (test B). Target: ResourceTransformation interface.
+    query: |
+      What types implement the ResourceTransformation interface in the resources package?
+    expected_state: COMPLETE
+    reference_answer: |
+      Found 12 implementations/subclasses of 'ResourceTransformation':
+      Interface: resources/transform.go:92:ResourceTransformation
+        - executeAsTemplateTransform in resource_transformers/templates/
+        - minifyTransformation in resource_transformers/minifier/
+        - babelTransformation in resource_transformers/babel/
+        - buildTransformation in resource_transformers/js/
+        - postcssTransformation in resource_transformers/cssjs/
+        - toCSSTransformation in resource_transformers/tocss/scss/
+        - tailwindcssTransformation in resource_transformers/cssjs/
+        - fingerprintTransformation in resource_transformers/integrity/
+        - transform in resource_transformers/tocss/dartsass/
+        - transformerNotAvailable, resourceAdapter, testTransformation
+    validations:
+      - type: graph_tool_used
+
+  - id: 5045
+    name: hugo_find_implementations_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_implementations tool against Hugo (test C). Target: ProviderProvider interface in markup/converter.
+    query: |
+      What types implement the ProviderProvider interface in the markup/converter package?
+    expected_state: COMPLETE
+    reference_answer: |
+      Found 12 implementations/subclasses of 'ProviderProvider':
+      Interface: markup/converter/converter.go:45:ProviderProvider
+        - newConverter in markup/converter/converter.go:63
+        - provider in markup/rst/convert.go:33
+        - provide in markup/org/convert.go:31
+        - provider in markup/pandoc/convert.go:29
+        - provider in markup/asciidocext/convert.go:28
+        - provide in markup/goldmark/convert.go:53
+        - Exec in common/hexec/exec.go:124
+        - Exec in config/security/securityConfig.go:76
+        - Template in tpl/internal/go_templates/ (html and text)
+        - templateState, textTemplateWrapperWithLock in tpl/tplimpl/
+    validations:
+      - type: graph_tool_used
+
   # -- Additional find_callees tests (42-43) -- expected_state: COMPLETE --
   - id: 5042
     name: hugo_find_callees_b
@@ -616,3 +702,1654 @@ tests:
       page metadata processing.
     validations:
       - type: graph_tool_used
+
+  # -- Additional find_symbol tests (46-47) -- expected_state: COMPLETE --
+
+  - id: 5046
+    name: hugo_find_symbol_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_symbol tool against Hugo (test B). Target: pageState struct.
+    query: |
+      Where is the pageState struct defined in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      pageState is defined in hugolib/page.go. It is the concrete type that
+      holds all mutable state for a Hugo page during the build process,
+      including content, metadata, and output format information.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5047
+    name: hugo_find_symbol_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_symbol tool against Hugo (test C). Target: ContentSpec struct.
+    query: |
+      Where is ContentSpec defined in this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      ContentSpec is defined in helpers/content.go. It provides content-related
+      helper functions including summary truncation, content rendering
+      configuration, and HTML handling utilities.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_references tests (48-49) -- expected_state: COMPLETE --
+
+  - id: 5048
+    name: hugo_find_references_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_references tool against Hugo (test B). Target: Resource interface.
+    query: |
+      Where is the Resource interface referenced across this codebase?
+    expected_state: COMPLETE
+    reference_answer: |
+      The Resource interface is referenced in resources/resource.go,
+      hugolib page resource management, template functions for asset
+      pipelines, and the image processing subsystem.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5049
+    name: hugo_find_references_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_references tool against Hugo (test C). Target: Deps struct.
+    query: |
+      Where is the Deps struct referenced throughout Hugo?
+    expected_state: COMPLETE
+    reference_answer: |
+      Deps is referenced in deps/deps.go and used across hugolib for site
+      initialization, tpl for template execution setup, resources for
+      asset pipeline configuration, and commands for CLI initialization.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional get_call_chain tests (50-51) -- expected_state: COMPLETE --
+
+  - id: 5050
+    name: hugo_get_call_chain_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      get_call_chain tool against Hugo (test B). Downstream from LoadConfigFromDir.
+      LoadConfigFromDir (configLoader.go:119) calls Walk, IsValidConfigFilename,
+      UnmarshalFileToMap, RenameKeys, and other config processing functions.
+    query: |
+      Show the downstream call chain from LoadConfigFromDir
+    expected_state: COMPLETE
+    reference_answer: |
+      get_call_chain from LoadConfigFromDir shows a downstream tree including
+      Walk, IsDir, IsValidConfigFilename, UnmarshalFileToMap, RenameKeys,
+      and Set among others. This is Hugo's directory-based configuration
+      loading pipeline that reads and merges config files from disk.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5051
+    name: hugo_find_path_build_to_assemble
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_path tool against Hugo. Between HugoSites.Build and assemblePagesStep1.
+      Direct chain: Build (hugo_sites_build.go:63) → assemble
+      (hugo_sites_build.go:176) → assemblePagesStep1. 2-hop path through
+      Hugo's site building pipeline using direct function calls.
+    query: |
+      Find the shortest path between HugoSites.Build and assemblePagesStep1
+    expected_state: COMPLETE
+    reference_answer: |
+      find_path returns a 2-hop path: HugoSites.Build → assemble →
+      assemblePagesStep1. Build orchestrates the full site build process,
+      calling assemble to construct the page hierarchy, which calls
+      assemblePagesStep1 to create page output structures.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_path tests (52-53) -- expected_state: COMPLETE --
+
+  - id: 5052
+    name: hugo_find_path_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_path tool against Hugo (test B). Between LoadConfigFromDir and
+      UnmarshalFileToMap. LoadConfigFromDir (configLoader.go:119) directly
+      calls UnmarshalFileToMap (decoder.go:80). 1-hop path.
+    query: |
+      Find the shortest path between LoadConfigFromDir and UnmarshalFileToMap
+    expected_state: COMPLETE
+    reference_answer: |
+      find_path returns a 1-hop path: LoadConfigFromDir → UnmarshalFileToMap.
+      LoadConfigFromDir reads config files from a directory and calls
+      UnmarshalFileToMap to deserialize each config file into a map structure.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5053
+    name: hugo_find_path_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_path tool against Hugo (test C). Between resource transformation and output.
+    query: |
+      Find the shortest path between resource transformation and file output
+    expected_state: COMPLETE
+    reference_answer: |
+      ResourceTransformation.Transform -> resource processing pipeline ->
+      publish -> Publish to disk, traversing the asset transformation
+      and output writing path.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_hotspots tests (54-55) -- expected_state: COMPLETE --
+
+  - id: 5054
+    name: hugo_find_hotspots_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_hotspots tool against Hugo (test B). Focus on the tpl package.
+    query: |
+      What are the hotspot functions in the tpl package?
+    expected_state: COMPLETE
+    reference_answer: |
+      Top hotspots in tpl include the template execution functions,
+      funcMap registration, template lookup and resolution, and
+      partial template caching functions.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5055
+    name: hugo_find_hotspots_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_hotspots tool against Hugo (test C). Focus on incoming vs outgoing edges.
+    query: |
+      What are the hotspot functions with the highest connectivity ratio in Hugo?
+    expected_state: COMPLETE
+    reference_answer: |
+      Functions with high incoming-to-outgoing ratios include utility
+      functions in helpers package, string processing functions, and
+      common path resolution helpers used across many packages.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_dead_code tests (56-57) -- expected_state: COMPLETE --
+
+  - id: 5056
+    name: hugo_find_dead_code_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dead_code tool against Hugo (test B). Focus on the resources package.
+    query: |
+      Find unused or dead code in the resources package
+    expected_state: COMPLETE
+    reference_answer: |
+      Dead code analysis in the resources package identifies unused
+      transformation helpers, deprecated resource processing functions,
+      and unreferenced internal utility methods.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5057
+    name: hugo_find_dead_code_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dead_code tool against Hugo (test C). Focus on exported but uncalled functions.
+    query: |
+      Which exported functions in Hugo have no callers?
+    expected_state: COMPLETE
+    reference_answer: |
+      Exported functions with no internal callers include some public API
+      functions intended for external use, deprecated helpers, and
+      functions only exercised through tests or plugin interfaces.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_cycles tests (58-59) -- expected_state: COMPLETE --
+
+  - id: 5058
+    name: hugo_find_cycles_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_cycles tool against Hugo (test B). Focus on the hugolib package.
+    query: |
+      Find circular dependencies within the hugolib package specifically
+    expected_state: COMPLETE
+    reference_answer: |
+      Within hugolib, circular dependencies exist between page construction
+      and site assembly, where pageState references Site for context and
+      Site iterates pages during assembly.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5059
+    name: hugo_find_cycles_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_cycles tool against Hugo (test C). Focus on cross-package cycles.
+    query: |
+      Are there any circular call chains between the tpl and hugolib packages?
+    expected_state: COMPLETE
+    reference_answer: |
+      Found 20 circular call chains but none of the displayed cycles include
+      both the tpl and hugolib packages. The visible cycles are confined to
+      individual package clusters: hugolib/internal, resources/filecache,
+      herrors/hexec/hugofs/metadecoders/security, and tpl/tpl/internal.
+      No cross-package cycle between tpl and hugolib was found in the
+      returned data, though truncated cycles may exist.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_important tests (60-61) -- expected_state: COMPLETE --
+
+  - id: 5060
+    name: hugo_find_important_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_important tool against Hugo (test B). Focus on the resources subsystem.
+    query: |
+      What are the most important functions in the resources package by PageRank?
+    expected_state: COMPLETE
+    reference_answer: |
+      PageRank in the resources package identifies resource transformation
+      pipeline functions, image processing methods, and the resource
+      cache management functions as most central.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5061
+    name: hugo_find_important_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_important tool against Hugo (test C). Focus on betweenness centrality.
+    query: |
+      Which functions act as the most important bridges between subsystems?
+    expected_state: COMPLETE
+    reference_answer: |
+      Bridge functions with high betweenness include HugoSites.Build
+      connecting CLI to rendering, Deps initialization connecting
+      configuration to runtime, and page output connecting content to templates.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_communities tests (62-63) -- expected_state: COMPLETE --
+
+  - id: 5062
+    name: hugo_find_communities_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_communities tool against Hugo (test B). Focus on the rendering subsystem.
+    query: |
+      What code communities exist within the rendering and output subsystems?
+    expected_state: COMPLETE
+    reference_answer: |
+      Communities in rendering include template execution (tpl), markup
+      conversion (goldmark, asciidoc), output format handling, and
+      page output generation as distinct clusters.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5063
+    name: hugo_find_communities_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_communities tool against Hugo (test C). Ask about inter-community coupling.
+    query: |
+      Which code communities are most tightly coupled to each other?
+    expected_state: COMPLETE
+    reference_answer: |
+      The hugolib core community and tpl template community show the
+      tightest coupling, followed by hugolib and resources communities,
+      reflecting the build-render-asset pipeline dependencies.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_articulation_points tests (64-65) -- expected_state: COMPLETE --
+
+  - id: 5064
+    name: hugo_find_articulation_points_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_articulation_points tool against Hugo (test B). Focus on the build pipeline.
+    query: |
+      What are the single points of failure in the Hugo build pipeline?
+    expected_state: COMPLETE
+    reference_answer: |
+      Articulation points in the build pipeline include HugoSites.Build,
+      site.render, and the page assembly step, whose removal would
+      disconnect the configuration from the output generation.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5065
+    name: hugo_find_articulation_points_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_articulation_points tool against Hugo (test C). Focus on risk assessment.
+    query: |
+      Which functions, if removed, would split the call graph into disconnected components?
+    expected_state: COMPLETE
+    reference_answer: |
+      Key articulation points include Deps initialization functions that
+      bridge configuration to runtime, template resolution functions
+      bridging content to rendering, and page factory functions.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_dominators tests (66-67) -- expected_state: COMPLETE --
+
+  - id: 5066
+    name: hugo_find_dominators_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dominators tool against Hugo (test B). Target: template execution.
+    query: |
+      What functions must be called before template execution begins?
+    expected_state: COMPLETE
+    reference_answer: |
+      Dominators of template execution include template parsing and
+      compilation, funcMap registration, site configuration loading,
+      and the Deps initialization that provides the template handler.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5067
+    name: hugo_find_dominators_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_dominators tool against Hugo (test C). Target: resource transformation.
+    query: |
+      What functions dominate the resource transformation pipeline?
+    expected_state: COMPLETE
+    reference_answer: |
+      Dominators of resource transformation include resource cache
+      initialization, transformation client setup, and the resource
+      specification parsing that must precede any transformation.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_loops tests (68-69) -- expected_state: COMPLETE --
+
+  - id: 5068
+    name: hugo_find_loops_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_loops tool against Hugo (test B). Focus on the navigation package.
+    query: |
+      Find recursive patterns in the navigation and menu system
+    expected_state: COMPLETE
+    reference_answer: |
+      Recursive patterns in navigation include menu tree traversal for
+      nested menus, section hierarchy walking, and breadcrumb generation
+      that recurse through parent page relationships.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5069
+    name: hugo_find_loops_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_loops tool against Hugo (test C). Focus on self-recursive functions.
+    query: |
+      Which functions in Hugo call themselves directly?
+    expected_state: COMPLETE
+    reference_answer: |
+      Self-recursive functions include tree walkers in the page
+      hierarchy, taxonomy term collectors that recurse through nested
+      terms, and template partial evaluation that can recurse.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_merge_points tests (70-71) -- expected_state: COMPLETE --
+
+  - id: 5070
+    name: hugo_find_merge_points_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_merge_points tool against Hugo (test B). Focus on content processing.
+    query: |
+      Where do Markdown, HTML, and Org-mode content processing paths converge?
+    expected_state: COMPLETE
+    reference_answer: |
+      Content processing paths converge at the Converter interface where
+      goldmark, pandoc, and org converters all produce rendered HTML
+      that feeds into the common page output pipeline.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5071
+    name: hugo_find_merge_points_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_merge_points tool against Hugo (test C). Focus on CLI command paths.
+    query: |
+      Where do the different Hugo CLI commands converge in the execution flow?
+    expected_state: COMPLETE
+    reference_answer: |
+      CLI command paths (server, build, deploy) converge at the
+      HugoSites.Build function and the shared configuration loading
+      and Deps initialization pipeline.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_common_dependency tests (72-73) -- expected_state: COMPLETE --
+
+  - id: 5072
+    name: hugo_find_common_dependency_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_common_dependency tool against Hugo (test B). Between tpl and resources.
+    query: |
+      What shared dependency do the template system and resource pipeline have?
+    expected_state: COMPLETE
+    reference_answer: |
+      Both tpl and resources depend on the Deps struct for runtime
+      configuration, the PathSpec for file path resolution, and
+      the media types registry for content type handling.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5073
+    name: hugo_find_common_dependency_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_common_dependency tool against Hugo (test C). Between page and taxonomy.
+    query: |
+      What common dependencies do page rendering and taxonomy generation share?
+    expected_state: COMPLETE
+    reference_answer: |
+      Page rendering and taxonomy generation share the Site struct,
+      the page collection infrastructure, and the template execution
+      engine for rendering their respective output pages.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_control_dependencies tests (74-75) -- expected_state: COMPLETE --
+
+  - id: 5074
+    name: hugo_find_control_dependencies_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_control_dependencies tool against Hugo (test B). Target: output format selection.
+    query: |
+      What conditionals control which output formats are generated for a page?
+    expected_state: COMPLETE
+    reference_answer: |
+      Output format selection is controlled by page kind checks,
+      front matter outputFormats configuration, site-level output
+      format settings, and media type matching logic.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5075
+    name: hugo_find_control_dependencies_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_control_dependencies tool against Hugo (test C). Target: caching decisions.
+    query: |
+      What conditionals control whether Hugo caches content or re-renders?
+    expected_state: COMPLETE
+    reference_answer: |
+      Caching decisions are controlled by content hash comparisons,
+      file modification timestamps, resource fingerprint checks,
+      and the lazy initialization pattern used in page content providers.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_extractable_regions tests (76-77) -- expected_state: COMPLETE --
+
+  - id: 5076
+    name: hugo_find_extractable_regions_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_extractable_regions tool against Hugo (test B). Focus on hugolib package.
+    query: |
+      Find extractable regions within the large functions of the hugolib package
+    expected_state: COMPLETE
+    reference_answer: |
+      Extractable regions in hugolib include subsections of HugoSites.Build
+      for initialization vs rendering, page assembly phases that could be
+      independent functions, and site configuration validation blocks.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5077
+    name: hugo_find_extractable_regions_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_extractable_regions tool against Hugo (test C). Focus on refactoring candidates.
+    query: |
+      Which functions have the most extractable single-entry single-exit regions?
+    expected_state: COMPLETE
+    reference_answer: |
+      Functions with the most SESE regions include the site rendering
+      pipeline functions, page output methods with multiple output format
+      handling blocks, and resource transformation chains.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional check_reducibility tests (78-79) -- expected_state: COMPLETE --
+
+  - id: 5078
+    name: hugo_check_reducibility_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      check_reducibility tool against Hugo (test B). Focus on the rendering subsystem.
+    query: |
+      Check the control flow reducibility of the rendering subsystem
+    expected_state: COMPLETE
+    reference_answer: |
+      The rendering subsystem's control flow is largely reducible with
+      clean loop and conditional structures, though some areas involving
+      template resolution may show complex branching patterns.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5079
+    name: hugo_check_reducibility_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      check_reducibility tool against Hugo (test C). Focus on irreducible regions.
+    query: |
+      Are there any irreducible control flow regions in Hugo and what causes them?
+    expected_state: COMPLETE
+    reference_answer: |
+      Irreducible regions, if present, are typically caused by mutual
+      recursion between page and site processing, or complex goto-like
+      patterns in content parsing and shortcode expansion.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_critical_path tests (80-81) -- expected_state: COMPLETE --
+
+  - id: 5080
+    name: hugo_find_critical_path_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_critical_path tool against Hugo (test B). Target: taxonomy rendering.
+    query: |
+      What is the critical path to render a taxonomy page?
+    expected_state: COMPLETE
+    reference_answer: |
+      The critical path for taxonomy rendering goes through site
+      initialization -> page assembly -> taxonomy term collection ->
+      taxonomy page creation -> template execution -> output writing.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5081
+    name: hugo_find_critical_path_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_critical_path tool against Hugo (test C). Target: static file processing.
+    query: |
+      What is the mandatory execution sequence to process a static file?
+    expected_state: COMPLETE
+    reference_answer: |
+      Static file processing follows configuration loading -> source
+      filesystem setup -> static file syncer initialization -> file
+      copy/fingerprint -> publish to destination directory.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_module_api tests (82-83) -- expected_state: COMPLETE --
+
+  - id: 5082
+    name: hugo_find_module_api_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_module_api tool against Hugo (test B). Target: resources package.
+    query: |
+      What is the public API of the resources package?
+    expected_state: COMPLETE
+    reference_answer: |
+      The resources package exports Resource, ResourceTransformation,
+      and related interfaces along with Spec for resource specification
+      and functions for image processing, SCSS compilation, and minification.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5083
+    name: hugo_find_module_api_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_module_api tool against Hugo (test C). Target: tpl package.
+    query: |
+      What is the public API of the tpl template package?
+    expected_state: COMPLETE
+    reference_answer: |
+      The tpl package exports Template, TemplateHandler, and FuncMap
+      registration interfaces along with template execution functions,
+      partial caching, and template lookup methods.
+    validations:
+      - type: graph_tool_used
+
+  # -- Additional find_weighted_criticality tests (84-85) -- expected_state: COMPLETE --
+
+  - id: 5084
+    name: hugo_find_weighted_criticality_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_weighted_criticality tool against Hugo (test B). Focus on the markup subsystem.
+    query: |
+      What are the most critical functions in the markup conversion subsystem?
+    expected_state: COMPLETE
+    reference_answer: |
+      Weighted criticality in markup identifies the Converter interface
+      methods, goldmark renderer functions, and content transformation
+      pipeline functions as most critical by combined metrics.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5085
+    name: hugo_find_weighted_criticality_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_weighted_criticality tool against Hugo (test C). Focus on comparing subsystems.
+    query: |
+      Compare the weighted criticality of functions in hugolib versus tpl
+    expected_state: COMPLETE
+    reference_answer: |
+      hugolib functions tend to score higher on degree centrality due to
+      orchestration responsibilities, while tpl functions score higher on
+      betweenness as they bridge content to output rendering paths.
+    validations:
+      - type: graph_tool_used
+
+  # ── IT-24: graph_overview (a/b/c) ──
+
+  - id: 5086
+    name: hugo_graph_overview
+    category: TOOL_HAPPY_PATH
+    description: >
+      graph_overview tool against Hugo. Get overall graph statistics.
+    query: |
+      Give me an overview of this codebase's call graph
+    expected_state: COMPLETE
+    reference_answer: |
+      Hugo's call graph contains approximately 19k nodes and 52k edges
+      spanning packages like hugolib, tpl, resources, commands, and helpers.
+      The graph shows high connectivity in the core build pipeline.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5087
+    name: hugo_graph_overview_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      graph_overview tool against Hugo (test B). Focus on graph density.
+    query: |
+      How dense is the call graph and what is the average connectivity?
+    expected_state: COMPLETE
+    reference_answer: |
+      The graph has moderate density with most functions having 2-5 callees.
+      Hotspot functions in hugolib and tpl have significantly higher degree,
+      reflecting the orchestration-heavy architecture.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5088
+    name: hugo_graph_overview_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      graph_overview tool against Hugo (test C). Focus on package distribution.
+    query: |
+      How are functions distributed across packages in the call graph?
+    expected_state: COMPLETE
+    reference_answer: |
+      The largest packages by node count are hugolib (core build), tpl
+      (templates), resources (asset pipeline), and helpers (utilities).
+      hugolib contains the most edges due to orchestration responsibilities.
+    validations:
+      - type: graph_tool_used
+
+  # ── IT-25: explore_package (a/b/c) ──
+
+  - id: 5089
+    name: hugo_explore_package
+    category: TOOL_HAPPY_PATH
+    description: >
+      explore_package tool against Hugo. Explore the hugolib package.
+    query: |
+      Explore the hugolib package and show its key types and functions
+    expected_state: COMPLETE
+    reference_answer: |
+      hugolib contains HugoSites, Site, pageState, and related types.
+      Key functions include Build, Assemble, Render, and the page factory
+      functions that construct the site's page tree.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5090
+    name: hugo_explore_package_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      explore_package tool against Hugo (test B). Explore tpl package.
+    query: |
+      Explore the tpl package and its subpackages
+    expected_state: COMPLETE
+    reference_answer: |
+      The tpl package contains the template execution engine with subpackages
+      for each template function namespace (cast, collections, compare, etc.).
+      Key types include TemplateHandler and the funcMap registration system.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5091
+    name: hugo_explore_package_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      explore_package tool against Hugo (test C). Explore resources package.
+    query: |
+      Explore the resources package and what it contains
+    expected_state: COMPLETE
+    reference_answer: |
+      The resources package manages Hugo's asset pipeline with Resource and
+      ResourceTransformation interfaces. It includes subpackages for image
+      processing, SCSS compilation, minification, and fingerprinting.
+    validations:
+      - type: graph_tool_used
+
+  # ── IT-26: list_packages (a/b/c) ──
+
+  - id: 5092
+    name: hugo_list_packages
+    category: TOOL_HAPPY_PATH
+    description: >
+      list_packages tool against Hugo. List all packages.
+    query: |
+      List all packages in this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      Hugo contains packages including hugolib, tpl, resources, commands,
+      config, helpers, parser, navigation, related, langs, media, output,
+      and their subpackages.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5093
+    name: hugo_list_packages_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      list_packages tool against Hugo (test B). Focus on package count.
+    query: |
+      How many packages does this codebase have?
+    expected_state: COMPLETE
+    reference_answer: |
+      Hugo has dozens of packages organized into a deep hierarchy. Top-level
+      packages include hugolib, tpl, resources, commands, config, helpers,
+      and common, each with multiple subpackages.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5094
+    name: hugo_list_packages_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      list_packages tool against Hugo (test C). Focus on package hierarchy.
+    query: |
+      Show the package hierarchy and how packages are organized
+    expected_state: COMPLETE
+    reference_answer: |
+      Packages are organized by concern: hugolib (core), tpl/* (template
+      functions), resources/* (asset pipeline), commands (CLI), config
+      (configuration), common/* (shared utilities), and markup/* (content).
+    validations:
+      - type: graph_tool_used
+
+  # ── IT-34: Read (a/b/c) ──
+
+  - id: 5095
+    name: hugo_read
+    category: TOOL_HAPPY_PATH
+    description: >
+      Read tool against Hugo. Read a specific file.
+    query: |
+      Show me the contents of hugolib/hugo_sites.go
+    expected_state: COMPLETE
+    reference_answer: |
+      hugolib/hugo_sites.go contains the HugoSites struct definition and
+      its methods for building, assembling, and rendering Hugo sites.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5096
+    name: hugo_read_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Read tool against Hugo (test B). Read a different file.
+    query: |
+      Read the main.go entry point file
+    expected_state: COMPLETE
+    reference_answer: |
+      The main.go file bootstraps Hugo by calling the commands package
+      Execute function which sets up the CLI and dispatches to the
+      appropriate command handler.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5097
+    name: hugo_read_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Read tool against Hugo (test C). Read a config-related file.
+    query: |
+      Show me the config/allconfig/allconfig.go file
+    expected_state: COMPLETE
+    reference_answer: |
+      allconfig.go defines the complete Hugo configuration structure with
+      all available settings, default values, and configuration merging
+      logic for site and language-specific overrides.
+    validations:
+      - type: graph_tool_used
+
+  # ── IT-35: Trace Analysis (a/b/c) ──
+
+  - id: 5098
+    name: hugo_trace_template_rendering
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace the template rendering pipeline in Hugo.
+    query: |
+      What is the call chain from page rendering to template execution?
+    expected_state: COMPLETE
+    reference_answer: |
+      Page rendering flows through the site publisher, page output rendering,
+      template lookup by layout, and Go template execution with the page
+      context as the data source.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5099
+    name: hugo_trace_config_loading
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace config loading and merging in Hugo.
+    query: |
+      How does Hugo load and merge configuration from multiple sources?
+    expected_state: COMPLETE
+    reference_answer: |
+      Config loading flows through config file discovery, TOML/YAML/JSON
+      parsing, environment variable overlay, and config merging to produce
+      the final site configuration.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5100
+    name: hugo_trace_content_pipeline
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace the content processing pipeline in Hugo.
+    query: |
+      Trace the call chain from content file reading to HTML output
+    expected_state: COMPLETE
+    reference_answer: |
+      Content processing flows through file reading, front matter parsing,
+      Markdown rendering via Goldmark, shortcode expansion, and final
+      HTML output generation.
+    validations:
+      - type: graph_tool_used
+
+  # ── IT-36: Trace Analysis (d/e/f) ──
+
+  - id: 5101
+    name: hugo_trace_taxonomy_build
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace taxonomy page generation in Hugo.
+    query: |
+      What functions are involved in building taxonomy pages?
+    expected_state: COMPLETE
+    reference_answer: |
+      Taxonomy building involves collecting taxonomy terms from page front
+      matter, creating taxonomy nodes, generating list and term pages,
+      and applying taxonomy-specific templates.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5102
+    name: hugo_trace_resource_transform
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace resource transformation pipeline in Hugo.
+    query: |
+      How do resource transformations (like SCSS compilation) flow through Hugo?
+    expected_state: COMPLETE
+    reference_answer: |
+      Resource transformations flow through the resource transformation chain,
+      applying filters like ToCSS, PostCSS, Minify, and Fingerprint
+      sequentially with caching of intermediate results.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5103
+    name: hugo_trace_livereload
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace the live reload notification flow in Hugo server.
+    query: |
+      What is the call path from file change detection to browser live reload?
+    expected_state: COMPLETE
+    reference_answer: |
+      File change detection triggers a rebuild via the watcher, which
+      identifies affected pages, performs incremental rebuild, and sends
+      a WebSocket notification to connected browsers for live reload.
+    validations:
+      - type: graph_tool_used
+
+  # ── IT-37: Glob (a/b/c) ──
+
+  - id: 5104
+    name: hugo_glob
+    category: TOOL_HAPPY_PATH
+    description: >
+      Glob tool against Hugo. Find Go files by pattern.
+    query: |
+      Find all Go test files in the hugolib directory
+    expected_state: COMPLETE
+    reference_answer: |
+      Glob finds files matching hugolib/*_test.go pattern, including
+      hugo_sites_test.go, page_test.go, site_test.go, and other test files.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5105
+    name: hugo_glob_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Glob tool against Hugo (test B). Find template files.
+    query: |
+      Find all template-related Go files in the tpl directory
+    expected_state: COMPLETE
+    reference_answer: |
+      Glob finds Go files under tpl/ including template handler files,
+      function namespace implementations, and template execution code.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5106
+    name: hugo_glob_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Glob tool against Hugo (test C). Find resource files.
+    query: |
+      Find all Go files related to image processing
+    expected_state: COMPLETE
+    reference_answer: |
+      Glob finds files under resources/images/ and related directories
+      containing image transformation, resizing, and filter implementations.
+    validations:
+      - type: graph_tool_used
+
+  # ── IT-38: Grep (a/b/c) ──
+
+  - id: 5107
+    name: hugo_grep
+    category: TOOL_HAPPY_PATH
+    description: >
+      Grep tool against Hugo. Search for a pattern.
+    query: |
+      Search for all uses of the Publish method in Go files
+    expected_state: COMPLETE
+    reference_answer: |
+      Grep finds Publish references in hugolib for page publishing,
+      resources for asset publishing, and the publisher package for
+      destination file writing.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5108
+    name: hugo_grep_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Grep tool against Hugo (test B). Search for error patterns.
+    query: |
+      Search for error wrapping patterns using fmt.Errorf
+    expected_state: COMPLETE
+    reference_answer: |
+      Grep finds fmt.Errorf usage across Hugo packages, showing the error
+      wrapping pattern used for context-rich error propagation throughout
+      the build pipeline.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5109
+    name: hugo_grep_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Grep tool against Hugo (test C). Search for interface definitions.
+    query: |
+      Find all interface definitions in the resources package
+    expected_state: COMPLETE
+    reference_answer: |
+      Grep finds interface definitions including Resource, ResourceTransformation,
+      and related interfaces that define the asset pipeline contracts.
+    validations:
+      - type: graph_tool_used
+
+  # ── IT-39: Diff (a/b/c) ──
+
+  - id: 5110
+    name: hugo_diff
+    category: TOOL_HAPPY_PATH
+    description: >
+      Diff tool against Hugo. Compare two files.
+    query: |
+      Compare the page.go and page_nop.go files in hugolib
+    expected_state: COMPLETE
+    reference_answer: |
+      Diff shows the differences between the full page implementation
+      and the no-op page used for zero-value comparisons and testing.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5111
+    name: hugo_diff_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Diff tool against Hugo (test B). Compare config files.
+    query: |
+      Show differences between the default and security config files
+    expected_state: COMPLETE
+    reference_answer: |
+      Diff reveals the structural differences between default configuration
+      and security-specific configuration settings in Hugo.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5112
+    name: hugo_diff_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Diff tool against Hugo (test C). Compare template files.
+    query: |
+      Compare the goldmark and pandoc converter implementations
+    expected_state: COMPLETE
+    reference_answer: |
+      Diff shows how the two markup converters differ in their Convert
+      method implementations while sharing the same Converter interface.
+    validations:
+      - type: graph_tool_used
+
+  # ── IT-40: Tree (a/b/c) ──
+
+  - id: 5113
+    name: hugo_tree
+    category: TOOL_HAPPY_PATH
+    description: >
+      Tree tool against Hugo. Show directory structure.
+    query: |
+      Show the directory structure of this codebase
+    expected_state: COMPLETE
+    reference_answer: |
+      The directory tree shows top-level directories including hugolib,
+      tpl, resources, commands, config, common, helpers, parser, markup,
+      and their nested subpackage structures.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5114
+    name: hugo_tree_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      Tree tool against Hugo (test B). Show specific directory.
+    query: |
+      Show the directory structure of the tpl package
+    expected_state: COMPLETE
+    reference_answer: |
+      The tpl directory tree shows subpackages for each template function
+      namespace: cast, collections, compare, crypto, data, encoding,
+      fmt, hugo, images, lang, math, os, path, reflect, safe, strings,
+      time, transform, and urls.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5115
+    name: hugo_tree_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      Tree tool against Hugo (test C). Show resources directory.
+    query: |
+      Show the directory layout of the resources package
+    expected_state: COMPLETE
+    reference_answer: |
+      The resources directory contains subdirectories for images, page,
+      resource_transformers (with babel, cssjs, htesting, integrity,
+      minifier, postcss, templates, tocss), and internal helpers.
+    validations:
+      - type: graph_tool_used
+
+  # ── IT-41: Trace Analysis (g/h/i) ──
+
+  - id: 5116
+    name: hugo_trace_shortcode_exec
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace shortcode parsing and execution in Hugo.
+    query: |
+      How are shortcodes parsed and executed during content rendering?
+    expected_state: COMPLETE
+    reference_answer: |
+      Shortcode processing involves lexing shortcode syntax from content,
+      building a shortcode tree, resolving shortcode templates, and
+      executing them with the page context during rendering.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5117
+    name: hugo_trace_menu_build
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace menu construction in Hugo.
+    query: |
+      What is the call chain for building navigation menus from config and pages?
+    expected_state: COMPLETE
+    reference_answer: |
+      Menu building collects menu entries from both site config and page
+      front matter, sorts them by weight and name, builds the menu
+      hierarchy, and makes it available via .Site.Menus in templates.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5118
+    name: hugo_trace_image_processing
+    category: TOOL_HAPPY_PATH
+    description: >
+      Trace image processing pipeline in Hugo.
+    query: |
+      What functions are involved when Hugo processes and resizes an image?
+    expected_state: COMPLETE
+    reference_answer: |
+      Image processing flows through the image resource, applying
+      resize/crop/fit operations via the imaging library, caching
+      processed variants, and generating output paths for the processed images.
+    validations:
+      - type: graph_tool_used
+
+  # ── IT-42: validate_syntax (a/b/c) ──
+
+  - id: 5119
+    name: hugo_validate_syntax
+    category: TOOL_HAPPY_PATH
+    description: >
+      validate_syntax tool against Hugo. Check Go file syntax.
+    query: |
+      Validate the syntax of hugolib/hugo_sites.go
+    expected_state: COMPLETE
+    reference_answer: |
+      Syntax validation confirms hugo_sites.go is syntactically correct Go
+      code with proper package declaration, imports, and type definitions.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5120
+    name: hugo_validate_syntax_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      validate_syntax tool against Hugo (test B). Check template file.
+    query: |
+      Check the syntax of the template execution code in tpl
+    expected_state: COMPLETE
+    reference_answer: |
+      Syntax validation confirms the template execution code has valid Go
+      syntax including proper interface implementations and method signatures.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5121
+    name: hugo_validate_syntax_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      validate_syntax tool against Hugo (test C). Check resource code.
+    query: |
+      Validate the syntax of the resource transformation pipeline code
+    expected_state: COMPLETE
+    reference_answer: |
+      Syntax validation confirms the resource transformation code is valid
+      with correct interface implementations for the transformation chain.
+    validations:
+      - type: graph_tool_used
+
+  # ── IT-28: find_entry_points b/c ──
+
+  - id: 5122
+    name: hugo_find_entry_points_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_entry_points tool against Hugo (test B). Focus on HTTP handlers.
+    query: |
+      What are the HTTP handler entry points in Hugo's server mode?
+    expected_state: COMPLETE
+    reference_answer: |
+      HTTP entry points include the livereload handler, static file server,
+      and the main site handler that serves rendered pages during hugo server.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5123
+    name: hugo_find_entry_points_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_entry_points tool against Hugo (test C). Focus on init functions.
+    query: |
+      Find all init() functions that run at startup
+    expected_state: COMPLETE
+    reference_answer: |
+      Init functions exist across packages for registering template functions,
+      markup converters, media types, and output formats during initialization.
+    validations:
+      - type: graph_tool_used
+
+  # ── IT-29: trace_data_flow b/c ──
+
+  - id: 5124
+    name: hugo_trace_data_flow_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      trace_data_flow tool against Hugo (test B). Trace page content flow.
+    query: |
+      Trace how page content flows from markdown files to rendered HTML
+    expected_state: COMPLETE
+    reference_answer: |
+      Content flows from source files through content providers, markup
+      converters (goldmark), shortcode processing, template execution,
+      and finally to the output writer for rendered HTML pages.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5125
+    name: hugo_trace_data_flow_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      trace_data_flow tool against Hugo (test C). Trace taxonomy data.
+    query: |
+      Trace how taxonomy data flows through the build pipeline
+    expected_state: COMPLETE
+    reference_answer: |
+      Taxonomy data flows from front matter parsing through page assembly
+      where terms are collected, then to taxonomy page creation and
+      rendering using taxonomy-specific templates.
+    validations:
+      - type: graph_tool_used
+
+  # ── IT-30: trace_error_flow b/c ──
+
+  - id: 5126
+    name: hugo_trace_error_flow_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      trace_error_flow tool against Hugo (test B). Trace config errors.
+    query: |
+      Trace how configuration errors propagate during site initialization
+    expected_state: COMPLETE
+    reference_answer: |
+      Configuration errors propagate from config.FromFile through Deps
+      initialization, causing early termination with descriptive error
+      messages before the build pipeline starts.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5127
+    name: hugo_trace_error_flow_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      trace_error_flow tool against Hugo (test C). Trace content errors.
+    query: |
+      How do content parsing errors propagate during the build?
+    expected_state: COMPLETE
+    reference_answer: |
+      Content parsing errors are collected per-page rather than halting the
+      build. They propagate from markup converters through the page content
+      provider to the error collector in HugoSites.Build.
+    validations:
+      - type: graph_tool_used
+
+  # ── IT-31: build_minimal_context b/c ──
+
+  - id: 5128
+    name: hugo_build_minimal_context_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      build_minimal_context tool against Hugo (test B). Context for Render.
+    query: |
+      Build minimal context to understand the site rendering pipeline
+    expected_state: COMPLETE
+    reference_answer: |
+      Minimal context for rendering includes Site.render, pageOutput,
+      template lookup and execution, and the output format configuration
+      that determines which templates to use.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5129
+    name: hugo_build_minimal_context_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      build_minimal_context tool against Hugo (test C). Context for page assembly.
+    query: |
+      Build minimal context to understand the page assembly phase
+    expected_state: COMPLETE
+    reference_answer: |
+      Minimal context for page assembly includes newPage, pageState,
+      the page map, content provider initialization, and the taxonomy
+      and section tree building logic.
+    validations:
+      - type: graph_tool_used
+
+  # ── IT-32: find_similar_code b/c ──
+
+  - id: 5130
+    name: hugo_find_similar_code_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_similar_code tool against Hugo (test B). Similar to resource transforms.
+    query: |
+      Find code structurally similar to the SCSS compilation pipeline
+    expected_state: COMPLETE
+    reference_answer: |
+      Code similar to SCSS compilation exists in PostCSS processing,
+      Babel transformation, and minification — all following the
+      ResourceTransformation interface pattern with cache-aware execution.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5131
+    name: hugo_find_similar_code_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_similar_code tool against Hugo (test C). Similar to CLI commands.
+    query: |
+      Find code similar to the server command implementation
+    expected_state: COMPLETE
+    reference_answer: |
+      Code similar to the server command exists in the build, deploy, and
+      new commands, all following the cobra.Command pattern with flag
+      registration, argument validation, and execution methods.
+    validations:
+      - type: graph_tool_used
+
+  # ── IT-33: find_config_usage b/c ──
+
+  - id: 5132
+    name: hugo_find_config_usage_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_config_usage tool against Hugo (test B). Focus on template config.
+    query: |
+      How is template configuration used in the tpl package?
+    expected_state: COMPLETE
+    reference_answer: |
+      Template configuration controls template lookup paths, function
+      registration, safe/unsafe HTML mode, and partial caching behavior
+      in the tpl package's template handler.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5133
+    name: hugo_find_config_usage_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      find_config_usage tool against Hugo (test C). Focus on output config.
+    query: |
+      Where are output format settings used in the rendering pipeline?
+    expected_state: COMPLETE
+    reference_answer: |
+      Output format configuration is used in page output generation to
+      determine which formats (HTML, RSS, JSON, AMP) to render, which
+      templates to use, and the file naming conventions.
+    validations:
+      - type: graph_tool_used
+
+  # ── IT-27: summarize_file b/c ──
+
+  - id: 5134
+    name: hugo_summarize_file_b
+    category: TOOL_HAPPY_PATH
+    description: >
+      summarize_file tool against Hugo (test B). Summarize a different file.
+    query: |
+      Summarize the resources/resource.go file
+    expected_state: COMPLETE
+    reference_answer: |
+      resource.go defines the Resource interface and core resource types
+      used throughout Hugo's asset pipeline for managing CSS, JS, images,
+      and other static assets with transformation support.
+    validations:
+      - type: graph_tool_used
+
+  - id: 5135
+    name: hugo_summarize_file_c
+    category: TOOL_HAPPY_PATH
+    description: >
+      summarize_file tool against Hugo (test C). Summarize command file.
+    query: |
+      Summarize the commands/server.go file
+    expected_state: COMPLETE
+    reference_answer: |
+      server.go implements Hugo's development server command with live reload,
+      file watching, and automatic rebuild. It sets up HTTP handlers for
+      serving rendered content and static files.
+    validations:
+      - type: graph_tool_used
+
+  # -- GR-58: CRS TraceStep Verification Tests --
+
+  - id: 5136
+    name: hugo_crs_find_callers
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58: Verify find_callers produces CRS TraceStep. Target: Publish.
+    query: |
+      Who calls the Publish function?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_callers tool was used and produced a CRS TraceStep recording the query
+      for Publish with match_count, total_callers, and used_inheritance_path metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 5137
+    name: hugo_crs_find_callees
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58: Verify find_callees produces CRS TraceStep. Target: Build.
+    query: |
+      What functions does the Build method call?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_callees tool was used and produced a CRS TraceStep recording the query
+      for Build with resolved_count, external_count, and total_count metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  # -- GR-58: CRS TraceStep Verification (IT-03 to IT-42) --
+
+  - id: 5138
+    name: hugo_crs_find_symbol
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-04: Verify find_symbol produces CRS TraceStep against Hugo.
+    query: |
+      Where is the Site struct defined in Hugo?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_symbol tool was used and produced a CRS TraceStep with
+      match_count, used_fuzzy, and kind_filter metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 5139
+    name: hugo_crs_find_cycles
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-09: Verify find_cycles produces CRS TraceStep against Hugo.
+    query: |
+      Find dependency cycles in Hugo's codebase.
+    expected_state: COMPLETE
+    reference_answer: |
+      find_cycles tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 5140
+    name: hugo_crs_find_dominators
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-13: Verify find_dominators produces CRS TraceStep against Hugo.
+    query: |
+      Find dominators of the Build function in Hugo.
+    expected_state: COMPLETE
+    reference_answer: |
+      find_dominators tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 5141
+    name: hugo_crs_find_extractable_regions
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-18: Verify find_extractable_regions produces CRS TraceStep against Hugo.
+    query: |
+      Find extractable code regions in Hugo's build system.
+    expected_state: COMPLETE
+    reference_answer: |
+      find_extractable_regions tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 5142
+    name: hugo_crs_find_weighted_criticality
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-22: Verify find_weighted_criticality produces CRS TraceStep against Hugo.
+    query: |
+      Find weighted criticality scores for Hugo's functions.
+    expected_state: COMPLETE
+    reference_answer: |
+      find_weighted_criticality tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 5143
+    name: hugo_crs_summarize_file
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-27: Verify summarize_file produces CRS TraceStep against Hugo.
+    query: |
+      Summarize the commands/server.go file in Hugo.
+    expected_state: COMPLETE
+    reference_answer: |
+      summarize_file tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 5144
+    name: hugo_crs_build_minimal_context
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-31: Verify build_minimal_context produces CRS TraceStep against Hugo.
+    query: |
+      Build minimal context for the Publish function in Hugo.
+    expected_state: COMPLETE
+    reference_answer: |
+      build_minimal_context tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 5145
+    name: hugo_crs_trace_flow
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      CRS verification: trace analysis records CRS state correctly.
+    query: |
+      Trace how errors propagate through Hugo's template execution pipeline
+    expected_state: COMPLETE
+    reference_answer: |
+      The trace analysis tool records CRS state for template execution
+      error propagation in the Hugo static site generator codebase.
+    validations:
+      - type: crs_state_recorded
+
+  - id: 5146
+    name: hugo_crs_tree
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      GR-58/IT-40: Verify tree tool produces CRS TraceStep against Hugo.
+    query: |
+      Show the directory tree of Hugo's source code.
+    expected_state: COMPLETE
+    reference_answer: |
+      tree tool was used and produced a CRS TraceStep with appropriate metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  # -- IT-01/IT-02/IT-03: Second CRS TraceStep Verification --
+
+  - id: 5147
+    name: hugo_crs_find_callers_b
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      IT-01: Second CRS verification for find_callers against Hugo. Target: Page.Render.
+    query: |
+      Who calls the Page.Render method in Hugo?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_callers tool was used and produced a CRS TraceStep with
+      match_count, total_callers, and used_inheritance_path metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 5148
+    name: hugo_crs_find_callees_b
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      IT-02: Second CRS verification for find_callees against Hugo. Target: Page.Render.
+    query: |
+      What functions does Page.Render call in Hugo?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_callees tool was used and produced a CRS TraceStep with
+      resolved_count, external_count, and total_count metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 5149
+    name: hugo_crs_find_implementations_a
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      IT-03: First CRS verification for find_implementations against Hugo. Target: Converter.
+    query: |
+      What types implement the Converter interface in Hugo?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_implementations tool was used and produced a CRS TraceStep with
+      match_count, total_implementations, and index_used metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present
+
+  - id: 5150
+    name: hugo_crs_find_implementations_b
+    category: TOOL_CRS_VERIFICATION
+    description: >
+      IT-03: Second CRS verification for find_implementations against Hugo. Target: Resource.
+    query: |
+      What types implement the Resource interface in Hugo?
+    expected_state: COMPLETE
+    reference_answer: |
+      find_implementations tool was used and produced a CRS TraceStep with
+      match_count, total_implementations, and index_used metadata.
+    validations:
+      - type: graph_tool_used
+      - type: crs_trace_step_present

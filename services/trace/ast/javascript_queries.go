@@ -89,6 +89,12 @@ const (
 	jsNodeAwait    = "await"
 )
 
+// Depth limit constants for JavaScript AST traversal.
+const (
+	// maxThisAssignmentDepth is the maximum recursion depth for bodyHasThisAssignment.
+	maxThisAssignmentDepth = 5
+)
+
 // JavaScriptNodeTypes maps symbol kinds to the tree-sitter node types that produce them.
 var JavaScriptNodeTypes = map[SymbolKind][]string{
 	SymbolKindImport:   {jsNodeImportStatement},

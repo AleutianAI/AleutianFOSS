@@ -16,6 +16,7 @@ package phases
 import (
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"strings"
 
@@ -169,6 +170,12 @@ func (p *ExecutePhase) synthesizeFromToolResults(deps *Dependencies) string {
 //	both successful outputs and error messages. This ensures users understand
 //	what was discovered and what failed.
 //
+//	Phase 19 enhancement: When there is exactly one successful tool result
+//	that is already well-formatted (contains markdown headers), pass it
+//	through verbatim instead of wrapping it in a synthesis frame. This
+//	preserves authoritative tool output (e.g., graph tool "Symbol not found"
+//	messages) that would otherwise be flattened by the formatting pipeline.
+//
 // Inputs:
 //
 //	results - Tool results to summarize.
@@ -177,22 +184,35 @@ func (p *ExecutePhase) synthesizeFromToolResults(deps *Dependencies) string {
 //
 //	string - Synthesized summary, empty if no content.
 func (p *ExecutePhase) synthesizeFromToolResultsSlice(results []agent.ToolResult) string {
+	// Phase 19: Pass through single well-formatted tool results verbatim.
+	// Graph tools (find_implementations, find_callers, etc.) already produce
+	// well-structured markdown output with headers and explanations. Wrapping
+	// them in "Based on the codebase analysis:" adds noise and loses formatting.
+	if singleResult, ok := getSingleFormattedResult(results); ok {
+		return singleResult
+	}
+
 	var sb strings.Builder
 	sb.WriteString("Based on the codebase analysis:\n\n")
 
 	hasContent := false
 	hasErrors := false
 
-	// Deduplicate results by content hash to avoid duplicate tool outputs
-	seen := make(map[string]bool)
+	// CR-20-8: Deduplicate results by FNV hash to avoid storing full output strings
+	// as map keys. Graph tool outputs can be 10KB+; using the full string as a key
+	// creates unnecessary memory pressure and slow map operations.
+	seen := make(map[uint64]bool)
 
 	for _, result := range results {
 		if result.Success && result.Output != "" {
 			// Skip duplicate outputs (e.g., from circuit breaker retries)
-			if seen[result.Output] {
+			h := fnv.New64a()
+			h.Write([]byte(result.Output))
+			hash := h.Sum64()
+			if seen[hash] {
 				continue
 			}
-			seen[result.Output] = true
+			seen[hash] = true
 
 			// Format the output - try to parse JSON and format nicely
 			formatted := formatToolOutput(result.Output)
@@ -217,6 +237,102 @@ func (p *ExecutePhase) synthesizeFromToolResultsSlice(results []agent.ToolResult
 	sb.WriteString("*Note: This summary was generated from tool outputs due to context limitations.*")
 
 	return sb.String()
+}
+
+// trivialReferenceLocationThreshold is the minimum number of reference locations
+// required before the synthesis LLM is invoked for find_references results. Results
+// with fewer locations are passed through verbatim — the synthesis model tends to
+// return an empty response when there is "too little to say," producing a worse
+// result than the raw tool output. Results at or above this threshold still go
+// through LLM synthesis to produce richer narrative explanations.
+const trivialReferenceLocationThreshold = 3
+
+// getSingleFormattedResult checks if there is exactly one successful tool result
+// that is already well-formatted with markdown headers (## GRAPH RESULT, Found N, etc.).
+//
+// Description:
+//
+//	Graph tools produce authoritative, well-structured output that should be
+//	preserved verbatim during empty response recovery. This function detects
+//	that case and returns the output for pass-through, avoiding the generic
+//	"Based on the codebase analysis:" wrapper that flattens formatting.
+//
+// Inputs:
+//
+//	results - Tool results to check.
+//
+// Outputs:
+//
+//	string - The single formatted output, if applicable.
+//	bool   - True if pass-through should be used.
+//
+// Limitations:
+//
+//	Only triggers for exactly one successful result with no errors.
+//	Multi-result synthesis still uses the standard formatting pipeline.
+func getSingleFormattedResult(results []agent.ToolResult) (string, bool) {
+	var successCount int
+	var errorCount int
+	var emptySuccessCount int
+	var singleOutput string
+
+	for _, result := range results {
+		if result.Success && result.Output != "" {
+			successCount++
+			singleOutput = result.Output
+		} else if result.Success && result.Output == "" {
+			// CR-20-6: Track success-with-empty-output separately. This indicates
+			// another tool ran but produced nothing — the full synthesis path should
+			// handle it rather than passing through the single non-empty result.
+			emptySuccessCount++
+		} else if !result.Success && result.Error != "" {
+			errorCount++
+		}
+	}
+
+	// Only pass through when there is exactly one successful result with output,
+	// no errors, and no empty-output successes that might indicate partial results.
+	if successCount != 1 || errorCount > 0 || emptySuccessCount > 0 {
+		return "", false
+	}
+
+	// CR-20-5: Check for graph-specific markers only. The previous generic "## " check
+	// would match any H2 header from any tool, causing unintended pass-through for
+	// non-graph tools. Graph tools produce these specific patterns:
+	//   - "## GRAPH RESULT" — used by find_implementations, find_callers, etc.
+	//   - "Found N" prefix — used by successful graph queries
+	//   - "these results are exhaustive" — definitive answer footer
+	trimmed := strings.TrimSpace(singleOutput)
+
+	// IT-06d Bug 12: For find_references positive results, allow pass-through when the
+	// result is trivially small (fewer than trivialReferenceLocationThreshold locations).
+	// Trivial results cause the synthesis LLM to return an empty response — the raw
+	// tool output is cleaner than the empty-response fallback dump. Larger results
+	// (≥ threshold) still go through LLM synthesis for richer narrative explanations.
+	// Negative results ("not found") still pass through unconditionally to prevent
+	// hallucination (unchanged from IT-06c).
+	if strings.Contains(trimmed, "references to '") && !strings.Contains(strings.ToLower(trimmed), "not found") {
+		if countReferenceLocations(trimmed) >= trivialReferenceLocationThreshold {
+			return "", false
+		}
+		// Trivial result: fall through to pass-through below.
+	}
+
+	// IT-09: Do NOT pass through find_cycles results. Unlike other graph tools
+	// that return definitive lists (find_callers, find_implementations), find_cycles
+	// returns global unscoped results that LLM synthesis must narrate in context
+	// of the user's query (package scoping, sorting, relevance filtering).
+	if strings.Contains(trimmed, "circular dependencies") {
+		return "", false
+	}
+
+	if strings.Contains(trimmed, "## GRAPH RESULT") ||
+		strings.HasPrefix(trimmed, "Found ") ||
+		strings.Contains(trimmed, "these results are exhaustive") {
+		return singleOutput, true
+	}
+
+	return "", false
 }
 
 // synthesizeFromTraceSteps builds summary from trace steps when ToolResults unavailable.
@@ -491,6 +607,44 @@ func formatGenericObject(obj map[string]interface{}) string {
 // -----------------------------------------------------------------------------
 // Trace Step Filtering
 // -----------------------------------------------------------------------------
+
+// countReferenceLocations counts the number of file:line location entries in a
+// find_references tool result output string.
+//
+// Description:
+//
+//	Parses the "Found N references" header line to extract the location count.
+//	Falls back to counting bullet-prefixed lines if the header is absent or
+//	unparseable. Used by getSingleFormattedResult to determine whether LLM
+//	synthesis adds value or risks producing an empty response.
+//
+// Inputs:
+//
+//	output - Raw find_references tool output (trimmed).
+//
+// Outputs:
+//
+//	int - Number of reference locations reported. Returns 0 if unparseable.
+func countReferenceLocations(output string) int {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Found ") {
+			var n int
+			if _, err := fmt.Sscanf(line, "Found %d", &n); err == nil {
+				return n
+			}
+		}
+	}
+	// Fallback: count bullet-prefixed lines that contain a colon (file:line format).
+	count := 0
+	for _, line := range strings.Split(output, "\n") {
+		trimLine := strings.TrimSpace(line)
+		if strings.HasPrefix(trimLine, "- ") && strings.ContainsRune(trimLine, ':') {
+			count++
+		}
+	}
+	return count
+}
 
 // filterToolCallSteps extracts tool_call steps from trace.
 //

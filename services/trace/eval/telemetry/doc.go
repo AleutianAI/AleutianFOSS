@@ -50,7 +50,7 @@
 // The Sink interface is the primary abstraction for telemetry collection:
 //
 //	sink := telemetry.NewPrometheusSink(telemetry.PrometheusConfig{
-//	    Namespace: "code_buddy",
+//	    Namespace: "trace",
 //	    Subsystem: "eval",
 //	})
 //
@@ -89,8 +89,8 @@
 // Metrics follow the pattern: <namespace>_<subsystem>_<metric>_<unit>
 //
 // Examples:
-//   - code_buddy_eval_benchmark_duration_seconds
-//   - code_buddy_eval_benchmark_iterations_total
-//   - code_buddy_eval_comparison_speedup_ratio
-//   - code_buddy_eval_errors_total
+//   - trace_eval_benchmark_duration_seconds
+//   - trace_eval_benchmark_iterations_total
+//   - trace_eval_comparison_speedup_ratio
+//   - trace_eval_errors_total
 package telemetry

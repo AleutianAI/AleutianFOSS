@@ -8,7 +8,7 @@
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
 
-// Package tdg provides Test-Driven Generation (TDG) for Code Buddy.
+// Package tdg provides Test-Driven Generation (TDG) for Trace.
 //
 // TDG is an agent mode that forces correctness proofs through tests:
 //

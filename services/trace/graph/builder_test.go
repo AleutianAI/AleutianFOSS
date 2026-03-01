@@ -1210,6 +1210,271 @@ func TestBuilder_GoInterfaceImplementation(t *testing.T) {
 	})
 }
 
+// TestBuilder_PromotedMethodResolution verifies that Go structs with embedded types
+// inherit promoted methods for interface implementation detection.
+// IT-03 H-3: Engine embeds RouterGroup → Engine gets RouterGroup's methods → Engine satisfies IRouter.
+func TestBuilder_PromotedMethodResolution(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	t.Run("struct with embed satisfies interface via promoted methods", func(t *testing.T) {
+		// IRouter interface requires GET, POST, Group methods
+		iRouter := &ast.Symbol{
+			ID:        "router.go:10:IRouter",
+			Name:      "IRouter",
+			Kind:      ast.SymbolKindInterface,
+			FilePath:  "router.go",
+			StartLine: 10,
+			EndLine:   20,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "GET", ParamCount: 2, ReturnCount: 1},
+					{Name: "POST", ParamCount: 2, ReturnCount: 1},
+					{Name: "Group", ParamCount: 1, ReturnCount: 1},
+				},
+			},
+		}
+
+		// RouterGroup has GET, POST, Group methods (satisfies IRouter directly)
+		routerGroup := &ast.Symbol{
+			ID:        "routergroup.go:5:RouterGroup",
+			Name:      "RouterGroup",
+			Kind:      ast.SymbolKindStruct,
+			FilePath:  "routergroup.go",
+			StartLine: 5,
+			EndLine:   15,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "GET", ParamCount: 2, ReturnCount: 1, ReceiverType: "*RouterGroup"},
+					{Name: "POST", ParamCount: 2, ReturnCount: 1, ReceiverType: "*RouterGroup"},
+					{Name: "Group", ParamCount: 1, ReturnCount: 1, ReceiverType: "*RouterGroup"},
+				},
+			},
+		}
+
+		// Engine embeds RouterGroup (has Extends="RouterGroup") but has NO direct methods
+		// that satisfy IRouter. It only satisfies IRouter via promoted methods.
+		engine := &ast.Symbol{
+			ID:        "engine.go:5:Engine",
+			Name:      "Engine",
+			Kind:      ast.SymbolKindStruct,
+			FilePath:  "engine.go",
+			StartLine: 5,
+			EndLine:   15,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			Metadata: &ast.SymbolMetadata{
+				Extends: "RouterGroup",
+				Methods: []ast.MethodSignature{
+					{Name: "Run", ParamCount: 1, ReturnCount: 1, ReceiverType: "*Engine"},
+				},
+			},
+		}
+
+		parseResult1 := testParseResult("router.go", []*ast.Symbol{iRouter}, nil)
+		parseResult2 := testParseResult("routergroup.go", []*ast.Symbol{routerGroup}, nil)
+		parseResult3 := testParseResult("engine.go", []*ast.Symbol{engine}, nil)
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2, parseResult3})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		// RouterGroup should implement IRouter (direct methods)
+		rgNode, ok := result.Graph.GetNode(routerGroup.ID)
+		if !ok {
+			t.Fatal("RouterGroup node not found")
+		}
+		foundRGImplements := false
+		for _, edge := range rgNode.Outgoing {
+			if edge.Type == EdgeTypeImplements && edge.ToID == iRouter.ID {
+				foundRGImplements = true
+				break
+			}
+		}
+		if !foundRGImplements {
+			t.Error("expected EdgeTypeImplements from RouterGroup to IRouter")
+		}
+
+		// Engine should ALSO implement IRouter via promoted methods from RouterGroup
+		engineNode, ok := result.Graph.GetNode(engine.ID)
+		if !ok {
+			t.Fatal("Engine node not found")
+		}
+		foundEngineImplements := false
+		for _, edge := range engineNode.Outgoing {
+			if edge.Type == EdgeTypeImplements && edge.ToID == iRouter.ID {
+				foundEngineImplements = true
+				break
+			}
+		}
+		if !foundEngineImplements {
+			t.Error("expected EdgeTypeImplements from Engine to IRouter (via promoted methods from RouterGroup)")
+		}
+	})
+
+	t.Run("struct with embed but no Extends does not get promoted methods", func(t *testing.T) {
+		// Interface
+		iface := &ast.Symbol{
+			ID:        "iface.go:10:Saver",
+			Name:      "Saver",
+			Kind:      ast.SymbolKindInterface,
+			FilePath:  "iface.go",
+			StartLine: 10,
+			EndLine:   15,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "Save", ParamCount: 1, ReturnCount: 1},
+				},
+			},
+		}
+
+		// Struct with no Extends and no Save method — should NOT implement Saver
+		plain := &ast.Symbol{
+			ID:        "plain.go:5:Plain",
+			Name:      "Plain",
+			Kind:      ast.SymbolKindStruct,
+			FilePath:  "plain.go",
+			StartLine: 5,
+			EndLine:   10,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "Load", ParamCount: 0, ReturnCount: 1, ReceiverType: "*Plain"},
+				},
+			},
+		}
+
+		parseResult1 := testParseResult("iface.go", []*ast.Symbol{iface}, nil)
+		parseResult2 := testParseResult("plain.go", []*ast.Symbol{plain}, nil)
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		plainNode, ok := result.Graph.GetNode(plain.ID)
+		if !ok {
+			t.Fatal("Plain node not found")
+		}
+		for _, edge := range plainNode.Outgoing {
+			if edge.Type == EdgeTypeImplements {
+				t.Error("expected NO EdgeTypeImplements from Plain (does not have Save method)")
+			}
+		}
+	})
+
+	t.Run("recursive embeds chain", func(t *testing.T) {
+		// Interface requires Write
+		writer := &ast.Symbol{
+			ID:        "w.go:10:Writer",
+			Name:      "Writer",
+			Kind:      ast.SymbolKindInterface,
+			FilePath:  "w.go",
+			StartLine: 10,
+			EndLine:   15,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "Write", ParamCount: 1, ReturnCount: 2},
+				},
+			},
+		}
+
+		// Base has Write
+		base := &ast.Symbol{
+			ID:        "base.go:5:Base",
+			Name:      "Base",
+			Kind:      ast.SymbolKindStruct,
+			FilePath:  "base.go",
+			StartLine: 5,
+			EndLine:   10,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "Write", ParamCount: 1, ReturnCount: 2, ReceiverType: "*Base"},
+				},
+			},
+		}
+
+		// Middle embeds Base (no direct methods matching Writer)
+		middle := &ast.Symbol{
+			ID:        "middle.go:5:Middle",
+			Name:      "Middle",
+			Kind:      ast.SymbolKindStruct,
+			FilePath:  "middle.go",
+			StartLine: 5,
+			EndLine:   10,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			Metadata: &ast.SymbolMetadata{
+				Extends: "Base",
+			},
+		}
+
+		// Top embeds Middle (should get Write via Middle → Base chain)
+		top := &ast.Symbol{
+			ID:        "top.go:5:Top",
+			Name:      "Top",
+			Kind:      ast.SymbolKindStruct,
+			FilePath:  "top.go",
+			StartLine: 5,
+			EndLine:   10,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			Metadata: &ast.SymbolMetadata{
+				Extends: "Middle",
+			},
+		}
+
+		parseResults := []*ast.ParseResult{
+			testParseResult("w.go", []*ast.Symbol{writer}, nil),
+			testParseResult("base.go", []*ast.Symbol{base}, nil),
+			testParseResult("middle.go", []*ast.Symbol{middle}, nil),
+			testParseResult("top.go", []*ast.Symbol{top}, nil),
+		}
+
+		result, err := builder.Build(ctx, parseResults)
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		// Top should implement Writer via Middle → Base chain
+		topNode, ok := result.Graph.GetNode(top.ID)
+		if !ok {
+			t.Fatal("Top node not found")
+		}
+		foundTopImplements := false
+		for _, edge := range topNode.Outgoing {
+			if edge.Type == EdgeTypeImplements && edge.ToID == writer.ID {
+				foundTopImplements = true
+				break
+			}
+		}
+		if !foundTopImplements {
+			t.Error("expected EdgeTypeImplements from Top to Writer (via recursive embeds: Top→Middle→Base)")
+		}
+	})
+}
+
 func TestBuilder_PythonProtocolImplementation(t *testing.T) {
 	builder := NewBuilder(WithProjectRoot("/test"))
 	ctx := context.Background()
@@ -3005,8 +3270,8 @@ func TestIsCallTarget(t *testing.T) {
 		// Constructor targets
 		{ast.SymbolKindClass, "Class (R3-P1b)", true},
 		{ast.SymbolKindStruct, "Struct (R3-P1b)", true},
-		// Not valid targets
-		{ast.SymbolKindVariable, "Variable", false},
+		// GR-62a P-4: Variable can be a call target (Python stores callables in variables)
+		{ast.SymbolKindVariable, "Variable", true},
 		{ast.SymbolKindConstant, "Constant", false},
 		{ast.SymbolKindField, "Field", false},
 		{ast.SymbolKindImport, "Import", false},
@@ -3399,5 +3664,2864 @@ func TestParseAliasedName(t *testing.T) {
 				t.Errorf("parseAliasedName(%q) original = %q, want %q", tt.input, original, tt.wantOriginal)
 			}
 		})
+	}
+}
+
+// =============================================================================
+// IT-03a A-1: TypeScript Implicit Interface Implementation Tests
+// =============================================================================
+
+func TestBuilder_TSInterfaceImplementation(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	t.Run("TS class implementing all interface methods creates IMPLEMENTS edge", func(t *testing.T) {
+		// TypeScript interface with methods
+		tsInterface := &ast.Symbol{
+			ID:        "api.ts:5:Renderable",
+			Name:      "Renderable",
+			Kind:      ast.SymbolKindInterface,
+			FilePath:  "api.ts",
+			StartLine: 5,
+			EndLine:   10,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "render", ParamCount: 1, ReturnCount: 1},
+					{Name: "dispose", ParamCount: 0, ReturnCount: 0},
+				},
+			},
+		}
+
+		// TypeScript class that implements all interface methods
+		tsClass := &ast.Symbol{
+			ID:        "widget.ts:10:Widget",
+			Name:      "Widget",
+			Kind:      ast.SymbolKindClass,
+			FilePath:  "widget.ts",
+			StartLine: 10,
+			EndLine:   30,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "render", ParamCount: 1, ReturnCount: 1},
+					{Name: "dispose", ParamCount: 0, ReturnCount: 0},
+					{Name: "update", ParamCount: 1, ReturnCount: 0}, // extra method
+				},
+			},
+		}
+
+		parseResult1 := &ast.ParseResult{
+			FilePath: "api.ts",
+			Language: "typescript",
+			Symbols:  []*ast.Symbol{tsInterface},
+			Package:  "api",
+		}
+		parseResult2 := &ast.ParseResult{
+			FilePath: "widget.ts",
+			Language: "typescript",
+			Symbols:  []*ast.Symbol{tsClass},
+			Package:  "api",
+		}
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		// Check that EdgeTypeImplements was created from Widget to Renderable
+		widgetNode, ok := result.Graph.GetNode(tsClass.ID)
+		if !ok {
+			t.Fatal("Widget node not found")
+		}
+		foundImplements := false
+		for _, edge := range widgetNode.Outgoing {
+			if edge.Type == EdgeTypeImplements && edge.ToID == tsInterface.ID {
+				foundImplements = true
+				break
+			}
+		}
+		if !foundImplements {
+			t.Error("expected EdgeTypeImplements from Widget to Renderable (TS implicit interface)")
+		}
+	})
+
+	t.Run("TS class with partial methods does not match", func(t *testing.T) {
+		tsInterface := &ast.Symbol{
+			ID:        "iface.ts:5:Serializable",
+			Name:      "Serializable",
+			Kind:      ast.SymbolKindInterface,
+			FilePath:  "iface.ts",
+			StartLine: 5,
+			EndLine:   10,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "serialize", ParamCount: 0, ReturnCount: 1},
+					{Name: "deserialize", ParamCount: 1, ReturnCount: 1},
+				},
+			},
+		}
+
+		tsClass := &ast.Symbol{
+			ID:        "data.ts:10:DataStore",
+			Name:      "DataStore",
+			Kind:      ast.SymbolKindClass,
+			FilePath:  "data.ts",
+			StartLine: 10,
+			EndLine:   20,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "serialize", ParamCount: 0, ReturnCount: 1},
+					// Missing deserialize
+				},
+			},
+		}
+
+		parseResult1 := &ast.ParseResult{
+			FilePath: "iface.ts",
+			Language: "typescript",
+			Symbols:  []*ast.Symbol{tsInterface},
+			Package:  "api",
+		}
+		parseResult2 := &ast.ParseResult{
+			FilePath: "data.ts",
+			Language: "typescript",
+			Symbols:  []*ast.Symbol{tsClass},
+			Package:  "api",
+		}
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		dataStoreNode, ok := result.Graph.GetNode(tsClass.ID)
+		if !ok {
+			t.Fatal("DataStore node not found")
+		}
+		for _, edge := range dataStoreNode.Outgoing {
+			if edge.Type == EdgeTypeImplements && edge.ToID == tsInterface.ID {
+				t.Error("unexpected EdgeTypeImplements from DataStore to Serializable (missing deserialize)")
+			}
+		}
+	})
+
+	t.Run("TS interface does not cross-match with Go types", func(t *testing.T) {
+		tsInterface := &ast.Symbol{
+			ID:        "ts_iface.ts:5:Runner",
+			Name:      "Runner",
+			Kind:      ast.SymbolKindInterface,
+			FilePath:  "ts_iface.ts",
+			StartLine: 5,
+			EndLine:   10,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "run", ParamCount: 0, ReturnCount: 0},
+				},
+			},
+		}
+
+		goStruct := &ast.Symbol{
+			ID:        "runner.go:5:GoRunner",
+			Name:      "GoRunner",
+			Kind:      ast.SymbolKindStruct,
+			FilePath:  "runner.go",
+			StartLine: 5,
+			EndLine:   10,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "go",
+			Metadata: &ast.SymbolMetadata{
+				Methods: []ast.MethodSignature{
+					{Name: "run", ParamCount: 0, ReturnCount: 0, ReceiverType: "*GoRunner"},
+				},
+			},
+		}
+
+		parseResult1 := &ast.ParseResult{
+			FilePath: "ts_iface.ts",
+			Language: "typescript",
+			Symbols:  []*ast.Symbol{tsInterface},
+			Package:  "api",
+		}
+		parseResult2 := testParseResult("runner.go", []*ast.Symbol{goStruct}, nil)
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		goNode, ok := result.Graph.GetNode(goStruct.ID)
+		if !ok {
+			t.Fatal("GoRunner node not found")
+		}
+		for _, edge := range goNode.Outgoing {
+			if edge.Type == EdgeTypeImplements && edge.ToID == tsInterface.ID {
+				t.Error("Go struct should NOT implement TypeScript interface (cross-language)")
+			}
+		}
+	})
+}
+
+// =============================================================================
+// IT-03a A-3: Decorator Argument Edges Tests
+// =============================================================================
+
+func TestBuilder_DecoratorArgEdges(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	t.Run("symbol with DecoratorArgs creates REFERENCES edges", func(t *testing.T) {
+		// The decorator argument target (a class that is referenced)
+		loggingInterceptor := &ast.Symbol{
+			ID:        "interceptors.ts:5:LoggingInterceptor",
+			Name:      "LoggingInterceptor",
+			Kind:      ast.SymbolKindClass,
+			FilePath:  "interceptors.ts",
+			StartLine: 5,
+			EndLine:   20,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript",
+		}
+
+		// The decorated symbol with decorator args referencing LoggingInterceptor
+		controller := &ast.Symbol{
+			ID:        "controller.ts:10:UserController",
+			Name:      "UserController",
+			Kind:      ast.SymbolKindClass,
+			FilePath:  "controller.ts",
+			StartLine: 10,
+			EndLine:   40,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript",
+			Metadata: &ast.SymbolMetadata{
+				DecoratorArgs: map[string][]string{
+					"UseInterceptors": {"LoggingInterceptor"},
+				},
+			},
+		}
+
+		parseResult1 := &ast.ParseResult{
+			FilePath: "interceptors.ts",
+			Language: "typescript",
+			Symbols:  []*ast.Symbol{loggingInterceptor},
+			Package:  "api",
+		}
+		parseResult2 := &ast.ParseResult{
+			FilePath: "controller.ts",
+			Language: "typescript",
+			Symbols:  []*ast.Symbol{controller},
+			Package:  "api",
+		}
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		controllerNode, ok := result.Graph.GetNode(controller.ID)
+		if !ok {
+			t.Fatal("UserController node not found")
+		}
+
+		foundReference := false
+		for _, edge := range controllerNode.Outgoing {
+			if edge.Type == EdgeTypeReferences && edge.ToID == loggingInterceptor.ID {
+				foundReference = true
+				break
+			}
+		}
+		if !foundReference {
+			t.Error("expected EdgeTypeReferences from UserController to LoggingInterceptor (decorator arg)")
+		}
+	})
+
+	t.Run("multiple decorator args create multiple edges", func(t *testing.T) {
+		targetA := &ast.Symbol{
+			ID:        "services.ts:5:AuthService",
+			Name:      "AuthService",
+			Kind:      ast.SymbolKindClass,
+			FilePath:  "services.ts",
+			StartLine: 5,
+			EndLine:   15,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript",
+		}
+
+		targetB := &ast.Symbol{
+			ID:        "services.ts:20:UserService",
+			Name:      "UserService",
+			Kind:      ast.SymbolKindClass,
+			FilePath:  "services.ts",
+			StartLine: 20,
+			EndLine:   30,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript",
+		}
+
+		decorated := &ast.Symbol{
+			ID:        "module.ts:10:AppModule",
+			Name:      "AppModule",
+			Kind:      ast.SymbolKindClass,
+			FilePath:  "module.ts",
+			StartLine: 10,
+			EndLine:   30,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript",
+			Metadata: &ast.SymbolMetadata{
+				DecoratorArgs: map[string][]string{
+					"Module": {"AuthService", "UserService"},
+				},
+			},
+		}
+
+		parseResult1 := &ast.ParseResult{
+			FilePath: "services.ts",
+			Language: "typescript",
+			Symbols:  []*ast.Symbol{targetA, targetB},
+			Package:  "api",
+		}
+		parseResult2 := &ast.ParseResult{
+			FilePath: "module.ts",
+			Language: "typescript",
+			Symbols:  []*ast.Symbol{decorated},
+			Package:  "api",
+		}
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		moduleNode, ok := result.Graph.GetNode(decorated.ID)
+		if !ok {
+			t.Fatal("AppModule node not found")
+		}
+
+		refToAuth := false
+		refToUser := false
+		for _, edge := range moduleNode.Outgoing {
+			if edge.Type == EdgeTypeReferences {
+				if edge.ToID == targetA.ID {
+					refToAuth = true
+				}
+				if edge.ToID == targetB.ID {
+					refToUser = true
+				}
+			}
+		}
+		if !refToAuth {
+			t.Error("expected EdgeTypeReferences from AppModule to AuthService")
+		}
+		if !refToUser {
+			t.Error("expected EdgeTypeReferences from AppModule to UserService")
+		}
+	})
+}
+
+func TestBuilder_DecoratorArgEdges_NoArgs(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	// Symbol with nil Metadata (no decorator args)
+	sym := &ast.Symbol{
+		ID:        "plain.ts:10:PlainClass",
+		Name:      "PlainClass",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "plain.ts",
+		StartLine: 10,
+		EndLine:   20,
+		StartCol:  0,
+		EndCol:    50,
+		Language:  "typescript",
+	}
+
+	parseResult := &ast.ParseResult{
+		FilePath: "plain.ts",
+		Language: "typescript",
+		Symbols:  []*ast.Symbol{sym},
+		Package:  "api",
+	}
+
+	result, err := builder.Build(ctx, []*ast.ParseResult{parseResult})
+	if err != nil {
+		t.Fatalf("build failed: %v", err)
+	}
+
+	plainNode, ok := result.Graph.GetNode(sym.ID)
+	if !ok {
+		t.Fatal("PlainClass node not found")
+	}
+
+	// Should have no REFERENCES edges since there are no decorator args
+	for _, edge := range plainNode.Outgoing {
+		if edge.Type == EdgeTypeReferences {
+			t.Errorf("unexpected EdgeTypeReferences from PlainClass (no decorator args): to %s", edge.ToID)
+		}
+	}
+}
+
+func TestBuilder_DecoratorArgEdges_OnlyPascalCase(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	// Symbol with decorator args: one PascalCase (placeholder created), one lowercase (skipped)
+	sym := &ast.Symbol{
+		ID:        "handler.ts:10:MyHandler",
+		Name:      "MyHandler",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "handler.ts",
+		StartLine: 10,
+		EndLine:   30,
+		StartCol:  0,
+		EndCol:    50,
+		Language:  "typescript",
+		Metadata: &ast.SymbolMetadata{
+			DecoratorArgs: map[string][]string{
+				"Guard": {"AuthGuard", "options"},
+			},
+		},
+	}
+
+	parseResult := &ast.ParseResult{
+		FilePath: "handler.ts",
+		Language: "typescript",
+		Symbols:  []*ast.Symbol{sym},
+		Package:  "api",
+	}
+
+	result, err := builder.Build(ctx, []*ast.ParseResult{parseResult})
+	if err != nil {
+		t.Fatalf("build failed: %v", err)
+	}
+
+	handlerNode, ok := result.Graph.GetNode(sym.ID)
+	if !ok {
+		t.Fatal("MyHandler node not found")
+	}
+
+	// Count REFERENCES edges: should have one for AuthGuard (PascalCase placeholder),
+	// but none for "options" (lowercase, skipped)
+	refCount := 0
+	for _, edge := range handlerNode.Outgoing {
+		if edge.Type == EdgeTypeReferences {
+			refCount++
+		}
+	}
+
+	if refCount != 1 {
+		t.Errorf("expected 1 REFERENCES edge (AuthGuard only), got %d", refCount)
+	}
+}
+
+// =============================================================================
+// IT-03a C-1: Callback Reference Edges Tests
+// =============================================================================
+
+func TestBuilder_CallbackRefEdges(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	t.Run("CallSite with FunctionArgs creates REFERENCES edges", func(t *testing.T) {
+		// The callback function that will be passed as argument
+		middleware := &ast.Symbol{
+			ID:        "middleware.js:5:authMiddleware",
+			Name:      "authMiddleware",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "middleware.js",
+			StartLine: 5,
+			EndLine:   15,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "javascript",
+		}
+
+		// The caller that passes middleware as a callback arg
+		setup := testSymbolWithCalls("setup", ast.SymbolKindFunction, "middleware.js", 20, []ast.CallSite{
+			{
+				Target: "use",
+				Location: ast.Location{
+					FilePath:  "middleware.js",
+					StartLine: 22,
+					EndLine:   22,
+				},
+				IsMethod:     true,
+				Receiver:     "app",
+				FunctionArgs: []string{"authMiddleware"},
+			},
+		})
+		setup.Language = "javascript"
+
+		parseResult := &ast.ParseResult{
+			FilePath: "middleware.js",
+			Language: "javascript",
+			Symbols:  []*ast.Symbol{middleware, setup},
+			Package:  "app",
+		}
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{parseResult})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		setupNode, ok := result.Graph.GetNode(setup.ID)
+		if !ok {
+			t.Fatal("setup node not found")
+		}
+
+		foundCallbackRef := false
+		for _, edge := range setupNode.Outgoing {
+			if edge.Type == EdgeTypeReferences && edge.ToID == middleware.ID {
+				foundCallbackRef = true
+				break
+			}
+		}
+		if !foundCallbackRef {
+			t.Error("expected EdgeTypeReferences from setup to authMiddleware (callback arg)")
+		}
+	})
+
+	t.Run("multiple FunctionArgs create multiple REFERENCES edges", func(t *testing.T) {
+		handlerA := &ast.Symbol{
+			ID:        "handlers.ts:5:handleGet",
+			Name:      "handleGet",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "handlers.ts",
+			StartLine: 5,
+			EndLine:   15,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript",
+		}
+
+		handlerB := &ast.Symbol{
+			ID:        "handlers.ts:20:handlePost",
+			Name:      "handlePost",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "handlers.ts",
+			StartLine: 20,
+			EndLine:   30,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript",
+		}
+
+		router := testSymbolWithCalls("configureRoutes", ast.SymbolKindFunction, "handlers.ts", 35, []ast.CallSite{
+			{
+				Target: "route",
+				Location: ast.Location{
+					FilePath:  "handlers.ts",
+					StartLine: 36,
+					EndLine:   36,
+				},
+				FunctionArgs: []string{"handleGet", "handlePost"},
+			},
+		})
+		router.Language = "typescript"
+
+		parseResult := &ast.ParseResult{
+			FilePath: "handlers.ts",
+			Language: "typescript",
+			Symbols:  []*ast.Symbol{handlerA, handlerB, router},
+			Package:  "api",
+		}
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{parseResult})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		routerNode, ok := result.Graph.GetNode(router.ID)
+		if !ok {
+			t.Fatal("configureRoutes node not found")
+		}
+
+		refToA := false
+		refToB := false
+		for _, edge := range routerNode.Outgoing {
+			if edge.Type == EdgeTypeReferences {
+				if edge.ToID == handlerA.ID {
+					refToA = true
+				}
+				if edge.ToID == handlerB.ID {
+					refToB = true
+				}
+			}
+		}
+		if !refToA {
+			t.Error("expected EdgeTypeReferences from configureRoutes to handleGet")
+		}
+		if !refToB {
+			t.Error("expected EdgeTypeReferences from configureRoutes to handlePost")
+		}
+	})
+}
+
+func TestBuilder_CallbackRefEdges_UnresolvableSkipped(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	// Caller with FunctionArgs that reference a name not in the graph
+	caller := testSymbolWithCalls("setup", ast.SymbolKindFunction, "app.js", 5, []ast.CallSite{
+		{
+			Target: "configure",
+			Location: ast.Location{
+				FilePath:  "app.js",
+				StartLine: 6,
+				EndLine:   6,
+			},
+			FunctionArgs: []string{"nonExistentHandler"},
+		},
+	})
+	caller.Language = "javascript"
+
+	parseResult := &ast.ParseResult{
+		FilePath: "app.js",
+		Language: "javascript",
+		Symbols:  []*ast.Symbol{caller},
+		Package:  "app",
+	}
+
+	result, err := builder.Build(ctx, []*ast.ParseResult{parseResult})
+	if err != nil {
+		t.Fatalf("build failed: %v", err)
+	}
+
+	callerNode, ok := result.Graph.GetNode(caller.ID)
+	if !ok {
+		t.Fatal("setup node not found")
+	}
+
+	// Should have NO REFERENCES edges since nonExistentHandler doesn't resolve
+	// (callback args don't create placeholders)
+	for _, edge := range callerNode.Outgoing {
+		if edge.Type == EdgeTypeReferences {
+			t.Errorf("unexpected EdgeTypeReferences from setup (unresolvable callback arg): to %s", edge.ToID)
+		}
+	}
+}
+
+// =============================================================================
+// IT-03a C-2: Type Argument Reference Edges Tests
+// =============================================================================
+
+func TestBuilder_TypeArgEdges(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	t.Run("symbol with TypeArguments creates REFERENCES edges", func(t *testing.T) {
+		// The type referenced as a type argument
+		userType := &ast.Symbol{
+			ID:        "models.ts:5:User",
+			Name:      "User",
+			Kind:      ast.SymbolKindInterface,
+			FilePath:  "models.ts",
+			StartLine: 5,
+			EndLine:   15,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript",
+		}
+
+		// Function whose return type has a type argument referencing User (e.g., Promise<User>)
+		getUser := &ast.Symbol{
+			ID:        "service.ts:10:getUser",
+			Name:      "getUser",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "service.ts",
+			StartLine: 10,
+			EndLine:   20,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript",
+			Metadata: &ast.SymbolMetadata{
+				TypeArguments: []string{"User"},
+			},
+		}
+
+		parseResult1 := &ast.ParseResult{
+			FilePath: "models.ts",
+			Language: "typescript",
+			Symbols:  []*ast.Symbol{userType},
+			Package:  "api",
+		}
+		parseResult2 := &ast.ParseResult{
+			FilePath: "service.ts",
+			Language: "typescript",
+			Symbols:  []*ast.Symbol{getUser},
+			Package:  "api",
+		}
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		getUserNode, ok := result.Graph.GetNode(getUser.ID)
+		if !ok {
+			t.Fatal("getUser node not found")
+		}
+
+		foundTypeArgRef := false
+		for _, edge := range getUserNode.Outgoing {
+			if edge.Type == EdgeTypeReferences && edge.ToID == userType.ID {
+				foundTypeArgRef = true
+				break
+			}
+		}
+		if !foundTypeArgRef {
+			t.Error("expected EdgeTypeReferences from getUser to User (type argument)")
+		}
+	})
+
+	t.Run("multiple type arguments create multiple edges", func(t *testing.T) {
+		keyType := &ast.Symbol{
+			ID:        "types.ts:5:KeyType",
+			Name:      "KeyType",
+			Kind:      ast.SymbolKindInterface,
+			FilePath:  "types.ts",
+			StartLine: 5,
+			EndLine:   10,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript",
+		}
+
+		valType := &ast.Symbol{
+			ID:        "types.ts:15:ValueType",
+			Name:      "ValueType",
+			Kind:      ast.SymbolKindInterface,
+			FilePath:  "types.ts",
+			StartLine: 15,
+			EndLine:   20,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript",
+		}
+
+		// Function with Map<KeyType, ValueType>
+		mapFunc := &ast.Symbol{
+			ID:        "utils.ts:10:buildMap",
+			Name:      "buildMap",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "utils.ts",
+			StartLine: 10,
+			EndLine:   20,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript",
+			Metadata: &ast.SymbolMetadata{
+				TypeArguments: []string{"KeyType", "ValueType"},
+			},
+		}
+
+		parseResult1 := &ast.ParseResult{
+			FilePath: "types.ts",
+			Language: "typescript",
+			Symbols:  []*ast.Symbol{keyType, valType},
+			Package:  "api",
+		}
+		parseResult2 := &ast.ParseResult{
+			FilePath: "utils.ts",
+			Language: "typescript",
+			Symbols:  []*ast.Symbol{mapFunc},
+			Package:  "api",
+		}
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		mapNode, ok := result.Graph.GetNode(mapFunc.ID)
+		if !ok {
+			t.Fatal("buildMap node not found")
+		}
+
+		refToKey := false
+		refToVal := false
+		for _, edge := range mapNode.Outgoing {
+			if edge.Type == EdgeTypeReferences {
+				if edge.ToID == keyType.ID {
+					refToKey = true
+				}
+				if edge.ToID == valType.ID {
+					refToVal = true
+				}
+			}
+		}
+		if !refToKey {
+			t.Error("expected EdgeTypeReferences from buildMap to KeyType")
+		}
+		if !refToVal {
+			t.Error("expected EdgeTypeReferences from buildMap to ValueType")
+		}
+	})
+
+	t.Run("unresolvable type arguments are skipped", func(t *testing.T) {
+		sym := &ast.Symbol{
+			ID:        "fn.ts:10:processData",
+			Name:      "processData",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "fn.ts",
+			StartLine: 10,
+			EndLine:   20,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript",
+			Metadata: &ast.SymbolMetadata{
+				TypeArguments: []string{"UnknownType"},
+			},
+		}
+
+		parseResult := &ast.ParseResult{
+			FilePath: "fn.ts",
+			Language: "typescript",
+			Symbols:  []*ast.Symbol{sym},
+			Package:  "api",
+		}
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{parseResult})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		symNode, ok := result.Graph.GetNode(sym.ID)
+		if !ok {
+			t.Fatal("processData node not found")
+		}
+
+		for _, edge := range symNode.Outgoing {
+			if edge.Type == EdgeTypeReferences {
+				t.Errorf("unexpected EdgeTypeReferences from processData (type arg should not resolve): to %s", edge.ToID)
+			}
+		}
+	})
+}
+
+// =============================================================================
+// IT-03a C-3: Type Narrowing Reference Edges Tests
+// =============================================================================
+
+func TestBuilder_TypeNarrowingEdges(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	t.Run("symbol with TypeNarrowings creates REFERENCES edges", func(t *testing.T) {
+		// The type referenced in instanceof
+		routerClass := &ast.Symbol{
+			ID:        "router.ts:5:Router",
+			Name:      "Router",
+			Kind:      ast.SymbolKindClass,
+			FilePath:  "router.ts",
+			StartLine: 5,
+			EndLine:   25,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript",
+		}
+
+		// Function that uses instanceof Router
+		handleRequest := &ast.Symbol{
+			ID:        "handler.ts:10:handleRequest",
+			Name:      "handleRequest",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "handler.ts",
+			StartLine: 10,
+			EndLine:   30,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript",
+			Metadata: &ast.SymbolMetadata{
+				TypeNarrowings: []string{"Router"},
+			},
+		}
+
+		parseResult1 := &ast.ParseResult{
+			FilePath: "router.ts",
+			Language: "typescript",
+			Symbols:  []*ast.Symbol{routerClass},
+			Package:  "api",
+		}
+		parseResult2 := &ast.ParseResult{
+			FilePath: "handler.ts",
+			Language: "typescript",
+			Symbols:  []*ast.Symbol{handleRequest},
+			Package:  "api",
+		}
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		handlerNode, ok := result.Graph.GetNode(handleRequest.ID)
+		if !ok {
+			t.Fatal("handleRequest node not found")
+		}
+
+		foundNarrowingRef := false
+		for _, edge := range handlerNode.Outgoing {
+			if edge.Type == EdgeTypeReferences && edge.ToID == routerClass.ID {
+				foundNarrowingRef = true
+				break
+			}
+		}
+		if !foundNarrowingRef {
+			t.Error("expected EdgeTypeReferences from handleRequest to Router (type narrowing)")
+		}
+	})
+
+	t.Run("multiple type narrowings create multiple edges", func(t *testing.T) {
+		classA := &ast.Symbol{
+			ID:        "types.ts:5:ErrorA",
+			Name:      "ErrorA",
+			Kind:      ast.SymbolKindClass,
+			FilePath:  "types.ts",
+			StartLine: 5,
+			EndLine:   10,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript",
+		}
+
+		classB := &ast.Symbol{
+			ID:        "types.ts:15:ErrorB",
+			Name:      "ErrorB",
+			Kind:      ast.SymbolKindClass,
+			FilePath:  "types.ts",
+			StartLine: 15,
+			EndLine:   20,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript",
+		}
+
+		fn := &ast.Symbol{
+			ID:        "handler.ts:30:handleError",
+			Name:      "handleError",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "handler.ts",
+			StartLine: 30,
+			EndLine:   50,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript",
+			Metadata: &ast.SymbolMetadata{
+				TypeNarrowings: []string{"ErrorA", "ErrorB"},
+			},
+		}
+
+		parseResult1 := &ast.ParseResult{
+			FilePath: "types.ts",
+			Language: "typescript",
+			Symbols:  []*ast.Symbol{classA, classB},
+			Package:  "api",
+		}
+		parseResult2 := &ast.ParseResult{
+			FilePath: "handler.ts",
+			Language: "typescript",
+			Symbols:  []*ast.Symbol{fn},
+			Package:  "api",
+		}
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		fnNode, ok := result.Graph.GetNode(fn.ID)
+		if !ok {
+			t.Fatal("handleError node not found")
+		}
+
+		refToA := false
+		refToB := false
+		for _, edge := range fnNode.Outgoing {
+			if edge.Type == EdgeTypeReferences {
+				if edge.ToID == classA.ID {
+					refToA = true
+				}
+				if edge.ToID == classB.ID {
+					refToB = true
+				}
+			}
+		}
+		if !refToA {
+			t.Error("expected EdgeTypeReferences from handleError to ErrorA")
+		}
+		if !refToB {
+			t.Error("expected EdgeTypeReferences from handleError to ErrorB")
+		}
+	})
+
+	t.Run("unresolvable type narrowings are skipped", func(t *testing.T) {
+		fn := &ast.Symbol{
+			ID:        "check.ts:10:checkType",
+			Name:      "checkType",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "check.ts",
+			StartLine: 10,
+			EndLine:   20,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript",
+			Metadata: &ast.SymbolMetadata{
+				TypeNarrowings: []string{"NonExistentType"},
+			},
+		}
+
+		parseResult := &ast.ParseResult{
+			FilePath: "check.ts",
+			Language: "typescript",
+			Symbols:  []*ast.Symbol{fn},
+			Package:  "api",
+		}
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{parseResult})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		fnNode, ok := result.Graph.GetNode(fn.ID)
+		if !ok {
+			t.Fatal("checkType node not found")
+		}
+
+		for _, edge := range fnNode.Outgoing {
+			if edge.Type == EdgeTypeReferences {
+				t.Errorf("unexpected EdgeTypeReferences from checkType (type narrowing should not resolve): to %s", edge.ToID)
+			}
+		}
+	})
+
+	t.Run("nil metadata does not cause errors", func(t *testing.T) {
+		fn := &ast.Symbol{
+			ID:        "simple.ts:10:simpleFunc",
+			Name:      "simpleFunc",
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  "simple.ts",
+			StartLine: 10,
+			EndLine:   20,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "typescript",
+			// Metadata is nil
+		}
+
+		parseResult := &ast.ParseResult{
+			FilePath: "simple.ts",
+			Language: "typescript",
+			Symbols:  []*ast.Symbol{fn},
+			Package:  "api",
+		}
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{parseResult})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		fnNode, ok := result.Graph.GetNode(fn.ID)
+		if !ok {
+			t.Fatal("simpleFunc node not found")
+		}
+
+		for _, edge := range fnNode.Outgoing {
+			if edge.Type == EdgeTypeReferences {
+				t.Errorf("unexpected EdgeTypeReferences from simpleFunc (nil metadata): to %s", edge.ToID)
+			}
+		}
+	})
+}
+
+// =============================================================================
+// IT-03a Phase 12: End-to-end TS implicit interface matching via real parser
+// =============================================================================
+
+func TestBuildGraph_TSImplicitInterfaceMatching_EndToEnd(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	t.Run("parsed TS interface+class produces IMPLEMENTS edge", func(t *testing.T) {
+		// Parse real TypeScript source through the actual parser to verify
+		// that Metadata.Methods is populated by the parser, and the builder
+		// then creates EdgeTypeImplements.
+		tsParser := ast.NewTypeScriptParser()
+
+		ifaceSource := `export interface Repository {
+    findById(id: string): Entity;
+    save(entity: Entity): void;
+}
+`
+		classSource := `export class UserRepository {
+    findById(id: string): Entity {
+        return null;
+    }
+    save(entity: Entity): void {
+        // persist
+    }
+    count(): number {
+        return 0;
+    }
+}
+`
+
+		ifaceResult, err := tsParser.Parse(ctx, []byte(ifaceSource), "repo.ts")
+		if err != nil {
+			t.Fatalf("parse interface failed: %v", err)
+		}
+		classResult, err := tsParser.Parse(ctx, []byte(classSource), "user_repo.ts")
+		if err != nil {
+			t.Fatalf("parse class failed: %v", err)
+		}
+
+		// Verify parser populated Metadata.Methods (the fix this phase adds)
+		var iface *ast.Symbol
+		for _, sym := range ifaceResult.Symbols {
+			if sym.Kind == ast.SymbolKindInterface && sym.Name == "Repository" {
+				iface = sym
+				break
+			}
+		}
+		if iface == nil {
+			t.Fatal("expected interface 'Repository' in parse result")
+		}
+		if iface.Metadata == nil || len(iface.Metadata.Methods) == 0 {
+			t.Fatal("expected Metadata.Methods to be populated for TS interface (F-1 fix)")
+		}
+
+		var cls *ast.Symbol
+		for _, sym := range classResult.Symbols {
+			if sym.Kind == ast.SymbolKindClass && sym.Name == "UserRepository" {
+				cls = sym
+				break
+			}
+		}
+		if cls == nil {
+			t.Fatal("expected class 'UserRepository' in parse result")
+		}
+		if cls.Metadata == nil || len(cls.Metadata.Methods) == 0 {
+			t.Fatal("expected Metadata.Methods to be populated for TS class (F-2 fix)")
+		}
+
+		// Feed to builder — this should now create EdgeTypeImplements
+		result, err := builder.Build(ctx, []*ast.ParseResult{ifaceResult, classResult})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		classNode, ok := result.Graph.GetNode(cls.ID)
+		if !ok {
+			t.Fatal("UserRepository node not found in graph")
+		}
+
+		foundImplements := false
+		for _, edge := range classNode.Outgoing {
+			if edge.Type == EdgeTypeImplements && edge.ToID == iface.ID {
+				foundImplements = true
+				break
+			}
+		}
+		if !foundImplements {
+			t.Error("expected EdgeTypeImplements from UserRepository to Repository (TS implicit interface matching)")
+		}
+	})
+}
+
+func TestBuildGraph_TSImplicitInterfaceMatching_PartialMethods(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	t.Run("parsed TS class with partial methods does NOT match", func(t *testing.T) {
+		tsParser := ast.NewTypeScriptParser()
+
+		ifaceSource := `export interface Serializable {
+    serialize(): string;
+    deserialize(data: string): void;
+}
+`
+		classSource := `export class PartialImpl {
+    serialize(): string {
+        return "{}";
+    }
+}
+`
+
+		ifaceResult, err := tsParser.Parse(ctx, []byte(ifaceSource), "serial.ts")
+		if err != nil {
+			t.Fatalf("parse interface failed: %v", err)
+		}
+		classResult, err := tsParser.Parse(ctx, []byte(classSource), "partial.ts")
+		if err != nil {
+			t.Fatalf("parse class failed: %v", err)
+		}
+
+		// Verify parser populated Metadata.Methods
+		var iface *ast.Symbol
+		for _, sym := range ifaceResult.Symbols {
+			if sym.Kind == ast.SymbolKindInterface && sym.Name == "Serializable" {
+				iface = sym
+				break
+			}
+		}
+		if iface == nil {
+			t.Fatal("expected interface 'Serializable'")
+		}
+		if iface.Metadata == nil || len(iface.Metadata.Methods) != 2 {
+			t.Fatalf("expected 2 methods in interface Metadata.Methods, got %d",
+				func() int {
+					if iface.Metadata == nil {
+						return 0
+					}
+					return len(iface.Metadata.Methods)
+				}())
+		}
+
+		var cls *ast.Symbol
+		for _, sym := range classResult.Symbols {
+			if sym.Kind == ast.SymbolKindClass && sym.Name == "PartialImpl" {
+				cls = sym
+				break
+			}
+		}
+		if cls == nil {
+			t.Fatal("expected class 'PartialImpl'")
+		}
+
+		result, err := builder.Build(ctx, []*ast.ParseResult{ifaceResult, classResult})
+		if err != nil {
+			t.Fatalf("build failed: %v", err)
+		}
+
+		classNode, ok := result.Graph.GetNode(cls.ID)
+		if !ok {
+			t.Fatal("PartialImpl node not found in graph")
+		}
+
+		for _, edge := range classNode.Outgoing {
+			if edge.Type == EdgeTypeImplements && edge.ToID == iface.ID {
+				t.Error("unexpected EdgeTypeImplements from PartialImpl to Serializable (missing deserialize)")
+			}
+		}
+	})
+}
+
+// Phase 18: Test that composed interfaces (embedding other interfaces) gain methods
+// transitively and that structs implementing all those methods get IMPLEMENTS edges
+// to the composed interface as well.
+func TestBuildGraph_GoComposedInterfaceResolution(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	// Interface Reader with method Read
+	readerIface := &ast.Symbol{
+		ID:        "iface.go:1:Reader",
+		Name:      "Reader",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "iface.go",
+		StartLine: 1, EndLine: 5, StartCol: 0, EndCol: 50,
+		Language: "go",
+		Metadata: &ast.SymbolMetadata{
+			Methods: []ast.MethodSignature{
+				{Name: "Read", ParamCount: 1, ReturnCount: 2},
+			},
+		},
+	}
+
+	// Interface Writer with method Write
+	writerIface := &ast.Symbol{
+		ID:        "iface.go:7:Writer",
+		Name:      "Writer",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "iface.go",
+		StartLine: 7, EndLine: 11, StartCol: 0, EndCol: 50,
+		Language: "go",
+		Metadata: &ast.SymbolMetadata{
+			Methods: []ast.MethodSignature{
+				{Name: "Write", ParamCount: 1, ReturnCount: 2},
+			},
+		},
+	}
+
+	// Composed interface ReadWriter: embeds Reader + Writer, no direct methods
+	readWriterIface := &ast.Symbol{
+		ID:        "iface.go:13:ReadWriter",
+		Name:      "ReadWriter",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "iface.go",
+		StartLine: 13, EndLine: 17, StartCol: 0, EndCol: 50,
+		Language: "go",
+		Metadata: &ast.SymbolMetadata{
+			Extends:    "Reader",
+			Implements: []string{"Writer"},
+		},
+	}
+
+	// Struct MyRW implements both Read and Write
+	myRW := &ast.Symbol{
+		ID:        "impl.go:1:MyRW",
+		Name:      "MyRW",
+		Kind:      ast.SymbolKindStruct,
+		FilePath:  "impl.go",
+		StartLine: 1, EndLine: 5, StartCol: 0, EndCol: 50,
+		Language: "go",
+		Metadata: &ast.SymbolMetadata{
+			Methods: []ast.MethodSignature{
+				{Name: "Read", ParamCount: 1, ReturnCount: 2, ReceiverType: "*MyRW"},
+				{Name: "Write", ParamCount: 1, ReturnCount: 2, ReceiverType: "*MyRW"},
+			},
+		},
+	}
+
+	parseResult1 := testParseResult("iface.go", []*ast.Symbol{readerIface, writerIface, readWriterIface}, nil)
+	parseResult2 := testParseResult("impl.go", []*ast.Symbol{myRW}, nil)
+
+	result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+	if err != nil {
+		t.Fatalf("build failed: %v", err)
+	}
+
+	myRWNode, ok := result.Graph.GetNode(myRW.ID)
+	if !ok {
+		t.Fatal("MyRW node not found")
+	}
+
+	implementsTargets := make(map[string]bool)
+	for _, edge := range myRWNode.Outgoing {
+		if edge.Type == EdgeTypeImplements {
+			implementsTargets[edge.ToID] = true
+		}
+	}
+
+	if !implementsTargets[readerIface.ID] {
+		t.Error("expected EdgeTypeImplements from MyRW to Reader")
+	}
+	if !implementsTargets[writerIface.ID] {
+		t.Error("expected EdgeTypeImplements from MyRW to Writer")
+	}
+	if !implementsTargets[readWriterIface.ID] {
+		t.Error("expected EdgeTypeImplements from MyRW to ReadWriter (composed interface)")
+	}
+}
+
+// Phase 18: Test deep composed interface resolution (3 levels, like Hugo's Page).
+func TestBuildGraph_GoDeepComposedInterface(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	// Level 1: TypeProvider with method ResourceType
+	typeProvider := &ast.Symbol{
+		ID:        "types.go:1:TypeProvider",
+		Name:      "TypeProvider",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "types.go",
+		StartLine: 1, EndLine: 5, StartCol: 0, EndCol: 50,
+		Language: "go",
+		Metadata: &ast.SymbolMetadata{
+			Methods: []ast.MethodSignature{
+				{Name: "ResourceType", ParamCount: 0, ReturnCount: 1},
+			},
+		},
+	}
+
+	// Level 2: ResourceWithoutMeta embeds TypeProvider, no direct methods
+	resourceWithoutMeta := &ast.Symbol{
+		ID:        "types.go:7:ResourceWithoutMeta",
+		Name:      "ResourceWithoutMeta",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "types.go",
+		StartLine: 7, EndLine: 11, StartCol: 0, EndCol: 50,
+		Language: "go",
+		Metadata: &ast.SymbolMetadata{
+			Extends: "TypeProvider",
+		},
+	}
+
+	// Level 3: Resource embeds ResourceWithoutMeta, no direct methods
+	resource := &ast.Symbol{
+		ID:        "types.go:13:Resource",
+		Name:      "Resource",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "types.go",
+		StartLine: 13, EndLine: 17, StartCol: 0, EndCol: 50,
+		Language: "go",
+		Metadata: &ast.SymbolMetadata{
+			Extends: "ResourceWithoutMeta",
+		},
+	}
+
+	// Struct GenericResource implements ResourceType
+	genericResource := &ast.Symbol{
+		ID:        "impl.go:1:GenericResource",
+		Name:      "GenericResource",
+		Kind:      ast.SymbolKindStruct,
+		FilePath:  "impl.go",
+		StartLine: 1, EndLine: 5, StartCol: 0, EndCol: 50,
+		Language: "go",
+		Metadata: &ast.SymbolMetadata{
+			Methods: []ast.MethodSignature{
+				{Name: "ResourceType", ParamCount: 0, ReturnCount: 1, ReceiverType: "*GenericResource"},
+			},
+		},
+	}
+
+	parseResult1 := testParseResult("types.go", []*ast.Symbol{typeProvider, resourceWithoutMeta, resource}, nil)
+	parseResult2 := testParseResult("impl.go", []*ast.Symbol{genericResource}, nil)
+
+	result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+	if err != nil {
+		t.Fatalf("build failed: %v", err)
+	}
+
+	grNode, ok := result.Graph.GetNode(genericResource.ID)
+	if !ok {
+		t.Fatal("GenericResource node not found")
+	}
+
+	implementsTargets := make(map[string]bool)
+	for _, edge := range grNode.Outgoing {
+		if edge.Type == EdgeTypeImplements {
+			implementsTargets[edge.ToID] = true
+		}
+	}
+
+	if !implementsTargets[typeProvider.ID] {
+		t.Error("expected EdgeTypeImplements from GenericResource to TypeProvider")
+	}
+	if !implementsTargets[resourceWithoutMeta.ID] {
+		t.Error("expected EdgeTypeImplements from GenericResource to ResourceWithoutMeta")
+	}
+	if !implementsTargets[resource.ID] {
+		t.Error("expected EdgeTypeImplements from GenericResource to Resource (3-level deep)")
+	}
+}
+
+// Phase 18: Test that an interface embedding a non-existent interface remains empty
+// and does NOT match any struct (avoids false-positive "implements everything").
+func TestBuildGraph_GoComposedInterface_EmptyAfterResolution(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	// Interface that embeds a non-existent interface (placeholder target)
+	emptyComposer := &ast.Symbol{
+		ID:        "iface.go:1:EmptyComposer",
+		Name:      "EmptyComposer",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "iface.go",
+		StartLine: 1, EndLine: 5, StartCol: 0, EndCol: 50,
+		Language: "go",
+		Metadata: &ast.SymbolMetadata{
+			Extends: "NonExistent",
+		},
+	}
+
+	// Struct with a method — should NOT implement EmptyComposer
+	anything := &ast.Symbol{
+		ID:        "impl.go:1:Anything",
+		Name:      "Anything",
+		Kind:      ast.SymbolKindStruct,
+		FilePath:  "impl.go",
+		StartLine: 1, EndLine: 5, StartCol: 0, EndCol: 50,
+		Language: "go",
+		Metadata: &ast.SymbolMetadata{
+			Methods: []ast.MethodSignature{
+				{Name: "Foo", ParamCount: 0, ReturnCount: 0, ReceiverType: "*Anything"},
+			},
+		},
+	}
+
+	parseResult1 := testParseResult("iface.go", []*ast.Symbol{emptyComposer}, nil)
+	parseResult2 := testParseResult("impl.go", []*ast.Symbol{anything}, nil)
+
+	result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+	if err != nil {
+		t.Fatalf("build failed: %v", err)
+	}
+
+	anythingNode, ok := result.Graph.GetNode(anything.ID)
+	if !ok {
+		t.Fatal("Anything node not found")
+	}
+
+	for _, edge := range anythingNode.Outgoing {
+		if edge.Type == EdgeTypeImplements && edge.ToID == emptyComposer.ID {
+			t.Error("unexpected EdgeTypeImplements from Anything to EmptyComposer (should remain empty)")
+		}
+	}
+}
+
+// Phase 18: Test that TypeScript composed interfaces (extending other interfaces)
+// gain methods transitively and that classes implementing all methods match.
+func TestBuildGraph_TSComposedInterfaceResolution(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	// interface Readable { read(): string }
+	readable := &ast.Symbol{
+		ID:        "io.ts:1:Readable",
+		Name:      "Readable",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "io.ts",
+		StartLine: 1, EndLine: 5, StartCol: 0, EndCol: 50,
+		Language: "typescript",
+		Metadata: &ast.SymbolMetadata{
+			Methods: []ast.MethodSignature{
+				{Name: "read", ParamCount: 0, ReturnCount: 1},
+			},
+		},
+	}
+
+	// interface Writable { write(data: string): void }
+	writable := &ast.Symbol{
+		ID:        "io.ts:7:Writable",
+		Name:      "Writable",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "io.ts",
+		StartLine: 7, EndLine: 11, StartCol: 0, EndCol: 50,
+		Language: "typescript",
+		Metadata: &ast.SymbolMetadata{
+			Methods: []ast.MethodSignature{
+				{Name: "write", ParamCount: 1, ReturnCount: 0},
+			},
+		},
+	}
+
+	// interface ReadWriteStream extends Readable, Writable {} — no own methods
+	readWriteStream := &ast.Symbol{
+		ID:        "io.ts:13:ReadWriteStream",
+		Name:      "ReadWriteStream",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "io.ts",
+		StartLine: 13, EndLine: 15, StartCol: 0, EndCol: 50,
+		Language: "typescript",
+		Metadata: &ast.SymbolMetadata{
+			Extends:    "Readable",
+			Implements: []string{"Writable"},
+		},
+	}
+
+	// class FileStream implements read + write
+	fileStream := &ast.Symbol{
+		ID:        "stream.ts:1:FileStream",
+		Name:      "FileStream",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "stream.ts",
+		StartLine: 1, EndLine: 10, StartCol: 0, EndCol: 50,
+		Language: "typescript",
+		Metadata: &ast.SymbolMetadata{
+			Methods: []ast.MethodSignature{
+				{Name: "read", ParamCount: 0, ReturnCount: 1},
+				{Name: "write", ParamCount: 1, ReturnCount: 0},
+			},
+		},
+	}
+
+	parseResult1 := &ast.ParseResult{
+		FilePath: "io.ts",
+		Language: "typescript",
+		Symbols:  []*ast.Symbol{readable, writable, readWriteStream},
+		Package:  "io",
+	}
+	parseResult2 := &ast.ParseResult{
+		FilePath: "stream.ts",
+		Language: "typescript",
+		Symbols:  []*ast.Symbol{fileStream},
+		Package:  "stream",
+	}
+
+	result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+	if err != nil {
+		t.Fatalf("build failed: %v", err)
+	}
+
+	fsNode, ok := result.Graph.GetNode(fileStream.ID)
+	if !ok {
+		t.Fatal("FileStream node not found")
+	}
+
+	implementsTargets := make(map[string]bool)
+	for _, edge := range fsNode.Outgoing {
+		if edge.Type == EdgeTypeImplements {
+			implementsTargets[edge.ToID] = true
+		}
+	}
+
+	if !implementsTargets[readable.ID] {
+		t.Error("expected EdgeTypeImplements from FileStream to Readable")
+	}
+	if !implementsTargets[writable.ID] {
+		t.Error("expected EdgeTypeImplements from FileStream to Writable")
+	}
+	if !implementsTargets[readWriteStream.ID] {
+		t.Error("expected EdgeTypeImplements from FileStream to ReadWriteStream (composed interface)")
+	}
+}
+
+// Phase 18: Test that Python composed Protocols (inheriting from other Protocols)
+// gain methods transitively and that classes implementing all methods match.
+func TestBuildGraph_PythonComposedProtocolResolution(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	// class Readable(Protocol): def read(self) -> str: ...
+	readable := &ast.Symbol{
+		ID:        "protocols.py:1:Readable",
+		Name:      "Readable",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "protocols.py",
+		StartLine: 1, EndLine: 5, StartCol: 0, EndCol: 50,
+		Language: "python",
+		Metadata: &ast.SymbolMetadata{
+			Extends: "Protocol",
+			Methods: []ast.MethodSignature{
+				{Name: "read", ParamCount: 1, ReturnCount: 1},
+			},
+		},
+	}
+
+	// class Writable(Protocol): def write(self, data: str) -> None: ...
+	writable := &ast.Symbol{
+		ID:        "protocols.py:7:Writable",
+		Name:      "Writable",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "protocols.py",
+		StartLine: 7, EndLine: 11, StartCol: 0, EndCol: 50,
+		Language: "python",
+		Metadata: &ast.SymbolMetadata{
+			Extends: "Protocol",
+			Methods: []ast.MethodSignature{
+				{Name: "write", ParamCount: 2, ReturnCount: 0},
+			},
+		},
+	}
+
+	// class ReadWrite(Readable, Writable, Protocol): pass — no own methods
+	readWrite := &ast.Symbol{
+		ID:        "protocols.py:13:ReadWrite",
+		Name:      "ReadWrite",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "protocols.py",
+		StartLine: 13, EndLine: 14, StartCol: 0, EndCol: 50,
+		Language: "python",
+		Metadata: &ast.SymbolMetadata{
+			Extends:    "Readable",
+			Implements: []string{"Writable", "Protocol"},
+		},
+	}
+
+	// class FileHandler: implements read + write
+	fileHandler := &ast.Symbol{
+		ID:        "handlers.py:1:FileHandler",
+		Name:      "FileHandler",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "handlers.py",
+		StartLine: 1, EndLine: 10, StartCol: 0, EndCol: 50,
+		Language: "python",
+		Metadata: &ast.SymbolMetadata{
+			Methods: []ast.MethodSignature{
+				{Name: "read", ParamCount: 1, ReturnCount: 1},
+				{Name: "write", ParamCount: 2, ReturnCount: 0},
+			},
+		},
+	}
+
+	parseResult1 := &ast.ParseResult{
+		FilePath: "protocols.py",
+		Language: "python",
+		Symbols:  []*ast.Symbol{readable, writable, readWrite},
+		Package:  "protocols",
+	}
+	parseResult2 := &ast.ParseResult{
+		FilePath: "handlers.py",
+		Language: "python",
+		Symbols:  []*ast.Symbol{fileHandler},
+		Package:  "handlers",
+	}
+
+	result, err := builder.Build(ctx, []*ast.ParseResult{parseResult1, parseResult2})
+	if err != nil {
+		t.Fatalf("build failed: %v", err)
+	}
+
+	fhNode, ok := result.Graph.GetNode(fileHandler.ID)
+	if !ok {
+		t.Fatal("FileHandler node not found")
+	}
+
+	implementsTargets := make(map[string]bool)
+	for _, edge := range fhNode.Outgoing {
+		if edge.Type == EdgeTypeImplements {
+			implementsTargets[edge.ToID] = true
+		}
+	}
+
+	if !implementsTargets[readable.ID] {
+		t.Error("expected EdgeTypeImplements from FileHandler to Readable")
+	}
+	if !implementsTargets[writable.ID] {
+		t.Error("expected EdgeTypeImplements from FileHandler to Writable")
+	}
+	if !implementsTargets[readWrite.ID] {
+		t.Error("expected EdgeTypeImplements from FileHandler to ReadWrite (composed Protocol)")
+	}
+}
+
+// TestInferPackageFromCall tests IT-05a import-map-based package inference
+// across all 4 supported languages.
+func TestInferPackageFromCall(t *testing.T) {
+	tests := []struct {
+		name     string
+		call     ast.CallSite
+		imports  []ast.Import
+		expected string
+	}{
+		// Strategy 1: Alias match
+		{
+			name: "Python alias pd→pandas",
+			call: ast.CallSite{Target: "pd.read_csv"},
+			imports: []ast.Import{
+				{Path: "pandas", Alias: "pd"},
+			},
+			expected: "pandas",
+		},
+		{
+			name: "Python alias np→numpy",
+			call: ast.CallSite{Target: "np.array"},
+			imports: []ast.Import{
+				{Path: "numpy", Alias: "np"},
+			},
+			expected: "numpy",
+		},
+
+		// Strategy 2: Path last segment match
+		{
+			name: "Go os.MkdirAll",
+			call: ast.CallSite{Target: "os.MkdirAll"},
+			imports: []ast.Import{
+				{Path: "os"},
+			},
+			expected: "os",
+		},
+		{
+			name: "Go net/http.ListenAndServe",
+			call: ast.CallSite{Target: "http.ListenAndServe"},
+			imports: []ast.Import{
+				{Path: "net/http"},
+			},
+			expected: "net/http",
+		},
+		{
+			name: "Go fmt.Println",
+			call: ast.CallSite{Target: "fmt.Println"},
+			imports: []ast.Import{
+				{Path: "fmt"},
+				{Path: "os"},
+			},
+			expected: "fmt",
+		},
+		{
+			name: "Python dotted import os.path",
+			call: ast.CallSite{Target: "os.path.join"},
+			imports: []ast.Import{
+				{Path: "os.path"},
+			},
+			expected: "os.path",
+		},
+
+		// Strategy 3: Bare name in import Names (destructured imports)
+		{
+			name: "JS destructured Router from express",
+			call: ast.CallSite{Target: "Router"},
+			imports: []ast.Import{
+				{Path: "express", Names: []string{"Router"}},
+			},
+			expected: "express",
+		},
+		{
+			name: "Python from flask import Flask",
+			call: ast.CallSite{Target: "Flask"},
+			imports: []ast.Import{
+				{Path: "flask", Names: []string{"Flask", "Blueprint"}},
+			},
+			expected: "flask",
+		},
+		{
+			name: "TS aliased import merge as pd_merge",
+			call: ast.CallSite{Target: "pd_merge"},
+			imports: []ast.Import{
+				{Path: "lodash", Names: []string{"merge as pd_merge"}},
+			},
+			expected: "lodash",
+		},
+
+		// No match cases
+		{
+			name:     "no imports returns empty",
+			call:     ast.CallSite{Target: "foo.Bar"},
+			imports:  []ast.Import{},
+			expected: "",
+		},
+		{
+			name: "no matching import returns empty",
+			call: ast.CallSite{Target: "unknown.Function"},
+			imports: []ast.Import{
+				{Path: "os"},
+				{Path: "fmt"},
+			},
+			expected: "",
+		},
+		{
+			name: "bare name not in any Names list returns empty",
+			call: ast.CallSite{Target: "SomeFunc"},
+			imports: []ast.Import{
+				{Path: "express", Names: []string{"Router", "Request"}},
+			},
+			expected: "",
+		},
+
+		// === Additional Strategy 1 tests (alias) ===
+		{
+			name: "Go aliased import mux→gorilla/mux",
+			call: ast.CallSite{Target: "mux.NewRouter"},
+			imports: []ast.Import{
+				{Path: "github.com/gorilla/mux", Alias: "mux"},
+			},
+			expected: "github.com/gorilla/mux",
+		},
+		{
+			name: "Python alias tf→tensorflow",
+			call: ast.CallSite{Target: "tf.constant"},
+			imports: []ast.Import{
+				{Path: "tensorflow", Alias: "tf"},
+			},
+			expected: "tensorflow",
+		},
+		{
+			name: "alias match before path segment scan",
+			call: ast.CallSite{Target: "j.Marshal"},
+			imports: []ast.Import{
+				{Path: "encoding/json"},              // Strategy 2: last seg "json" != "j"
+				{Path: "custom/json/v2", Alias: "j"}, // Strategy 1: alias "j" matches
+			},
+			expected: "custom/json/v2",
+		},
+
+		// === Additional Strategy 2 tests (path segment) ===
+		{
+			name: "Go context package",
+			call: ast.CallSite{Target: "context.Background"},
+			imports: []ast.Import{
+				{Path: "context"},
+			},
+			expected: "context",
+		},
+		{
+			name: "Go deep path github.com/pkg/errors",
+			call: ast.CallSite{Target: "errors.Wrap"},
+			imports: []ast.Import{
+				{Path: "github.com/pkg/errors"},
+			},
+			expected: "github.com/pkg/errors",
+		},
+		{
+			name: "Python werkzeug.serving",
+			call: ast.CallSite{Target: "werkzeug.run_simple"},
+			imports: []ast.Import{
+				{Path: "werkzeug.serving"},
+			},
+			expected: "werkzeug.serving",
+		},
+		{
+			name: "first matching import wins",
+			call: ast.CallSite{Target: "log.Println"},
+			imports: []ast.Import{
+				{Path: "log"},
+				{Path: "custom/log"},
+			},
+			expected: "log",
+		},
+
+		// === Additional Strategy 3 tests (named imports) ===
+		{
+			name: "Python from collections import OrderedDict",
+			call: ast.CallSite{Target: "OrderedDict"},
+			imports: []ast.Import{
+				{Path: "collections", Names: []string{"OrderedDict", "defaultdict"}},
+			},
+			expected: "collections",
+		},
+		{
+			name: "TS named import from react",
+			call: ast.CallSite{Target: "useState"},
+			imports: []ast.Import{
+				{Path: "react", Names: []string{"useState", "useEffect"}},
+			},
+			expected: "react",
+		},
+		{
+			name: "multiple imports first Names match wins",
+			call: ast.CallSite{Target: "merge"},
+			imports: []ast.Import{
+				{Path: "lodash", Names: []string{"merge", "cloneDeep"}},
+				{Path: "rxjs", Names: []string{"merge", "concat"}},
+			},
+			expected: "lodash",
+		},
+		{
+			name: "aliased destructured import Component as Comp",
+			call: ast.CallSite{Target: "Comp"},
+			imports: []ast.Import{
+				{Path: "react", Names: []string{"Component as Comp"}},
+			},
+			expected: "react",
+		},
+
+		// === Edge cases ===
+		{
+			name: "empty target returns empty",
+			call: ast.CallSite{Target: ""},
+			imports: []ast.Import{
+				{Path: "os"},
+			},
+			expected: "",
+		},
+		{
+			name:     "nil imports returns empty",
+			call:     ast.CallSite{Target: "os.Exit"},
+			imports:  nil,
+			expected: "",
+		},
+		{
+			name: "dot-only target",
+			call: ast.CallSite{Target: ".something"},
+			imports: []ast.Import{
+				{Path: "os"},
+			},
+			expected: "",
+		},
+		{
+			name: "target with slash not a dot prefix",
+			call: ast.CallSite{Target: "path/to/func"},
+			imports: []ast.Import{
+				{Path: "path"},
+			},
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := inferPackageFromCall(tt.call, tt.imports)
+			if got != tt.expected {
+				t.Errorf("inferPackageFromCall(%q, imports) = %q, want %q",
+					tt.call.Target, got, tt.expected)
+			}
+		})
+	}
+}
+
+// =============================================================================
+// GR-62a Phase 1: Multi-Parent Inheritance Chain Tests
+// =============================================================================
+
+// TestBuilder_BuildInheritanceChain_MultiParent verifies that buildInheritanceChain
+// returns all parents from both classExtends (primary parent) and classAdditionalParents
+// (secondary parents via Python's Metadata.Implements).
+func TestBuilder_BuildInheritanceChain_MultiParent(t *testing.T) {
+	// Setup: class C(A, B) — A is primary (Extends), B is secondary (Implements)
+	// A and B are independent base classes.
+	builder := NewBuilder(WithProjectRoot("/test"))
+
+	classA := &ast.Symbol{
+		ID:       ast.GenerateID("models.py", 1, "A"),
+		Name:     "A",
+		Kind:     ast.SymbolKindClass,
+		FilePath: "models.py",
+		Language: "python",
+		Children: []*ast.Symbol{
+			{
+				ID:        ast.GenerateID("models.py", 2, "method_a"),
+				Name:      "method_a",
+				Kind:      ast.SymbolKindMethod,
+				FilePath:  "models.py",
+				Language:  "python",
+				StartLine: 2, EndLine: 5,
+			},
+		},
+		StartLine: 1, EndLine: 10,
+	}
+
+	classB := &ast.Symbol{
+		ID:       ast.GenerateID("mixins.py", 1, "B"),
+		Name:     "B",
+		Kind:     ast.SymbolKindClass,
+		FilePath: "mixins.py",
+		Language: "python",
+		Children: []*ast.Symbol{
+			{
+				ID:        ast.GenerateID("mixins.py", 2, "mixin_method"),
+				Name:      "mixin_method",
+				Kind:      ast.SymbolKindMethod,
+				FilePath:  "mixins.py",
+				Language:  "python",
+				StartLine: 2, EndLine: 5,
+			},
+		},
+		StartLine: 1, EndLine: 10,
+	}
+
+	classC := &ast.Symbol{
+		ID:       ast.GenerateID("child.py", 1, "C"),
+		Name:     "C",
+		Kind:     ast.SymbolKindClass,
+		FilePath: "child.py",
+		Language: "python",
+		Metadata: &ast.SymbolMetadata{
+			Extends:    "A",
+			Implements: []string{"B"},
+		},
+		Children:  []*ast.Symbol{},
+		StartLine: 1, EndLine: 10,
+	}
+
+	results := []*ast.ParseResult{
+		{FilePath: "models.py", Language: "python", Symbols: []*ast.Symbol{classA}, Package: "models"},
+		{FilePath: "mixins.py", Language: "python", Symbols: []*ast.Symbol{classB}, Package: "mixins"},
+		{FilePath: "child.py", Language: "python", Symbols: []*ast.Symbol{classC}, Package: "child"},
+	}
+
+	buildResult, err := builder.Build(context.Background(), results)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+	_ = buildResult
+
+	// Now test the internal buildInheritanceChain via a full build:
+	// Build a state manually to unit-test the chain function directly.
+	state := &buildState{
+		graph:                  NewGraph("/test"),
+		result:                 &BuildResult{FileErrors: make([]FileError, 0), EdgeErrors: make([]EdgeError, 0)},
+		symbolsByID:            make(map[string]*ast.Symbol),
+		symbolsByName:          make(map[string][]*ast.Symbol),
+		fileImports:            make(map[string][]ast.Import),
+		placeholders:           make(map[string]*Node),
+		symbolParent:           make(map[string]string),
+		classExtends:           map[string]string{"C": "A"},
+		classAdditionalParents: map[string][]string{"C": {"B"}},
+		importNameMap:          make(map[string]map[string]importEntry),
+	}
+
+	chain := builder.buildInheritanceChain(state, "C")
+
+	// Chain must include C, A, and B
+	chainSet := make(map[string]bool)
+	for _, name := range chain {
+		chainSet[name] = true
+	}
+
+	if !chainSet["C"] {
+		t.Error("chain missing 'C' (the class itself)")
+	}
+	if !chainSet["A"] {
+		t.Error("chain missing 'A' (primary parent from Extends)")
+	}
+	if !chainSet["B"] {
+		t.Error("chain missing 'B' (secondary parent from Implements)")
+	}
+	if len(chain) != 3 {
+		t.Errorf("expected chain length 3, got %d: %v", len(chain), chain)
+	}
+}
+
+// TestBuilder_BuildInheritanceChain_Diamond verifies that diamond inheritance
+// does not produce duplicates. C(A, B), A(D), B(D) — D appears once.
+func TestBuilder_BuildInheritanceChain_Diamond(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+
+	state := &buildState{
+		graph:  NewGraph("/test"),
+		result: &BuildResult{FileErrors: make([]FileError, 0), EdgeErrors: make([]EdgeError, 0)},
+		classExtends: map[string]string{
+			"C": "A",
+			"A": "D",
+			"B": "D",
+		},
+		classAdditionalParents: map[string][]string{
+			"C": {"B"},
+		},
+		symbolsByID:   make(map[string]*ast.Symbol),
+		symbolsByName: make(map[string][]*ast.Symbol),
+		fileImports:   make(map[string][]ast.Import),
+		placeholders:  make(map[string]*Node),
+		symbolParent:  make(map[string]string),
+		importNameMap: make(map[string]map[string]importEntry),
+	}
+
+	chain := builder.buildInheritanceChain(state, "C")
+
+	// Count occurrences of D
+	dCount := 0
+	for _, name := range chain {
+		if name == "D" {
+			dCount++
+		}
+	}
+	if dCount != 1 {
+		t.Errorf("expected D to appear exactly once in chain, got %d times: %v", dCount, chain)
+	}
+
+	// All four classes should be in the chain
+	chainSet := make(map[string]bool)
+	for _, name := range chain {
+		chainSet[name] = true
+	}
+	for _, expected := range []string{"C", "A", "B", "D"} {
+		if !chainSet[expected] {
+			t.Errorf("chain missing %q: %v", expected, chain)
+		}
+	}
+	if len(chain) != 4 {
+		t.Errorf("expected chain length 4, got %d: %v", len(chain), chain)
+	}
+}
+
+// TestBuilder_ResolveCallTarget_SelfCallMultiParent verifies that self.mixin_method()
+// resolves across a non-primary parent via the multi-parent inheritance chain.
+func TestBuilder_ResolveCallTarget_SelfCallMultiParent(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+
+	// class B with mixin_method
+	mixinMethod := &ast.Symbol{
+		ID:        ast.GenerateID("mixins.py", 2, "mixin_method"),
+		Name:      "mixin_method",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "mixins.py",
+		Language:  "python",
+		StartLine: 2, EndLine: 5,
+	}
+	classB := &ast.Symbol{
+		ID:        ast.GenerateID("mixins.py", 1, "B"),
+		Name:      "B",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "mixins.py",
+		Language:  "python",
+		Children:  []*ast.Symbol{mixinMethod},
+		StartLine: 1, EndLine: 10,
+	}
+
+	// class C(A, B) with a method that calls self.mixin_method()
+	childMethod := &ast.Symbol{
+		ID:       ast.GenerateID("child.py", 5, "do_work"),
+		Name:     "do_work",
+		Kind:     ast.SymbolKindMethod,
+		FilePath: "child.py",
+		Language: "python",
+		Calls: []ast.CallSite{
+			{
+				Target:   "mixin_method",
+				Receiver: "self",
+				IsMethod: true,
+				Location: ast.Location{FilePath: "child.py", StartLine: 6, EndLine: 6},
+			},
+		},
+		StartLine: 5, EndLine: 10,
+	}
+	classC := &ast.Symbol{
+		ID:       ast.GenerateID("child.py", 1, "C"),
+		Name:     "C",
+		Kind:     ast.SymbolKindClass,
+		FilePath: "child.py",
+		Language: "python",
+		Metadata: &ast.SymbolMetadata{
+			Extends:    "A",
+			Implements: []string{"B"},
+		},
+		Children:  []*ast.Symbol{childMethod},
+		StartLine: 1, EndLine: 20,
+	}
+
+	// class A (simple base, no relevant methods)
+	classA := &ast.Symbol{
+		ID:        ast.GenerateID("models.py", 1, "A"),
+		Name:      "A",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "models.py",
+		Language:  "python",
+		Children:  []*ast.Symbol{},
+		StartLine: 1, EndLine: 10,
+	}
+
+	results := []*ast.ParseResult{
+		{FilePath: "models.py", Language: "python", Symbols: []*ast.Symbol{classA}, Package: "models"},
+		{FilePath: "mixins.py", Language: "python", Symbols: []*ast.Symbol{classB}, Package: "mixins"},
+		{FilePath: "child.py", Language: "python", Symbols: []*ast.Symbol{classC}, Package: "child"},
+	}
+
+	buildResult, err := builder.Build(context.Background(), results)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Verify: do_work should have a CALLS edge to mixin_method
+	doWorkID := childMethod.ID
+	mixinMethodID := mixinMethod.ID
+
+	doWorkNode, ok := buildResult.Graph.GetNode(doWorkID)
+	if !ok || doWorkNode == nil {
+		t.Fatalf("do_work node not found in graph")
+	}
+
+	found := false
+	for _, edge := range doWorkNode.Outgoing {
+		if edge.ToID == mixinMethodID && edge.Type == EdgeTypeCalls {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected CALLS edge from do_work to mixin_method (via multi-parent chain)")
+		t.Logf("do_work ID: %s", doWorkID)
+		t.Logf("mixin_method ID: %s", mixinMethodID)
+		for _, edge := range doWorkNode.Outgoing {
+			t.Logf("  edge: type=%s target=%s", edge.Type, edge.ToID)
+		}
+	}
+}
+
+// =============================================================================
+// GR-62a Phase 2: JS this.method() Resolution Tests
+// =============================================================================
+
+// TestBuilder_ResolveThisSelfCall_JSPrototypeMethod verifies that a JS prototype method
+// calling this.otherMethod() resolves correctly even when the prototype method was added
+// as both a top-level symbol AND a child (causing a duplicate in AddNode).
+func TestBuilder_ResolveThisSelfCall_JSPrototypeMethod(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+
+	// Simulate JS prototype method pattern:
+	// Router.prototype.handle = function() { this.route(); }
+	// The parser adds "handle" and "route" both as top-level AND as children of "Router".
+
+	routeMethod := &ast.Symbol{
+		ID:        ast.GenerateID("router.js", 10, "route"),
+		Name:      "route",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "router.js",
+		Language:  "javascript",
+		Receiver:  "Router",
+		StartLine: 10, EndLine: 15,
+	}
+
+	handleMethod := &ast.Symbol{
+		ID:       ast.GenerateID("router.js", 5, "handle"),
+		Name:     "handle",
+		Kind:     ast.SymbolKindMethod,
+		FilePath: "router.js",
+		Language: "javascript",
+		Receiver: "Router",
+		Calls: []ast.CallSite{
+			{
+				Target:   "route",
+				Receiver: "this",
+				IsMethod: true,
+				Location: ast.Location{FilePath: "router.js", StartLine: 7, EndLine: 7},
+			},
+		},
+		StartLine: 5, EndLine: 9,
+	}
+
+	routerClass := &ast.Symbol{
+		ID:       ast.GenerateID("router.js", 1, "Router"),
+		Name:     "Router",
+		Kind:     ast.SymbolKindClass,
+		FilePath: "router.js",
+		Language: "javascript",
+		// Children include the same methods (duplicating top-level)
+		Children:  []*ast.Symbol{handleMethod, routeMethod},
+		StartLine: 1, EndLine: 20,
+	}
+
+	results := []*ast.ParseResult{
+		{
+			FilePath: "router.js",
+			Language: "javascript",
+			// Top-level: handle, route are also added here (simulating JS parser behavior)
+			Symbols: []*ast.Symbol{routerClass, handleMethod, routeMethod},
+			Package: "router",
+		},
+	}
+
+	buildResult, err := builder.Build(context.Background(), results)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Verify: handle should have a CALLS edge to route
+	handleNode, ok := buildResult.Graph.GetNode(handleMethod.ID)
+	if !ok || handleNode == nil {
+		t.Fatalf("handle node not found in graph")
+	}
+
+	found := false
+	for _, edge := range handleNode.Outgoing {
+		if edge.ToID == routeMethod.ID && edge.Type == EdgeTypeCalls {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected CALLS edge from handle to route (this.route() in JS prototype method)")
+		for _, edge := range handleNode.Outgoing {
+			t.Logf("  edge: type=%s target=%s", edge.Type, edge.ToID)
+		}
+	}
+}
+
+// TestBuilder_ResolveThisSelfCall_JSClassMethod verifies that ES6 class method
+// calling this.otherMethod() resolves correctly.
+func TestBuilder_ResolveThisSelfCall_JSClassMethod(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+
+	greetMethod := &ast.Symbol{
+		ID:        ast.GenerateID("app.js", 10, "greet"),
+		Name:      "greet",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "app.js",
+		Language:  "javascript",
+		StartLine: 10, EndLine: 15,
+	}
+
+	initMethod := &ast.Symbol{
+		ID:       ast.GenerateID("app.js", 5, "init"),
+		Name:     "init",
+		Kind:     ast.SymbolKindMethod,
+		FilePath: "app.js",
+		Language: "javascript",
+		Calls: []ast.CallSite{
+			{
+				Target:   "greet",
+				Receiver: "this",
+				IsMethod: true,
+				Location: ast.Location{FilePath: "app.js", StartLine: 7, EndLine: 7},
+			},
+		},
+		StartLine: 5, EndLine: 9,
+	}
+
+	appClass := &ast.Symbol{
+		ID:        ast.GenerateID("app.js", 1, "App"),
+		Name:      "App",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "app.js",
+		Language:  "javascript",
+		Children:  []*ast.Symbol{initMethod, greetMethod},
+		StartLine: 1, EndLine: 20,
+	}
+
+	results := []*ast.ParseResult{
+		{
+			FilePath: "app.js",
+			Language: "javascript",
+			Symbols:  []*ast.Symbol{appClass},
+			Package:  "app",
+		},
+	}
+
+	buildResult, err := builder.Build(context.Background(), results)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Verify: init should have a CALLS edge to greet
+	initNode, ok := buildResult.Graph.GetNode(initMethod.ID)
+	if !ok || initNode == nil {
+		t.Fatalf("init node not found in graph")
+	}
+
+	found := false
+	for _, edge := range initNode.Outgoing {
+		if edge.ToID == greetMethod.ID && edge.Type == EdgeTypeCalls {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected CALLS edge from init to greet (this.greet() in ES6 class method)")
+		for _, edge := range initNode.Outgoing {
+			t.Logf("  edge: type=%s target=%s", edge.Type, edge.ToID)
+		}
+	}
+}
+
+// =============================================================================
+// GR-62a Phase 3: super().method() Resolution Tests
+// =============================================================================
+
+// TestBuilder_ResolveSuperCall verifies that super().method() calls resolve
+// to the parent class method, skipping the caller's own class.
+func TestBuilder_ResolveSuperCall(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+
+	// Parent.save()
+	parentSave := &ast.Symbol{
+		ID:        ast.GenerateID("parent.py", 5, "save"),
+		Name:      "save",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "parent.py",
+		Language:  "python",
+		StartLine: 5, EndLine: 10,
+	}
+	parentClass := &ast.Symbol{
+		ID:        ast.GenerateID("parent.py", 1, "Parent"),
+		Name:      "Parent",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "parent.py",
+		Language:  "python",
+		Children:  []*ast.Symbol{parentSave},
+		StartLine: 1, EndLine: 20,
+	}
+
+	// Child.save() calls super().save() — parser normalizes to Receiver="super"
+	childSave := &ast.Symbol{
+		ID:       ast.GenerateID("child.py", 5, "save"),
+		Name:     "save",
+		Kind:     ast.SymbolKindMethod,
+		FilePath: "child.py",
+		Language: "python",
+		Calls: []ast.CallSite{
+			{
+				Target:   "save",
+				Receiver: "super",
+				IsMethod: true,
+				Location: ast.Location{FilePath: "child.py", StartLine: 7, EndLine: 7},
+			},
+		},
+		StartLine: 5, EndLine: 10,
+	}
+	childClass := &ast.Symbol{
+		ID:       ast.GenerateID("child.py", 1, "Child"),
+		Name:     "Child",
+		Kind:     ast.SymbolKindClass,
+		FilePath: "child.py",
+		Language: "python",
+		Metadata: &ast.SymbolMetadata{
+			Extends: "Parent",
+		},
+		Children:  []*ast.Symbol{childSave},
+		StartLine: 1, EndLine: 20,
+	}
+
+	results := []*ast.ParseResult{
+		{FilePath: "parent.py", Language: "python", Symbols: []*ast.Symbol{parentClass}, Package: "parent"},
+		{FilePath: "child.py", Language: "python", Symbols: []*ast.Symbol{childClass}, Package: "child"},
+	}
+
+	buildResult, err := builder.Build(context.Background(), results)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	// Verify: Child.save should call Parent.save (not itself)
+	childSaveNode, ok := buildResult.Graph.GetNode(childSave.ID)
+	if !ok || childSaveNode == nil {
+		t.Fatalf("Child.save node not found in graph (ID=%s)", childSave.ID)
+	}
+
+	found := false
+	for _, edge := range childSaveNode.Outgoing {
+		if edge.ToID == parentSave.ID && edge.Type == EdgeTypeCalls {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected CALLS edge from Child.save to Parent.save (super().save() resolution)")
+		for _, edge := range childSaveNode.Outgoing {
+			t.Logf("  edge: type=%s toID=%s", edge.Type, edge.ToID)
+		}
+	}
+
+	// Also verify it did NOT resolve to itself
+	for _, edge := range childSaveNode.Outgoing {
+		if edge.ToID == childSave.ID && edge.Type == EdgeTypeCalls {
+			t.Error("super().save() should NOT resolve to the caller's own class method")
+		}
+	}
+}
+
+// =============================================================================
+// GR-62a Phase 4: Variable Alias Fallback Tests
+// =============================================================================
+
+// TestBuilder_ResolveCallTarget_VariableMethodFallback verifies that when the only
+// candidate for a method call is a Variable symbol, it resolves as a fallback.
+func TestBuilder_ResolveCallTarget_VariableMethodFallback(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+
+	// handler = _MergeOperation (a variable that holds a callable)
+	handlerVar := &ast.Symbol{
+		ID:        ast.GenerateID("merge.py", 10, "handler"),
+		Name:      "handler",
+		Kind:      ast.SymbolKindVariable,
+		FilePath:  "merge.py",
+		Language:  "python",
+		StartLine: 10, EndLine: 10,
+	}
+
+	// Function that calls self.handler()
+	processMethod := &ast.Symbol{
+		ID:       ast.GenerateID("merge.py", 20, "process"),
+		Name:     "process",
+		Kind:     ast.SymbolKindMethod,
+		FilePath: "merge.py",
+		Language: "python",
+		Calls: []ast.CallSite{
+			{
+				Target:   "handler",
+				Receiver: "obj",
+				IsMethod: true,
+				Location: ast.Location{FilePath: "merge.py", StartLine: 22, EndLine: 22},
+			},
+		},
+		StartLine: 20, EndLine: 25,
+	}
+
+	results := []*ast.ParseResult{
+		{
+			FilePath: "merge.py",
+			Language: "python",
+			Symbols:  []*ast.Symbol{handlerVar, processMethod},
+			Package:  "merge",
+		},
+	}
+
+	buildResult, err := builder.Build(context.Background(), results)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	processNode, ok := buildResult.Graph.GetNode(processMethod.ID)
+	if !ok || processNode == nil {
+		t.Fatalf("process node not found in graph")
+	}
+
+	found := false
+	for _, edge := range processNode.Outgoing {
+		if edge.ToID == handlerVar.ID && edge.Type == EdgeTypeCalls {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected CALLS edge from process to handler (Variable fallback)")
+		for _, edge := range processNode.Outgoing {
+			t.Logf("  edge: type=%s target=%s", edge.Type, edge.ToID)
+		}
+	}
+}
+
+// TestBuilder_ResolveCallTarget_MethodPreferredOverVariable verifies that when
+// both a Method and a Variable candidate exist, Method wins.
+func TestBuilder_ResolveCallTarget_MethodPreferredOverVariable(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+
+	handlerMethod := &ast.Symbol{
+		ID:        ast.GenerateID("service.py", 5, "handler"),
+		Name:      "handler",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "service.py",
+		Language:  "python",
+		StartLine: 5, EndLine: 10,
+	}
+
+	handlerVar := &ast.Symbol{
+		ID:        ast.GenerateID("service.py", 15, "handler"),
+		Name:      "handler",
+		Kind:      ast.SymbolKindVariable,
+		FilePath:  "service.py",
+		Language:  "python",
+		StartLine: 15, EndLine: 15,
+	}
+
+	caller := &ast.Symbol{
+		ID:       ast.GenerateID("service.py", 20, "dispatch"),
+		Name:     "dispatch",
+		Kind:     ast.SymbolKindFunction,
+		FilePath: "service.py",
+		Language: "python",
+		Calls: []ast.CallSite{
+			{
+				Target:   "handler",
+				Receiver: "obj",
+				IsMethod: true,
+				Location: ast.Location{FilePath: "service.py", StartLine: 22, EndLine: 22},
+			},
+		},
+		StartLine: 20, EndLine: 25,
+	}
+
+	results := []*ast.ParseResult{
+		{
+			FilePath: "service.py",
+			Language: "python",
+			Symbols:  []*ast.Symbol{handlerMethod, handlerVar, caller},
+			Package:  "service",
+		},
+	}
+
+	buildResult, err := builder.Build(context.Background(), results)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	callerNode, ok := buildResult.Graph.GetNode(caller.ID)
+	if !ok || callerNode == nil {
+		t.Fatalf("caller node not found in graph")
+	}
+
+	// Should resolve to Method, not Variable
+	for _, edge := range callerNode.Outgoing {
+		if edge.Type == EdgeTypeCalls {
+			if edge.ToID == handlerVar.ID {
+				t.Error("expected Method to win over Variable, but Variable was chosen")
+			}
+			if edge.ToID == handlerMethod.ID {
+				// correct
+				return
+			}
+		}
+	}
+	t.Error("expected a CALLS edge from dispatch to handler (method), but none found")
+}
+
+// =============================================================================
+// GR-62a Phase 5: Verification Tests (T-1, J-2, T-2)
+// =============================================================================
+
+// TestBuilder_TSInterfaceExtendsMultiple_EmbedsEdges (T-1) verifies that
+// interface C extends A, B produces EMBEDS edges to both A and B.
+func TestBuilder_TSInterfaceExtendsMultiple_EmbedsEdges(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+
+	ifaceA := &ast.Symbol{
+		ID:        ast.GenerateID("types.ts", 1, "A"),
+		Name:      "A",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "types.ts",
+		Language:  "typescript",
+		StartLine: 1, EndLine: 5,
+	}
+
+	ifaceB := &ast.Symbol{
+		ID:        ast.GenerateID("types.ts", 10, "B"),
+		Name:      "B",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "types.ts",
+		Language:  "typescript",
+		StartLine: 10, EndLine: 15,
+	}
+
+	// interface C extends A, B — A in Extends, B in Implements
+	ifaceC := &ast.Symbol{
+		ID:       ast.GenerateID("types.ts", 20, "C"),
+		Name:     "C",
+		Kind:     ast.SymbolKindInterface,
+		FilePath: "types.ts",
+		Language: "typescript",
+		Metadata: &ast.SymbolMetadata{
+			Extends:    "A",
+			Implements: []string{"B"},
+		},
+		StartLine: 20, EndLine: 25,
+	}
+
+	results := []*ast.ParseResult{
+		{
+			FilePath: "types.ts",
+			Language: "typescript",
+			Symbols:  []*ast.Symbol{ifaceA, ifaceB, ifaceC},
+			Package:  "types",
+		},
+	}
+
+	buildResult, err := builder.Build(context.Background(), results)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	cNode, ok := buildResult.Graph.GetNode(ifaceC.ID)
+	if !ok || cNode == nil {
+		t.Fatalf("interface C node not found in graph")
+	}
+
+	foundA := false
+	foundB := false
+	for _, edge := range cNode.Outgoing {
+		if edge.Type == EdgeTypeEmbeds {
+			if edge.ToID == ifaceA.ID {
+				foundA = true
+			}
+			if edge.ToID == ifaceB.ID {
+				foundB = true
+			}
+		}
+	}
+
+	if !foundA {
+		t.Error("T-1: expected EMBEDS edge from C to A (primary extends)")
+	}
+	if !foundB {
+		t.Error("T-1: expected EMBEDS edge from C to B (secondary extends via Implements)")
+	}
+}
+
+// TestBuilder_JSObjectCreate_ClassExtends (J-2) verifies that when the parser sets
+// Metadata.Extends from Object.create pattern, the builder creates an EMBEDS edge.
+func TestBuilder_JSObjectCreate_ClassExtends(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+
+	parentClass := &ast.Symbol{
+		ID:        ast.GenerateID("parent.js", 1, "Parent"),
+		Name:      "Parent",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "parent.js",
+		Language:  "javascript",
+		StartLine: 1, EndLine: 10,
+	}
+
+	// Child.prototype = Object.create(Parent.prototype) → parser sets Extends="Parent"
+	childClass := &ast.Symbol{
+		ID:       ast.GenerateID("child.js", 1, "Child"),
+		Name:     "Child",
+		Kind:     ast.SymbolKindClass,
+		FilePath: "child.js",
+		Language: "javascript",
+		Metadata: &ast.SymbolMetadata{
+			Extends: "Parent",
+		},
+		StartLine: 1, EndLine: 10,
+	}
+
+	results := []*ast.ParseResult{
+		{FilePath: "parent.js", Language: "javascript", Symbols: []*ast.Symbol{parentClass}, Package: "parent"},
+		{FilePath: "child.js", Language: "javascript", Symbols: []*ast.Symbol{childClass}, Package: "child"},
+	}
+
+	buildResult, err := builder.Build(context.Background(), results)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	childNode, ok := buildResult.Graph.GetNode(childClass.ID)
+	if !ok || childNode == nil {
+		t.Fatalf("Child node not found in graph")
+	}
+
+	found := false
+	for _, edge := range childNode.Outgoing {
+		if edge.ToID == parentClass.ID && edge.Type == EdgeTypeEmbeds {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("J-2: expected EMBEDS edge from Child to Parent (Object.create inheritance)")
+		for _, edge := range childNode.Outgoing {
+			t.Logf("  edge: type=%s target=%s", edge.Type, edge.ToID)
+		}
+	}
+
+	// Also verify classExtends was populated for inheritance chain resolution
+	// (important for this.method() calls through the chain)
+}
+
+// TestBuilder_TSGenericTypeParams_TypeReferences (T-2) verifies that
+// foo(repo: Repository<User>) produces TypeReferences including both
+// "Repository" and "User", and the builder creates REFERENCES edges for them.
+func TestBuilder_TSGenericTypeParams_TypeReferences(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+
+	repoInterface := &ast.Symbol{
+		ID:        ast.GenerateID("types.ts", 1, "Repository"),
+		Name:      "Repository",
+		Kind:      ast.SymbolKindInterface,
+		FilePath:  "types.ts",
+		Language:  "typescript",
+		StartLine: 1, EndLine: 5,
+	}
+
+	userClass := &ast.Symbol{
+		ID:        ast.GenerateID("types.ts", 10, "User"),
+		Name:      "User",
+		Kind:      ast.SymbolKindClass,
+		FilePath:  "types.ts",
+		Language:  "typescript",
+		StartLine: 10, EndLine: 15,
+	}
+
+	// function foo(repo: Repository<User>) — has TypeReferences to both
+	fooFunc := &ast.Symbol{
+		ID:       ast.GenerateID("service.ts", 1, "foo"),
+		Name:     "foo",
+		Kind:     ast.SymbolKindFunction,
+		FilePath: "service.ts",
+		Language: "typescript",
+		TypeReferences: []ast.TypeReference{
+			{Name: "Repository", Location: ast.Location{FilePath: "service.ts", StartLine: 1, EndLine: 1}},
+			{Name: "User", Location: ast.Location{FilePath: "service.ts", StartLine: 1, EndLine: 1}},
+		},
+		StartLine: 1, EndLine: 10,
+	}
+
+	results := []*ast.ParseResult{
+		{FilePath: "types.ts", Language: "typescript", Symbols: []*ast.Symbol{repoInterface, userClass}, Package: "types"},
+		{FilePath: "service.ts", Language: "typescript", Symbols: []*ast.Symbol{fooFunc}, Package: "service"},
+	}
+
+	buildResult, err := builder.Build(context.Background(), results)
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	fooNode, ok := buildResult.Graph.GetNode(fooFunc.ID)
+	if !ok || fooNode == nil {
+		t.Fatalf("foo node not found in graph")
+	}
+
+	foundRepo := false
+	foundUser := false
+	for _, edge := range fooNode.Outgoing {
+		if edge.Type == EdgeTypeReferences {
+			if edge.ToID == repoInterface.ID {
+				foundRepo = true
+			}
+			if edge.ToID == userClass.ID {
+				foundUser = true
+			}
+		}
+	}
+
+	if !foundRepo {
+		t.Error("T-2: expected REFERENCES edge from foo to Repository")
+	}
+	if !foundUser {
+		t.Error("T-2: expected REFERENCES edge from foo to User")
 	}
 }

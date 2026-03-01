@@ -8,7 +8,7 @@
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
 
-package code_buddy
+package trace
 
 import (
 	"bytes"
@@ -28,7 +28,7 @@ func TestHandlers_HandleGetTools(t *testing.T) {
 	svc := NewService(DefaultServiceConfig())
 	router := setupTestRouter(svc)
 
-	req, _ := http.NewRequest("GET", "/v1/codebuddy/tools", nil)
+	req, _ := http.NewRequest("GET", "/v1/trace/tools", nil)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -75,7 +75,7 @@ func TestHandlers_HandleFindEntryPoints_GraphNotFound(t *testing.T) {
 	router := setupTestRouter(svc)
 
 	body := `{"graph_id": "nonexistent"}`
-	req, _ := http.NewRequest("POST", "/v1/codebuddy/explore/entry_points", bytes.NewBufferString(body))
+	req, _ := http.NewRequest("POST", "/v1/trace/explore/entry_points", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -100,7 +100,7 @@ func TestHandlers_HandleFindEntryPoints_InvalidRequest(t *testing.T) {
 
 	// Missing required graph_id
 	body := `{}`
-	req, _ := http.NewRequest("POST", "/v1/codebuddy/explore/entry_points", bytes.NewBufferString(body))
+	req, _ := http.NewRequest("POST", "/v1/trace/explore/entry_points", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -124,7 +124,7 @@ func TestHandlers_HandleTraceDataFlow_GraphNotFound(t *testing.T) {
 	router := setupTestRouter(svc)
 
 	body := `{"graph_id": "nonexistent", "symbol_id": "test"}`
-	req, _ := http.NewRequest("POST", "/v1/codebuddy/explore/data_flow", bytes.NewBufferString(body))
+	req, _ := http.NewRequest("POST", "/v1/trace/explore/data_flow", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -139,7 +139,7 @@ func TestHandlers_HandleFindSimilarCode_GraphNotFound(t *testing.T) {
 	router := setupTestRouter(svc)
 
 	body := `{"graph_id": "nonexistent", "symbol_id": "test"}`
-	req, _ := http.NewRequest("POST", "/v1/codebuddy/explore/similar_code", bytes.NewBufferString(body))
+	req, _ := http.NewRequest("POST", "/v1/trace/explore/similar_code", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -158,7 +158,7 @@ func TestHandlers_HandleCheckBreakingChanges_GraphNotFound(t *testing.T) {
 	router := setupTestRouter(svc)
 
 	body := `{"graph_id": "nonexistent", "symbol_id": "test", "new_signature": "func Test()"}`
-	req, _ := http.NewRequest("POST", "/v1/codebuddy/reason/breaking_changes", bytes.NewBufferString(body))
+	req, _ := http.NewRequest("POST", "/v1/trace/reason/breaking_changes", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -173,7 +173,7 @@ func TestHandlers_HandleValidateChange_Success(t *testing.T) {
 	router := setupTestRouter(svc)
 
 	body := `{"code": "func Hello() {}", "language": "go"}`
-	req, _ := http.NewRequest("POST", "/v1/codebuddy/reason/validate_change", bytes.NewBufferString(body))
+	req, _ := http.NewRequest("POST", "/v1/trace/reason/validate_change", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -198,7 +198,7 @@ func TestHandlers_HandleValidateChange_InvalidRequest(t *testing.T) {
 
 	// Missing required code field
 	body := `{"language": "go"}`
-	req, _ := http.NewRequest("POST", "/v1/codebuddy/reason/validate_change", bytes.NewBufferString(body))
+	req, _ := http.NewRequest("POST", "/v1/trace/reason/validate_change", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -217,7 +217,7 @@ func TestHandlers_HandlePlanMultiFileChange_GraphNotFound(t *testing.T) {
 	router := setupTestRouter(svc)
 
 	body := `{"graph_id": "nonexistent", "target_id": "test", "change_type": "add_parameter"}`
-	req, _ := http.NewRequest("POST", "/v1/codebuddy/coordinate/plan_changes", bytes.NewBufferString(body))
+	req, _ := http.NewRequest("POST", "/v1/trace/coordinate/plan_changes", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -232,7 +232,7 @@ func TestHandlers_HandleValidatePlan_PlanNotFound(t *testing.T) {
 	router := setupTestRouter(svc)
 
 	body := `{"plan_id": "nonexistent"}`
-	req, _ := http.NewRequest("POST", "/v1/codebuddy/coordinate/validate_plan", bytes.NewBufferString(body))
+	req, _ := http.NewRequest("POST", "/v1/trace/coordinate/validate_plan", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -256,7 +256,7 @@ func TestHandlers_HandlePreviewChanges_PlanNotFound(t *testing.T) {
 	router := setupTestRouter(svc)
 
 	body := `{"plan_id": "nonexistent"}`
-	req, _ := http.NewRequest("POST", "/v1/codebuddy/coordinate/preview_changes", bytes.NewBufferString(body))
+	req, _ := http.NewRequest("POST", "/v1/trace/coordinate/preview_changes", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -275,7 +275,7 @@ func TestHandlers_HandleDetectPatterns_GraphNotFound(t *testing.T) {
 	router := setupTestRouter(svc)
 
 	body := `{"graph_id": "nonexistent"}`
-	req, _ := http.NewRequest("POST", "/v1/codebuddy/patterns/detect", bytes.NewBufferString(body))
+	req, _ := http.NewRequest("POST", "/v1/trace/patterns/detect", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -290,7 +290,7 @@ func TestHandlers_HandleFindCodeSmells_GraphNotFound(t *testing.T) {
 	router := setupTestRouter(svc)
 
 	body := `{"graph_id": "nonexistent"}`
-	req, _ := http.NewRequest("POST", "/v1/codebuddy/patterns/code_smells", bytes.NewBufferString(body))
+	req, _ := http.NewRequest("POST", "/v1/trace/patterns/code_smells", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -305,7 +305,7 @@ func TestHandlers_HandleFindDuplication_GraphNotFound(t *testing.T) {
 	router := setupTestRouter(svc)
 
 	body := `{"graph_id": "nonexistent"}`
-	req, _ := http.NewRequest("POST", "/v1/codebuddy/patterns/duplication", bytes.NewBufferString(body))
+	req, _ := http.NewRequest("POST", "/v1/trace/patterns/duplication", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -320,7 +320,7 @@ func TestHandlers_HandleFindCircularDeps_GraphNotFound(t *testing.T) {
 	router := setupTestRouter(svc)
 
 	body := `{"graph_id": "nonexistent"}`
-	req, _ := http.NewRequest("POST", "/v1/codebuddy/patterns/circular_deps", bytes.NewBufferString(body))
+	req, _ := http.NewRequest("POST", "/v1/trace/patterns/circular_deps", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -335,7 +335,7 @@ func TestHandlers_HandleExtractConventions_GraphNotFound(t *testing.T) {
 	router := setupTestRouter(svc)
 
 	body := `{"graph_id": "nonexistent"}`
-	req, _ := http.NewRequest("POST", "/v1/codebuddy/patterns/conventions", bytes.NewBufferString(body))
+	req, _ := http.NewRequest("POST", "/v1/trace/patterns/conventions", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -350,7 +350,7 @@ func TestHandlers_HandleFindDeadCode_GraphNotFound(t *testing.T) {
 	router := setupTestRouter(svc)
 
 	body := `{"graph_id": "nonexistent"}`
-	req, _ := http.NewRequest("POST", "/v1/codebuddy/patterns/dead_code", bytes.NewBufferString(body))
+	req, _ := http.NewRequest("POST", "/v1/trace/patterns/dead_code", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
@@ -373,35 +373,35 @@ func TestAgenticRoutes_AllEndpointsExist(t *testing.T) {
 		path   string
 	}{
 		// Tool discovery
-		{"GET", "/v1/codebuddy/tools"},
+		{"GET", "/v1/trace/tools"},
 		// Exploration
-		{"POST", "/v1/codebuddy/explore/entry_points"},
-		{"POST", "/v1/codebuddy/explore/data_flow"},
-		{"POST", "/v1/codebuddy/explore/error_flow"},
-		{"POST", "/v1/codebuddy/explore/config_usage"},
-		{"POST", "/v1/codebuddy/explore/similar_code"},
-		{"POST", "/v1/codebuddy/explore/minimal_context"},
-		{"POST", "/v1/codebuddy/explore/summarize_file"},
-		{"POST", "/v1/codebuddy/explore/summarize_package"},
-		{"POST", "/v1/codebuddy/explore/change_impact"},
+		{"POST", "/v1/trace/explore/entry_points"},
+		{"POST", "/v1/trace/explore/data_flow"},
+		{"POST", "/v1/trace/explore/error_flow"},
+		{"POST", "/v1/trace/explore/config_usage"},
+		{"POST", "/v1/trace/explore/similar_code"},
+		{"POST", "/v1/trace/explore/minimal_context"},
+		{"POST", "/v1/trace/explore/summarize_file"},
+		{"POST", "/v1/trace/explore/summarize_package"},
+		{"POST", "/v1/trace/explore/change_impact"},
 		// Reasoning
-		{"POST", "/v1/codebuddy/reason/breaking_changes"},
-		{"POST", "/v1/codebuddy/reason/simulate_change"},
-		{"POST", "/v1/codebuddy/reason/validate_change"},
-		{"POST", "/v1/codebuddy/reason/test_coverage"},
-		{"POST", "/v1/codebuddy/reason/side_effects"},
-		{"POST", "/v1/codebuddy/reason/suggest_refactor"},
+		{"POST", "/v1/trace/reason/breaking_changes"},
+		{"POST", "/v1/trace/reason/simulate_change"},
+		{"POST", "/v1/trace/reason/validate_change"},
+		{"POST", "/v1/trace/reason/test_coverage"},
+		{"POST", "/v1/trace/reason/side_effects"},
+		{"POST", "/v1/trace/reason/suggest_refactor"},
 		// Coordination
-		{"POST", "/v1/codebuddy/coordinate/plan_changes"},
-		{"POST", "/v1/codebuddy/coordinate/validate_plan"},
-		{"POST", "/v1/codebuddy/coordinate/preview_changes"},
+		{"POST", "/v1/trace/coordinate/plan_changes"},
+		{"POST", "/v1/trace/coordinate/validate_plan"},
+		{"POST", "/v1/trace/coordinate/preview_changes"},
 		// Patterns
-		{"POST", "/v1/codebuddy/patterns/detect"},
-		{"POST", "/v1/codebuddy/patterns/code_smells"},
-		{"POST", "/v1/codebuddy/patterns/duplication"},
-		{"POST", "/v1/codebuddy/patterns/circular_deps"},
-		{"POST", "/v1/codebuddy/patterns/conventions"},
-		{"POST", "/v1/codebuddy/patterns/dead_code"},
+		{"POST", "/v1/trace/patterns/detect"},
+		{"POST", "/v1/trace/patterns/code_smells"},
+		{"POST", "/v1/trace/patterns/duplication"},
+		{"POST", "/v1/trace/patterns/circular_deps"},
+		{"POST", "/v1/trace/patterns/conventions"},
+		{"POST", "/v1/trace/patterns/dead_code"},
 	}
 
 	for _, ep := range endpoints {
@@ -438,7 +438,7 @@ func setupTestRouterWithInitializedGraph(t *testing.T, projectRoot string) (*gin
 
 	// Initialize a graph
 	body, _ := json.Marshal(InitRequest{ProjectRoot: projectRoot})
-	req, _ := http.NewRequest("POST", "/v1/codebuddy/init", bytes.NewBuffer(body))
+	req, _ := http.NewRequest("POST", "/v1/trace/init", bytes.NewBuffer(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)

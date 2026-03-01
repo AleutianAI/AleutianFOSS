@@ -76,7 +76,7 @@ var (
 	//   - status: "success", "failure", or "partial"
 	crsActivitiesTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
-			Namespace: "code_buddy",
+			Namespace: "trace",
 			Subsystem: "crs",
 			Name:      "activities_total",
 			Help:      "Total CRS activity executions by activity and status",
@@ -90,7 +90,7 @@ var (
 	//   - status: "proven", "disproven", "expanded", or "unknown"
 	crsProofUpdatesTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
-			Namespace: "code_buddy",
+			Namespace: "trace",
 			Subsystem: "crs",
 			Name:      "proof_updates_total",
 			Help:      "Total proof status updates by new status",
@@ -104,7 +104,7 @@ var (
 	//   - type: "mutual_exclusion", "implication", "ordering", or "resource"
 	crsConstraintsAddedTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
-			Namespace: "code_buddy",
+			Namespace: "trace",
 			Subsystem: "crs",
 			Name:      "constraints_added_total",
 			Help:      "Total constraints added by type",
@@ -115,7 +115,7 @@ var (
 	// crsDependenciesFoundTotal counts dependency edges discovered.
 	crsDependenciesFoundTotal = promauto.NewCounter(
 		prometheus.CounterOpts{
-			Namespace: "code_buddy",
+			Namespace: "trace",
 			Subsystem: "crs",
 			Name:      "dependencies_found_total",
 			Help:      "Total dependency edges discovered",
@@ -128,7 +128,7 @@ var (
 	//   - activity: Activity name (sanitized against knownActivities)
 	crsActivityDurationSeconds = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Namespace: "code_buddy",
+			Namespace: "trace",
 			Subsystem: "crs",
 			Name:      "activity_duration_seconds",
 			Help:      "Activity execution duration in seconds",
@@ -140,7 +140,7 @@ var (
 	// crsStepsRecordedTotal counts trace steps recorded.
 	crsStepsRecordedTotal = promauto.NewCounter(
 		prometheus.CounterOpts{
-			Namespace: "code_buddy",
+			Namespace: "trace",
 			Subsystem: "crs",
 			Name:      "steps_recorded_total",
 			Help:      "Total reasoning trace steps recorded",
@@ -150,7 +150,7 @@ var (
 	// crsConflictsTotal counts delta application conflicts.
 	crsConflictsTotal = promauto.NewCounter(
 		prometheus.CounterOpts{
-			Namespace: "code_buddy",
+			Namespace: "trace",
 			Subsystem: "crs",
 			Name:      "conflicts_total",
 			Help:      "Total delta application conflicts requiring retry",
@@ -160,7 +160,7 @@ var (
 	// crsGenerationGauge tracks the current CRS generation.
 	crsGenerationGauge = promauto.NewGauge(
 		prometheus.GaugeOpts{
-			Namespace: "code_buddy",
+			Namespace: "trace",
 			Subsystem: "crs",
 			Name:      "generation",
 			Help:      "Current CRS generation number",
@@ -170,7 +170,7 @@ var (
 	// crsRecordingErrorsTotal counts recording failures (DR-14).
 	crsRecordingErrorsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
-			Namespace: "code_buddy",
+			Namespace: "trace",
 			Subsystem: "crs",
 			Name:      "recording_errors_total",
 			Help:      "Total errors during trace recording by error type",
@@ -181,7 +181,7 @@ var (
 	// crsRecordingDurationSeconds measures recording overhead (DR-9).
 	crsRecordingDurationSeconds = promauto.NewHistogram(
 		prometheus.HistogramOpts{
-			Namespace: "code_buddy",
+			Namespace: "trace",
 			Subsystem: "crs",
 			Name:      "recording_duration_seconds",
 			Help:      "Duration of trace recording operations in seconds",
@@ -196,7 +196,7 @@ var (
 	// Answers: "Does trace_flow prove more nodes than explore_file?"
 	crsProofUpdatesPerActivity = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Namespace: "code_buddy",
+			Namespace: "trace",
 			Subsystem: "crs",
 			Name:      "proof_updates_per_activity",
 			Help:      "Distribution of proof updates per activity execution",
@@ -209,7 +209,7 @@ var (
 	// Answers: "Which activities add the most constraints?"
 	crsConstraintsPerActivity = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Namespace: "code_buddy",
+			Namespace: "trace",
 			Subsystem: "crs",
 			Name:      "constraints_per_activity",
 			Help:      "Distribution of constraints added per activity execution",
@@ -222,7 +222,7 @@ var (
 	// Answers: "Which activities discover the most dependency edges?"
 	crsDependenciesPerActivity = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Namespace: "code_buddy",
+			Namespace: "trace",
 			Subsystem: "crs",
 			Name:      "dependencies_per_activity",
 			Help:      "Distribution of dependencies found per activity execution",
@@ -235,7 +235,7 @@ var (
 	// Answers: "Which activities find the most symbols?"
 	crsSymbolsPerActivity = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Namespace: "code_buddy",
+			Namespace: "trace",
 			Subsystem: "crs",
 			Name:      "symbols_per_activity",
 			Help:      "Distribution of symbols found per activity execution",
@@ -260,7 +260,7 @@ var (
 	//   - failure_type: "cycle_detected", "circuit_breaker", "tool_error", "safety"
 	crsClausesLearnedTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
-			Namespace: "code_buddy",
+			Namespace: "trace",
 			Subsystem: "crs",
 			Name:      "clauses_learned_total",
 			Help:      "Total learned clauses by failure type",
@@ -278,7 +278,7 @@ var (
 	//   - tool: The tool that was blocked
 	crsDecisionsBlockedTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
-			Namespace: "code_buddy",
+			Namespace: "trace",
 			Subsystem: "crs",
 			Name:      "decisions_blocked_total",
 			Help:      "Total decisions blocked by learned clauses",
@@ -294,7 +294,7 @@ var (
 	//   - algorithm: "brent" for real-time, "tarjan" for post-session
 	crsCyclesDetectedTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
-			Namespace: "code_buddy",
+			Namespace: "trace",
 			Subsystem: "crs",
 			Name:      "cycles_detected_total",
 			Help:      "Total reasoning cycles detected by algorithm",
@@ -312,7 +312,7 @@ var (
 	//   - algorithm: "brent" for real-time, "tarjan" for post-session
 	crsCycleLengthHistogram = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Namespace: "code_buddy",
+			Namespace: "trace",
 			Subsystem: "crs",
 			Name:      "cycle_length",
 			Help:      "Distribution of detected cycle lengths",

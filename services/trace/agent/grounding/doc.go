@@ -27,7 +27,7 @@
 //   - Layer 7: Multi-Sample Consistency - Generate multiple responses, find consensus
 //   - Layer 8: Chain-of-Verification - Self-verification step
 //
-// The package follows the SafetyGate pattern from services/code_buddy/agent/safety/
+// The package follows the SafetyGate pattern from services/trace/agent/safety/
 // for consistency with existing validation infrastructure.
 //
 // Thread Safety:

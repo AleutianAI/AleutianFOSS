@@ -545,7 +545,10 @@ func (r *ToolRoutingRegistry) FindToolsByKeyword(query string) []ToolMatch {
 	matchCounts := make(map[string]int)
 	matchedKeywords := make(map[string][]string)
 
-	for _, word := range words {
+	for _, rawWord := range words {
+		// IT-11: Strip trailing punctuation so "communities?" matches keyword "communities".
+		// Query tokenization splits on whitespace only, leaving punctuation attached to words.
+		word := strings.TrimRight(rawWord, "?.,!;:\"'()[]{}…")
 		if toolNames, ok := r.keywordIndex[word]; ok {
 			for _, toolName := range toolNames {
 				matchCounts[toolName]++

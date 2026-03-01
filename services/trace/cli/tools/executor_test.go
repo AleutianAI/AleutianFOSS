@@ -25,7 +25,7 @@ type mockTool struct {
 func (t *mockTool) Name() string               { return t.name }
 func (t *mockTool) Category() ToolCategory     { return CategoryExploration }
 func (t *mockTool) Definition() ToolDefinition { return t.definition }
-func (t *mockTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *mockTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	return &Result{Success: true, OutputText: "ok"}, nil
 }
 

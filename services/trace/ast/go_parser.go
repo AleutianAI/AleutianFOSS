@@ -457,6 +457,8 @@ func (p *GoParser) processFunctionDecl(ctx context.Context, node *sitter.Node, c
 	var params string
 	var returns string
 	var bodyNode *sitter.Node
+	var paramListNode *sitter.Node  // IT-06 Bug 9: track for type ref extraction
+	var returnTypeNode *sitter.Node // IT-06 Bug 9: track standalone return type node
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
@@ -468,11 +470,14 @@ func (p *GoParser) processFunctionDecl(ctx context.Context, node *sitter.Node, c
 			plist := string(content[child.StartByte():child.EndByte()])
 			if params == "" {
 				params = plist
+				paramListNode = child // IT-06 Bug 9
 			} else {
 				returns = plist
+				returnTypeNode = child // IT-06 Bug 9: return parameter_list
 			}
 		case "type_identifier", "pointer_type", "slice_type", "map_type", "channel_type", "qualified_type", "interface_type", "struct_type", "function_type":
 			returns = string(content[child.StartByte():child.EndByte()])
+			returnTypeNode = child // IT-06 Bug 9
 		case "block":
 			// GR-41: Capture function body for call extraction
 			bodyNode = child
@@ -519,6 +524,29 @@ func (p *GoParser) processFunctionDecl(ctx context.Context, node *sitter.Node, c
 		sym.Calls = p.extractCallSites(ctx, bodyNode, content, filePath)
 	}
 
+	// IT-06 Bug 9: Extract type references from parameter and return type annotations
+	var typeRefs []TypeReference
+	if paramListNode != nil {
+		typeRefs = append(typeRefs, extractGoTypeRefsFromParamList(paramListNode, content, filePath)...)
+	}
+	if returnTypeNode != nil {
+		if returnTypeNode.Type() == "parameter_list" {
+			typeRefs = append(typeRefs, extractGoTypeRefsFromParamList(returnTypeNode, content, filePath)...)
+		} else {
+			typeRefs = append(typeRefs, extractGoReturnTypeRefs(returnTypeNode, content, filePath)...)
+		}
+	}
+	// IT-16: Extract type references from composite literals in function body (e.g., H{...}, Config{...})
+	if bodyNode != nil {
+		typeRefs = append(typeRefs, p.extractCompositeLiteralTypeRefs(ctx, bodyNode, content, filePath)...)
+	}
+	if len(typeRefs) > 0 {
+		if len(typeRefs) > MaxTypeReferencesPerSymbol {
+			typeRefs = typeRefs[:MaxTypeReferencesPerSymbol]
+		}
+		sym.TypeReferences = typeRefs
+	}
+
 	result.Symbols = append(result.Symbols, sym)
 }
 
@@ -541,6 +569,8 @@ func (p *GoParser) processMethodDecl(ctx context.Context, node *sitter.Node, con
 	var params string
 	var returns string
 	var bodyNode *sitter.Node
+	var paramListNode *sitter.Node  // IT-06 Bug 9: track params (not receiver) for type ref extraction
+	var returnTypeNode *sitter.Node // IT-06 Bug 9: track standalone return type node
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
@@ -552,14 +582,17 @@ func (p *GoParser) processMethodDecl(ctx context.Context, node *sitter.Node, con
 				receiverStr = plist
 			} else if params == "" {
 				params = plist
+				paramListNode = child // IT-06 Bug 9: second parameter_list is params
 			} else {
 				// Third parameter_list is returns
 				returns = plist
+				returnTypeNode = child // IT-06 Bug 9: third parameter_list is return types
 			}
 		case "field_identifier":
 			name = string(content[child.StartByte():child.EndByte()])
 		case "type_identifier", "pointer_type", "slice_type", "map_type", "channel_type", "qualified_type":
 			returns = string(content[child.StartByte():child.EndByte()])
+			returnTypeNode = child // IT-06 Bug 9
 		case "block":
 			// GR-41: Capture method body for call extraction
 			bodyNode = child
@@ -610,7 +643,183 @@ func (p *GoParser) processMethodDecl(ctx context.Context, node *sitter.Node, con
 		sym.Calls = p.extractCallSites(ctx, bodyNode, content, filePath)
 	}
 
+	// IT-06 Bug 9: Extract type references from parameter and return type annotations
+	var typeRefs []TypeReference
+	if paramListNode != nil {
+		typeRefs = append(typeRefs, extractGoTypeRefsFromParamList(paramListNode, content, filePath)...)
+	}
+	if returnTypeNode != nil {
+		if returnTypeNode.Type() == "parameter_list" {
+			typeRefs = append(typeRefs, extractGoTypeRefsFromParamList(returnTypeNode, content, filePath)...)
+		} else {
+			typeRefs = append(typeRefs, extractGoReturnTypeRefs(returnTypeNode, content, filePath)...)
+		}
+	}
+	// IT-16: Extract type references from composite literals in method body (e.g., H{...}, Config{...})
+	if bodyNode != nil {
+		typeRefs = append(typeRefs, p.extractCompositeLiteralTypeRefs(ctx, bodyNode, content, filePath)...)
+	}
+	if len(typeRefs) > 0 {
+		if len(typeRefs) > MaxTypeReferencesPerSymbol {
+			typeRefs = typeRefs[:MaxTypeReferencesPerSymbol]
+		}
+		sym.TypeReferences = typeRefs
+	}
+
 	result.Symbols = append(result.Symbols, sym)
+}
+
+// goTypeSkipList contains Go built-in types that should not produce TypeReference entries.
+var goTypeSkipList = map[string]bool{
+	// Numeric types
+	"int": true, "int8": true, "int16": true, "int32": true, "int64": true,
+	"uint": true, "uint8": true, "uint16": true, "uint32": true, "uint64": true,
+	"uintptr": true, "float32": true, "float64": true,
+	"complex64": true, "complex128": true,
+	// String and byte types
+	"string": true, "byte": true, "rune": true,
+	// Boolean
+	"bool": true,
+	// Other builtins
+	"error": true, "any": true, "comparable": true,
+}
+
+// extractGoTypeRefsFromParamList walks a tree-sitter parameter_list node and extracts
+// non-builtin type identifiers as TypeReference entries.
+//
+// Description:
+//
+//	Go parameter_list contains parameter_declaration children, each with
+//	identifier(s) and a type node (type_identifier, pointer_type, etc.).
+//	This walks the type nodes to find type_identifier leaves.
+//
+// IT-06 Bug 9: Enables graph edges from Go function parameter/return types.
+//
+// Inputs:
+//   - paramListNode: A tree-sitter "parameter_list" node.
+//   - content: Source file bytes.
+//   - filePath: Relative path for Location.
+//
+// Outputs:
+//   - []TypeReference: Non-builtin type identifiers found in the parameter list.
+func extractGoTypeRefsFromParamList(paramListNode *sitter.Node, content []byte, filePath string) []TypeReference {
+	if paramListNode == nil {
+		return nil
+	}
+
+	var refs []TypeReference
+	seen := make(map[string]bool)
+
+	var walkType func(node *sitter.Node)
+	walkType = func(node *sitter.Node) {
+		if node == nil || len(refs) >= MaxTypeReferencesPerSymbol {
+			return
+		}
+
+		switch node.Type() {
+		case "type_identifier":
+			name := string(content[node.StartByte():node.EndByte()])
+			if !goTypeSkipList[name] && !seen[name] {
+				seen[name] = true
+				refs = append(refs, TypeReference{
+					Name: name,
+					Location: Location{
+						FilePath:  filePath,
+						StartLine: int(node.StartPoint().Row + 1),
+						EndLine:   int(node.EndPoint().Row + 1),
+						StartCol:  int(node.StartPoint().Column),
+						EndCol:    int(node.EndPoint().Column),
+					},
+				})
+			}
+			return
+		case "qualified_type":
+			// For context.Context — extract "Context" (the type_identifier part)
+			// but skip since it's external. Walk children to find type_identifier.
+			for i := 0; i < int(node.ChildCount()); i++ {
+				child := node.Child(i)
+				if child.Type() == "type_identifier" {
+					walkType(child)
+				}
+			}
+			return
+		}
+
+		// Recurse into children (pointer_type, slice_type, map_type, etc.)
+		for i := 0; i < int(node.ChildCount()); i++ {
+			walkType(node.Child(i))
+		}
+	}
+
+	// Walk each parameter_declaration or variadic_parameter_declaration in the list
+	for i := 0; i < int(paramListNode.ChildCount()); i++ {
+		child := paramListNode.Child(i)
+		if child.Type() == "parameter_declaration" || child.Type() == "variadic_parameter_declaration" {
+			// The type is the last non-identifier child. Walk all children that are type nodes.
+			for j := 0; j < int(child.ChildCount()); j++ {
+				typeChild := child.Child(j)
+				switch typeChild.Type() {
+				case "type_identifier", "pointer_type", "slice_type", "map_type",
+					"channel_type", "qualified_type", "interface_type", "struct_type",
+					"function_type", "array_type":
+					walkType(typeChild)
+				}
+			}
+		}
+	}
+
+	return refs
+}
+
+// extractGoReturnTypeRefs extracts TypeReference entries from a standalone return type node.
+//
+// IT-06 Bug 9: For functions returning a single type (not a parameter_list of returns),
+// the return type appears as a direct child of the function_declaration.
+//
+// Inputs:
+//   - typeNode: A tree-sitter type node (type_identifier, pointer_type, etc.).
+//   - content: Source file bytes.
+//   - filePath: Relative path for Location.
+//
+// Outputs:
+//   - []TypeReference: Non-builtin type identifiers found in the return type.
+func extractGoReturnTypeRefs(typeNode *sitter.Node, content []byte, filePath string) []TypeReference {
+	if typeNode == nil {
+		return nil
+	}
+
+	var refs []TypeReference
+	seen := make(map[string]bool)
+
+	var walk func(node *sitter.Node)
+	walk = func(node *sitter.Node) {
+		if node == nil || len(refs) >= MaxTypeReferencesPerSymbol {
+			return
+		}
+		if node.Type() == "type_identifier" {
+			name := string(content[node.StartByte():node.EndByte()])
+			if !goTypeSkipList[name] && !seen[name] {
+				seen[name] = true
+				refs = append(refs, TypeReference{
+					Name: name,
+					Location: Location{
+						FilePath:  filePath,
+						StartLine: int(node.StartPoint().Row + 1),
+						EndLine:   int(node.EndPoint().Row + 1),
+						StartCol:  int(node.StartPoint().Column),
+						EndCol:    int(node.EndPoint().Column),
+					},
+				})
+			}
+			return
+		}
+		for i := 0; i < int(node.ChildCount()); i++ {
+			walk(node.Child(i))
+		}
+	}
+
+	walk(typeNode)
+	return refs
 }
 
 // extractReceiverTypeFromString extracts the type name from a receiver string.
@@ -671,7 +880,13 @@ func (p *GoParser) processTypeSpec(node *sitter.Node, content []byte, filePath s
 		child := node.Child(i)
 		switch child.Type() {
 		case "type_identifier":
-			name = string(content[child.StartByte():child.EndByte()])
+			// Phase 20-C: Only set name from the FIRST type_identifier child.
+			// For type aliases like `type nopPage int`, tree-sitter produces two
+			// type_identifier children: "nopPage" (the name) and "int" (the aliased type).
+			// Without this guard, "int" overwrites "nopPage" and method association fails.
+			if name == "" {
+				name = string(content[child.StartByte():child.EndByte()])
+			}
 		case "struct_type":
 			kind = SymbolKindStruct
 			typeNode = child
@@ -728,6 +943,43 @@ func (p *GoParser) processTypeSpec(node *sitter.Node, content []byte, filePath s
 					sym.Metadata = &SymbolMetadata{}
 				}
 				sym.Metadata.Methods = methods
+			}
+
+			// Phase 18: Extract embedded interface names for transitive resolution.
+			// Interfaces can embed other interfaces (e.g., ReadWriter embeds Reader + Writer).
+			// Store them in Extends/Implements like struct embeds so the builder's
+			// extractEmbedsEdges() creates EMBEDS edges for transitive method resolution.
+			embeddedIfaces := p.extractInterfaceEmbeds(typeNode, content)
+			if len(embeddedIfaces) > 0 {
+				if sym.Metadata == nil {
+					sym.Metadata = &SymbolMetadata{}
+				}
+				sym.Metadata.Extends = embeddedIfaces[0]
+				if len(embeddedIfaces) > 1 {
+					sym.Metadata.Implements = embeddedIfaces[1:]
+				}
+			}
+		}
+
+		// IT-03 H-3: For structs, detect embedded (anonymous) fields and set Extends.
+		// This enables the builder to create EMBEDS edges for promoted method resolution.
+		if kind == SymbolKindStruct {
+			embeddedTypes := p.extractEmbeddedTypes(typeNode, content)
+			if len(embeddedTypes) > 0 {
+				if sym.Metadata == nil {
+					sym.Metadata = &SymbolMetadata{}
+				}
+				sym.Metadata.Extends = embeddedTypes[0]
+				// IT-03a Phase 16 G-1: Store additional embeds in Implements.
+				// NOTE: For Go structs, Metadata.Implements holds additional embedded types,
+				// NOT interface implementations. Go structs never use explicit "implements"
+				// syntax. The builder's extractEmbedsEdges creates EMBEDS edges (not IMPLEMENTS)
+				// for these entries when sym.Kind == SymbolKindStruct. The builder also calls
+				// extractImplementsEdges, but validateEdgeType prevents incorrect IMPLEMENTS
+				// edges when the target is not an interface.
+				if len(embeddedTypes) > 1 {
+					sym.Metadata.Implements = embeddedTypes[1:]
+				}
 			}
 		}
 	}
@@ -804,6 +1056,244 @@ func (p *GoParser) extractField(node *sitter.Node, content []byte, filePath stri
 	}
 
 	return fields
+}
+
+// extractEmbeddedTypes detects anonymous (embedded) fields in a Go struct type node.
+//
+// Description:
+//
+//	Walks the field_declaration_list of a struct_type node looking for
+//	field_declaration nodes that have no field_identifier child. These are
+//	Go embedded (anonymous) fields. Returns the type names of all embedded types.
+//
+// Inputs:
+//   - structNode: A tree-sitter struct_type node. Must not be nil.
+//   - content: Raw source bytes for extracting text.
+//
+// Outputs:
+//   - []string: Names of embedded types (e.g., ["RouterGroup", "Mutex"]).
+//     Empty if no embedded fields found.
+//
+// Limitations:
+//   - Qualified embeds (e.g., sync.Mutex) return only the type name ("Mutex"), not the package.
+//   - Interface embeds within structs are included (they are valid Go embeds).
+//
+// Assumptions:
+//   - structNode is a valid struct_type node from tree-sitter.
+func (p *GoParser) extractEmbeddedTypes(structNode *sitter.Node, content []byte) []string {
+	var embedded []string
+
+	for i := 0; i < int(structNode.ChildCount()); i++ {
+		child := structNode.Child(i)
+		if child.Type() != "field_declaration_list" {
+			continue
+		}
+
+		for j := 0; j < int(child.ChildCount()); j++ {
+			field := child.Child(j)
+			if field.Type() != "field_declaration" {
+				continue
+			}
+
+			// Check if this field_declaration has a field_identifier child.
+			// If it does, it's a named field, not an embedded type.
+			hasFieldIdentifier := false
+			for k := 0; k < int(field.ChildCount()); k++ {
+				if field.Child(k).Type() == "field_identifier" {
+					hasFieldIdentifier = true
+					break
+				}
+			}
+
+			if hasFieldIdentifier {
+				continue
+			}
+
+			// No field_identifier — this is an embedded (anonymous) field.
+			// Extract the type name from type_identifier, pointer_type, or qualified_type.
+			typeName := p.extractEmbeddedTypeName(field, content)
+			if typeName != "" {
+				embedded = append(embedded, typeName)
+			}
+		}
+	}
+
+	return embedded
+}
+
+// extractInterfaceEmbeds extracts embedded interface names from an interface_type node.
+//
+// Description:
+//
+//	Walks the children of an interface_type AST node and collects embedded interface
+//	names. In Go, interface children are either method_elem (method declarations) or
+//	type_identifier/qualified_type (embedded interfaces). This function collects the
+//	latter, analogous to extractEmbeddedTypes for struct nodes.
+//
+// Inputs:
+//   - ifaceNode: A tree-sitter node of type "interface_type". Must not be nil.
+//   - content: Raw source bytes for extracting text from AST nodes.
+//
+// Outputs:
+//   - []string: Names of embedded interfaces (e.g., ["Reader", "Writer", "Stringer"]).
+//     Empty slice if no embedded interfaces found.
+//
+// Example:
+//
+//	For `type ReadWriter interface { Reader; Writer; Close() error }`,
+//	returns ["Reader", "Writer"]. Close() is a method_elem, not an embed.
+//
+// Limitations:
+//   - Single-file analysis: cannot resolve cross-package interface methods.
+//     The builder handles transitive method resolution via EMBEDS edges.
+//
+// Assumptions:
+//   - ifaceNode is a valid interface_type node from tree-sitter.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (p *GoParser) extractInterfaceEmbeds(ifaceNode *sitter.Node, content []byte) []string {
+	if ifaceNode == nil || ifaceNode.Type() != "interface_type" {
+		return nil
+	}
+
+	var embedded []string
+
+	contentLen := len(content)
+
+	for i := 0; i < int(ifaceNode.ChildCount()); i++ {
+		child := ifaceNode.Child(i)
+		if child == nil {
+			continue
+		}
+		switch child.Type() {
+		case "type_elem":
+			// tree-sitter wraps embedded interfaces in a type_elem node.
+			// Walk its children for type_identifier, qualified_type, or pointer_type.
+			for j := 0; j < int(child.ChildCount()); j++ {
+				inner := child.Child(j)
+				if inner == nil {
+					continue
+				}
+				switch inner.Type() {
+				case "type_identifier":
+					// CR-20-2: Bounds check prevents panic if AST node range exceeds content.
+					if int(inner.EndByte()) > contentLen {
+						continue
+					}
+					name := string(content[inner.StartByte():inner.EndByte()])
+					if name != "" {
+						embedded = append(embedded, name)
+					}
+				case "qualified_type":
+					name := p.extractQualifiedTypeName(inner, content)
+					if name != "" {
+						embedded = append(embedded, name)
+					}
+				case "pointer_type":
+					name := p.unwrapPointerType(inner, content)
+					if name != "" {
+						embedded = append(embedded, name)
+					}
+				}
+			}
+		case "type_identifier":
+			// Fallback: some tree-sitter versions may place embeds directly.
+			// CR-20-2: Bounds check prevents panic if AST node range exceeds content.
+			if int(child.EndByte()) > contentLen {
+				continue
+			}
+			name := string(content[child.StartByte():child.EndByte()])
+			if name != "" {
+				embedded = append(embedded, name)
+			}
+		case "qualified_type":
+			name := p.extractQualifiedTypeName(child, content)
+			if name != "" {
+				embedded = append(embedded, name)
+			}
+		case "pointer_type":
+			name := p.unwrapPointerType(child, content)
+			if name != "" {
+				embedded = append(embedded, name)
+			}
+		}
+		// Skip method_elem, "{", "}", "\n", comment nodes — they are not embeds
+	}
+
+	return embedded
+}
+
+// extractEmbeddedTypeName extracts the type name from an embedded field declaration.
+//
+// Description:
+//
+//	Handles plain types (RouterGroup), pointer types (*RouterGroup),
+//	and qualified types (sync.Mutex, *sync.Mutex).
+//
+// Inputs:
+//   - fieldNode: A field_declaration node with no field_identifier.
+//   - content: Raw source bytes.
+//
+// Outputs:
+//   - string: The type name (e.g., "RouterGroup", "Mutex"). Empty if not found.
+func (p *GoParser) extractEmbeddedTypeName(fieldNode *sitter.Node, content []byte) string {
+	for i := 0; i < int(fieldNode.ChildCount()); i++ {
+		child := fieldNode.Child(i)
+		switch child.Type() {
+		case "type_identifier":
+			return string(content[child.StartByte():child.EndByte()])
+		case "pointer_type":
+			// *SomeType — unwrap the pointer to get the type name
+			return p.unwrapPointerType(child, content)
+		case "qualified_type":
+			// pkg.Type — extract just the type name (last identifier)
+			return p.extractQualifiedTypeName(child, content)
+		}
+	}
+	return ""
+}
+
+// unwrapPointerType extracts the type name from a pointer_type node (*T or *pkg.T).
+func (p *GoParser) unwrapPointerType(node *sitter.Node, content []byte) string {
+	contentLen := len(content)
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child == nil {
+			continue
+		}
+		switch child.Type() {
+		case "type_identifier":
+			// CR-20-2 R-5: Bounds check on content slicing.
+			if int(child.EndByte()) > contentLen {
+				continue
+			}
+			return string(content[child.StartByte():child.EndByte()])
+		case "qualified_type":
+			return p.extractQualifiedTypeName(child, content)
+		}
+	}
+	return ""
+}
+
+// extractQualifiedTypeName extracts the type name from a qualified_type node (pkg.Type).
+func (p *GoParser) extractQualifiedTypeName(node *sitter.Node, content []byte) string {
+	// qualified_type has children: package_identifier "." type_identifier
+	// Return the type_identifier (last part).
+	contentLen := len(content)
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child == nil {
+			continue
+		}
+		if child.Type() == "type_identifier" {
+			// CR-20-2 R-5: Bounds check on content slicing.
+			if int(child.EndByte()) > contentLen {
+				continue
+			}
+			return string(content[child.StartByte():child.EndByte()])
+		}
+	}
+	return ""
 }
 
 // extractMethodSpec extracts interface method specifications.
@@ -1534,6 +2024,151 @@ func (p *GoParser) extractCallSites(ctx context.Context, bodyNode *sitter.Node, 
 	)
 
 	return calls
+}
+
+// extractCompositeLiteralTypeRefs extracts type references from composite literal
+// expressions in a function/method body.
+//
+// Description:
+//
+//	Walks the body AST looking for composite_literal nodes (e.g., H{...},
+//	Config{...}, gin.H{...}). Extracts the type identifier from each and
+//	returns them as TypeReference entries. These feed into the graph builder's
+//	EdgeTypeReferences edges, making composite literal usages visible to
+//	find_references.
+//
+//	IT-16: Without this, types like gin.H that are primarily used via composite
+//	literals (not function calls) are invisible to find_references — the parser
+//	only extracted call_expression nodes from bodies.
+//
+// Inputs:
+//   - ctx: Context for cancellation.
+//   - bodyNode: The function/method body node from tree-sitter. Must not be nil.
+//   - content: Source file bytes.
+//   - filePath: Relative path for Location.
+//
+// Outputs:
+//   - []TypeReference: Type references found in composite literals.
+//
+// Thread Safety: Safe for concurrent use.
+func (p *GoParser) extractCompositeLiteralTypeRefs(ctx context.Context, bodyNode *sitter.Node, content []byte, filePath string) []TypeReference {
+	if bodyNode == nil {
+		return nil
+	}
+
+	if ctx.Err() != nil {
+		return nil
+	}
+
+	var refs []TypeReference
+	seen := make(map[string]bool)
+
+	type stackEntry struct {
+		node  *sitter.Node
+		depth int
+	}
+
+	stack := make([]stackEntry, 0, 64)
+	stack = append(stack, stackEntry{node: bodyNode, depth: 0})
+
+	nodeCount := 0
+	for len(stack) > 0 {
+		entry := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+
+		node := entry.node
+		if node == nil {
+			continue
+		}
+
+		if entry.depth > MaxCallExpressionDepth {
+			continue
+		}
+
+		nodeCount++
+		if nodeCount%100 == 0 {
+			if ctx.Err() != nil {
+				return refs
+			}
+		}
+
+		if len(refs) >= MaxTypeReferencesPerSymbol {
+			return refs
+		}
+
+		if node.Type() == "composite_literal" {
+			typeNode := node.ChildByFieldName("type")
+			if typeNode != nil {
+				var typeName string
+				switch typeNode.Type() {
+				case "type_identifier":
+					typeName = string(content[typeNode.StartByte():typeNode.EndByte()])
+				case "qualified_type":
+					// gin.H -> extract "H" (strip package qualifier)
+					nameNode := typeNode.ChildByFieldName("name")
+					if nameNode != nil {
+						typeName = string(content[nameNode.StartByte():nameNode.EndByte()])
+					}
+				case "generic_type":
+					// Result[T] -> extract "Result"
+					nameNode := typeNode.ChildByFieldName("type")
+					if nameNode != nil && nameNode.Type() == "type_identifier" {
+						typeName = string(content[nameNode.StartByte():nameNode.EndByte()])
+					}
+				case "slice_type", "map_type", "array_type":
+					// []Config{...} or map[string]H{...} — walk children for type_identifier
+					for j := 0; j < int(typeNode.ChildCount()); j++ {
+						child := typeNode.Child(j)
+						if child != nil && child.Type() == "type_identifier" {
+							name := string(content[child.StartByte():child.EndByte()])
+							if name != "" && !goTypeSkipList[name] && !seen[name] {
+								seen[name] = true
+								refs = append(refs, TypeReference{
+									Name: name,
+									Location: Location{
+										FilePath:  filePath,
+										StartLine: int(node.StartPoint().Row) + 1,
+										EndLine:   int(node.EndPoint().Row) + 1,
+										StartCol:  int(node.StartPoint().Column),
+										EndCol:    int(node.EndPoint().Column),
+									},
+								})
+							}
+						}
+					}
+					// Skip the main typeName path for container types
+					typeName = ""
+				}
+				if typeName != "" && !goTypeSkipList[typeName] && !seen[typeName] {
+					seen[typeName] = true
+					refs = append(refs, TypeReference{
+						Name: typeName,
+						Location: Location{
+							FilePath:  filePath,
+							StartLine: int(node.StartPoint().Row) + 1,
+							EndLine:   int(node.EndPoint().Row) + 1,
+							StartCol:  int(node.StartPoint().Column),
+							EndCol:    int(node.EndPoint().Column),
+						},
+					})
+				}
+			}
+		}
+
+		// Add children to stack (reverse order for left-to-right processing)
+		childCount := int(node.ChildCount())
+		for i := childCount - 1; i >= 0; i-- {
+			child := node.Child(i)
+			if child != nil {
+				stack = append(stack, stackEntry{
+					node:  child,
+					depth: entry.depth + 1,
+				})
+			}
+		}
+	}
+
+	return refs
 }
 
 // extractSingleCallSite extracts call information from a call_expression node.

@@ -83,18 +83,19 @@ func (t *DiffTool) Definition() tools.ToolDefinition {
 }
 
 // Execute compares two files and returns the diff.
-func (t *DiffTool) Execute(ctx context.Context, params map[string]any) (*tools.Result, error) {
+func (t *DiffTool) Execute(ctx context.Context, params tools.TypedParams) (*tools.Result, error) {
 	start := time.Now()
 
 	// Parse parameters
+	m := params.ToMap()
 	p := &DiffParams{}
-	if fileA, ok := params["file_a"].(string); ok {
+	if fileA, ok := m["file_a"].(string); ok {
 		p.FileA = fileA
 	}
-	if fileB, ok := params["file_b"].(string); ok {
+	if fileB, ok := m["file_b"].(string); ok {
 		p.FileB = fileB
 	}
-	if contextLines, ok := getIntParam(params, "context_lines"); ok {
+	if contextLines, ok := getIntParam(m, "context_lines"); ok {
 		p.ContextLines = contextLines
 	}
 

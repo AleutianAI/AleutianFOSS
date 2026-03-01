@@ -866,6 +866,150 @@ func TestPythonParser_Parse_Validation(t *testing.T) {
 	}
 }
 
+// TestPythonParser_DecoratedClassWithManyMethods tests that a decorated class
+// with many methods (like Pandas MultiIndex) is correctly parsed and passes Validate().
+// IT-04: Diagnostic test for the find_symbol integration failure on MultiIndex.
+func TestPythonParser_DecoratedClassWithManyMethods(t *testing.T) {
+	source := `
+from pandas.compat import set_module
+
+@set_module("pandas")
+class MultiIndex(Index):
+    """A multi-level index object."""
+
+    _hidden_attrs = frozenset()
+    _cache = {}
+
+    def __new__(cls, levels=None, codes=None, sortorder=None, names=None,
+                dtype=None, copy=False, name=None, verify_integrity=True):
+        result = object.__new__(cls)
+        return result
+
+    def __init__(self, levels=None, codes=None, sortorder=None, names=None):
+        self._levels = levels
+        self._codes = codes
+
+    @classmethod
+    def from_arrays(cls, arrays, sortorder=None, names=None):
+        """Create a MultiIndex from arrays."""
+        return cls(levels=arrays, names=names)
+
+    @classmethod
+    def from_tuples(cls, tuples, sortorder=None, names=None):
+        """Create from list of tuples."""
+        return cls(levels=tuples, names=names)
+
+    @property
+    def levels(self):
+        return self._levels
+
+    @property
+    def codes(self):
+        return self._codes
+
+    def _get_level_number(self, level):
+        count = self.names.count(level)
+        return count
+
+    def _set_levels(self, levels, level=None, copy=False, validate=True,
+                    verify_integrity=False):
+        new_levels = []
+        for lev in levels:
+            new_levels.append(lev)
+        self._levels = new_levels
+
+    def get_loc(self, key, method=None):
+        """Get location for a label."""
+        return self._engine.get_loc(key)
+
+    def get_locs(self, seq):
+        """Get locations for a sequence."""
+        return [self.get_loc(x) for x in seq]
+
+    def _reindex_non_unique(self, target):
+        new_target = self._shallow_copy(target)
+        return new_target
+
+    def set_levels(self, levels, level=None, inplace=None, verify_integrity=True):
+        self._set_levels(levels, level=level, validate=True,
+                         verify_integrity=verify_integrity)
+
+    def set_codes(self, codes, level=None, inplace=None, verify_integrity=True):
+        self._codes = codes
+`
+	parser := NewPythonParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "pandas/core/indexes/multi.py")
+	if err != nil {
+		t.Fatalf("Parse() returned error: %v", err)
+	}
+
+	// Check ParseResult.Validate()
+	if err := result.Validate(); err != nil {
+		t.Fatalf("result.Validate() failed — WOULD CAUSE FILE DROP: %v", err)
+	}
+
+	// Find MultiIndex class
+	var mi *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "MultiIndex" {
+			mi = sym
+			break
+		}
+	}
+	if mi == nil {
+		t.Fatal("MultiIndex not found in parsed symbols")
+	}
+
+	// Verify Symbol.Validate() passes (including recursive children)
+	if err := mi.Validate(); err != nil {
+		t.Fatalf("MultiIndex.Validate() failed: %v", err)
+	}
+
+	t.Logf("MultiIndex found: Kind=%s, StartLine=%d, EndLine=%d, Exported=%v, Children=%d",
+		mi.Kind, mi.StartLine, mi.EndLine, mi.Exported, len(mi.Children))
+
+	// Log all children for diagnosis
+	for i, child := range mi.Children {
+		t.Logf("  Child[%d]: Name=%q Kind=%s StartLine=%d EndLine=%d Exported=%v",
+			i, child.Name, child.Kind, child.StartLine, child.EndLine, child.Exported)
+	}
+
+	// Verify expectations
+	if mi.Kind != SymbolKindClass {
+		t.Errorf("expected SymbolKindClass, got %s", mi.Kind)
+	}
+	if mi.Metadata == nil || mi.Metadata.Extends != "Index" {
+		t.Errorf("expected Extends=Index, got %v", mi.Metadata)
+	}
+	if !mi.Exported {
+		t.Error("expected MultiIndex to be exported")
+	}
+
+	// Verify decorator is captured
+	if mi.Metadata == nil || len(mi.Metadata.Decorators) == 0 {
+		t.Error("expected set_module decorator to be captured")
+	} else {
+		t.Logf("  Decorators: %v", mi.Metadata.Decorators)
+	}
+
+	// Check children include various kinds
+	methodCount := 0
+	propertyCount := 0
+	for _, child := range mi.Children {
+		switch child.Kind {
+		case SymbolKindMethod:
+			methodCount++
+		case SymbolKindProperty:
+			propertyCount++
+		}
+	}
+	t.Logf("  Methods: %d, Properties: %d", methodCount, propertyCount)
+
+	if methodCount == 0 {
+		t.Error("expected at least one method child")
+	}
+}
+
 func TestPythonParser_Parse_Hash(t *testing.T) {
 	parser := NewPythonParser()
 	content := []byte("def foo(): pass")
@@ -1923,6 +2067,23 @@ func TestPythonParser_ExtractCallSites_OverloadAndDelegation(t *testing.T) {
 		}
 	})
 
+	t.Run("overload_stubs_have_IsOverload_metadata", func(t *testing.T) {
+		// IT-06c H-3: Parser must mark @overload stubs so symbol resolution
+		// can prefer the real implementation.
+		for i, stub := range overloadStubs {
+			if stub.Metadata == nil || !stub.Metadata.IsOverload {
+				t.Errorf("overload stub %d at line %d should have IsOverload=true",
+					i, stub.StartLine)
+			}
+		}
+		// The real implementation must NOT have IsOverload set
+		if realToCsv != nil {
+			if realToCsv.Metadata != nil && realToCsv.Metadata.IsOverload {
+				t.Error("real to_csv implementation should NOT have IsOverload=true")
+			}
+		}
+	})
+
 	t.Run("real_to_csv_extracts_all_calls", func(t *testing.T) {
 		if realToCsv == nil {
 			t.Fatal("real to_csv implementation not found (expected method with calls)")
@@ -1994,4 +2155,1174 @@ func TestPythonParser_ExtractCallSites_OverloadAndDelegation(t *testing.T) {
 			t.Error("missing call to merge() (inline-imported function)")
 		}
 	})
+}
+
+// === IT-03a A-3: Decorator Arguments Tests ===
+
+func TestPythonParser_DecoratorArgs_SimpleFunction(t *testing.T) {
+	source := `@app.route("/users")
+def get_users():
+    pass
+`
+	parser := NewPythonParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var fn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindFunction && sym.Name == "get_users" {
+			fn = sym
+			break
+		}
+	}
+
+	if fn == nil {
+		t.Fatal("expected function 'get_users'")
+	}
+
+	if fn.Metadata == nil {
+		t.Fatal("expected metadata on decorated function")
+	}
+
+	// Verify the decorator name is captured
+	foundDecorator := false
+	for _, dec := range fn.Metadata.Decorators {
+		if dec == "app.route" {
+			foundDecorator = true
+			break
+		}
+	}
+	if !foundDecorator {
+		t.Errorf("expected decorator 'app.route', got decorators: %v", fn.Metadata.Decorators)
+	}
+
+	// @app.route("/users") has only a string arg, no identifier args
+	// DecoratorArgs should be nil or not contain "app.route"
+	if fn.Metadata.DecoratorArgs != nil {
+		if args, ok := fn.Metadata.DecoratorArgs["app.route"]; ok && len(args) > 0 {
+			t.Errorf("expected no decorator args for app.route (string arg only), got %v", args)
+		}
+	}
+}
+
+func TestPythonParser_DecoratorArgs_ClassWithIdentifier(t *testing.T) {
+	source := `@use_interceptors(LoggingInterceptor)
+def handler():
+    pass
+`
+	parser := NewPythonParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var fn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindFunction && sym.Name == "handler" {
+			fn = sym
+			break
+		}
+	}
+
+	if fn == nil {
+		t.Fatal("expected function 'handler'")
+	}
+
+	if fn.Metadata == nil {
+		t.Fatal("expected metadata on decorated function")
+	}
+
+	if fn.Metadata.DecoratorArgs == nil {
+		t.Fatal("expected DecoratorArgs to be non-nil")
+	}
+
+	args, ok := fn.Metadata.DecoratorArgs["use_interceptors"]
+	if !ok {
+		t.Fatalf("expected DecoratorArgs to contain 'use_interceptors', got %v", fn.Metadata.DecoratorArgs)
+	}
+
+	if len(args) != 1 || args[0] != "LoggingInterceptor" {
+		t.Errorf("expected DecoratorArgs['use_interceptors'] = ['LoggingInterceptor'], got %v", args)
+	}
+}
+
+func TestPythonParser_DecoratorArgs_KeywordArgument(t *testing.T) {
+	source := `@register(cls=MyService)
+def handler():
+    pass
+`
+	parser := NewPythonParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var fn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindFunction && sym.Name == "handler" {
+			fn = sym
+			break
+		}
+	}
+
+	if fn == nil {
+		t.Fatal("expected function 'handler'")
+	}
+
+	if fn.Metadata == nil || fn.Metadata.DecoratorArgs == nil {
+		t.Fatal("expected DecoratorArgs to be non-nil")
+	}
+
+	args, ok := fn.Metadata.DecoratorArgs["register"]
+	if !ok {
+		t.Fatalf("expected DecoratorArgs to contain 'register', got %v", fn.Metadata.DecoratorArgs)
+	}
+
+	found := false
+	for _, arg := range args {
+		if arg == "MyService" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected DecoratorArgs['register'] to include 'MyService', got %v", args)
+	}
+}
+
+func TestPythonParser_DecoratorArgs_ListArgument(t *testing.T) {
+	source := `@register([Service1, Service2])
+def handler():
+    pass
+`
+	parser := NewPythonParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var fn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindFunction && sym.Name == "handler" {
+			fn = sym
+			break
+		}
+	}
+
+	if fn == nil {
+		t.Fatal("expected function 'handler'")
+	}
+
+	if fn.Metadata == nil || fn.Metadata.DecoratorArgs == nil {
+		t.Fatal("expected DecoratorArgs to be non-nil")
+	}
+
+	args, ok := fn.Metadata.DecoratorArgs["register"]
+	if !ok {
+		t.Fatalf("expected DecoratorArgs to contain 'register', got %v", fn.Metadata.DecoratorArgs)
+	}
+
+	argSet := make(map[string]bool)
+	for _, a := range args {
+		argSet[a] = true
+	}
+
+	if !argSet["Service1"] {
+		t.Errorf("expected DecoratorArgs['register'] to include 'Service1', got %v", args)
+	}
+	if !argSet["Service2"] {
+		t.Errorf("expected DecoratorArgs['register'] to include 'Service2', got %v", args)
+	}
+}
+
+func TestPythonParser_DecoratorArgs_NoArgs(t *testing.T) {
+	source := `@staticmethod
+def foo():
+    pass
+`
+	parser := NewPythonParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var fn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindFunction && sym.Name == "foo" {
+			fn = sym
+			break
+		}
+	}
+
+	if fn == nil {
+		t.Fatal("expected function 'foo'")
+	}
+
+	// @staticmethod has no parentheses, so no DecoratorArgs
+	if fn.Metadata != nil && fn.Metadata.DecoratorArgs != nil {
+		t.Errorf("expected no DecoratorArgs for bare decorator, got %v", fn.Metadata.DecoratorArgs)
+	}
+}
+
+func TestPythonParser_DecoratorArgs_EmptyCall(t *testing.T) {
+	source := `@injectable()
+def foo():
+    pass
+`
+	parser := NewPythonParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var fn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindFunction && sym.Name == "foo" {
+			fn = sym
+			break
+		}
+	}
+
+	if fn == nil {
+		t.Fatal("expected function 'foo'")
+	}
+
+	// @injectable() has empty args — no identifier arguments
+	if fn.Metadata != nil && fn.Metadata.DecoratorArgs != nil {
+		if args, ok := fn.Metadata.DecoratorArgs["injectable"]; ok && len(args) > 0 {
+			t.Errorf("expected no DecoratorArgs for empty call, got %v", args)
+		}
+	}
+}
+
+func TestPythonParser_DecoratorArgs_ClassDecorated(t *testing.T) {
+	source := `@register(MyPlugin)
+class PluginHandler:
+    def handle(self):
+        pass
+`
+	parser := NewPythonParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var class *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindClass && sym.Name == "PluginHandler" {
+			class = sym
+			break
+		}
+	}
+
+	if class == nil {
+		t.Fatal("expected class 'PluginHandler'")
+	}
+
+	if class.Metadata == nil {
+		t.Fatal("expected metadata on decorated class")
+	}
+
+	// Verify decorator is present
+	foundDecorator := false
+	for _, dec := range class.Metadata.Decorators {
+		if dec == "register" {
+			foundDecorator = true
+			break
+		}
+	}
+	if !foundDecorator {
+		t.Errorf("expected decorator 'register', got decorators: %v", class.Metadata.Decorators)
+	}
+
+	// Verify DecoratorArgs
+	if class.Metadata.DecoratorArgs == nil {
+		t.Fatal("expected DecoratorArgs to be non-nil for decorated class")
+	}
+
+	args, ok := class.Metadata.DecoratorArgs["register"]
+	if !ok {
+		t.Fatalf("expected DecoratorArgs to contain 'register', got %v", class.Metadata.DecoratorArgs)
+	}
+
+	if len(args) != 1 || args[0] != "MyPlugin" {
+		t.Errorf("expected DecoratorArgs['register'] = ['MyPlugin'], got %v", args)
+	}
+}
+
+func TestPythonParser_DecoratorArgs_DecoratedMethod(t *testing.T) {
+	source := `class MyController:
+    @use_guards(AuthGuard)
+    def protected_route(self):
+        pass
+`
+	parser := NewPythonParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var class *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindClass && sym.Name == "MyController" {
+			class = sym
+			break
+		}
+	}
+
+	if class == nil {
+		t.Fatal("expected class 'MyController'")
+	}
+
+	var method *Symbol
+	for _, child := range class.Children {
+		if child.Name == "protected_route" {
+			method = child
+			break
+		}
+	}
+
+	if method == nil {
+		t.Fatal("expected method 'protected_route'")
+	}
+
+	if method.Metadata == nil {
+		t.Fatal("expected metadata on decorated method")
+	}
+
+	// Verify decorator is present
+	foundDecorator := false
+	for _, dec := range method.Metadata.Decorators {
+		if dec == "use_guards" {
+			foundDecorator = true
+			break
+		}
+	}
+	if !foundDecorator {
+		t.Errorf("expected decorator 'use_guards', got decorators: %v", method.Metadata.Decorators)
+	}
+
+	// Verify DecoratorArgs
+	if method.Metadata.DecoratorArgs == nil {
+		t.Fatal("expected DecoratorArgs to be non-nil for decorated method")
+	}
+
+	args, ok := method.Metadata.DecoratorArgs["use_guards"]
+	if !ok {
+		t.Fatalf("expected DecoratorArgs to contain 'use_guards', got %v", method.Metadata.DecoratorArgs)
+	}
+
+	if len(args) != 1 || args[0] != "AuthGuard" {
+		t.Errorf("expected DecoratorArgs['use_guards'] = ['AuthGuard'], got %v", args)
+	}
+}
+
+func TestPythonParser_DecoratorArgs_SkipsBooleans(t *testing.T) {
+	source := `@foo(True, False, None)
+def bar():
+    pass
+`
+	parser := NewPythonParser()
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var fn *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Kind == SymbolKindFunction && sym.Name == "bar" {
+			fn = sym
+			break
+		}
+	}
+
+	if fn == nil {
+		t.Fatal("expected function 'bar'")
+	}
+
+	// True, False, None are not identifiers for our purposes — should be skipped
+	if fn.Metadata != nil && fn.Metadata.DecoratorArgs != nil {
+		if args, ok := fn.Metadata.DecoratorArgs["foo"]; ok && len(args) > 0 {
+			t.Errorf("expected no DecoratorArgs for @foo(True, False, None), got %v", args)
+		}
+	}
+}
+
+// IT-03a Phase 15 P-1: Protocol[T] detection tests
+
+func TestPythonParser_ProtocolWithGeneric(t *testing.T) {
+	parser := NewPythonParser()
+
+	src := []byte(`
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class Comparable(Protocol[T]):
+    def compare(self, other: T) -> int:
+        ...
+
+class StringComparable:
+    def compare(self, other: str) -> int:
+        return 0
+`)
+
+	result, err := parser.Parse(context.Background(), src, "protocol_generic.py")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	var comparable *Symbol
+	var stringComparable *Symbol
+	for _, sym := range result.Symbols {
+		switch sym.Name {
+		case "Comparable":
+			comparable = sym
+		case "StringComparable":
+			stringComparable = sym
+		}
+	}
+
+	if comparable == nil {
+		t.Fatal("expected symbol 'Comparable'")
+	}
+	// Protocol[T] should be detected as an interface
+	if comparable.Kind != SymbolKindInterface {
+		t.Errorf("expected Comparable kind Interface, got %v", comparable.Kind)
+	}
+
+	if stringComparable == nil {
+		t.Fatal("expected symbol 'StringComparable'")
+	}
+	// Regular class should remain a class
+	if stringComparable.Kind != SymbolKindClass {
+		t.Errorf("expected StringComparable kind Class, got %v", stringComparable.Kind)
+	}
+}
+
+// IT-03a Phase 15 P-2: ABCMeta metaclass detection tests
+
+func TestPythonParser_ABCMetaMetaclass(t *testing.T) {
+	parser := NewPythonParser()
+
+	src := []byte(`
+from abc import ABCMeta, abstractmethod
+
+class Handler(metaclass=ABCMeta):
+    @abstractmethod
+    def handle(self, request):
+        pass
+
+    @abstractmethod
+    def validate(self, request):
+        pass
+
+class ConcreteHandler(Handler):
+    def handle(self, request):
+        return "handled"
+
+    def validate(self, request):
+        return True
+`)
+
+	result, err := parser.Parse(context.Background(), src, "abcmeta.py")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	var handler *Symbol
+	var concrete *Symbol
+	for _, sym := range result.Symbols {
+		switch sym.Name {
+		case "Handler":
+			handler = sym
+		case "ConcreteHandler":
+			concrete = sym
+		}
+	}
+
+	if handler == nil {
+		t.Fatal("expected symbol 'Handler'")
+	}
+	// ABCMeta metaclass with @abstractmethod should be detected as interface
+	if handler.Kind != SymbolKindInterface {
+		t.Errorf("expected Handler kind Interface (ABCMeta + abstractmethod), got %v", handler.Kind)
+	}
+
+	if concrete == nil {
+		t.Fatal("expected symbol 'ConcreteHandler'")
+	}
+	if concrete.Kind != SymbolKindClass {
+		t.Errorf("expected ConcreteHandler kind Class, got %v", concrete.Kind)
+	}
+}
+
+// TestPythonParser_KeywordArg_NonMetaclass verifies that non-metaclass keyword
+// arguments in class definitions do not incorrectly affect class classification.
+// Phase 17 COVERAGE-2: Negative test for extractKeywordBaseClass.
+func TestPythonParser_KeywordArg_NonMetaclass(t *testing.T) {
+	parser := NewPythonParser()
+
+	src := []byte(`
+class Config(slots=True, frozen=True):
+    name: str
+    value: int
+
+class TypedDict(total=False):
+    key: str
+`)
+
+	result, err := parser.Parse(context.Background(), src, "non_metaclass.py")
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	for _, sym := range result.Symbols {
+		if sym.Name == "Config" || sym.Name == "TypedDict" {
+			// Non-metaclass keyword args should not change classification
+			if sym.Kind != SymbolKindClass {
+				t.Errorf("expected %s kind Class (non-metaclass keyword args), got %v", sym.Name, sym.Kind)
+			}
+		}
+	}
+}
+
+// TestPythonParser_QualifiedBaseClassName verifies IT-06b Issue 4:
+// When a class extends a qualified name (e.g., "generic.NDFrame"),
+// the Extends metadata stores only the bare name "NDFrame" for
+// index lookup compatibility.
+func TestPythonParser_QualifiedBaseClassName(t *testing.T) {
+	tests := []struct {
+		name           string
+		source         string
+		expectedExtend string
+	}{
+		{
+			name: "bare base class name",
+			source: `class Series(NDFrame):
+    def apply(self):
+        pass
+`,
+			expectedExtend: "NDFrame",
+		},
+		{
+			name: "qualified base class name (dotted)",
+			source: `class Series(generic.NDFrame):
+    def apply(self):
+        pass
+`,
+			expectedExtend: "NDFrame",
+		},
+		{
+			name: "deeply qualified base class name",
+			source: `class Series(pandas.core.generic.NDFrame):
+    def apply(self):
+        pass
+`,
+			expectedExtend: "NDFrame",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parser := NewPythonParser()
+			result, err := parser.Parse(context.Background(), []byte(tt.source), "test.py")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			var classSym *Symbol
+			for _, sym := range result.Symbols {
+				if sym.Name == "Series" && sym.Kind == SymbolKindClass {
+					classSym = sym
+					break
+				}
+			}
+
+			if classSym == nil {
+				t.Fatal("expected to find class 'Series'")
+			}
+
+			if classSym.Metadata == nil {
+				t.Fatal("expected Metadata to be set")
+			}
+
+			if classSym.Metadata.Extends != tt.expectedExtend {
+				t.Errorf("expected Extends=%q, got %q", tt.expectedExtend, classSym.Metadata.Extends)
+			}
+		})
+	}
+}
+
+// TestPythonParser_SuperCallExtraction verifies that super().method() calls are
+// normalized to Receiver="super", Target="method", IsMethod=true.
+func TestPythonParser_SuperCallExtraction(t *testing.T) {
+	source := `
+class Parent:
+    def save(self):
+        pass
+
+class Child(Parent):
+    def save(self):
+        super().save()
+        super().validate()
+`
+
+	parser := NewPythonParser()
+	ctx := context.Background()
+	result, err := parser.Parse(ctx, []byte(source), "test_super.py")
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	// Find Child class and its save method
+	var childSave *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Child" {
+			for _, child := range sym.Children {
+				if child.Name == "save" {
+					childSave = child
+					break
+				}
+			}
+		}
+	}
+
+	if childSave == nil {
+		t.Fatal("expected to find Child.save method")
+	}
+
+	if len(childSave.Calls) < 2 {
+		t.Fatalf("expected at least 2 calls in Child.save, got %d", len(childSave.Calls))
+	}
+
+	// Check that super() calls are normalized
+	for _, call := range childSave.Calls {
+		if call.Target == "save" || call.Target == "validate" {
+			if call.Receiver != "super" {
+				t.Errorf("super().%s() should have Receiver='super', got %q", call.Target, call.Receiver)
+			}
+			if !call.IsMethod {
+				t.Errorf("super().%s() should have IsMethod=true", call.Target)
+			}
+		}
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IT-43a: Implicit Dunder Method Extraction Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+const pythonDunderTestSource = `
+class Container:
+    def __init__(self):
+        self.data = {}
+        self.items = []
+
+    def __getitem__(self, key):
+        return self.data[key]
+
+    def __setitem__(self, key, value):
+        self.data[key] = value
+
+    def __delitem__(self, key):
+        del self.data[key]
+
+    def __iter__(self):
+        return iter(self.items)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+    def process(self):
+        val = self.data["x"]
+        self.data["y"] = 42
+        del self.data["z"]
+
+    def iterate_items(self):
+        for item in self.items:
+            print(item)
+
+    def use_context(self):
+        with open("file.txt") as f:
+            f.read()
+
+    def nested_subscript(self):
+        val = self.data["a"]["b"]
+
+    def subscript_on_call(self):
+        val = self.get_data()[0]
+
+    def augmented_subscript(self):
+        self.data["count"] += 1
+
+    def get_data(self):
+        return self.data
+`
+
+func TestPythonParser_ImplicitDunderCalls_Subscript(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonDunderTestSource), "container.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Find the process method
+	method := findMethodInClass(t, result, "Container", "process")
+	if method == nil {
+		t.Fatal("process method not found")
+	}
+
+	calls := callsByTarget(method.Calls)
+
+	// self.data["x"] → __getitem__
+	if !calls["__getitem__"] {
+		t.Errorf("expected __getitem__ call, got: %v", callTargetNames(method.Calls))
+	}
+	// self.data["y"] = 42 → __setitem__
+	if !calls["__setitem__"] {
+		t.Errorf("expected __setitem__ call, got: %v", callTargetNames(method.Calls))
+	}
+	// del self.data["z"] → __delitem__
+	if !calls["__delitem__"] {
+		t.Errorf("expected __delitem__ call, got: %v", callTargetNames(method.Calls))
+	}
+
+	// Verify receivers are "self" for self.data[...] subscripts
+	for _, call := range method.Calls {
+		if call.Target == "__getitem__" || call.Target == "__setitem__" || call.Target == "__delitem__" {
+			if call.Receiver != "self" {
+				t.Errorf("dunder call %s should have Receiver='self', got %q", call.Target, call.Receiver)
+			}
+			if !call.IsMethod {
+				t.Errorf("dunder call %s should have IsMethod=true", call.Target)
+			}
+		}
+	}
+}
+
+func TestPythonParser_ImplicitDunderCalls_ForIteration(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonDunderTestSource), "container.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	method := findMethodInClass(t, result, "Container", "iterate_items")
+	if method == nil {
+		t.Fatal("iterate_items method not found")
+	}
+
+	calls := callsByTarget(method.Calls)
+
+	// for item in self.items: → __iter__
+	if !calls["__iter__"] {
+		t.Errorf("expected __iter__ call, got: %v", callTargetNames(method.Calls))
+	}
+
+	// Verify receiver is "self" for self.items
+	for _, call := range method.Calls {
+		if call.Target == "__iter__" {
+			if call.Receiver != "self" {
+				t.Errorf("__iter__ should have Receiver='self', got %q", call.Receiver)
+			}
+			if !call.IsMethod {
+				t.Error("__iter__ should have IsMethod=true")
+			}
+		}
+	}
+}
+
+func TestPythonParser_ImplicitDunderCalls_WithStatement(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonDunderTestSource), "container.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	method := findMethodInClass(t, result, "Container", "use_context")
+	if method == nil {
+		t.Fatal("use_context method not found")
+	}
+
+	calls := callsByTarget(method.Calls)
+
+	// with open("file.txt") as f: → __enter__ and __exit__
+	if !calls["__enter__"] {
+		t.Errorf("expected __enter__ call, got: %v", callTargetNames(method.Calls))
+	}
+	if !calls["__exit__"] {
+		t.Errorf("expected __exit__ call, got: %v", callTargetNames(method.Calls))
+	}
+}
+
+func TestPythonParser_ImplicitDunderCalls_NestedSubscript(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonDunderTestSource), "container.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	method := findMethodInClass(t, result, "Container", "nested_subscript")
+	if method == nil {
+		t.Fatal("nested_subscript method not found")
+	}
+
+	// self.data["a"]["b"] → two __getitem__ calls
+	getitemCount := 0
+	for _, call := range method.Calls {
+		if call.Target == "__getitem__" {
+			getitemCount++
+		}
+	}
+
+	if getitemCount < 2 {
+		t.Errorf("expected at least 2 __getitem__ calls for nested subscript, got %d: %v",
+			getitemCount, callTargetNames(method.Calls))
+	}
+}
+
+func TestPythonParser_ImplicitDunderCalls_AugmentedSubscript(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonDunderTestSource), "container.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	method := findMethodInClass(t, result, "Container", "augmented_subscript")
+	if method == nil {
+		t.Fatal("augmented_subscript method not found")
+	}
+
+	calls := callsByTarget(method.Calls)
+
+	// self.data["count"] += 1 → __getitem__ AND __setitem__
+	if !calls["__getitem__"] {
+		t.Errorf("expected __getitem__ for augmented assignment, got: %v", callTargetNames(method.Calls))
+	}
+	if !calls["__setitem__"] {
+		t.Errorf("expected __setitem__ for augmented assignment, got: %v", callTargetNames(method.Calls))
+	}
+}
+
+func TestPythonParser_ImplicitDunderCalls_NoFalseEdgesOnLiterals(t *testing.T) {
+	source := `
+class Foo:
+    def bar(self):
+        x = [1, 2, 3][0]
+        y = {"a": 1}["a"]
+        z = (1, 2, 3)[0]
+`
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	method := findMethodInClass(t, result, "Foo", "bar")
+	if method == nil {
+		t.Fatal("bar method not found")
+	}
+
+	// Subscripts on list/dict/tuple literals should NOT generate dunder calls
+	for _, call := range method.Calls {
+		if call.Target == "__getitem__" {
+			t.Errorf("unexpected __getitem__ on literal subscript: receiver=%q", call.Receiver)
+		}
+	}
+}
+
+func TestPythonParser_ImplicitDunderCalls_ForOnLiteral(t *testing.T) {
+	source := `
+class Foo:
+    def bar(self):
+        for x in [1, 2, 3]:
+            pass
+        for y in self.items:
+            pass
+`
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	method := findMethodInClass(t, result, "Foo", "bar")
+	if method == nil {
+		t.Fatal("bar method not found")
+	}
+
+	// for x in [1,2,3] should NOT generate __iter__
+	// for y in self.items SHOULD generate __iter__
+	iterCount := 0
+	for _, call := range method.Calls {
+		if call.Target == "__iter__" {
+			iterCount++
+			if call.Receiver != "self" {
+				t.Errorf("__iter__ should have Receiver='self', got %q", call.Receiver)
+			}
+		}
+	}
+
+	if iterCount != 1 {
+		t.Errorf("expected exactly 1 __iter__ call (for self.items), got %d: %v",
+			iterCount, callTargetNames(method.Calls))
+	}
+}
+
+// ── Helpers ──
+
+func findMethodInClass(t *testing.T, result *ParseResult, className, methodName string) *Symbol {
+	t.Helper()
+	for _, sym := range result.Symbols {
+		if sym.Name == className {
+			for _, child := range sym.Children {
+				if child.Name == methodName {
+					return child
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func callsByTarget(calls []CallSite) map[string]bool {
+	m := make(map[string]bool)
+	for _, c := range calls {
+		m[c.Target] = true
+	}
+	return m
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IT-43b: @property Access Edge Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+const pythonPropertyTestSource = `
+class DataModel:
+    def __init__(self):
+        self._name = "default"
+        self._count = 0
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def count(self) -> int:
+        return self._count
+
+    def display(self):
+        print(self.name)
+        print(self.count)
+
+    def process(self):
+        n = self.name
+        c = self.count
+        self.update()
+
+    def update(self):
+        self._name = "updated"
+
+    def method_calls_method(self):
+        self.update()
+        self.name
+`
+
+func TestPythonParser_PropertyAccess_SelfDot(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonPropertyTestSource), "model.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The display method accesses self.name and self.count (both @property)
+	method := findMethodInClass(t, result, "DataModel", "display")
+	if method == nil {
+		t.Fatal("display method not found")
+	}
+
+	calls := callsByTarget(method.Calls)
+
+	if !calls["name"] {
+		t.Errorf("expected call edge to @property 'name', got: %v", callTargetNames(method.Calls))
+	}
+	if !calls["count"] {
+		t.Errorf("expected call edge to @property 'count', got: %v", callTargetNames(method.Calls))
+	}
+
+	// Verify receiver is "self" and IsMethod is true
+	for _, call := range method.Calls {
+		if call.Target == "name" || call.Target == "count" {
+			if call.Receiver != "self" {
+				t.Errorf("property call %s should have Receiver='self', got %q", call.Target, call.Receiver)
+			}
+			if !call.IsMethod {
+				t.Errorf("property call %s should have IsMethod=true", call.Target)
+			}
+		}
+	}
+}
+
+func TestPythonParser_PropertyAccess_NotConfusedWithMethodCall(t *testing.T) {
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonPropertyTestSource), "model.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// method_calls_method() calls self.update() (a method call, NOT a property)
+	// and accesses self.name (a property)
+	method := findMethodInClass(t, result, "DataModel", "method_calls_method")
+	if method == nil {
+		t.Fatal("method_calls_method not found")
+	}
+
+	calls := callsByTarget(method.Calls)
+
+	// self.update() should be extracted as a normal method call
+	if !calls["update"] {
+		t.Errorf("expected call to update(), got: %v", callTargetNames(method.Calls))
+	}
+
+	// self.name should be extracted as a property access
+	if !calls["name"] {
+		t.Errorf("expected property access edge to 'name', got: %v", callTargetNames(method.Calls))
+	}
+
+	// self.update() is a regular call — should only appear once from extractCallSites
+	// self.name should appear from property access edges
+	updateCount := 0
+	nameCount := 0
+	for _, call := range method.Calls {
+		if call.Target == "update" {
+			updateCount++
+		}
+		if call.Target == "name" {
+			nameCount++
+		}
+	}
+
+	if updateCount != 1 {
+		t.Errorf("expected exactly 1 call to update(), got %d", updateCount)
+	}
+	if nameCount < 1 {
+		t.Errorf("expected at least 1 property access to name, got %d", nameCount)
+	}
+}
+
+func TestPythonParser_PropertyAccess_NotConfusedWithPlainAttribute(t *testing.T) {
+	source := `
+class Foo:
+    @property
+    def name(self):
+        return self._name
+
+    def bar(self):
+        x = self._name
+        y = self.name
+        z = self.other_attr
+`
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	method := findMethodInClass(t, result, "Foo", "bar")
+	if method == nil {
+		t.Fatal("bar method not found")
+	}
+
+	// self.name → should have property edge (name is @property)
+	// self._name → should NOT have property edge (not a property)
+	// self.other_attr → should NOT have property edge (not a property)
+	nameEdges := 0
+	privateNameEdges := 0
+	otherAttrEdges := 0
+	for _, call := range method.Calls {
+		switch call.Target {
+		case "name":
+			nameEdges++
+		case "_name":
+			privateNameEdges++
+		case "other_attr":
+			otherAttrEdges++
+		}
+	}
+
+	if nameEdges == 0 {
+		t.Error("expected property access edge for self.name")
+	}
+	if privateNameEdges > 0 {
+		t.Error("self._name should NOT create a property edge")
+	}
+	if otherAttrEdges > 0 {
+		t.Error("self.other_attr should NOT create a property edge")
+	}
+}
+
+func TestPythonParser_PropertyAccess_DedupMultipleAccesses(t *testing.T) {
+	source := `
+class Foo:
+    @property
+    def name(self):
+        return self._name
+
+    def bar(self):
+        x = self.name
+        y = self.name
+        z = self.name
+`
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(source), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	method := findMethodInClass(t, result, "Foo", "bar")
+	if method == nil {
+		t.Fatal("bar method not found")
+	}
+
+	// Three accesses to self.name should produce exactly 1 property edge (deduped)
+	nameCount := 0
+	for _, call := range method.Calls {
+		if call.Target == "name" {
+			nameCount++
+		}
+	}
+
+	if nameCount != 1 {
+		t.Errorf("expected exactly 1 property edge for name (deduped), got %d", nameCount)
+	}
+}
+
+func TestPythonParser_PropertyAccess_ExistingTestSource(t *testing.T) {
+	// The existing pythonTestSource has a User class with @property display_name
+	parser := NewPythonParser(WithPythonParseOptions(ParseOptions{IncludePrivate: true}))
+	result, err := parser.Parse(context.Background(), []byte(pythonTestSource), "test.py")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify display_name is extracted as a property
+	propFound := false
+	for _, sym := range result.Symbols {
+		if sym.Name == "User" {
+			for _, child := range sym.Children {
+				if child.Name == "display_name" && child.Kind == SymbolKindProperty {
+					propFound = true
+				}
+			}
+		}
+	}
+
+	if !propFound {
+		t.Error("expected display_name to be extracted as SymbolKindProperty")
+	}
 }

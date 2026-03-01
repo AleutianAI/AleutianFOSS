@@ -15,13 +15,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/cmd/aleutian/internal/initializer"
 	"github.com/AleutianAI/AleutianFOSS/cmd/aleutian/internal/risk"
 	"github.com/spf13/cobra"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 // =============================================================================
@@ -112,9 +112,6 @@ func init() {
 		"Continue on signal failure")
 	riskCmd.Flags().IntVar(&riskTimeout, "timeout", 60,
 		"Total timeout in seconds")
-
-	// Add to root
-	rootCmd.AddCommand(riskCmd)
 }
 
 // =============================================================================
@@ -133,10 +130,10 @@ func runRiskCommand(cmd *cobra.Command, args []string) {
 	}
 
 	// Load index (optional - impact analysis needs it)
-	indexPath := filepath.Join(projectRoot, ".aleutian", "index.json")
 	var index *initializer.MemoryIndex
 	if !riskSkipImpact {
-		index, err = loadIndex(indexPath)
+		storage := initializer.NewStorage(projectRoot)
+		index, err = storage.LoadIndex(ctx)
 		if err != nil {
 			// Warn but continue without impact
 			if !riskQuiet && !riskJSON {
@@ -215,22 +212,6 @@ func buildRiskConfig(args []string, projectRoot string) risk.Config {
 	return cfg
 }
 
-// loadIndex loads the memory index from disk.
-func loadIndex(path string) (*initializer.MemoryIndex, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read index: %w", err)
-	}
-
-	index := initializer.NewMemoryIndex()
-	if err := json.Unmarshal(data, index); err != nil {
-		return nil, fmt.Errorf("parse index: %w", err)
-	}
-
-	index.BuildIndexes()
-	return index, nil
-}
-
 // =============================================================================
 // OUTPUT FUNCTIONS
 // =============================================================================
@@ -269,7 +250,7 @@ func outputRiskText(result *risk.Result, cfg risk.Config) {
 		fmt.Println("Contributing Factors:")
 		for _, f := range result.Factors {
 			icon := getFactorIcon(f.Severity)
-			fmt.Printf("  %s %s: %s\n", icon, strings.Title(f.Signal), f.Message)
+			fmt.Printf("  %s %s: %s\n", icon, cases.Title(language.English).String(f.Signal), f.Message)
 		}
 		fmt.Println()
 	}

@@ -21,6 +21,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
@@ -41,6 +42,26 @@ type FindCalleesParams struct {
 	// Limit is the maximum number of callees to return.
 	// Default: 50, Max: 1000
 	Limit int
+
+	// PackageHint is an optional package/module context extracted from the query.
+	// IT-06c Bug C: Used to disambiguate when multiple symbols share the same name.
+	// For example, "Build" in Hugo matches 11 symbols; "hugolib" narrows to the right one.
+	PackageHint string
+}
+
+// ToolName returns the tool name for TypedParams interface.
+func (p FindCalleesParams) ToolName() string { return "find_callees" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p FindCalleesParams) ToMap() map[string]any {
+	m := map[string]any{
+		"function_name": p.FunctionName,
+		"limit":         p.Limit,
+	}
+	if p.PackageHint != "" {
+		m["package_hint"] = p.PackageHint
+	}
+	return m
 }
 
 // FindCalleesOutput contains the structured result.
@@ -62,6 +83,11 @@ type FindCalleesOutput struct {
 
 	// ExternalCallees are external/stdlib callees (names only).
 	ExternalCallees []string `json:"external_callees"`
+
+	// ResolvedKind is the ast.SymbolKind of the resolved symbol (e.g., "type", "function").
+	// IT-06b Issue 3: Used by formatText to provide kind-specific messages
+	// (e.g., "HandlerFunc is a type alias, not a function with a body").
+	ResolvedKind string `json:"resolved_kind,omitempty"`
 }
 
 // CalleeInfo holds information about an in-codebase callee.
@@ -194,15 +220,23 @@ func (t *findCalleesTool) Definition() ToolDefinition {
 }
 
 // Execute runs the find_callees tool.
-func (t *findCalleesTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findCalleesTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	start := time.Now()
 
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
+		errStep := crs.NewTraceStepBuilder().
+			WithAction("tool_find_callees").
+			WithTool("find_callees").
+			WithDuration(time.Since(start)).
+			WithError(err.Error()).
+			Build()
 		return &Result{
-			Success: false,
-			Error:   err.Error(),
+			Success:   false,
+			Error:     err.Error(),
+			TraceStep: &errStep,
+			Duration:  time.Since(start),
 		}, nil
 	}
 
@@ -223,6 +257,7 @@ func (t *findCalleesTool) Execute(ctx context.Context, params map[string]any) (*
 	// GR-01: Use index first for O(1) lookup
 	var results map[string]*graph.QueryResult
 	var queryErrors int
+	var resolvedKind ast.SymbolKind // IT-06b Issue 3: Track resolved symbol kind for formatText
 
 	if t.index != nil {
 		var symbols []*ast.Symbol
@@ -245,6 +280,15 @@ func (t *findCalleesTool) Execute(ctx context.Context, params map[string]any) (*
 				bareName := parts[1]
 				bareSymbols := t.index.GetByName(bareName)
 				if len(bareSymbols) > 0 {
+					// IT-06c Bug C: Disambiguate bare name matches using package hint
+					// or the type prefix from dot-notation (e.g., "hugolib" from "hugolib.Build").
+					hint := p.PackageHint
+					if hint == "" {
+						hint = strings.ToLower(parts[0])
+					}
+					if len(bareSymbols) > 1 && hint != "" {
+						bareSymbols = filterByPackageHint(bareSymbols, hint, logger, "find_callees")
+					}
 					symbols = bareSymbols
 					logger.Info("IT-02 C-1: dot-notation fallback to bare name",
 						slog.String("tool", "find_callees"),
@@ -273,6 +317,13 @@ func (t *findCalleesTool) Execute(ctx context.Context, params map[string]any) (*
 			// O(1) index lookup for bare names
 			symbols = t.index.GetByName(p.FunctionName)
 
+			// IT-06c Bug C: When multiple symbols match and a package hint is available,
+			// disambiguate by preferring symbols from the hinted package/directory.
+			// "Build in hugolib" → prefer symbols whose FilePath contains "hugolib".
+			if len(symbols) > 1 && p.PackageHint != "" {
+				symbols = filterByPackageHint(symbols, p.PackageHint, logger, "find_callees")
+			}
+
 			// P1: If no exact match, try fuzzy search (Feb 14, 2026)
 			if len(symbols) == 0 {
 				symbol, fuzzy, err := ResolveFunctionWithFuzzy(ctx, t.index, p.FunctionName, logger)
@@ -293,6 +344,9 @@ func (t *findCalleesTool) Execute(ctx context.Context, params map[string]any) (*
 		)
 
 		if len(symbols) > 0 {
+			// IT-06b Issue 3: Capture the resolved symbol's kind for formatText.
+			resolvedKind = symbols[0].Kind
+
 			results = make(map[string]*graph.QueryResult, len(symbols))
 			for _, sym := range symbols {
 				if sym == nil {
@@ -333,15 +387,30 @@ func (t *findCalleesTool) Execute(ctx context.Context, params map[string]any) (*
 		results, gErr = t.graph.FindCalleesByName(ctx, p.FunctionName, graph.WithLimit(p.Limit))
 		if gErr != nil {
 			span.RecordError(gErr)
+			errStep := crs.NewTraceStepBuilder().
+				WithAction("tool_find_callees").
+				WithTarget(p.FunctionName).
+				WithTool("find_callees").
+				WithDuration(time.Since(start)).
+				WithError(fmt.Sprintf("find callees for '%s': %v", p.FunctionName, gErr)).
+				Build()
 			return &Result{
-				Success: false,
-				Error:   fmt.Sprintf("find callees for '%s': %v", p.FunctionName, gErr),
+				Success:   false,
+				Error:     fmt.Sprintf("find callees for '%s': %v", p.FunctionName, gErr),
+				TraceStep: &errStep,
+				Duration:  time.Since(start),
 			}, nil
 		}
 	}
 
 	// Build typed output (single classification pass)
 	output := t.buildOutput(p.FunctionName, results)
+	// IT-06b Issue 3: Thread resolved symbol kind into output for formatText.
+	// Only set when a symbol was actually resolved — otherwise leave empty
+	// so omitempty suppresses it in JSON (avoids misleading "unknown").
+	if resolvedKind != ast.SymbolKindUnknown {
+		output.ResolvedKind = resolvedKind.String()
+	}
 
 	// M-1: Format text from typed output (eliminates duplicate classification)
 	outputText := t.formatText(p.FunctionName, output)
@@ -352,12 +421,26 @@ func (t *findCalleesTool) Execute(ctx context.Context, params map[string]any) (*
 		attribute.Int("total_count", output.TotalCount),
 	)
 
+	duration := time.Since(start)
+
+	// Build CRS TraceStep for reasoning trace continuity
+	toolStep := crs.NewTraceStepBuilder().
+		WithAction("tool_find_callees").
+		WithTarget(p.FunctionName).
+		WithTool("find_callees").
+		WithDuration(duration).
+		WithMetadata("resolved_count", fmt.Sprintf("%d", output.ResolvedCount)).
+		WithMetadata("external_count", fmt.Sprintf("%d", output.ExternalCount)).
+		WithMetadata("total_count", fmt.Sprintf("%d", output.TotalCount)).
+		Build()
+
 	return &Result{
 		Success:    true,
 		Output:     output,
 		OutputText: outputText,
 		TokensUsed: estimateTokens(outputText),
-		Duration:   time.Since(start),
+		TraceStep:  &toolStep,
+		Duration:   duration,
 	}, nil
 }
 
@@ -373,8 +456,8 @@ func (t *findCalleesTool) parseParams(params map[string]any) (FindCalleesParams,
 			p.FunctionName = name
 		}
 	}
-	if p.FunctionName == "" {
-		return p, fmt.Errorf("function_name is required")
+	if err := ValidateSymbolName(p.FunctionName, "function_name", "'render', 'Initialize', 'Execute'"); err != nil {
+		return p, err
 	}
 
 	// Extract limit (optional)
@@ -390,6 +473,13 @@ func (t *findCalleesTool) parseParams(params map[string]any) (FindCalleesParams,
 				limit = 1000
 			}
 			p.Limit = limit
+		}
+	}
+
+	// IT-06c Bug C: Extract package_hint (optional)
+	if hintRaw, ok := params["package_hint"]; ok {
+		if hint, ok := parseStringParam(hintRaw); ok && hint != "" {
+			p.PackageHint = hint
 		}
 	}
 
@@ -469,8 +559,20 @@ func (t *findCalleesTool) formatText(functionName string, output FindCalleesOutp
 	var sb strings.Builder
 
 	if output.TotalCount == 0 {
-		sb.WriteString(fmt.Sprintf("## GRAPH RESULT: No callees of '%s'\n\n", functionName))
-		sb.WriteString(fmt.Sprintf("The function '%s' does not call any other functions.\n", functionName))
+		sb.WriteString(fmt.Sprintf("## GRAPH RESULT: Callees of '%s' not found\n\n", functionName))
+
+		// IT-06b Issue 3: Provide kind-specific messaging for type aliases.
+		// Type aliases (e.g., "type HandlerFunc func(c *Context)") have no executable body
+		// and therefore no outgoing call edges. The generic "does not call any functions"
+		// message is misleading — it implies a function exists but has an empty body.
+		if output.ResolvedKind == ast.SymbolKindType.String() {
+			sb.WriteString(fmt.Sprintf("'%s' is a type alias, not a function with a body.\n", functionName))
+			sb.WriteString("Type aliases define a type signature but have no executable code, so they have no callees.\n\n")
+			sb.WriteString("Try: find_references for this type to see where it is used.\n\n")
+		} else {
+			sb.WriteString(fmt.Sprintf("The function '%s' does not call any other functions.\n", functionName))
+		}
+
 		sb.WriteString("The graph has been fully indexed - this is the definitive answer.\n\n")
 		sb.WriteString("**Do NOT use Grep to search further** - the graph already analyzed all source files.\n")
 		return sb.String()
@@ -506,6 +608,11 @@ func (t *findCalleesTool) formatText(functionName string, output FindCalleesOutp
 			sb.WriteString(fmt.Sprintf("  ... and %d more external calls\n", len(output.ExternalCallees)-10))
 		}
 	}
+
+	// GR-59 Group A: Signal definitiveness on success path.
+	sb.WriteString("\n---\n")
+	sb.WriteString("The graph has been fully indexed — these results are exhaustive.\n")
+	sb.WriteString("**Do NOT use Grep or Read to verify** — the graph already analyzed all source files.\n")
 
 	return sb.String()
 }

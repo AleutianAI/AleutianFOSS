@@ -88,7 +88,7 @@ run_internal_test() {
 
         verify_delta_count)
             # Query CRS state for delta count
-            local delta_info=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/crs/deltas'" 2>/dev/null)
+            local delta_info=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/debug/crs/deltas'" 2>/dev/null)
             if echo "$delta_info" | jq . > /dev/null 2>&1; then
                 local count=$(echo "$delta_info" | jq '.count // .total // 0')
                 if [ "$count" -gt 0 ]; then
@@ -106,7 +106,7 @@ run_internal_test() {
 
         verify_history_limit)
             # Verify ringbuffer history is bounded
-            local history_info=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/crs/history'" 2>/dev/null)
+            local history_info=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/debug/crs/history'" 2>/dev/null)
             if echo "$history_info" | jq . > /dev/null 2>&1; then
                 local size=$(echo "$history_info" | jq '.size // .count // 0')
                 local limit=$(echo "$history_info" | jq '.limit // .max_size // 1000')
@@ -166,16 +166,16 @@ run_internal_test() {
             echo -e "  ${BLUE}Checking PageRank convergence (GR-12)...${NC}"
 
             # Ensure graph is built first
-            local stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/graph/stats'" 2>/dev/null || echo "")
+            local stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/debug/graph/stats'" 2>/dev/null || echo "")
             if [ -z "$stats_response" ] || echo "$stats_response" | jq -e '.error' >/dev/null 2>&1; then
                 echo -e "  ${YELLOW}Building graph first...${NC}"
-                ssh_cmd "curl -s -X POST -H 'Content-Type: application/json' -d '{\"project_root\":\"/home/aleutiandevops/trace_test/AleutianOrchestrator\"}' 'http://localhost:8080/v1/codebuddy/init'" 2>/dev/null
+                ssh_cmd "curl -s -X POST -H 'Content-Type: application/json' -d '{\"project_root\":\"/home/aleutiandevops/trace_test/AleutianOrchestrator\"}' 'http://localhost:8080/v1/trace/init'" 2>/dev/null
                 sleep 2
             fi
 
             # Trigger PageRank by calling find_important via agent
             echo -e "  ${BLUE}Triggering PageRank via find_important...${NC}"
-            local agent_response=$(ssh_cmd "curl -s -X POST -H 'Content-Type: application/json' -d '{\"query\":\"What are the top 3 most important functions?\"}' 'http://localhost:8080/v1/codebuddy/agent/run'" 2>/dev/null)
+            local agent_response=$(ssh_cmd "curl -s -X POST -H 'Content-Type: application/json' -d '{\"query\":\"What are the top 3 most important functions?\"}' 'http://localhost:8080/v1/trace/agent/run'" 2>/dev/null)
             sleep 3
 
             # Check for PageRank-related log entries
@@ -207,7 +207,7 @@ run_internal_test() {
             echo -e "  ${BLUE}Checking for EdgeTypeImplements edges in graph...${NC}"
 
             # Query the graph stats endpoint for edge type breakdown
-            local graph_stats=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/graph/stats'" 2>/dev/null)
+            local graph_stats=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/debug/graph/stats'" 2>/dev/null)
 
             if echo "$graph_stats" | jq . > /dev/null 2>&1; then
                 local implements_count=$(echo "$graph_stats" | jq '.edges_by_type.implements // .edges_by_type.EdgeTypeImplements // 0')
@@ -299,7 +299,7 @@ run_internal_test() {
             # GR-Phase1: Endpoint moved to /agent/debug/crs for session access
             echo -e "  ${BLUE}Checking /agent/debug/crs endpoint availability...${NC}"
 
-            local crs_response=$(ssh_cmd "curl -s -w '%{http_code}' 'http://localhost:8080/v1/codebuddy/agent/debug/crs'" 2>/dev/null || echo "")
+            local crs_response=$(ssh_cmd "curl -s -w '%{http_code}' 'http://localhost:8080/v1/trace/agent/debug/crs'" 2>/dev/null || echo "")
             local http_code=""
             local body=""
             local resp_len=${#crs_response}
@@ -342,7 +342,7 @@ run_internal_test() {
             # NOTE: This endpoint is not yet implemented - test will show 404
             echo -e "  ${BLUE}Checking /debug/history endpoint availability...${NC}"
 
-            local history_response=$(ssh_cmd "curl -s -w '%{http_code}' 'http://localhost:8080/v1/codebuddy/agent/debug/history'" 2>/dev/null || echo "")
+            local history_response=$(ssh_cmd "curl -s -w '%{http_code}' 'http://localhost:8080/v1/trace/agent/debug/history'" 2>/dev/null || echo "")
             local http_code=""
             local body=""
             local resp_len=${#history_response}
@@ -430,12 +430,12 @@ run_internal_test() {
             echo -e "  ${BLUE}Checking nodesByName index (GR-06)...${NC}"
 
             # Ensure graph is built first
-            local stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/graph/stats'" 2>/dev/null || echo "")
+            local stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/debug/graph/stats'" 2>/dev/null || echo "")
             if [ -z "$stats_response" ] || echo "$stats_response" | jq -e '.error' >/dev/null 2>&1; then
                 echo -e "  ${YELLOW}Building graph first...${NC}"
-                local init_response=$(ssh_cmd "curl -s -X POST -H 'Content-Type: application/json' -d '{\"project_root\":\"/home/aleutiandevops/trace_test/AleutianOrchestrator\"}' 'http://localhost:8080/v1/codebuddy/init'" 2>/dev/null)
+                local init_response=$(ssh_cmd "curl -s -X POST -H 'Content-Type: application/json' -d '{\"project_root\":\"/home/aleutiandevops/trace_test/AleutianOrchestrator\"}' 'http://localhost:8080/v1/trace/init'" 2>/dev/null)
                 sleep 2
-                stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/graph/stats'" 2>/dev/null || echo "")
+                stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/debug/graph/stats'" 2>/dev/null || echo "")
             fi
 
             if [ -z "$stats_response" ]; then
@@ -467,12 +467,12 @@ run_internal_test() {
             echo -e "  ${BLUE}Checking nodesByKind index (GR-07)...${NC}"
 
             # Ensure graph is built first
-            local stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/graph/stats'" 2>/dev/null || echo "")
+            local stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/debug/graph/stats'" 2>/dev/null || echo "")
             if [ -z "$stats_response" ] || echo "$stats_response" | jq -e '.error' >/dev/null 2>&1; then
                 echo -e "  ${YELLOW}Building graph first...${NC}"
-                local init_response=$(ssh_cmd "curl -s -X POST -H 'Content-Type: application/json' -d '{\"project_root\":\"/home/aleutiandevops/trace_test/AleutianOrchestrator\"}' 'http://localhost:8080/v1/codebuddy/init'" 2>/dev/null)
+                local init_response=$(ssh_cmd "curl -s -X POST -H 'Content-Type: application/json' -d '{\"project_root\":\"/home/aleutiandevops/trace_test/AleutianOrchestrator\"}' 'http://localhost:8080/v1/trace/init'" 2>/dev/null)
                 sleep 2
-                stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/graph/stats'" 2>/dev/null || echo "")
+                stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/debug/graph/stats'" 2>/dev/null || echo "")
             fi
 
             if [ -z "$stats_response" ]; then
@@ -505,12 +505,12 @@ run_internal_test() {
             echo -e "  ${BLUE}Checking edgesByType index (GR-08)...${NC}"
 
             # Ensure graph is built first
-            local stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/graph/stats'" 2>/dev/null || echo "")
+            local stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/debug/graph/stats'" 2>/dev/null || echo "")
             if [ -z "$stats_response" ] || echo "$stats_response" | jq -e '.error' >/dev/null 2>&1; then
                 echo -e "  ${YELLOW}Building graph first...${NC}"
-                local init_response=$(ssh_cmd "curl -s -X POST -H 'Content-Type: application/json' -d '{\"project_root\":\"/home/aleutiandevops/trace_test/AleutianOrchestrator\"}' 'http://localhost:8080/v1/codebuddy/init'" 2>/dev/null)
+                local init_response=$(ssh_cmd "curl -s -X POST -H 'Content-Type: application/json' -d '{\"project_root\":\"/home/aleutiandevops/trace_test/AleutianOrchestrator\"}' 'http://localhost:8080/v1/trace/init'" 2>/dev/null)
                 sleep 2
-                stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/graph/stats'" 2>/dev/null || echo "")
+                stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/debug/graph/stats'" 2>/dev/null || echo "")
             fi
 
             if [ -z "$stats_response" ]; then
@@ -544,12 +544,12 @@ run_internal_test() {
             echo -e "  ${BLUE}Checking edgesByFile index (GR-09)...${NC}"
 
             # Ensure graph is built first
-            local stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/graph/stats'" 2>/dev/null || echo "")
+            local stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/debug/graph/stats'" 2>/dev/null || echo "")
             if [ -z "$stats_response" ] || echo "$stats_response" | jq -e '.error' >/dev/null 2>&1; then
                 echo -e "  ${YELLOW}Building graph first...${NC}"
-                local init_response=$(ssh_cmd "curl -s -X POST -H 'Content-Type: application/json' -d '{\"project_root\":\"/home/aleutiandevops/trace_test/AleutianOrchestrator\"}' 'http://localhost:8080/v1/codebuddy/init'" 2>/dev/null)
+                local init_response=$(ssh_cmd "curl -s -X POST -H 'Content-Type: application/json' -d '{\"project_root\":\"/home/aleutiandevops/trace_test/AleutianOrchestrator\"}' 'http://localhost:8080/v1/trace/init'" 2>/dev/null)
                 sleep 2
-                stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/graph/stats'" 2>/dev/null || echo "")
+                stats_response=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/debug/graph/stats'" 2>/dev/null || echo "")
             fi
 
             if [ -z "$stats_response" ]; then
@@ -596,7 +596,7 @@ run_internal_test() {
 
             # First, ensure graph is initialized
             echo -e "  ${BLUE}Ensuring graph is initialized...${NC}"
-            local init_resp=$(ssh_cmd "curl -s -X POST -H 'Content-Type: application/json' -d '{\"project_root\":\"/home/aleutiandevops/trace_test/AleutianOrchestrator\"}' 'http://localhost:8080/v1/codebuddy/init'" 2>/dev/null || echo "")
+            local init_resp=$(ssh_cmd "curl -s -X POST -H 'Content-Type: application/json' -d '{\"project_root\":\"/home/aleutiandevops/trace_test/AleutianOrchestrator\"}' 'http://localhost:8080/v1/trace/init'" 2>/dev/null || echo "")
             local graph_id=$(echo "$init_resp" | jq -r '.graph_id // ""' 2>/dev/null)
             if [ -n "$graph_id" ] && [ "$graph_id" != "null" ]; then
                 echo -e "  ${GREEN}✓ Graph initialized: $graph_id${NC}"
@@ -609,7 +609,7 @@ run_internal_test() {
             local total_callers=0
             # These are actual functions in AleutianOrchestrator that are likely to have callers
             for func_name in "CodeAnalysisRequest" "NewClient" "ParseAPIMessage" "WriteDataToGCS" "FetchPromptFromGCS" "DistillerRequest"; do
-                local callers_resp=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/callers?graph_id=$graph_id&function=$func_name'" 2>/dev/null || echo "")
+                local callers_resp=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/callers?graph_id=$graph_id&function=$func_name'" 2>/dev/null || echo "")
                 local callers_count=$(echo "$callers_resp" | jq '.callers | length' 2>/dev/null || echo "0")
                 if [ "$callers_count" -gt 0 ]; then
                     echo -e "  ${GREEN}✓ Found $callers_count callers of '$func_name'${NC}"
@@ -621,7 +621,7 @@ run_internal_test() {
                 echo -e "  ${YELLOW}⚠ No callers found (cache should still record misses)${NC}"
             fi
 
-            local cache_response=$(ssh_cmd "curl -s -w '%{http_code}' 'http://localhost:8080/v1/codebuddy/debug/cache'" 2>/dev/null || echo "")
+            local cache_response=$(ssh_cmd "curl -s -w '%{http_code}' 'http://localhost:8080/v1/trace/debug/cache'" 2>/dev/null || echo "")
             local http_code=""
             local body=""
             local resp_len=${#cache_response}
@@ -687,16 +687,16 @@ run_internal_test() {
             echo -e "  ${BLUE}Checking cache invalidation (GR-10)...${NC}"
 
             # First, get current cache stats
-            local before_stats=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/cache'" 2>/dev/null || echo "{}")
+            local before_stats=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/debug/cache'" 2>/dev/null || echo "{}")
             local before_callers=$(echo "$before_stats" | jq '.callers_size // 0' 2>/dev/null || echo "0")
 
             # Trigger a graph rebuild (re-init the project)
             echo -e "  ${BLUE}Triggering graph rebuild...${NC}"
-            ssh_cmd "curl -s -X POST -H 'Content-Type: application/json' -d '{\"project_root\":\"/home/aleutiandevops/trace_test/AleutianOrchestrator\", \"force_rebuild\": true}' 'http://localhost:8080/v1/codebuddy/init'" 2>/dev/null
+            ssh_cmd "curl -s -X POST -H 'Content-Type: application/json' -d '{\"project_root\":\"/home/aleutiandevops/trace_test/AleutianOrchestrator\", \"force_rebuild\": true}' 'http://localhost:8080/v1/trace/init'" 2>/dev/null
             sleep 2
 
             # Check cache stats after rebuild
-            local after_stats=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/cache'" 2>/dev/null || echo "{}")
+            local after_stats=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/debug/cache'" 2>/dev/null || echo "{}")
             local after_callers=$(echo "$after_stats" | jq '.callers_size // 0' 2>/dev/null || echo "0")
             local generation=$(echo "$after_stats" | jq '.generation // 0' 2>/dev/null || echo "0")
 
@@ -792,7 +792,7 @@ run_internal_test() {
             echo -e "  ${BLUE}Checking community modularity score (GR-14)...${NC}"
 
             # Query debug endpoint for community detection stats
-            local community_stats=$(ssh_cmd "curl -s 'http://localhost:8080/v1/codebuddy/debug/graph/stats'" 2>/dev/null || echo "{}")
+            local community_stats=$(ssh_cmd "curl -s 'http://localhost:8080/v1/trace/debug/graph/stats'" 2>/dev/null || echo "{}")
             local modularity=$(echo "$community_stats" | jq '.communities.modularity // .community_modularity // -1' 2>/dev/null || echo "-1")
             local community_count=$(echo "$community_stats" | jq '.communities.count // .community_count // 0' 2>/dev/null || echo "0")
 

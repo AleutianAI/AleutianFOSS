@@ -111,9 +111,9 @@ func TestPhantomPackageChecker_DetectsServicesPaths(t *testing.T) {
 	checker := NewPhantomPackageChecker(nil)
 
 	input := &CheckInput{
-		Response: "The services/code_buddy package handles the agent and services/unknown does X",
+		Response: "The services/trace package handles the agent and services/unknown does X",
 		KnownPackages: map[string]bool{
-			"services/code_buddy": true,
+			"services/trace":      true,
 			"services/embeddings": true,
 		},
 		ProjectLang: "go",

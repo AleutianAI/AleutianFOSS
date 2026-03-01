@@ -28,13 +28,23 @@ tools:
       - incoming calls
       - call sites
       - invocations of
-      - references to
       - called by
       - where is it called
-      - usages of
-      - find references
-    use_when: "User asks who or what calls a specific function. The target function is the OBJECT being called. Examples: 'who calls parseConfig?', 'what calls the validate function?', 'find usages of Process', 'where is Open called from?'. NEVER use for 'what does X call' or 'what functions does X call' — those are find_callees queries."
-    avoid_when: "User asks what a function calls or depends on. The target function is the SUBJECT doing the calling. Examples: 'what does X call?', 'what functions does Build call?', 'what methods does X invoke?'. Use find_callees instead."
+    # NOTE: "no callers", "no incoming calls", "never called" → find_dead_code, NOT find_callers
+    use_when: "User asks who or what CALLS a specific function. The query is about CALL relationships, not general usage. Examples: 'who calls parseConfig?', 'what calls the validate function?', 'where is Open called from?'. NEVER use for 'where is X used?' or 'find references to X' — those are find_references queries. NEVER use for 'what does X call?' — those are find_callees queries."
+    avoid_when: >
+      NEVER use find_callers when the query asks 'where is X used?', 'references to X',
+      'usages of X', or 'find all uses of X' — use find_references instead.
+      NEVER use find_callers when the query contains 'call chain', 'call graph',
+      'call hierarchy', 'call tree', 'transitive', or 'recursive' — use get_call_chain instead.
+      NEVER use find_callers when user asks what a function calls or depends on — use find_callees instead.
+      NEVER use find_callers when the query contains NEGATION like 'no callers',
+      'no incoming calls', 'never called', 'zero callers' — these are dead code queries,
+      use find_dead_code instead.
+      NEVER use find_callers when the query asks about inheritance, class hierarchy,
+      or implementations: 'what extends X?', 'what subclasses X?', 'what implements X?',
+      'what derives from X?', 'base class', 'parent class', 'child class', 'class hierarchy'.
+      These are find_implementations queries.
     instead_of:
       - tool: Grep
         when: "Searching for function call patterns in code"
@@ -58,7 +68,17 @@ tools:
       - calls what
       - makes calls to
     use_when: "USE THIS when user asks what functions a specific function calls or depends on. The target function is the SUBJECT doing the calling. Examples: 'what does Engine.Run call?', 'what functions does Build call?', 'what does make_response depend on?', 'what methods does X invoke?'. This is the correct tool for 'what does X call' queries."
-    avoid_when: "User asks who calls a function. The target function is the OBJECT being called. Examples: 'who calls X?', 'find usages of X'. Use find_callers instead."
+    avoid_when: >
+      NEVER use find_callees when the query asks who calls a function — use find_callers instead.
+      NEVER use find_callees when the query asks about inheritance, extensions, subclasses,
+      implementations, base classes, or class hierarchy — use find_implementations instead.
+      NEVER use find_callees when the query asks about circular dependencies, dependency
+      cycles, cyclic dependencies, SCCs, strongly connected components, or circular call
+      chains — use find_cycles instead.
+      NEVER use find_callees when the query asks about deprecated, unreachable, dead, or
+      unused methods/functions — use find_dead_code instead.
+      NEVER use find_callees when the query mentions PageRank, peripheral, or lowest
+      importance — use find_important instead.
     instead_of:
       - tool: Grep
         when: "Searching for function calls inside a function"
@@ -76,21 +96,44 @@ tools:
       - interface implementations
       - types that implement
       - structs implementing
-    use_when: "User asks what types implement an interface"
-    avoid_when: "User asks about callers or callees"
+      - extends
+      - subclass
+      - subclasses
+      - inherits
+      - derives from
+      - child class
+      - base class
+      - class hierarchy
+      - what extends
+      - what implements
+    use_when: "User asks what types implement an interface OR what classes extend a base class. Works for all languages: Go interfaces, Python class inheritance/ABCs, JS/TS class extends. Use for 'what implements X?', 'what extends X?', 'what subclasses X?', 'what derives from X?'."
+    avoid_when: "User asks about callers or callees. Use find_callers or find_callees instead."
     requires:
       - graph_initialized
 
   - name: find_references
     keywords:
       - references
+      - references to
       - usages
+      - usages of
+      - find references
       - where is it used
+      - where is used
+      - used across
+      - is referenced
+      - referenced
+      - referenced across
+      - referenced in
+      - referenced throughout
       - occurrences
       - all usages
       - find all uses
-    use_when: "User asks where a symbol is used or referenced"
-    avoid_when: "User specifically asks about callers (use find_callers)"
+      - type used
+      - struct used
+      - class used
+    use_when: "User asks WHERE a symbol (type, class, struct, function, variable) is USED or REFERENCED across the codebase. Examples: 'Where is Entry type used?', 'What code references Config?', 'Show usages of HandlerFunc', 'Where is the Request object used across the codebase?', 'Find all references to Flask class', 'Where is X referenced across this codebase?'. This is the correct tool for any 'where is X used?' or 'where is X referenced?' or 'references to X' query."
+    avoid_when: "User specifically asks who CALLS a function (use find_callers). User asks what a function CALLS (use find_callees)."
     instead_of:
       - tool: Grep
         when: "Looking for all usages of a symbol"
@@ -102,12 +145,27 @@ tools:
       - find symbol
       - locate function
       - where is defined
+      - where is declared
       - definition of
       - find function
       - find type
       - find variable
-    use_when: "User wants to find where a symbol is defined"
-    avoid_when: "User wants to find usages (use find_references)"
+      - find class
+      - find struct
+      - find interface
+      - what is
+      - locate
+      - symbol lookup
+      - definition location
+    use_when: >
+      User wants to find where a symbol (function, class, struct, interface, type, variable)
+      is defined or declared. Examples: "Where is Router defined?", "Find the DataFrame class",
+      "What is Context?", "Locate the NestFactory class". Works across Go, Python, JS, TS.
+    avoid_when: >
+      NEVER use find_symbol when the query asks where a symbol is USED, REFERENCED, or has USAGES
+      (use find_references instead). "Where is X referenced?" and "Where is X used?" are
+      find_references queries, not find_symbol queries. User wants to find who calls a function
+      (use find_callers). User wants to find what a function calls (use find_callees).
     requires:
       - graph_initialized
 
@@ -122,8 +180,8 @@ tools:
       - trace calls
       - full call hierarchy
       - recursive callers
-    use_when: "User wants to see the full call hierarchy, not just immediate callers/callees"
-    avoid_when: "User only wants immediate callers or callees"
+    use_when: "User explicitly asks for the FULL call hierarchy, transitive calls, call chains, impact analysis, or 'all the way down/up'. Must contain words like 'chain', 'transitive', 'recursive', 'hierarchy', 'impact', or 'all calls'."
+    avoid_when: "User asks 'what does X call' or 'what functions does X call' or 'what methods does X invoke' — those are find_callees queries for DIRECT callees only. DO NOT use get_call_chain unless the user explicitly wants transitive/recursive traversal."
     requires:
       - graph_initialized
 
@@ -470,11 +528,19 @@ tools:
 
   - name: find_circular_deps
     keywords:
-      - circular
-      - cycles
-      - circular dependencies
-      - dependency cycle
-    use_when: "User wants to find circular dependencies"
+      - circular imports
+      - import cycles
+      - package cycles
+      - module cycles
+      - circular package dependencies
+    use_when: >
+      User wants to find circular IMPORT or PACKAGE-LEVEL dependencies. Examples:
+      'Find circular imports', 'Are there package dependency cycles?', 'Module import cycles'.
+      This operates on package/module import relationships, NOT function-level call cycles.
+    avoid_when: >
+      NEVER use find_circular_deps when the query asks about circular call dependencies,
+      circular call chains, SCCs, or function-level cycles — use find_cycles instead.
+      "circular dependencies" without "import" or "package" qualifier = find_cycles.
     requires:
       - graph_initialized
 
@@ -482,12 +548,25 @@ tools:
     keywords:
       - call cycles
       - cyclic calls
-      - mutual recursion
-      - recursive calls
       - function cycles
       - circular calls
-    use_when: "User wants to find circular call dependencies between functions"
-    avoid_when: "User asks about package-level circular dependencies (use find_circular_deps)"
+      - circular dependencies
+      - circular call dependencies
+      - dependency cycles
+      - cyclic dependencies
+      - strongly connected
+      - SCC
+      - circular call chains
+    use_when: >
+      User wants to find circular call dependencies between functions using Tarjan's
+      SCC algorithm. This is the correct tool for ANY query about circular dependencies,
+      dependency cycles, or circular call chains in the call graph. Examples: 'Find circular
+      call dependencies', 'Are there dependency cycles?', 'Find circular call chains',
+      'What are the shortest circular dependencies?'. This tool finds cycles between
+      DISTINCT functions — for recursion within a single function, use find_loops.
+    avoid_when: >
+      User asks about recursion within a single function (use find_loops).
+      User asks about package-level import cycles (use find_circular_deps).
     requires:
       - graph_initialized
 
@@ -510,7 +589,6 @@ tools:
     keywords:
       - important
       - most important
-      - critical functions
       - pagerank
       - architecturally important
       - key functions
@@ -518,8 +596,29 @@ tools:
       - core functions
       - significance
       - impact analysis
-    use_when: "User wants to find the most important symbols using PageRank algorithm"
-    avoid_when: "User just wants connection counts (use find_hotspots for degree-based ranking)"
+      - structural importance
+      - centrality
+      - peripheral
+      - least important
+      - lowest pagerank
+      - bottom ranked
+      - least central
+    use_when: >
+      User wants to find the most important or influential symbols by PageRank centrality.
+      Use for: 'most important functions', 'highest PageRank', 'structural importance',
+      'most influential', 'centrality ranking', 'key functions by importance',
+      'lowest PageRank' (peripheral symbols), 'peripheral functions', 'least important'.
+      This measures recursive importance — a function called by one critical function
+      may rank higher than one called by many trivial helpers.
+    avoid_when: >
+      User just wants connection counts (use find_hotspots for degree-based ranking).
+      User asks about crash risk or production criticality (use find_weighted_criticality).
+      NEVER use find_weighted_criticality when the query says 'most important',
+      'important by PageRank', or 'important functions in [module]' — these are
+      find_important queries even when a package/module scope is mentioned.
+      NEVER use find_communities when the query says 'important bridges between
+      subsystems' — this is a find_important query. Only use find_communities
+      when the word 'community' or 'communities' appears in the query.
     requires:
       - graph_initialized
 
@@ -538,13 +637,34 @@ tools:
       - unused code
       - unreferenced
       - orphan code
-    use_when: "User wants to find unreferenced code"
+      - unused functions
+      - no callers
+      - no incoming calls
+      - no internal callers
+      - never called
+      - zero callers
+      - not referenced
+      - deprecated
+      - unreachable
+      - unreachable methods
+      - dead methods
+      - unused methods
+      - orphaned
+      - legacy code
+    use_when: >
+      User wants to find unreferenced code, dead code, unused functions, or symbols
+      with no callers/no incoming calls. Negated caller queries like 'functions with
+      no callers' or 'no incoming calls' mean dead code. Also use for queries about
+      deprecated, unreachable, or orphaned functions — these are dead code queries
+      even when the phrase 'dead code' is not used.
+    avoid_when: "User asks about most connected functions (use find_hotspots) or code structure (use find_communities). User asks WHO calls a specific function (use find_callers) — but 'no callers' or 'no incoming calls' means dead code, not find_callers."
     requires:
       - graph_initialized
 
   - name: find_communities
     keywords:
       - communities
+      - community
       - modules
       - module boundaries
       - natural modules
@@ -557,11 +677,21 @@ tools:
       - real modules
       - cross-package
       - leiden
-    use_when: "User wants to find natural code communities or module boundaries"
+      - bridges between communities
+      - subsystem community
+      - belongs to community
+      - distinct communities
+      - community boundaries
+      - cross-community
+    use_when: "User wants to find natural code communities or module boundaries. Also use when user asks what community a subsystem belongs to, whether specific classes form distinct communities, about community coupling, or about bridges/connections between communities. ANY query containing the word 'community' or 'communities' should use this tool."
     avoid_when: "User wants to find callers or callees of specific functions"
     instead_of:
       - tool: Grep
         when: "Searching for module structure or code organization patterns"
+      - tool: find_module_api
+        when: "User asks about code communities, which community something belongs to, or community structure"
+      - tool: find_articulation_points
+        when: "User asks about bridges or connections BETWEEN communities — community bridge analysis is find_communities, NOT find_articulation_points"
     requires:
       - graph_initialized
 
@@ -580,8 +710,8 @@ tools:
       - fragility
       - architecture weakness
       - single dependency
-    use_when: "User asks about single points of failure, fragile architecture, or critical bottleneck functions"
-    avoid_when: "User asks about dominators, control flow, or callers/callees of specific functions"
+    use_when: "User asks about single points of failure, fragile architecture, or critical bottleneck functions whose removal would disconnect the graph"
+    avoid_when: "User asks about dominators, control flow, or callers/callees of specific functions. NEVER use when the query mentions 'communities' — if the user asks about bridges or connections BETWEEN communities, use find_communities instead (it includes cross-community edge analysis). Only use find_articulation_points when asking about graph-theoretic bridge nodes, NOT community bridges."
     instead_of:
       - tool: find_hotspots
         when: "User specifically asks about single points of failure or fragility"
@@ -625,8 +755,19 @@ tools:
       - recursive functions
       - self-recursion
       - indirect recursion
-    use_when: "User asks about recursion patterns, loops in call graph, cyclic dependencies, or wants to find recursive functions"
-    avoid_when: "User asks about dependency cycles (use find_cycles) or articulation points (use find_articulation_points)"
+    use_when: >
+      User asks about recursion patterns within individual functions: self-recursion,
+      mutual recursion between 2-3 functions, or recursive call patterns. Examples:
+      'Find recursive functions', 'Which functions call themselves?', 'Find self-recursive
+      or mutually-recursive functions'. This finds loops WITHIN functions, not Tarjan SCCs.
+    avoid_when: >
+      NEVER use find_loops when the query asks about circular dependencies, dependency
+      cycles, circular call dependencies, SCCs, strongly connected components, or
+      circular call chains between distinct functions — use find_cycles instead.
+      find_loops finds recursive patterns WITHIN individual functions (self-recursion,
+      mutual recursion between 2-3 functions). find_cycles finds Tarjan SCCs across the
+      entire call graph. "circular dependencies" = find_cycles, NOT find_loops.
+      NEVER use find_loops for articulation points — use find_articulation_points.
     instead_of:
       - tool: find_cycles
         when: "User specifically asks about recursion or self-calling functions"
@@ -767,25 +908,34 @@ tools:
       - module entry
       - public functions
       - module interface
-    use_when: "User asks about module interfaces, public APIs, or how to interact with different parts of the codebase"
-    avoid_when: "User asks about all entry points globally (use find_entry_points)"
+    use_when: "User asks about module interfaces, public APIs, or how to interact with different parts of the codebase. Do NOT use for community-related queries."
+    avoid_when: "User asks about all entry points globally (use find_entry_points). NEVER use when the query contains the word 'community' or 'communities' — use find_communities instead. This includes queries like 'what community does X belong to', 'community boundaries', 'bridges between communities'."
     requires:
       - graph_initialized
 
   - name: find_weighted_criticality
     keywords:
-      - critical functions
-      - most important
       - highest risk
       - weighted criticality
-      - combined importance
       - risk assessment
-      - key functions
-      - critical nodes
+      - crash risk
       - risky functions
-      - high impact
-    use_when: "User asks about most critical or risky functions considering both structural importance and dependency relationships"
-    avoid_when: "User asks only about dominators or only about importance (use find_dominators or find_important)"
+      - would break
+      - production criticality
+      - crash impact
+    use_when: >
+      User asks about the most critical or risky PRODUCTION functions that would cause
+      the most damage if changed. Measures DominatorScore × PageRank (crash risk).
+      Use for: 'critical production code', 'crash risk', 'what would break if changed',
+      'highest-risk functions for stability'.
+    avoid_when: >
+      NEVER use find_weighted_criticality when the query asks about 'most important',
+      'structural importance', 'highest importance', 'PageRank', 'centrality',
+      'influential functions', 'lowest PageRank', or 'peripheral' — use find_important.
+      find_weighted_criticality measures production-code RISK (DominatorScore × PageRank).
+      find_important measures PageRank CENTRALITY. Only use find_weighted_criticality for
+      'critical production code', 'crash risk', 'what would break if changed'.
+      User asks only about dominators (use find_dominators).
     requires:
       - graph_initialized
 

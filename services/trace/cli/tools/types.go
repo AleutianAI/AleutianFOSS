@@ -226,6 +226,151 @@ func (d *ToolDefinition) RequiredParams() []string {
 	return required
 }
 
+// TypedParams is the interface for strongly-typed tool parameter structs.
+//
+// Description:
+//
+//	Each tool's Params struct (e.g., FindCallersParams) implements this
+//	interface to provide type-safe parameter construction with a single
+//	conversion point to the map[string]any required by Tool.Execute().
+//
+// Thread Safety: Implementations must be safe to call ToMap() concurrently.
+type TypedParams interface {
+	// ToMap converts the typed parameters to the untyped map consumed
+	// by Tool.Execute(). This is the ONLY place where typed params
+	// become untyped — all upstream code works with concrete types.
+	ToMap() map[string]any
+
+	// ToolName returns the name of the tool these parameters belong to.
+	// Used for validation and logging.
+	ToolName() string
+}
+
+// MapParams wraps a raw map[string]any (from LLM tool calls) as a TypedParams.
+//
+// Description:
+//
+//	When the LLM produces tool calls, the parameters arrive as map[string]any
+//	from JSON unmarshaling. MapParams wraps these raw maps to satisfy the
+//	TypedParams interface, allowing a single Execute(ctx, TypedParams) signature
+//	for both the forced-tool path (which produces concrete typed params) and
+//	the LLM/executor path (which produces raw maps).
+//
+// Thread Safety: Safe for concurrent use (value type, map is not mutated).
+type MapParams struct {
+	// Tool is the name of the tool these parameters belong to.
+	Tool string
+
+	// Params is the raw parameter map from JSON unmarshaling.
+	Params map[string]any
+}
+
+// ToolName returns the tool name.
+func (p MapParams) ToolName() string { return p.Tool }
+
+// ToMap returns the underlying parameter map.
+func (p MapParams) ToMap() map[string]any { return p.Params }
+
+// EmptyParams represents a tool invocation with no parameters.
+//
+// Description:
+//
+//	Used by tools like list_packages, find_entry_points, and
+//	find_extractable_regions that require no input parameters.
+//
+// Thread Safety: Safe for concurrent use (immutable after creation).
+type EmptyParams struct {
+	// Tool is the name of the tool these empty parameters belong to.
+	Tool string
+}
+
+// ToolName returns the tool name for empty parameters.
+func (p EmptyParams) ToolName() string { return p.Tool }
+
+// ToMap returns an empty parameter map.
+func (p EmptyParams) ToMap() map[string]any { return map[string]any{} }
+
+// GrepToolParams contains parameters for the Grep tool when invoked
+// via the forced-tool path.
+//
+// Description:
+//
+//	The Grep tool is an external (non-graph) tool with its own parameter
+//	contract. This struct provides type safety for the forced-tool extraction
+//	path in extractToolParameters.
+//
+// Thread Safety: Safe for concurrent use (value type).
+type GrepToolParams struct {
+	// Pattern is the search pattern.
+	Pattern string
+
+	// OutputMode controls output format ("content", "files_with_matches", "count").
+	OutputMode string
+}
+
+// ToolName returns "Grep".
+func (p GrepToolParams) ToolName() string { return "Grep" }
+
+// ToMap converts GrepToolParams to the map consumed by Grep.Execute().
+func (p GrepToolParams) ToMap() map[string]any {
+	return map[string]any{
+		"pattern":     p.Pattern,
+		"output_mode": p.OutputMode,
+	}
+}
+
+// GraphOverviewParams contains parameters for the graph_overview tool.
+//
+// Thread Safety: Safe for concurrent use (value type).
+type GraphOverviewParams struct {
+	// Depth controls traversal depth (1-3).
+	Depth int
+
+	// IncludeDependencies includes inter-package dependency graph.
+	IncludeDependencies bool
+
+	// IncludeMetrics includes symbol counts and file metrics.
+	IncludeMetrics bool
+}
+
+// ToolName returns "graph_overview".
+func (p GraphOverviewParams) ToolName() string { return "graph_overview" }
+
+// ToMap converts GraphOverviewParams to the map consumed by graph_overview.Execute().
+func (p GraphOverviewParams) ToMap() map[string]any {
+	return map[string]any{
+		"depth":                p.Depth,
+		"include_dependencies": p.IncludeDependencies,
+		"include_metrics":      p.IncludeMetrics,
+	}
+}
+
+// ExplorePackageParams contains parameters for the explore_package tool.
+//
+// Thread Safety: Safe for concurrent use (value type).
+type ExplorePackageParams struct {
+	// Package is the package name or path to explore.
+	Package string
+
+	// IncludeDependencies shows packages this package imports.
+	IncludeDependencies bool
+
+	// IncludeDependents shows packages that import this package.
+	IncludeDependents bool
+}
+
+// ToolName returns "explore_package".
+func (p ExplorePackageParams) ToolName() string { return "explore_package" }
+
+// ToMap converts ExplorePackageParams to the map consumed by explore_package.Execute().
+func (p ExplorePackageParams) ToMap() map[string]any {
+	return map[string]any{
+		"package":              p.Package,
+		"include_dependencies": p.IncludeDependencies,
+		"include_dependents":   p.IncludeDependents,
+	}
+}
+
 // Tool defines the interface for executable tools.
 //
 // Implementations must be safe for concurrent use.
@@ -243,12 +388,12 @@ type Tool interface {
 	//
 	// Inputs:
 	//   ctx - Context for cancellation and timeout
-	//   params - Input parameters (validated before call)
+	//   params - Typed parameters (use params.ToMap() to access raw map)
 	//
 	// Outputs:
 	//   *Result - Execution result
 	//   error - Non-nil if execution failed
-	Execute(ctx context.Context, params map[string]any) (*Result, error)
+	Execute(ctx context.Context, params TypedParams) (*Result, error)
 }
 
 // Result contains the outcome of a tool execution.

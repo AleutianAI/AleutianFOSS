@@ -21,7 +21,7 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 )
 
-const mctsTracerName = "codebuddy.mcts"
+const mctsTracerName = "trace.mcts"
 
 // MCTSTracer provides OpenTelemetry tracing for MCTS operations.
 //

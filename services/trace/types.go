@@ -8,7 +8,7 @@
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
 
-package code_buddy
+package trace
 
 import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
@@ -18,7 +18,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
 )
 
-// InitRequest is the request body for POST /v1/codebuddy/init.
+// InitRequest is the request body for POST /v1/trace/init.
 type InitRequest struct {
 	// ProjectRoot is the absolute path to the project root directory.
 	// Required.
@@ -31,7 +31,7 @@ type InitRequest struct {
 	ExcludePatterns []string `json:"exclude_patterns"`
 }
 
-// InitResponse is the response for POST /v1/codebuddy/init.
+// InitResponse is the response for POST /v1/trace/init.
 type InitResponse struct {
 	// GraphID is the unique identifier for this graph.
 	GraphID string `json:"graph_id"`
@@ -58,7 +58,7 @@ type InitResponse struct {
 	Errors []string `json:"errors,omitempty"`
 }
 
-// ContextRequest is the request body for POST /v1/codebuddy/context.
+// ContextRequest is the request body for POST /v1/trace/context.
 type ContextRequest struct {
 	// GraphID is the graph to query. Required.
 	GraphID string `json:"graph_id" binding:"required"`
@@ -73,7 +73,7 @@ type ContextRequest struct {
 	IncludeLibraryDocs *bool `json:"include_library_docs"`
 }
 
-// ContextResponse is the response for POST /v1/codebuddy/context.
+// ContextResponse is the response for POST /v1/trace/context.
 type ContextResponse struct {
 	// Context is the formatted markdown context for LLM consumption.
 	Context string `json:"context"`
@@ -91,7 +91,7 @@ type ContextResponse struct {
 	Suggestions []string `json:"suggestions"`
 }
 
-// CallersRequest is the query params for GET /v1/codebuddy/callers.
+// CallersRequest is the query params for GET /v1/trace/callers.
 type CallersRequest struct {
 	// GraphID is the graph to query. Required.
 	GraphID string `form:"graph_id" binding:"required"`
@@ -103,7 +103,7 @@ type CallersRequest struct {
 	Limit int `form:"limit"`
 }
 
-// CallersResponse is the response for GET /v1/codebuddy/callers.
+// CallersResponse is the response for GET /v1/trace/callers.
 type CallersResponse struct {
 	// Function is the function name that was searched.
 	Function string `json:"function"`
@@ -112,7 +112,7 @@ type CallersResponse struct {
 	Callers []*SymbolInfo `json:"callers"`
 }
 
-// ImplementationsRequest is the query params for GET /v1/codebuddy/implementations.
+// ImplementationsRequest is the query params for GET /v1/trace/implementations.
 type ImplementationsRequest struct {
 	// GraphID is the graph to query. Required.
 	GraphID string `form:"graph_id" binding:"required"`
@@ -124,7 +124,7 @@ type ImplementationsRequest struct {
 	Limit int `form:"limit"`
 }
 
-// ImplementationsResponse is the response for GET /v1/codebuddy/implementations.
+// ImplementationsResponse is the response for GET /v1/trace/implementations.
 type ImplementationsResponse struct {
 	// Interface is the interface name that was searched.
 	Interface string `json:"interface"`
@@ -133,13 +133,13 @@ type ImplementationsResponse struct {
 	Implementations []*SymbolInfo `json:"implementations"`
 }
 
-// SymbolRequest is the query params for GET /v1/codebuddy/symbol/:id.
+// SymbolRequest is the query params for GET /v1/trace/symbol/:id.
 type SymbolRequest struct {
 	// GraphID is the graph to query. Required.
 	GraphID string `form:"graph_id" binding:"required"`
 }
 
-// SymbolResponse is the response for GET /v1/codebuddy/symbol/:id.
+// SymbolResponse is the response for GET /v1/trace/symbol/:id.
 type SymbolResponse struct {
 	// Symbol is the detailed symbol information.
 	Symbol *SymbolInfo `json:"symbol"`
@@ -178,7 +178,7 @@ type SymbolInfo struct {
 	Exported bool `json:"exported"`
 }
 
-// SeedRequest is the request body for POST /v1/codebuddy/seed.
+// SeedRequest is the request body for POST /v1/trace/seed.
 type SeedRequest struct {
 	// ProjectRoot is the absolute path to the project root. Required.
 	ProjectRoot string `json:"project_root" binding:"required"`
@@ -187,7 +187,7 @@ type SeedRequest struct {
 	DataSpace string `json:"data_space" binding:"required"`
 }
 
-// SeedResponse is the response for POST /v1/codebuddy/seed.
+// SeedResponse is the response for POST /v1/trace/seed.
 type SeedResponse struct {
 	// DependenciesFound is the number of dependencies discovered.
 	DependenciesFound int `json:"dependencies_found"`
@@ -199,7 +199,7 @@ type SeedResponse struct {
 	Errors []string `json:"errors,omitempty"`
 }
 
-// HealthResponse is the response for GET /v1/codebuddy/health.
+// HealthResponse is the response for GET /v1/trace/health.
 type HealthResponse struct {
 	// Status is "healthy" or "degraded".
 	Status string `json:"status"`
@@ -208,7 +208,7 @@ type HealthResponse struct {
 	Version string `json:"version"`
 }
 
-// ReadyResponse is the response for GET /v1/codebuddy/ready.
+// ReadyResponse is the response for GET /v1/trace/ready.
 type ReadyResponse struct {
 	// Ready is true if the service is ready to accept requests.
 	Ready bool `json:"ready"`
@@ -280,7 +280,7 @@ func SymbolInfoFromAST(s *ast.Symbol) *SymbolInfo {
 // Agent API Types (CB-11 Agent Loop)
 // =============================================================================
 
-// AgentRunRequest is the request body for POST /v1/codebuddy/agent/run.
+// AgentRunRequest is the request body for POST /v1/trace/agent/run.
 type AgentRunRequest struct {
 	// ProjectRoot is the absolute path to the project root directory.
 	// Required.
@@ -293,7 +293,7 @@ type AgentRunRequest struct {
 	Config *agent.SessionConfig `json:"config,omitempty"`
 }
 
-// AgentRunResponse is the response for POST /v1/codebuddy/agent/run.
+// AgentRunResponse is the response for POST /v1/trace/agent/run.
 type AgentRunResponse struct {
 	// SessionID is the unique identifier for this session.
 	SessionID string `json:"session_id"`
@@ -320,7 +320,7 @@ type AgentRunResponse struct {
 	DegradedMode bool `json:"degraded_mode"`
 }
 
-// AgentContinueRequest is the request body for POST /v1/codebuddy/agent/continue.
+// AgentContinueRequest is the request body for POST /v1/trace/agent/continue.
 type AgentContinueRequest struct {
 	// SessionID is the session to continue. Required.
 	SessionID string `json:"session_id" binding:"required"`
@@ -329,13 +329,13 @@ type AgentContinueRequest struct {
 	Clarification string `json:"clarification" binding:"required"`
 }
 
-// AgentAbortRequest is the request body for POST /v1/codebuddy/agent/abort.
+// AgentAbortRequest is the request body for POST /v1/trace/agent/abort.
 type AgentAbortRequest struct {
 	// SessionID is the session to abort. Required.
 	SessionID string `json:"session_id" binding:"required"`
 }
 
-// AgentStateResponse is the response for GET /v1/codebuddy/agent/:id.
+// AgentStateResponse is the response for GET /v1/trace/agent/:id.
 type AgentStateResponse struct {
 	// SessionID is the unique session identifier.
 	SessionID string `json:"session_id"`
@@ -369,7 +369,7 @@ type AgentStateResponse struct {
 // CRS Export API Types (CB-29-2)
 // =============================================================================
 
-// ReasoningTraceResponse is the response for GET /v1/codebuddy/agent/:id/reasoning.
+// ReasoningTraceResponse is the response for GET /v1/trace/agent/:id/reasoning.
 type ReasoningTraceResponse struct {
 	// SessionID is the unique session identifier.
 	SessionID string `json:"session_id"`
@@ -465,7 +465,7 @@ type ReasoningSummaryResponse struct {
 	ConfidenceScore float64 `json:"confidence_score"`
 }
 
-// CRSExportResponse is the response for GET /v1/codebuddy/agent/:id/crs.
+// CRSExportResponse is the response for GET /v1/trace/agent/:id/crs.
 type CRSExportResponse struct {
 	// SessionID is the unique session identifier.
 	SessionID string `json:"session_id"`
@@ -557,14 +557,14 @@ type HistoryEntryResponse struct {
 // Request and response types for the agentic reasoning layer tools.
 // These wrap the internal package types for HTTP API consumption.
 
-// ToolsResponse is the response for GET /v1/codebuddy/tools.
+// ToolsResponse is the response for GET /v1/trace/tools.
 type ToolsResponse struct {
 	Tools []ToolDefinition `json:"tools"`
 }
 
 // --- Exploration Tool Types ---
 
-// FindEntryPointsRequest is the request for POST /v1/codebuddy/explore/entry_points.
+// FindEntryPointsRequest is the request for POST /v1/trace/explore/entry_points.
 type FindEntryPointsRequest struct {
 	GraphID      string `json:"graph_id" binding:"required"`
 	Type         string `json:"type"`
@@ -573,7 +573,7 @@ type FindEntryPointsRequest struct {
 	IncludeTests bool   `json:"include_tests"`
 }
 
-// TraceDataFlowRequest is the request for POST /v1/codebuddy/explore/data_flow.
+// TraceDataFlowRequest is the request for POST /v1/trace/explore/data_flow.
 type TraceDataFlowRequest struct {
 	GraphID     string `json:"graph_id" binding:"required"`
 	SourceID    string `json:"source_id" binding:"required"`
@@ -581,21 +581,21 @@ type TraceDataFlowRequest struct {
 	IncludeCode bool   `json:"include_code"`
 }
 
-// TraceErrorFlowRequest is the request for POST /v1/codebuddy/explore/error_flow.
+// TraceErrorFlowRequest is the request for POST /v1/trace/explore/error_flow.
 type TraceErrorFlowRequest struct {
 	GraphID string `json:"graph_id" binding:"required"`
 	Scope   string `json:"scope" binding:"required"`
 	MaxHops int    `json:"max_hops"`
 }
 
-// FindConfigUsageRequest is the request for POST /v1/codebuddy/explore/config_usage.
+// FindConfigUsageRequest is the request for POST /v1/trace/explore/config_usage.
 type FindConfigUsageRequest struct {
 	GraphID         string `json:"graph_id" binding:"required"`
 	ConfigKey       string `json:"config_key" binding:"required"`
 	IncludeDefaults bool   `json:"include_defaults"`
 }
 
-// FindSimilarCodeRequest is the request for POST /v1/codebuddy/explore/similar_code.
+// FindSimilarCodeRequest is the request for POST /v1/trace/explore/similar_code.
 type FindSimilarCodeRequest struct {
 	GraphID       string  `json:"graph_id" binding:"required"`
 	SymbolID      string  `json:"symbol_id" binding:"required"`
@@ -603,7 +603,7 @@ type FindSimilarCodeRequest struct {
 	Limit         int     `json:"limit"`
 }
 
-// BuildMinimalContextRequest is the request for POST /v1/codebuddy/explore/minimal_context.
+// BuildMinimalContextRequest is the request for POST /v1/trace/explore/minimal_context.
 type BuildMinimalContextRequest struct {
 	GraphID        string `json:"graph_id" binding:"required"`
 	SymbolID       string `json:"symbol_id" binding:"required"`
@@ -611,19 +611,19 @@ type BuildMinimalContextRequest struct {
 	IncludeCallees bool   `json:"include_callees"`
 }
 
-// SummarizeFileRequest is the request for POST /v1/codebuddy/explore/summarize_file.
+// SummarizeFileRequest is the request for POST /v1/trace/explore/summarize_file.
 type SummarizeFileRequest struct {
 	GraphID  string `json:"graph_id" binding:"required"`
 	FilePath string `json:"file_path" binding:"required"`
 }
 
-// SummarizePackageRequest is the request for POST /v1/codebuddy/explore/summarize_package.
+// SummarizePackageRequest is the request for POST /v1/trace/explore/summarize_package.
 type SummarizePackageRequest struct {
 	GraphID string `json:"graph_id" binding:"required"`
 	Package string `json:"package" binding:"required"`
 }
 
-// AnalyzeChangeImpactRequest is the request for POST /v1/codebuddy/explore/change_impact.
+// AnalyzeChangeImpactRequest is the request for POST /v1/trace/explore/change_impact.
 type AnalyzeChangeImpactRequest struct {
 	GraphID    string `json:"graph_id" binding:"required"`
 	SymbolID   string `json:"symbol_id" binding:"required"`
@@ -632,14 +632,14 @@ type AnalyzeChangeImpactRequest struct {
 
 // --- Reasoning Tool Types ---
 
-// CheckBreakingChangesRequest is the request for POST /v1/codebuddy/reason/breaking_changes.
+// CheckBreakingChangesRequest is the request for POST /v1/trace/reason/breaking_changes.
 type CheckBreakingChangesRequest struct {
 	GraphID           string `json:"graph_id" binding:"required"`
 	SymbolID          string `json:"symbol_id" binding:"required"`
 	ProposedSignature string `json:"proposed_signature" binding:"required"`
 }
 
-// SimulateChangeRequest is the request for POST /v1/codebuddy/reason/simulate_change.
+// SimulateChangeRequest is the request for POST /v1/trace/reason/simulate_change.
 type SimulateChangeRequest struct {
 	GraphID       string                 `json:"graph_id" binding:"required"`
 	SymbolID      string                 `json:"symbol_id" binding:"required"`
@@ -647,27 +647,27 @@ type SimulateChangeRequest struct {
 	ChangeDetails map[string]interface{} `json:"change_details" binding:"required"`
 }
 
-// ValidateChangeRequest is the request for POST /v1/codebuddy/reason/validate_change.
+// ValidateChangeRequest is the request for POST /v1/trace/reason/validate_change.
 type ValidateChangeRequest struct {
 	Code     string `json:"code" binding:"required"`
 	Language string `json:"language" binding:"required"`
 }
 
-// FindTestCoverageRequest is the request for POST /v1/codebuddy/reason/test_coverage.
+// FindTestCoverageRequest is the request for POST /v1/trace/reason/test_coverage.
 type FindTestCoverageRequest struct {
 	GraphID         string `json:"graph_id" binding:"required"`
 	SymbolID        string `json:"symbol_id" binding:"required"`
 	IncludeIndirect bool   `json:"include_indirect"`
 }
 
-// DetectSideEffectsRequest is the request for POST /v1/codebuddy/reason/side_effects.
+// DetectSideEffectsRequest is the request for POST /v1/trace/reason/side_effects.
 type DetectSideEffectsRequest struct {
 	GraphID    string `json:"graph_id" binding:"required"`
 	SymbolID   string `json:"symbol_id" binding:"required"`
 	Transitive bool   `json:"transitive"`
 }
 
-// SuggestRefactorRequest is the request for POST /v1/codebuddy/reason/suggest_refactor.
+// SuggestRefactorRequest is the request for POST /v1/trace/reason/suggest_refactor.
 type SuggestRefactorRequest struct {
 	GraphID  string `json:"graph_id" binding:"required"`
 	SymbolID string `json:"symbol_id" binding:"required"`
@@ -675,7 +675,7 @@ type SuggestRefactorRequest struct {
 
 // --- Coordination Tool Types ---
 
-// PlanMultiFileChangeRequest is the request for POST /v1/codebuddy/coordinate/plan_changes.
+// PlanMultiFileChangeRequest is the request for POST /v1/trace/coordinate/plan_changes.
 type PlanMultiFileChangeRequest struct {
 	GraphID      string `json:"graph_id" binding:"required"`
 	TargetID     string `json:"target_id" binding:"required"`
@@ -686,12 +686,12 @@ type PlanMultiFileChangeRequest struct {
 	IncludeTests bool   `json:"include_tests"`
 }
 
-// ValidatePlanRequest is the request for POST /v1/codebuddy/coordinate/validate_plan.
+// ValidatePlanRequest is the request for POST /v1/trace/coordinate/validate_plan.
 type ValidatePlanRequest struct {
 	PlanID string `json:"plan_id" binding:"required"`
 }
 
-// PreviewChangesRequest is the request for POST /v1/codebuddy/coordinate/preview_changes.
+// PreviewChangesRequest is the request for POST /v1/trace/coordinate/preview_changes.
 type PreviewChangesRequest struct {
 	PlanID       string `json:"plan_id" binding:"required"`
 	ContextLines int    `json:"context_lines"`
@@ -699,7 +699,7 @@ type PreviewChangesRequest struct {
 
 // --- Pattern Tool Types ---
 
-// DetectPatternsRequest is the request for POST /v1/codebuddy/patterns/detect.
+// DetectPatternsRequest is the request for POST /v1/trace/patterns/detect.
 type DetectPatternsRequest struct {
 	GraphID       string   `json:"graph_id" binding:"required"`
 	Scope         string   `json:"scope"`
@@ -707,7 +707,7 @@ type DetectPatternsRequest struct {
 	MinConfidence float64  `json:"min_confidence"`
 }
 
-// FindCodeSmellsRequest is the request for POST /v1/codebuddy/patterns/code_smells.
+// FindCodeSmellsRequest is the request for POST /v1/trace/patterns/code_smells.
 type FindCodeSmellsRequest struct {
 	GraphID      string `json:"graph_id" binding:"required"`
 	Scope        string `json:"scope"`
@@ -715,7 +715,7 @@ type FindCodeSmellsRequest struct {
 	IncludeTests bool   `json:"include_tests"`
 }
 
-// FindDuplicationRequest is the request for POST /v1/codebuddy/patterns/duplication.
+// FindDuplicationRequest is the request for POST /v1/trace/patterns/duplication.
 type FindDuplicationRequest struct {
 	GraphID       string  `json:"graph_id" binding:"required"`
 	Scope         string  `json:"scope"`
@@ -724,14 +724,14 @@ type FindDuplicationRequest struct {
 	IncludeTests  bool    `json:"include_tests"`
 }
 
-// FindCircularDepsRequest is the request for POST /v1/codebuddy/patterns/circular_deps.
+// FindCircularDepsRequest is the request for POST /v1/trace/patterns/circular_deps.
 type FindCircularDepsRequest struct {
 	GraphID string `json:"graph_id" binding:"required"`
 	Scope   string `json:"scope"`
 	Level   string `json:"level"`
 }
 
-// ExtractConventionsRequest is the request for POST /v1/codebuddy/patterns/conventions.
+// ExtractConventionsRequest is the request for POST /v1/trace/patterns/conventions.
 type ExtractConventionsRequest struct {
 	GraphID      string   `json:"graph_id" binding:"required"`
 	Scope        string   `json:"scope"`
@@ -739,7 +739,7 @@ type ExtractConventionsRequest struct {
 	IncludeTests bool     `json:"include_tests"`
 }
 
-// FindDeadCodeRequest is the request for POST /v1/codebuddy/patterns/dead_code.
+// FindDeadCodeRequest is the request for POST /v1/trace/patterns/dead_code.
 type FindDeadCodeRequest struct {
 	GraphID         string `json:"graph_id" binding:"required"`
 	Scope           string `json:"scope"`
@@ -767,7 +767,7 @@ type AgenticResponse struct {
 // LSP INTEGRATION TYPES (CB-24)
 // =============================================================================
 
-// LSPDefinitionRequest is the request for POST /v1/codebuddy/lsp/definition.
+// LSPDefinitionRequest is the request for POST /v1/trace/lsp/definition.
 type LSPDefinitionRequest struct {
 	// GraphID is the graph to use for project context. Required.
 	GraphID string `json:"graph_id" binding:"required"`
@@ -782,7 +782,7 @@ type LSPDefinitionRequest struct {
 	Column int `json:"column" binding:"required,min=0"`
 }
 
-// LSPReferencesRequest is the request for POST /v1/codebuddy/lsp/references.
+// LSPReferencesRequest is the request for POST /v1/trace/lsp/references.
 type LSPReferencesRequest struct {
 	// GraphID is the graph to use for project context. Required.
 	GraphID string `json:"graph_id" binding:"required"`
@@ -800,7 +800,7 @@ type LSPReferencesRequest struct {
 	IncludeDeclaration bool `json:"include_declaration"`
 }
 
-// LSPHoverRequest is the request for POST /v1/codebuddy/lsp/hover.
+// LSPHoverRequest is the request for POST /v1/trace/lsp/hover.
 type LSPHoverRequest struct {
 	// GraphID is the graph to use for project context. Required.
 	GraphID string `json:"graph_id" binding:"required"`
@@ -815,7 +815,7 @@ type LSPHoverRequest struct {
 	Column int `json:"column" binding:"required,min=0"`
 }
 
-// LSPRenameRequest is the request for POST /v1/codebuddy/lsp/rename.
+// LSPRenameRequest is the request for POST /v1/trace/lsp/rename.
 type LSPRenameRequest struct {
 	// GraphID is the graph to use for project context. Required.
 	GraphID string `json:"graph_id" binding:"required"`
@@ -833,7 +833,7 @@ type LSPRenameRequest struct {
 	NewName string `json:"new_name" binding:"required"`
 }
 
-// LSPWorkspaceSymbolRequest is the request for POST /v1/codebuddy/lsp/symbols.
+// LSPWorkspaceSymbolRequest is the request for POST /v1/trace/lsp/symbols.
 type LSPWorkspaceSymbolRequest struct {
 	// GraphID is the graph to use for project context. Required.
 	GraphID string `json:"graph_id" binding:"required"`
@@ -863,7 +863,7 @@ type LSPLocation struct {
 	EndColumn int `json:"end_column"`
 }
 
-// LSPDefinitionResponse is the response for POST /v1/codebuddy/lsp/definition.
+// LSPDefinitionResponse is the response for POST /v1/trace/lsp/definition.
 type LSPDefinitionResponse struct {
 	// Locations contains the definition location(s).
 	Locations []LSPLocation `json:"locations"`
@@ -872,7 +872,7 @@ type LSPDefinitionResponse struct {
 	LatencyMs int64 `json:"latency_ms"`
 }
 
-// LSPReferencesResponse is the response for POST /v1/codebuddy/lsp/references.
+// LSPReferencesResponse is the response for POST /v1/trace/lsp/references.
 type LSPReferencesResponse struct {
 	// Locations contains the reference location(s).
 	Locations []LSPLocation `json:"locations"`
@@ -881,7 +881,7 @@ type LSPReferencesResponse struct {
 	LatencyMs int64 `json:"latency_ms"`
 }
 
-// LSPHoverResponse is the response for POST /v1/codebuddy/lsp/hover.
+// LSPHoverResponse is the response for POST /v1/trace/lsp/hover.
 type LSPHoverResponse struct {
 	// Content is the hover content (documentation, type info).
 	Content string `json:"content"`
@@ -896,7 +896,7 @@ type LSPHoverResponse struct {
 	LatencyMs int64 `json:"latency_ms"`
 }
 
-// LSPRenameResponse is the response for POST /v1/codebuddy/lsp/rename.
+// LSPRenameResponse is the response for POST /v1/trace/lsp/rename.
 type LSPRenameResponse struct {
 	// Edits is a map from file path to list of text edits.
 	Edits map[string][]LSPTextEdit `json:"edits"`
@@ -935,7 +935,7 @@ type LSPSymbolInfo struct {
 	ContainerName string `json:"container_name,omitempty"`
 }
 
-// LSPWorkspaceSymbolResponse is the response for POST /v1/codebuddy/lsp/symbols.
+// LSPWorkspaceSymbolResponse is the response for POST /v1/trace/lsp/symbols.
 type LSPWorkspaceSymbolResponse struct {
 	// Symbols contains the matching symbols.
 	Symbols []LSPSymbolInfo `json:"symbols"`
@@ -944,7 +944,7 @@ type LSPWorkspaceSymbolResponse struct {
 	LatencyMs int64 `json:"latency_ms"`
 }
 
-// LSPStatusResponse is the response for GET /v1/codebuddy/lsp/status.
+// LSPStatusResponse is the response for GET /v1/trace/lsp/status.
 type LSPStatusResponse struct {
 	// Available indicates if LSP is available for the project.
 	Available bool `json:"available"`
@@ -960,7 +960,7 @@ type LSPStatusResponse struct {
 // DEBUG ENDPOINT TYPES (GR-43)
 // =============================================================================
 
-// GraphStatsResponse is the response for GET /v1/codebuddy/debug/graph/stats.
+// GraphStatsResponse is the response for GET /v1/trace/debug/graph/stats.
 //
 // Description:
 //
@@ -1002,7 +1002,7 @@ type GraphStatsResponse struct {
 // CRS DEBUG ENDPOINT TYPES (GR-Phase1 Issue 5)
 // =============================================================================
 
-// DebugCRSResponse is the response for GET /v1/codebuddy/debug/crs.
+// DebugCRSResponse is the response for GET /v1/trace/debug/crs.
 //
 // Description:
 //
@@ -1117,7 +1117,7 @@ type DebugCRSMetrics struct {
 // DEBUG HISTORY ENDPOINT TYPES (GR-Phase1 Issue 5b)
 // =============================================================================
 
-// DebugHistoryResponse is the response for GET /v1/codebuddy/agent/debug/history.
+// DebugHistoryResponse is the response for GET /v1/trace/agent/debug/history.
 //
 // Description:
 //
@@ -1156,4 +1156,134 @@ type DebugHistoryEntry struct {
 
 	// DurationMs is how long the query took to process.
 	DurationMs int64 `json:"duration_ms"`
+}
+
+// =============================================================================
+// Graph Inspect/Export Types (GR-64)
+// =============================================================================
+
+// InspectNodeRequest is the query params for GET /v1/trace/debug/graph/inspect.
+type InspectNodeRequest struct {
+	// GraphID is the graph to query. Optional, uses first cached if not specified.
+	GraphID string `form:"graph_id"`
+
+	// Name is the symbol name to look up. Required.
+	Name string `form:"name" binding:"required"`
+
+	// Kind filters results to a specific symbol kind (e.g., "function", "struct").
+	// Optional, returns all kinds if not specified.
+	Kind string `form:"kind"`
+
+	// Limit is the maximum number of edges per direction. Default: 50.
+	Limit int `form:"limit"`
+}
+
+// InspectNodeResponse is the response for GET /v1/trace/debug/graph/inspect.
+type InspectNodeResponse struct {
+	// Matches contains the matching nodes with their edges.
+	Matches []InspectNodeMatch `json:"matches"`
+
+	// Truncated indicates if any match had its edge list truncated.
+	Truncated bool `json:"truncated"`
+}
+
+// InspectNodeMatch represents a single matching node in an inspect response.
+type InspectNodeMatch struct {
+	// NodeID is the unique node identifier.
+	NodeID string `json:"node_id"`
+
+	// Symbol is the symbol information.
+	Symbol *SymbolInfo `json:"symbol"`
+
+	// Outgoing contains edges from this node to other nodes.
+	Outgoing []InspectEdge `json:"outgoing"`
+
+	// Incoming contains edges from other nodes to this node.
+	Incoming []InspectEdge `json:"incoming"`
+}
+
+// InspectEdge represents an edge in an inspect response.
+type InspectEdge struct {
+	// PeerID is the ID of the node on the other end of the edge.
+	PeerID string `json:"peer_id"`
+
+	// PeerName is the name of the peer symbol.
+	PeerName string `json:"peer_name"`
+
+	// PeerKind is the kind of the peer symbol.
+	PeerKind string `json:"peer_kind"`
+
+	// EdgeType is the relationship type (e.g., "calls", "implements").
+	EdgeType string `json:"edge_type"`
+
+	// Location is where the relationship is expressed in code.
+	Location *ast.Location `json:"location,omitempty"`
+}
+
+// =============================================================================
+// Snapshot Types (GR-65)
+// =============================================================================
+
+// SaveSnapshotRequest is the request body for POST /v1/trace/debug/graph/snapshot.
+type SaveSnapshotRequest struct {
+	// GraphID is the graph to snapshot. Optional, uses first cached if not specified.
+	GraphID string `json:"graph_id"`
+
+	// Label is an optional human-readable label for the snapshot.
+	Label string `json:"label"`
+}
+
+// SaveSnapshotResponse is the response for POST /v1/trace/debug/graph/snapshot.
+type SaveSnapshotResponse struct {
+	// SnapshotID is the unique identifier for the saved snapshot.
+	SnapshotID string `json:"snapshot_id"`
+
+	// GraphHash is the deterministic hash of the graph structure.
+	GraphHash string `json:"graph_hash"`
+
+	// NodeCount is the number of nodes in the snapshot.
+	NodeCount int `json:"node_count"`
+
+	// EdgeCount is the number of edges in the snapshot.
+	EdgeCount int `json:"edge_count"`
+
+	// CompressedSize is the size of the compressed snapshot in bytes.
+	CompressedSize int64 `json:"compressed_size"`
+}
+
+// ListSnapshotsResponse is the response for GET /v1/trace/debug/graph/snapshots.
+type ListSnapshotsResponse struct {
+	// Snapshots contains the snapshot metadata entries.
+	Snapshots []*graph.SnapshotMetadata `json:"snapshots"`
+}
+
+// LoadSnapshotResponse is the response for GET /v1/trace/debug/graph/snapshot/:id.
+type LoadSnapshotResponse struct {
+	// Metadata is the snapshot metadata.
+	Metadata *graph.SnapshotMetadata `json:"metadata"`
+
+	// NodeCount is the number of nodes in the loaded graph.
+	NodeCount int `json:"node_count"`
+
+	// EdgeCount is the number of edges in the loaded graph.
+	EdgeCount int `json:"edge_count"`
+
+	// GraphHash is the hash of the loaded graph (should match metadata).
+	GraphHash string `json:"graph_hash"`
+}
+
+// SnapshotDiffRequest is the query params for GET /v1/trace/debug/graph/snapshot/diff.
+type SnapshotDiffRequest struct {
+	// Base is the base snapshot ID for comparison.
+	Base string `form:"base" binding:"required"`
+
+	// Target is the target snapshot ID for comparison.
+	Target string `form:"target" binding:"required"`
+}
+
+// SnapshotDiffResponse is the response for GET /v1/trace/debug/graph/snapshot/diff.
+// The actual diff data is in graph.SnapshotDiff, embedded directly.
+type SnapshotDiffResponse struct {
+	// Diff contains the snapshot comparison results.
+	Diff *graph.SnapshotDiff `json:"diff"`
 }

@@ -632,7 +632,7 @@ func (s *Storage) writeIndexJSON(path string, symbols []Symbol, edges []Edge) er
 		Edges:   edges,
 	}
 
-	data, err := json.MarshalIndent(index, "", "  ")
+	data, err := json.MarshalIndent(&index, "", "  ")
 	if err != nil {
 		return &StorageError{Op: "marshal_index", Err: err}
 	}

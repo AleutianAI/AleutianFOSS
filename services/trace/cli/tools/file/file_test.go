@@ -18,6 +18,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
 )
 
 // ============================================================================
@@ -60,9 +62,9 @@ func TestReadTool_Execute_SimpleFile(t *testing.T) {
 	tool := NewReadTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_path": path,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -96,11 +98,11 @@ func TestReadTool_Execute_WithOffset(t *testing.T) {
 	tool := NewReadTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_path": path,
 		"offset":    50,
 		"limit":     10,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -128,9 +130,9 @@ func TestReadTool_Execute_FileNotFound(t *testing.T) {
 	tool := NewReadTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_path": filepath.Join(dir, "nonexistent.txt"),
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -151,9 +153,9 @@ func TestReadTool_Execute_Directory(t *testing.T) {
 	tool := NewReadTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_path": dir,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -176,9 +178,9 @@ func TestReadTool_Execute_LineNumberFormat(t *testing.T) {
 	tool := NewReadTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_path": path,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -207,10 +209,10 @@ func TestWriteTool_Execute_NewFile(t *testing.T) {
 	path := filepath.Join(dir, "new_file.txt")
 	content := "new content"
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_path": path,
 		"content":   content,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -252,10 +254,10 @@ func TestWriteTool_Execute_Overwrite(t *testing.T) {
 	ctx := context.Background()
 	newContent := "new content"
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_path": path,
 		"content":   newContent,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -278,10 +280,10 @@ func TestWriteTool_Execute_CreateParentDirs(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(dir, "subdir", "nested", "file.txt")
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_path": path,
 		"content":   "content",
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -303,10 +305,10 @@ func TestWriteTool_Execute_OutsideAllowed(t *testing.T) {
 	tool := NewWriteTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_path": "/tmp/outside_allowed.txt",
 		"content":   "malicious",
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -336,11 +338,11 @@ func TestEditTool_Execute_SingleMatch(t *testing.T) {
 	tool := NewEditTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_path":  path,
 		"old_string": "func oldName()",
 		"new_string": "func newName()",
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -379,11 +381,11 @@ func TestEditTool_Execute_NoMatch(t *testing.T) {
 	tool := NewEditTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_path":  path,
 		"old_string": "nonexistent",
 		"new_string": "replacement",
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -406,11 +408,11 @@ func TestEditTool_Execute_MultipleMatch_NoReplaceAll(t *testing.T) {
 	tool := NewEditTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_path":  path,
 		"old_string": "foo",
 		"new_string": "bar",
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -433,12 +435,12 @@ func TestEditTool_Execute_ReplaceAll(t *testing.T) {
 	tool := NewEditTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_path":   path,
 		"old_string":  "foo",
 		"new_string":  "bar",
 		"replace_all": true,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -468,11 +470,11 @@ func TestEditTool_Execute_FileNotRead(t *testing.T) {
 	tool := NewEditTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_path":  path,
 		"old_string": "content",
 		"new_string": "new",
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -501,10 +503,10 @@ func TestGlobTool_Execute_SimplePattern(t *testing.T) {
 	tool := NewGlobTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"pattern": "*.go",
 		"path":    dir,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -532,10 +534,10 @@ func TestGlobTool_Execute_RecursivePattern(t *testing.T) {
 	tool := NewGlobTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"pattern": "**/*.go",
 		"path":    dir,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -562,10 +564,10 @@ func TestGlobTool_Execute_SortedByMtime(t *testing.T) {
 	tool := NewGlobTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"pattern": "*.go",
 		"path":    dir,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -597,11 +599,11 @@ func TestGlobTool_Execute_Limit(t *testing.T) {
 	tool := NewGlobTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"pattern": "*.go",
 		"path":    dir,
 		"limit":   5,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -629,10 +631,10 @@ func TestGrepTool_Execute_SimpleMatch(t *testing.T) {
 	tool := NewGrepTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"pattern": "main",
 		"path":    dir,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -660,11 +662,11 @@ func TestGrepTool_Execute_WithContext(t *testing.T) {
 	tool := NewGrepTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"pattern":       "MATCH",
 		"path":          dir,
 		"context_lines": 2,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -697,20 +699,20 @@ func TestGrepTool_Execute_CaseInsensitive(t *testing.T) {
 	ctx := context.Background()
 
 	// Case sensitive (should not match)
-	result1, _ := tool.Execute(ctx, map[string]any{
+	result1, _ := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"pattern": "hello",
 		"path":    dir,
-	})
+	}})
 	if result1.Output.(*GrepResult).Count != 0 {
 		t.Error("case sensitive should not match")
 	}
 
 	// Case insensitive (should match)
-	result2, _ := tool.Execute(ctx, map[string]any{
+	result2, _ := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"pattern":          "hello",
 		"path":             dir,
 		"case_insensitive": true,
-	})
+	}})
 	if result2.Output.(*GrepResult).Count != 1 {
 		t.Error("case insensitive should match")
 	}
@@ -726,11 +728,11 @@ func TestGrepTool_Execute_GlobFilter(t *testing.T) {
 	tool := NewGrepTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"pattern": "main",
 		"path":    dir,
 		"glob":    "*.go",
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -751,10 +753,10 @@ func TestGrepTool_Execute_RegexPattern(t *testing.T) {
 	tool := NewGrepTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"pattern": `func New\w+\(`,
 		"path":    dir,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -782,11 +784,11 @@ func processdata() {}
 	ctx := context.Background()
 
 	// "prsfil" should fuzzy match "parsefile" (p-a-r-s-e-f-i-l-e contains p-r-s-f-i-l in order)
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"pattern": "prsfil",
 		"path":    dir,
 		"fuzzy":   true,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -814,12 +816,12 @@ func TestGrepTool_Execute_FuzzyMatch_CaseInsensitive(t *testing.T) {
 	ctx := context.Background()
 
 	// Case insensitive fuzzy match
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"pattern":          "prsfl",
 		"path":             dir,
 		"fuzzy":            true,
 		"case_insensitive": true,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -846,12 +848,12 @@ func validate() {}
 	ctx := context.Background()
 
 	// "function" should approximately match "functon" with 1 error (missing 'i')
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"pattern":     "function",
 		"path":        dir,
 		"approximate": true,
 		"max_errors":  1,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -880,23 +882,23 @@ func TestGrepTool_Execute_ApproximateMatch_MaxErrors(t *testing.T) {
 
 	// "process" vs "proces" - 1 edit distance
 	// With max_errors=0, should NOT match
-	result1, _ := tool.Execute(ctx, map[string]any{
+	result1, _ := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"pattern":     "process",
 		"path":        dir,
 		"approximate": true,
 		"max_errors":  0,
-	})
+	}})
 	if result1.Output.(*GrepResult).Count != 0 {
 		t.Error("max_errors=0 should not match 'proces' for 'process'")
 	}
 
 	// With max_errors=1, should match
-	result2, _ := tool.Execute(ctx, map[string]any{
+	result2, _ := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"pattern":     "process",
 		"path":        dir,
 		"approximate": true,
 		"max_errors":  1,
-	})
+	}})
 	if result2.Output.(*GrepResult).Count != 1 {
 		t.Error("max_errors=1 should match 'proces' for 'process'")
 	}
@@ -1173,10 +1175,10 @@ func TestDiffTool_Execute_IdenticalFiles(t *testing.T) {
 	tool := NewDiffTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_a": pathA,
 		"file_b": pathB,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1201,10 +1203,10 @@ func TestDiffTool_Execute_DifferentFiles(t *testing.T) {
 	tool := NewDiffTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_a": pathA,
 		"file_b": pathB,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1235,10 +1237,10 @@ func TestDiffTool_Execute_AddedLines(t *testing.T) {
 	tool := NewDiffTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_a": pathA,
 		"file_b": pathB,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1268,9 +1270,9 @@ func TestTreeTool_Execute_SimpleDirectory(t *testing.T) {
 	tool := NewTreeTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"path": dir,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1302,10 +1304,10 @@ func TestTreeTool_Execute_DirsOnly(t *testing.T) {
 	tool := NewTreeTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"path":      dir,
 		"dirs_only": true,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1335,10 +1337,10 @@ func TestTreeTool_Execute_DepthLimit(t *testing.T) {
 	tool := NewTreeTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"path":  dir,
 		"depth": 2,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1364,10 +1366,10 @@ func TestJSONTool_Execute_ValidJSON(t *testing.T) {
 	tool := NewJSONTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_path": path,
 		"validate":  true,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1392,10 +1394,10 @@ func TestJSONTool_Execute_InvalidJSON(t *testing.T) {
 	tool := NewJSONTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_path": path,
 		"validate":  true,
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1420,10 +1422,10 @@ func TestJSONTool_Execute_QuerySimple(t *testing.T) {
 	tool := NewJSONTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_path": path,
 		"query":     ".name",
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1448,10 +1450,10 @@ func TestJSONTool_Execute_QueryNested(t *testing.T) {
 	tool := NewJSONTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_path": path,
 		"query":     ".config.database.host",
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1473,10 +1475,10 @@ func TestJSONTool_Execute_QueryArray(t *testing.T) {
 	tool := NewJSONTool(config)
 	ctx := context.Background()
 
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"file_path": path,
 		"query":     ".users[0].name",
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1542,10 +1544,10 @@ func TestGrepTool_Execute_RelativePath(t *testing.T) {
 	ctx := context.Background()
 
 	// GR-38: Test with relative path - should normalize to absolute
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"pattern": "main",
 		"path":    "subdir", // Relative path - should be joined with working dir
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1574,10 +1576,10 @@ func TestGlobTool_Execute_RelativePath(t *testing.T) {
 	ctx := context.Background()
 
 	// GR-38: Test with relative path - should normalize to absolute
-	result, err := tool.Execute(ctx, map[string]any{
+	result, err := tool.Execute(ctx, tools.MapParams{Params: map[string]any{
 		"pattern": "*.go",
 		"path":    "src", // Relative path - should be joined with working dir
-	})
+	}})
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1589,5 +1591,77 @@ func TestGlobTool_Execute_RelativePath(t *testing.T) {
 	globResult := result.Output.(*GlobResult)
 	if globResult.Count != 2 {
 		t.Errorf("expected 2 files, got %d", globResult.Count)
+	}
+}
+
+// =============================================================================
+// GR-59 Group D: Grep Parameter Resilience Tests
+// =============================================================================
+
+func TestGrepParams_ClampLimit(t *testing.T) {
+	t.Run("negative limit clamped to default", func(t *testing.T) {
+		p := &GrepParams{
+			Pattern: "test",
+			Limit:   -5,
+		}
+		err := p.Validate()
+		if err != nil {
+			t.Fatalf("expected no error after clamping, got: %v", err)
+		}
+		if p.Limit != DefaultGrepLimit {
+			t.Errorf("expected limit clamped to %d, got %d", DefaultGrepLimit, p.Limit)
+		}
+	})
+
+	t.Run("over-max limit clamped to max", func(t *testing.T) {
+		p := &GrepParams{
+			Pattern: "test",
+			Limit:   10000,
+		}
+		err := p.Validate()
+		if err != nil {
+			t.Fatalf("expected no error after clamping, got: %v", err)
+		}
+		if p.Limit != MaxGrepLimit {
+			t.Errorf("expected limit clamped to %d, got %d", MaxGrepLimit, p.Limit)
+		}
+	})
+
+	t.Run("valid limit unchanged", func(t *testing.T) {
+		p := &GrepParams{
+			Pattern: "test",
+			Limit:   50,
+		}
+		err := p.Validate()
+		if err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+		if p.Limit != 50 {
+			t.Errorf("expected limit 50, got %d", p.Limit)
+		}
+	})
+}
+
+func TestFixCommonRegexErrors(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"no fix needed", "func (.*) Next", "func (.*) Next"},
+		{"balanced parens", "func (.*) Next()", "func (.*) Next()"},
+		{"unclosed trailing paren", "func (.*) Next(", "func (.*) Next\\("},
+		{"escaped paren ignored", "func \\(test\\)", "func \\(test\\)"},
+		{"no parens", "simple pattern", "simple pattern"},
+		{"empty", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := fixCommonRegexErrors(tt.input)
+			if result != tt.expected {
+				t.Errorf("fixCommonRegexErrors(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
 	}
 }

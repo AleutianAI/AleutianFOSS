@@ -519,7 +519,7 @@ func initSanitizeMetrics() error {
 		var err error
 
 		sanitizeTotal, err = sanitizerMeter.Int64Counter(
-			"codebuddy_tool_sanitize_total",
+			"trace_tool_sanitize_total",
 			metric.WithDescription("Total tool output sanitizations"),
 		)
 		if err != nil {
@@ -528,7 +528,7 @@ func initSanitizeMetrics() error {
 		}
 
 		sanitizeEscaped, err = sanitizerMeter.Int64Counter(
-			"codebuddy_tool_sanitize_escaped_total",
+			"trace_tool_sanitize_escaped_total",
 			metric.WithDescription("Total dangerous patterns escaped"),
 		)
 		if err != nil {
@@ -537,7 +537,7 @@ func initSanitizeMetrics() error {
 		}
 
 		sanitizeSuspicious, err = sanitizerMeter.Int64Counter(
-			"codebuddy_tool_sanitize_suspicious_total",
+			"trace_tool_sanitize_suspicious_total",
 			metric.WithDescription("Total suspicious patterns detected"),
 		)
 		if err != nil {
@@ -546,7 +546,7 @@ func initSanitizeMetrics() error {
 		}
 
 		sanitizeTruncated, err = sanitizerMeter.Int64Counter(
-			"codebuddy_tool_sanitize_truncated_total",
+			"trace_tool_sanitize_truncated_total",
 			metric.WithDescription("Total truncation events"),
 		)
 		if err != nil {

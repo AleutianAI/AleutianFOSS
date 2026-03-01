@@ -386,8 +386,13 @@ func (p *GrepParams) Validate() error {
 	if p.ContextLines < 0 || p.ContextLines > MaxContextLines {
 		return fmt.Errorf("context_lines must be between 0 and %d", MaxContextLines)
 	}
-	if p.Limit < 0 || p.Limit > MaxGrepLimit {
-		return fmt.Errorf("limit must be between 0 and %d", MaxGrepLimit)
+	// GR-59 Group D: Clamp limit instead of rejecting out-of-range values.
+	// LLMs sometimes submit large limits; clamping is more resilient than erroring.
+	if p.Limit < 0 {
+		p.Limit = DefaultGrepLimit
+	}
+	if p.Limit > MaxGrepLimit {
+		p.Limit = MaxGrepLimit
 	}
 	if p.Path != "" && !filepath.IsAbs(p.Path) {
 		return errors.New("path must be absolute if provided")

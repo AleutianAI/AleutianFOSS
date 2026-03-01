@@ -8,7 +8,7 @@
 // NOTE: This work is subject to additional terms under AGPL v3 Section 7.
 // See the NOTICE.txt file for details regarding AI system attribution.
 
-// Package safety provides security analysis tools for Code Buddy.
+// Package safety provides security analysis tools for Trace.
 //
 // # Description
 //

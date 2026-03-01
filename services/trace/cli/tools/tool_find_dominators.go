@@ -48,6 +48,21 @@ type FindDominatorsParams struct {
 	ShowTree bool
 }
 
+// ToolName returns the tool name for TypedParams interface.
+func (p FindDominatorsParams) ToolName() string { return "find_dominators" }
+
+// ToMap converts typed parameters to the map consumed by Tool.Execute().
+func (p FindDominatorsParams) ToMap() map[string]any {
+	m := map[string]any{
+		"target":    p.Target,
+		"show_tree": p.ShowTree,
+	}
+	if p.Entry != "" {
+		m["entry"] = p.Entry
+	}
+	return m
+}
+
 // FindDominatorsOutput contains the structured result.
 type FindDominatorsOutput struct {
 	// Target is the resolved target node ID.
@@ -189,9 +204,9 @@ func (t *findDominatorsTool) Definition() ToolDefinition {
 }
 
 // Execute runs the find_dominators tool.
-func (t *findDominatorsTool) Execute(ctx context.Context, params map[string]any) (*Result, error) {
+func (t *findDominatorsTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
 	// Parse and validate parameters
-	p, err := t.parseParams(params)
+	p, err := t.parseParams(params.ToMap())
 	if err != nil {
 		return &Result{
 			Success: false,

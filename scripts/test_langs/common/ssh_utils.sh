@@ -61,6 +61,13 @@ setup_remote() {
     # Create temp directory on remote
     ssh_cmd "mkdir -p ~/trace_test"
 
+    # Wipe server log at the start of a new test run (first setup_remote call).
+    # Subsequent server restarts (per-project) append via >>.
+    if [ -z "$_TRACE_LOG_WIPED" ]; then
+        ssh_cmd "truncate -s 0 ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null || true"
+        export _TRACE_LOG_WIPED=1
+    fi
+
     # Copy the project to analyze (if it's local Mac path)
     if [[ "$PROJECT_TO_ANALYZE" == /Users/* ]]; then
         echo "Syncing project to remote server..."
@@ -165,7 +172,7 @@ start_trace_server() {
         "cd ~/trace_test/AleutianFOSS && \
          OLLAMA_BASE_URL=http://localhost:11434 \
          OLLAMA_MODEL=$OLLAMA_MODEL \
-         nohup ./bin/trace -with-context -with-tools > trace_server.log 2>&1 &"
+         nohup ./bin/trace -with-context -with-tools >> trace_server.log 2>&1 &"
 
     sleep 2
 
@@ -186,7 +193,7 @@ start_trace_server() {
     for i in {1..15}; do
         echo -n "."
         sleep 1
-        if ssh_cmd "curl -s http://localhost:8080/v1/codebuddy/health" > /dev/null 2>&1; then
+        if ssh_cmd "curl -s http://localhost:8080/v1/trace/health" > /dev/null 2>&1; then
             responding=1
             break
         fi
@@ -205,7 +212,7 @@ start_trace_server() {
     local ready=0
     for i in {1..120}; do
         # Check /ready endpoint - returns 200 when warmup complete, 503 when still warming
-        local ready_status=$(ssh_cmd "curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/v1/codebuddy/ready" 2>/dev/null)
+        local ready_status=$(ssh_cmd "curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/v1/trace/ready" 2>/dev/null)
         if [ "$ready_status" = "200" ]; then
             ready=1
             break

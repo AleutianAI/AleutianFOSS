@@ -154,7 +154,7 @@ func DefaultMCTSFullConfig() MCTSFullConfig {
 			MetricsEnabled: true,
 			LogLevel:       "info",
 			SampleRate:     1.0,
-			ServiceName:    "codebuddy-mcts",
+			ServiceName:    "trace-mcts",
 		},
 	}
 }

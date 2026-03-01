@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -33,6 +34,12 @@ const (
 	// DefaultWorkerCount is the default number of parallel workers.
 	// Set to 0 to use runtime.NumCPU().
 	DefaultWorkerCount = 0
+
+	// maxEmbedResolutionDepth is the maximum recursion depth for resolvePromotedMethods
+	// and resolveInterfaceEmbedsRecursive. Prevents stack overflow on pathological
+	// interface/struct embedding chains. 20 is generous for any realistic codebase
+	// (Hugo's Page interface is 4 levels deep, the deepest known real-world case).
+	maxEmbedResolutionDepth = 20
 )
 
 // ProgressPhase indicates which phase of building is in progress.
@@ -221,6 +228,15 @@ type buildState struct {
 	// Used by resolveCallTarget for inheritance-aware method resolution.
 	classExtends map[string]string
 
+	// classAdditionalParents maps a class name to additional parent class names
+	// beyond the primary parent stored in classExtends.
+	// GR-62a P-1: Python's class C(A, B) stores A in Extends and B in Implements.
+	// For non-Go-struct symbols, Metadata.Implements represents additional base classes
+	// that need to be included in the inheritance chain for method resolution.
+	// Guarded: only populated for non-Struct symbols (Go struct embeds use Implements
+	// differently — they represent embedded types, not base classes).
+	classAdditionalParents map[string][]string
+
 	// importNameMap maps filePath → localName → importEntry.
 	// R3-P2b: Built from fileImports during collectPhase. Enables import-aware
 	// call resolution: when "merge" is called in frame.py and the file imports
@@ -240,8 +256,9 @@ type buildState struct {
 //
 // Thread Safety: Immutable after construction.
 type importEntry struct {
-	ModulePath   string // "pandas.core.reshape.merge"
-	OriginalName string // "merge" (the name in the source module)
+	ModulePath   string       // "pandas.core.reshape.merge"
+	OriginalName string       // "merge" (the name in the source module)
+	Location     ast.Location // where the import statement appears in the importing file
 }
 
 // Build constructs a graph from the given parse results.
@@ -281,14 +298,15 @@ func (b *Builder) Build(ctx context.Context, results []*ast.ParseResult) (*Build
 			FileErrors: make([]FileError, 0),
 			EdgeErrors: make([]EdgeError, 0),
 		},
-		symbolsByID:   make(map[string]*ast.Symbol),
-		symbolsByName: make(map[string][]*ast.Symbol),
-		fileImports:   make(map[string][]ast.Import),
-		placeholders:  make(map[string]*Node),
-		symbolParent:  make(map[string]string),
-		classExtends:  make(map[string]string),
-		importNameMap: make(map[string]map[string]importEntry),
-		startTime:     time.Now(),
+		symbolsByID:            make(map[string]*ast.Symbol),
+		symbolsByName:          make(map[string][]*ast.Symbol),
+		fileImports:            make(map[string][]ast.Import),
+		placeholders:           make(map[string]*Node),
+		symbolParent:           make(map[string]string),
+		classExtends:           make(map[string]string),
+		classAdditionalParents: make(map[string][]string),
+		importNameMap:          make(map[string]map[string]importEntry),
+		startTime:              time.Now(),
 	}
 	state.result.Graph = state.graph
 
@@ -385,6 +403,12 @@ func (b *Builder) collectPhase(ctx context.Context, state *buildState, results [
 				state.classExtends[sym.Name] = sym.Metadata.Extends
 			}
 
+			// GR-62a P-1: Track additional parents from Metadata.Implements.
+			// Guard: Go structs use Implements for embedded types, not base classes.
+			if sym.Metadata != nil && len(sym.Metadata.Implements) > 0 && sym.Kind != ast.SymbolKindStruct {
+				state.classAdditionalParents[sym.Name] = sym.Metadata.Implements
+			}
+
 			// Recursively add children with parent tracking
 			b.addChildSymbols(state, sym.Children, sym.ID)
 		}
@@ -406,7 +430,14 @@ func (b *Builder) addChildSymbols(state *buildState, children []*ast.Symbol, par
 
 		_, err := state.graph.AddNode(child)
 		if err != nil {
-			// Log but don't fail - child nodes are optional
+			// GR-62a J-1: Node already exists (e.g., JS prototype methods added as
+			// both top-level and children). Still set symbolParent so this/self
+			// resolution works via findOwnerClassName Strategy 2, and recurse
+			// for grandchildren.
+			if parentID != "" {
+				state.symbolParent[child.ID] = parentID
+			}
+			b.addChildSymbols(state, child.Children, child.ID)
 			continue
 		}
 
@@ -422,6 +453,12 @@ func (b *Builder) addChildSymbols(state *buildState, children []*ast.Symbol, par
 		// Track class inheritance from Metadata.Extends
 		if child.Metadata != nil && child.Metadata.Extends != "" {
 			state.classExtends[child.Name] = child.Metadata.Extends
+		}
+
+		// GR-62a P-1: Track additional parents from Metadata.Implements.
+		// Guard: Go structs use Implements for embedded types, not base classes.
+		if child.Metadata != nil && len(child.Metadata.Implements) > 0 && child.Kind != ast.SymbolKindStruct {
+			state.classAdditionalParents[child.Name] = child.Metadata.Implements
 		}
 
 		// Recurse
@@ -465,6 +502,27 @@ func (b *Builder) extractEdgesPhase(ctx context.Context, state *buildState, resu
 			Err:      err,
 		})
 	}
+
+	// GR-62: Resolve Python named imports to symbol-level EdgeTypeReferences.
+	// "from X import Y" creates an edge from the importing package symbol to
+	// the Y symbol node, enabling find_references to return cross-file callers.
+	// Runs after per-file extraction so the full symbol index is available.
+	b.resolveNamedImportEdges(ctx, state, results)
+
+	// IT-06d Bug D/E: Resolve CommonJS alias imports to EdgeTypeReferences.
+	// "var X = require('./module')" creates an edge from the alias variable to
+	// the exported class, making the importing file visible in find_references.
+	b.resolveCommonJSAliasImportEdges(ctx, state, results)
+
+	// IT-06e Bug 4: Resolve dynamic import() calls to EdgeTypeReferences.
+	// "React.lazy(() => import('./Component'))" creates an edge from the file's
+	// package symbol to the lazily loaded module's exported class.
+	b.resolveDynamicImportEdges(ctx, state, results)
+
+	// IT-06e Bug 5: Resolve decorator argument class references to EdgeTypeReferences.
+	// "@Module({ providers: [UserService] })" creates an edge from AppModule to
+	// UserService, making AppModule appear in find_references for UserService.
+	b.resolveDecoratorArgEdges(ctx, state, results)
 
 	// GR-41: Record call edge metrics after all edges extracted
 	recordCallEdgeMetrics(ctx,
@@ -544,7 +602,7 @@ func (b *Builder) extractImportEdges(ctx context.Context, state *buildState, r *
 	// GR-41c: Find actual package symbol instead of fabricating fileSymbolID
 	sourceID := findPackageSymbolID(r)
 	if sourceID == "" {
-		slog.Warn("GR-41c: No package symbol found for import edges",
+		slog.Debug("GR-41c: No package symbol found for import edges (barrel file)",
 			slog.String("file", r.FilePath),
 			slog.Int("import_count", len(r.Imports)),
 		)
@@ -554,7 +612,7 @@ func (b *Builder) extractImportEdges(ctx context.Context, state *buildState, r *
 
 	// GR-41c: Verify sourceID exists in graph before using (I-1: use GetNode method)
 	if _, exists := state.graph.GetNode(sourceID); !exists {
-		slog.Warn("GR-41c: Package symbol not in graph",
+		slog.Debug("GR-41c: Package symbol not in graph",
 			slog.String("file", r.FilePath),
 			slog.String("source_id", sourceID),
 		)
@@ -690,9 +748,22 @@ func (b *Builder) extractSymbolEdges(ctx context.Context, state *buildState, sym
 		b.extractEmbedsEdges(state, sym)
 
 	case ast.SymbolKindInterface:
-		// Interfaces define contracts - no outgoing edges typically
-		break
+		// Phase 18: Interfaces can embed other interfaces — create EMBEDS edges
+		// for transitive method set resolution (e.g., ReadWriter embeds Reader + Writer).
+		b.extractInterfaceEmbedsEdges(state, sym)
 	}
+
+	// IT-03a A-3: Extract decorator argument edges for any symbol kind
+	b.extractDecoratorArgEdges(state, sym)
+
+	// IT-03a C-2: Extract type argument reference edges
+	b.extractTypeArgEdges(state, sym)
+
+	// IT-03a C-3: Extract type narrowing reference edges
+	b.extractTypeNarrowingEdges(state, sym)
+
+	// IT-06 Bug 9: Extract type annotation reference edges (parameter/return types)
+	b.extractTypeRefEdges(state, sym)
 }
 
 // extractReceiverEdge creates a RECEIVES edge from method to receiver type.
@@ -844,6 +915,279 @@ func (b *Builder) extractEmbedsEdges(state *buildState, sym *ast.Symbol) {
 	if len(targets) > 1 {
 		state.result.Stats.AmbiguousResolves++
 	}
+
+	// IT-03a Phase 16 G-1: Additional embeds stored in Implements for Go structs.
+	// For Go structs, Metadata.Implements holds additional embedded types (not interface
+	// implementations). We create EMBEDS edges here. extractImplementsEdges also reads
+	// Metadata.Implements, but validateEdgeType prevents IMPLEMENTS edges when the target
+	// is not a SymbolKindInterface. When the target IS an interface (e.g., embedding io.Writer),
+	// both EMBEDS and IMPLEMENTS edges are created, which is semantically correct — embedding
+	// an interface in Go satisfies that interface.
+	if sym.Kind == ast.SymbolKindStruct && len(sym.Metadata.Implements) > 0 {
+		for _, additionalEmbed := range sym.Metadata.Implements {
+			addlTargets := b.resolveSymbolByName(state, additionalEmbed, sym.FilePath)
+			if len(addlTargets) == 0 {
+				targetID := b.getOrCreatePlaceholder(state, "", additionalEmbed)
+				addlTargets = []string{targetID}
+			}
+			for _, targetID := range addlTargets {
+				err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeEmbeds, sym.Location())
+				if err != nil {
+					state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+						FromID:   sym.ID,
+						ToID:     targetID,
+						EdgeType: EdgeTypeEmbeds,
+						Err:      err,
+					})
+					continue
+				}
+				state.result.Stats.EdgesCreated++
+			}
+		}
+	}
+}
+
+// extractInterfaceEmbedsEdges creates EMBEDS edges from an interface to its embedded interfaces.
+//
+// Description:
+//
+//	In Go, interfaces can embed other interfaces (e.g., ReadWriter embeds Reader and Writer).
+//	The parser stores embedded interface names in Metadata.Extends (first embed) and
+//	Metadata.Implements (additional embeds), mirroring the struct embedding storage pattern.
+//	This function creates EMBEDS edges so that resolveInterfaceMethodSets can walk them
+//	to build transitive method sets.
+//
+// Inputs:
+//   - state: Build state containing graph and resolution data.
+//   - sym: An interface symbol that may embed other interfaces.
+//
+// Outputs:
+//   - None. Modifies state.graph by adding EMBEDS edges.
+//
+// Thread Safety: Not safe for concurrent use on the same buildState.
+func (b *Builder) extractInterfaceEmbedsEdges(state *buildState, sym *ast.Symbol) {
+	// CR-20-9: Defense in depth — validate precondition even though caller already checks.
+	if sym.Kind != ast.SymbolKindInterface {
+		return
+	}
+	if sym.Metadata == nil || sym.Metadata.Extends == "" {
+		return
+	}
+
+	// First embedded interface (stored in Extends)
+	embeddedName := sym.Metadata.Extends
+	targets := b.resolveSymbolByName(state, embeddedName, sym.FilePath)
+	if len(targets) == 0 {
+		targetID := b.getOrCreatePlaceholder(state, "", embeddedName)
+		targets = []string{targetID}
+	}
+
+	for _, targetID := range targets {
+		err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeEmbeds, sym.Location())
+		if err != nil {
+			state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+				FromID:   sym.ID,
+				ToID:     targetID,
+				EdgeType: EdgeTypeEmbeds,
+				Err:      err,
+			})
+			continue
+		}
+		state.result.Stats.EdgesCreated++
+	}
+
+	// Additional embedded interfaces (stored in Implements for Go interfaces)
+	if len(sym.Metadata.Implements) > 0 {
+		for _, additionalEmbed := range sym.Metadata.Implements {
+			addlTargets := b.resolveSymbolByName(state, additionalEmbed, sym.FilePath)
+			if len(addlTargets) == 0 {
+				targetID := b.getOrCreatePlaceholder(state, "", additionalEmbed)
+				addlTargets = []string{targetID}
+			}
+			for _, targetID := range addlTargets {
+				err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeEmbeds, sym.Location())
+				if err != nil {
+					state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+						FromID:   sym.ID,
+						ToID:     targetID,
+						EdgeType: EdgeTypeEmbeds,
+						Err:      err,
+					})
+					continue
+				}
+				state.result.Stats.EdgesCreated++
+			}
+		}
+	}
+}
+
+// extractDecoratorArgEdges creates REFERENCES edges from a decorated symbol to its decorator arguments.
+//
+// Description:
+//
+//	When a decorator has arguments that are identifiers (references to other symbols),
+//	this creates EdgeTypeReferences edges from the decorated symbol to those arguments.
+//	Example: @UseInterceptors(LoggingInterceptor) creates a REFERENCES edge from
+//	the decorated class to LoggingInterceptor.
+//
+// IT-03a A-3: Enables graph-based discovery of decorator argument relationships.
+func (b *Builder) extractDecoratorArgEdges(state *buildState, sym *ast.Symbol) {
+	if sym.Metadata == nil || len(sym.Metadata.DecoratorArgs) == 0 {
+		return
+	}
+
+	for _, argNames := range sym.Metadata.DecoratorArgs {
+		for _, argName := range argNames {
+			targets := b.resolveSymbolByName(state, argName, sym.FilePath)
+			if len(targets) == 0 {
+				// Only create placeholder for reasonable identifier names
+				if len(argName) > 0 && argName[0] >= 'A' && argName[0] <= 'Z' {
+					targetID := b.getOrCreatePlaceholder(state, "", argName)
+					targets = []string{targetID}
+				} else {
+					continue
+				}
+			}
+
+			for _, targetID := range targets {
+				err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeReferences, sym.Location())
+				if err != nil {
+					state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+						FromID:   sym.ID,
+						ToID:     targetID,
+						EdgeType: EdgeTypeReferences,
+						Err:      err,
+					})
+					continue
+				}
+				state.result.Stats.EdgesCreated++
+			}
+
+			if len(targets) > 1 {
+				state.result.Stats.AmbiguousResolves++
+			}
+		}
+	}
+}
+
+// extractTypeArgEdges creates REFERENCES edges from a symbol to its type argument types.
+//
+// Description:
+//
+//	When a symbol has TypeArguments in its metadata (e.g., Promise<User> → User),
+//	this creates EdgeTypeReferences edges from the symbol to the referenced types.
+//
+// IT-03a C-2: Enables graph-based discovery of generic type relationships.
+func (b *Builder) extractTypeArgEdges(state *buildState, sym *ast.Symbol) {
+	if sym.Metadata == nil || len(sym.Metadata.TypeArguments) == 0 {
+		return
+	}
+
+	for _, typeArg := range sym.Metadata.TypeArguments {
+		targets := b.resolveSymbolByName(state, typeArg, sym.FilePath)
+		if len(targets) == 0 {
+			continue // Don't create placeholders for type args
+		}
+		for _, targetID := range targets {
+			err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeReferences, sym.Location())
+			if err != nil && !strings.Contains(err.Error(), "already exists") {
+				state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+					FromID:   sym.ID,
+					ToID:     targetID,
+					EdgeType: EdgeTypeReferences,
+					Err:      err,
+				})
+			} else if err == nil {
+				state.result.Stats.EdgesCreated++
+			}
+		}
+	}
+}
+
+// extractTypeNarrowingEdges creates REFERENCES edges from a symbol to types used in instanceof checks.
+//
+// IT-03a C-3: Enables graph-based discovery of type narrowing relationships.
+func (b *Builder) extractTypeNarrowingEdges(state *buildState, sym *ast.Symbol) {
+	if sym.Metadata == nil || len(sym.Metadata.TypeNarrowings) == 0 {
+		return
+	}
+
+	for _, typeName := range sym.Metadata.TypeNarrowings {
+		targets := b.resolveSymbolByName(state, typeName, sym.FilePath)
+		if len(targets) == 0 {
+			continue
+		}
+		for _, targetID := range targets {
+			err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeReferences, sym.Location())
+			if err != nil && !strings.Contains(err.Error(), "already exists") {
+				state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+					FromID:   sym.ID,
+					ToID:     targetID,
+					EdgeType: EdgeTypeReferences,
+					Err:      err,
+				})
+			} else if err == nil {
+				state.result.Stats.EdgesCreated++
+			}
+		}
+	}
+}
+
+// extractTypeRefEdges creates REFERENCES edges from a symbol to types used in its
+// parameter annotations and return type annotations.
+//
+// IT-06 Bug 9: Type annotations like `def foo(x: Series) -> DataFrame` produce
+// TypeReference entries in the AST. This method resolves them to graph nodes and
+// creates EdgeTypeReferences edges, enabling find_references to discover usage
+// through type annotations (not just constructor calls).
+//
+// Inputs:
+//   - state: The build state containing symbol indexes.
+//   - sym: Any symbol that may have TypeReferences populated.
+//
+// Outputs:
+//   - None. Edges are added to state.graph, errors to state.result.EdgeErrors.
+//
+// Thread Safety:
+//
+//	Same as other extract*Edges methods — not safe for concurrent use on the
+//	same buildState, but the builder serializes calls.
+func (b *Builder) extractTypeRefEdges(state *buildState, sym *ast.Symbol) {
+	if len(sym.TypeReferences) == 0 {
+		return
+	}
+
+	// Deduplicate: a function referencing the same type in both params and return
+	// should produce only one edge.
+	seen := make(map[string]bool)
+	for _, typeRef := range sym.TypeReferences {
+		if seen[typeRef.Name] {
+			continue
+		}
+		seen[typeRef.Name] = true
+
+		targets := b.resolveSymbolByName(state, typeRef.Name, sym.FilePath)
+		if len(targets) == 0 {
+			continue // Don't create placeholders for type refs (matches extractTypeArgEdges behavior)
+		}
+		// IT-06d Bug 10: Use typeRef.Location (the annotation site) instead of sym.Location()
+		// (the function definition line). This makes find_references report the exact line
+		// containing `-> Series` or `: Series`, not the function's `def` line.
+		edgeLoc := typeRef.Location
+		for _, targetID := range targets {
+			err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeReferences, edgeLoc)
+			if err != nil && !strings.Contains(err.Error(), "already exists") {
+				state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+					FromID:   sym.ID,
+					ToID:     targetID,
+					EdgeType: EdgeTypeReferences,
+					Err:      err,
+				})
+			} else if err == nil {
+				state.result.Stats.EdgesCreated++
+			}
+		}
+	}
 }
 
 // extractCallEdges creates CALLS edges from a function/method to its callees.
@@ -895,8 +1239,11 @@ func (b *Builder) extractCallEdges(ctx context.Context, state *buildState, sym *
 		// Try to resolve the target to a symbol ID
 		targetID := b.resolveCallTarget(state, call, sym)
 		if targetID == "" {
-			// Create placeholder for unresolved external call
-			targetID = b.getOrCreatePlaceholder(state, "", call.Target)
+			// IT-05a: Infer package from the calling file's imports before
+			// creating the placeholder. This gives external nodes accurate
+			// package information (e.g., "pd.read_csv" → package "pandas").
+			pkg := inferPackageFromCall(call, state.fileImports[sym.FilePath])
+			targetID = b.getOrCreatePlaceholder(state, pkg, call.Target)
 			callsUnresolved++
 		} else {
 			callsResolved++
@@ -931,6 +1278,32 @@ func (b *Builder) extractCallEdges(ctx context.Context, state *buildState, sym *
 			continue
 		}
 		state.result.Stats.EdgesCreated++
+	}
+
+	// IT-03a C-1: Create REFERENCES edges for callback/HOF arguments
+	for _, call := range sym.Calls {
+		for _, argName := range call.FunctionArgs {
+			targets := b.resolveSymbolByName(state, argName, sym.FilePath)
+			if len(targets) == 0 {
+				continue // Don't create placeholders for callback args
+			}
+			for _, targetID := range targets {
+				if targetID == sym.ID {
+					continue
+				}
+				err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeReferences, call.Location)
+				if err != nil && !strings.Contains(err.Error(), "already exists") {
+					state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+						FromID:   sym.ID,
+						ToID:     targetID,
+						EdgeType: EdgeTypeReferences,
+						Err:      err,
+					})
+				} else if err == nil {
+					state.result.Stats.EdgesCreated++
+				}
+			}
+		}
 	}
 
 	// Track call edge stats for observability
@@ -1025,6 +1398,17 @@ func (b *Builder) resolveCallTarget(state *buildState, call ast.CallSite, caller
 	if call.IsMethod && call.Receiver != "" {
 		candidates := b.resolveSymbolByName(state, target, caller.FilePath)
 
+		// GR-62a P-3: Sub-strategy 3-super: super() receiver → resolve to parent class method.
+		// Python's super().method() should skip the caller's own class and start from
+		// the parent in the inheritance chain. Use ALL candidates across all files since
+		// the parent class method is typically in a different file.
+		if call.Receiver == "super" {
+			allCandidates := b.resolveAllSymbolsByName(state, target)
+			if resolved := b.resolveSuperCall(state, allCandidates, caller); resolved != "" {
+				return resolved
+			}
+		}
+
 		// Sub-strategy 3a: this/self receiver → resolve to caller's owning class
 		if call.Receiver == "this" || call.Receiver == "self" {
 			if resolved := b.resolveThisSelfCall(state, candidates, caller); resolved != "" {
@@ -1034,7 +1418,7 @@ func (b *Builder) resolveCallTarget(state *buildState, call ast.CallSite, caller
 
 		// Sub-strategy 3b: Go-style receiver matching (case-insensitive)
 		// Handles: txn.Get() → Txn.Get, ctx.Done() → Context.Done
-		if call.Receiver != "this" && call.Receiver != "self" {
+		if call.Receiver != "this" && call.Receiver != "self" && call.Receiver != "super" {
 			if resolved := b.resolveReceiverCaseInsensitive(state, candidates, call.Receiver); resolved != "" {
 				return resolved
 			}
@@ -1052,12 +1436,43 @@ func (b *Builder) resolveCallTarget(state *buildState, call ast.CallSite, caller
 			}
 		}
 
+		// IT-43d: Skip Strategy 3c/3d for dunder methods (__enter__, __exit__, etc.).
+		// Dunder methods are polymorphic — every class can define its own __enter__.
+		// Without type inference, Strategy 3c picks the first match by iteration
+		// order, creating false edges. Example: all 8064 `with` statements in pandas
+		// resolved to IOHandles.__enter__ (InDegree 8064, Score 16131).
+		//
+		// Self-qualified dunders (self.__enter__) already resolve correctly via
+		// Strategy 3a. The only cases reaching here are unresolvable (receiver type
+		// unknown), so returning "" (unresolved) is the honest answer.
+		//
+		// Known edge case: cross-class dunder calls where receiver != self/this
+		// will have no edge. This is acceptable — a missing edge is better than
+		// a false edge that inflates analytics.
+		isDunder := len(target) > 4 && strings.HasPrefix(target, "__") && strings.HasSuffix(target, "__")
+
 		// Sub-strategy 3c: Fallback — first method/property match (original behavior)
 		// R3-P1d: Include Property symbols so self.some_property resolves correctly.
-		for _, id := range candidates {
-			if sym, ok := state.symbolsByID[id]; ok {
-				if sym.Kind == ast.SymbolKindMethod || sym.Kind == ast.SymbolKindProperty {
-					return id
+		if !isDunder {
+			for _, id := range candidates {
+				if sym, ok := state.symbolsByID[id]; ok {
+					if sym.Kind == ast.SymbolKindMethod || sym.Kind == ast.SymbolKindProperty {
+						return id
+					}
+				}
+			}
+		}
+
+		// GR-62a P-4: Sub-strategy 3d: Variable fallback.
+		// When a callable is stored as a Variable (e.g., handler = _MergeOperation),
+		// method-style calls like obj.handler() won't match Method/Property in 3c.
+		// Accept Variable as last resort after Method/Property have been tried.
+		if !isDunder {
+			for _, id := range candidates {
+				if sym, ok := state.symbolsByID[id]; ok {
+					if sym.Kind == ast.SymbolKindVariable {
+						return id
+					}
 				}
 			}
 		}
@@ -1111,6 +1526,68 @@ func (b *Builder) resolveThisSelfCall(state *buildState, candidates []string, ca
 			}
 
 			// Check 2: sym is a child of the class (Python, TS — Receiver often empty)
+			parentID, hasParent := state.symbolParent[id]
+			if hasParent {
+				if parentSym, ok := state.symbolsByID[parentID]; ok {
+					if parentSym.Name == className {
+						return id
+					}
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+// resolveSuperCall resolves super().method() calls to the parent class method.
+//
+// Description:
+//
+//	GR-62a P-3: When Python code calls super().save(), the target should resolve to
+//	the parent class's save() method, not the caller's own class. This function
+//	uses the same logic as resolveThisSelfCall but starts from classChain[1:]
+//	(skipping the caller's own class).
+//
+// Inputs:
+//
+//	state - Build state with symbol indexes and parent/inheritance maps.
+//	candidates - Symbol IDs that match the target method name.
+//	caller - The calling function/method symbol.
+//
+// Outputs:
+//
+//	string - Resolved symbol ID, or empty if no match found.
+func (b *Builder) resolveSuperCall(state *buildState, candidates []string, caller *ast.Symbol) string {
+	// Find the caller's owning class
+	ownerClassName := b.findOwnerClassName(state, caller)
+	if ownerClassName == "" {
+		return ""
+	}
+
+	// Build inheritance chain and skip the first entry (caller's own class)
+	classChain := b.buildInheritanceChain(state, ownerClassName)
+	if len(classChain) < 2 {
+		return "" // No parent class to resolve to
+	}
+
+	// Start from classChain[1:] — skip the caller's own class
+	for _, className := range classChain[1:] {
+		for _, id := range candidates {
+			sym, ok := state.symbolsByID[id]
+			if !ok {
+				continue
+			}
+			if sym.Kind != ast.SymbolKindMethod && sym.Kind != ast.SymbolKindFunction && sym.Kind != ast.SymbolKindProperty {
+				continue
+			}
+
+			// Check 1: sym.Receiver matches the class name
+			if sym.Receiver == className {
+				return id
+			}
+
+			// Check 2: sym is a child of the class (Python — Receiver often empty)
 			parentID, hasParent := state.symbolParent[id]
 			if hasParent {
 				if parentSym, ok := state.symbolsByID[parentID]; ok {
@@ -1194,32 +1671,60 @@ func (b *Builder) findOwnerClassName(state *buildState, method *ast.Symbol) stri
 	return ""
 }
 
-// buildInheritanceChain builds the chain of class names from the given class up through its parents.
+// buildInheritanceChain builds the chain of class names from the given class
+// through all parents (primary via classExtends, secondary via classAdditionalParents).
 //
 // Description:
 //
-//	Walks the classExtends map to build [className, parentName, grandparentName, ...].
-//	Stops at a maximum depth of 10 to prevent infinite loops from circular inheritance.
+//	GR-62a P-1: Uses BFS to traverse both classExtends (single primary parent) and
+//	classAdditionalParents (secondary parents from Python's multiple inheritance).
+//	BFS preserves Python MRO-like breadth-first ordering: the starting class is first,
+//	then its direct parents, then their parents, etc.
+//
+//	A visited set prevents duplicates from diamond inheritance (e.g., C(A,B), A(D), B(D)
+//	— D appears once). Max chain length is 11 to prevent infinite loops.
 //
 // Inputs:
 //
-//	state - Build state with classExtends map.
+//	state - Build state with classExtends and classAdditionalParents maps.
 //	className - Starting class name.
 //
 // Outputs:
 //
-//	[]string - Class names from child to root, including className itself.
+//	[]string - Class names in BFS order from child through all ancestors.
 func (b *Builder) buildInheritanceChain(state *buildState, className string) []string {
-	chain := []string{className}
-	current := className
-	for i := 0; i < 10; i++ {
-		parent, ok := state.classExtends[current]
-		if !ok || parent == "" {
-			break
+	const maxChainLen = 11
+
+	chain := make([]string, 0, 4)
+	visited := make(map[string]bool)
+
+	// BFS queue
+	queue := []string{className}
+	visited[className] = true
+
+	for len(queue) > 0 && len(chain) < maxChainLen {
+		current := queue[0]
+		queue = queue[1:]
+
+		chain = append(chain, current)
+
+		// Enqueue primary parent from classExtends
+		if parent, ok := state.classExtends[current]; ok && parent != "" && !visited[parent] {
+			visited[parent] = true
+			queue = append(queue, parent)
 		}
-		chain = append(chain, parent)
-		current = parent
+
+		// Enqueue additional parents from classAdditionalParents
+		if additionalParents, ok := state.classAdditionalParents[current]; ok {
+			for _, ap := range additionalParents {
+				if ap != "" && !visited[ap] {
+					visited[ap] = true
+					queue = append(queue, ap)
+				}
+			}
+		}
 	}
+
 	return chain
 }
 
@@ -1321,6 +1826,640 @@ func filterOutID(ids []string, exclude string) []string {
 	return result
 }
 
+// resolveNamedImportEdges creates EdgeTypeReferences edges for Python named imports.
+//
+// # Description
+//
+// Python's "from X import Y" syntax creates a named dependency on a specific
+// symbol Y within module X. The existing extractImportEdges pass creates only
+// a coarse EdgeTypeImports edge from the importing file's package symbol to the
+// module placeholder. That edge points at the container (X), not the member (Y),
+// so FindReferencesByID on Y returns 0 results even though Y is widely used.
+//
+// This pass resolves each imported name to its in-project symbol node and emits
+// a precise EdgeTypeReferences edge. External library imports (symbols not
+// present in the project index) are silently skipped — they have no node to
+// point at.
+//
+// # When It Runs
+//
+// Inside extractEdgesPhase, after the per-file loop. Requires:
+//   - Full symbol index (state.symbolsByID, state.symbolsByName) — built in collectPhase.
+//   - state.importNameMap — built by buildImportNameMap before extractEdgesPhase.
+//
+// # Scope
+//
+// Python only. Go uses qualified identifiers (pkg.Symbol) which already create
+// call/type-ref edges. TypeScript named imports already populate TypeReferences
+// via type annotations. JavaScript has no static type resolution path.
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation.
+//   - state: Build state with full symbol index and importNameMap.
+//   - results: All parse results; used to find package symbol ID and filter by language.
+//
+// # Outputs
+//
+//   - None. Edges are added to state.graph; count recorded in state.result.Stats.
+//
+// # Thread Safety
+//
+// Modifies state.graph and state.result. Not safe for concurrent use on the
+// same buildState; the builder serializes calls appropriately.
+func (b *Builder) resolveNamedImportEdges(ctx context.Context, state *buildState, results []*ast.ParseResult) {
+	_, span := tracer.Start(ctx, "GraphBuilder.resolveNamedImportEdges")
+	defer span.End()
+
+	resolved := 0
+	skippedNoSource := 0
+	skippedNoTarget := 0
+
+	for _, r := range results {
+		if ctx.Err() != nil {
+			slog.Debug("GR-62: context cancelled during named import resolution")
+			break
+		}
+
+		if r == nil || r.Language != "python" {
+			continue
+		}
+
+		fileMap := state.importNameMap[r.FilePath]
+		if len(fileMap) == 0 {
+			continue
+		}
+
+		// Use the same source node as extractImportEdges: the package symbol
+		// of the importing file. If the file has no package symbol, skip it.
+		sourceID := findPackageSymbolID(r)
+		if sourceID == "" {
+			skippedNoSource += len(fileMap)
+			slog.Debug("GR-62: no package symbol for file, skipping named import resolution",
+				slog.String("file", r.FilePath),
+			)
+			continue
+		}
+		if _, exists := state.graph.GetNode(sourceID); !exists {
+			skippedNoSource += len(fileMap)
+			continue
+		}
+
+		for _, entry := range fileMap {
+			// Look up all in-project symbols with this name.
+			candidates := state.symbolsByName[entry.OriginalName]
+			if len(candidates) == 0 {
+				skippedNoTarget++
+				continue
+			}
+
+			// Filter to symbols whose file path matches the import module path.
+			// matchesImportPath converts "flask.globals" → "flask/globals" and
+			// handles __init__.py packages, so relative and absolute imports both work.
+			matched := false
+			for _, sym := range candidates {
+				if !matchesImportPath(sym.FilePath, entry.ModulePath) {
+					continue
+				}
+
+				// A matching symbol was found in the index. Mark matched=true now
+				// so that skippedNoTarget reflects "no symbol in index" not "AddEdge failed".
+				// Edge failures are separately recorded in EdgeErrors.
+				matched = true
+
+				err := state.graph.AddEdge(sourceID, sym.ID, EdgeTypeReferences, entry.Location)
+				if err != nil {
+					if strings.Contains(err.Error(), "already exists") {
+						// Duplicate edges are benign — same symbol imported via
+						// multiple aliases, or the edge was already created by
+						// a type annotation. Not an error.
+						continue
+					}
+					state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+						FromID:   sourceID,
+						ToID:     sym.ID,
+						EdgeType: EdgeTypeReferences,
+						Err:      fmt.Errorf("GR-62 named import edge: %w", err),
+					})
+					continue
+				}
+
+				state.result.Stats.EdgesCreated++
+				state.result.Stats.NamedImportEdgesResolved++
+				resolved++
+
+				slog.Debug("GR-62: named import edge created",
+					slog.String("from", sourceID),
+					slog.String("to", sym.ID),
+					slog.String("module", entry.ModulePath),
+					slog.String("name", entry.OriginalName),
+				)
+			}
+
+			if !matched {
+				skippedNoTarget++
+			}
+		}
+	}
+
+	span.SetAttributes(
+		attribute.Int("resolved", resolved),
+		attribute.Int("skipped_no_source", skippedNoSource),
+		attribute.Int("skipped_no_target", skippedNoTarget),
+	)
+
+	if resolved > 0 || skippedNoSource > 0 {
+		slog.Debug("GR-62: named import resolution complete",
+			slog.Int("edges_created", resolved),
+			slog.Int("skipped_no_source", skippedNoSource),
+			slog.Int("skipped_no_target", skippedNoTarget),
+		)
+	}
+}
+
+// semanticNameFromImportPath derives a PascalCase class name from a CommonJS import path.
+//
+// Description:
+//
+//	IT-06d Bug D: For CommonJS require() paths like "./response" or "./router/index",
+//	derives the semantic class name used by emitSyntheticClassSymbols.
+//	This mirrors deriveSemanticTypeName in the JS parser.
+//
+//	Examples:
+//	  "./response"      → "Response"
+//	  "./route"         → "Route"
+//	  "./router/index"  → "Router" (index → parent directory)
+//	  "express"         → "" (external module, no slash)
+//
+// Inputs:
+//
+//	importPath - The raw import path string (e.g., "./response", "../utils").
+//
+// Outputs:
+//
+//	string - PascalCase name, or "" if it cannot be derived.
+//
+// Thread Safety: Pure function, safe for concurrent use.
+func semanticNameFromImportPath(importPath string) string {
+	// Only handle relative imports (local modules)
+	if !strings.HasPrefix(importPath, ".") {
+		return ""
+	}
+	// Strip leading ./
+	p := strings.TrimLeft(importPath, "./")
+	if p == "" {
+		return ""
+	}
+	// Strip JS/TS extensions
+	for _, ext := range []string{".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs"} {
+		p = strings.TrimSuffix(p, ext)
+	}
+	// Take the last path segment
+	parts := strings.Split(p, "/")
+	name := parts[len(parts)-1]
+	// For "index", use the parent directory segment (same as deriveSemanticTypeName)
+	if name == "index" && len(parts) >= 2 {
+		name = parts[len(parts)-2]
+	}
+	if name == "" {
+		return ""
+	}
+	// Capitalize first letter (PascalCase)
+	runes := []rune(name)
+	if len(runes) == 0 {
+		return ""
+	}
+	runes[0] = unicode.ToUpper(runes[0])
+	return string(runes)
+}
+
+// resolveCommonJSAliasImportEdges creates EdgeTypeReferences edges from CommonJS alias
+// variables to the exported class of the required module.
+//
+// Description:
+//
+//	IT-06d Bug D: CommonJS imports like `var res = require('./response')` are recorded as
+//	Import{IsCommonJS: true, Alias: "res", Path: "./response"}, but the call `Object.create(res)`
+//	at the top level of the file is never extracted as a call site (not inside a function body).
+//	Without an edge, find_references("Response") shows no results from express.js.
+//
+//	This pass creates a REFERENCES edge from the alias variable symbol (e.g., `res` in express.js)
+//	to the exported class of the required module (e.g., `Response` in response.js), making the
+//	importing file visible in find_references results.
+//
+//	Bug E: Also handles `var Route = require('./route')` → `new Route()` resolves correctly via
+//	resolveViaImportMap (buildImportNameMap fix), but this pass additionally creates a direct
+//	REFERENCES edge from the alias variable to the imported class as a belt-and-suspenders link.
+//
+// Inputs:
+//
+//	ctx     - Context for cancellation.
+//	state   - Build state with full symbol index.
+//	results - All parse results; JS/TS files only.
+//
+// Outputs:
+//
+//	None. Edges are added to state.graph; count recorded in state.result.Stats.
+//
+// Thread Safety: Modifies state.graph and state.result. Not safe for concurrent use.
+func (b *Builder) resolveCommonJSAliasImportEdges(ctx context.Context, state *buildState, results []*ast.ParseResult) {
+	_, span := tracer.Start(ctx, "GraphBuilder.resolveCommonJSAliasImportEdges")
+	defer span.End()
+
+	resolved := 0
+	skipped := 0
+
+	for _, r := range results {
+		if ctx.Err() != nil {
+			slog.Debug("IT-06d: context cancelled during CommonJS alias import resolution")
+			break
+		}
+		if r == nil {
+			continue
+		}
+		if r.Language != "javascript" && r.Language != "typescript" {
+			continue
+		}
+
+		for _, imp := range r.Imports {
+			// Only CommonJS whole-module imports: var X = require('./module')
+			// Destructured imports (const { a, b } = require('m')) also have IsCommonJS=true
+			// but each creates a separate Import with Alias=name and no Names slice.
+			// Both are valid here — we create edges for any relative CommonJS import with Alias.
+			if !imp.IsCommonJS || imp.Alias == "" {
+				continue
+			}
+			// Only local imports (relative paths)
+			if !strings.HasPrefix(imp.Path, ".") {
+				continue
+			}
+
+			// Find the alias variable symbol in the importing file.
+			var sourceID string
+			aliasSyms := state.symbolsByName[imp.Alias]
+			for _, sym := range aliasSyms {
+				if sym.FilePath == r.FilePath &&
+					(sym.Kind == ast.SymbolKindVariable || sym.Kind == ast.SymbolKindConstant) {
+					sourceID = sym.ID
+					break
+				}
+			}
+			// IT-06e Bug 2: exports.X = require('./m') creates no variable symbol named X.
+			// The alias is a property name on the exports object, not a local variable.
+			// Fall back to the file's package symbol so the REFERENCES edge is still created.
+			if sourceID == "" {
+				sourceID = findPackageSymbolID(r)
+				if sourceID == "" {
+					skipped++
+					continue
+				}
+				if _, exists := state.graph.GetNode(sourceID); !exists {
+					skipped++
+					continue
+				}
+			}
+
+			// Derive the semantic class name from the import path.
+			// e.g., "./response" → "Response", "./route" → "Route"
+			semanticName := semanticNameFromImportPath(imp.Path)
+			if semanticName == "" {
+				skipped++
+				continue
+			}
+
+			// Find class/function symbols with that name in the matching module file.
+			candidates := state.symbolsByName[semanticName]
+			found := false
+			for _, sym := range candidates {
+				if sym.Kind != ast.SymbolKindClass && sym.Kind != ast.SymbolKindFunction {
+					continue
+				}
+				if !matchesImportPath(sym.FilePath, imp.Path) {
+					continue
+				}
+
+				err := state.graph.AddEdge(sourceID, sym.ID, EdgeTypeReferences, imp.Location)
+				if err != nil {
+					if strings.Contains(err.Error(), "already exists") {
+						found = true
+						continue
+					}
+					state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+						FromID:   sourceID,
+						ToID:     sym.ID,
+						EdgeType: EdgeTypeReferences,
+						Err:      fmt.Errorf("IT-06d CommonJS alias import edge: %w", err),
+					})
+					continue
+				}
+
+				state.result.Stats.EdgesCreated++
+				state.result.Stats.CommonJSImportEdgesResolved++
+				resolved++
+				found = true
+
+				slog.Debug("IT-06d: CommonJS alias import edge created",
+					slog.String("from", sourceID),
+					slog.String("to", sym.ID),
+					slog.String("alias", imp.Alias),
+					slog.String("module", imp.Path),
+					slog.String("semantic_name", semanticName),
+				)
+			}
+			if !found {
+				skipped++
+			}
+		}
+	}
+
+	span.SetAttributes(
+		attribute.Int("resolved", resolved),
+		attribute.Int("skipped", skipped),
+	)
+
+	if resolved > 0 {
+		slog.Debug("IT-06d: CommonJS alias import resolution complete",
+			slog.Int("edges_created", resolved),
+			slog.Int("skipped", skipped),
+		)
+	}
+}
+
+// resolveDynamicImportEdges creates EdgeTypeReferences edges for dynamic import() calls.
+//
+// Description:
+//
+//	IT-06e Bug 4: Dynamic imports like React.lazy(() => import('./HeavyComponent')) produce
+//	Import{IsDynamic: true, Path: "./HeavyComponent"} entries in the ParseResult (added by
+//	the JS/TS parser's extractDynamicImports pass). These imports have no Alias because
+//	the outer variable name (e.g., LazyComponent) is too deeply nested to reliably extract
+//	during the AST walk.
+//
+//	This pass creates a REFERENCES edge from the importing file's package symbol to the
+//	exported class of the dynamically imported module. This makes the importing file appear
+//	in find_references results for lazily-loaded components.
+//
+//	Resolution strategy mirrors resolveCommonJSAliasImportEdges:
+//	1. Source = findPackageSymbolID(r) — the file-level package symbol.
+//	2. Target = semanticNameFromImportPath(imp.Path) → class/function in the matching module.
+//
+// Inputs:
+//
+//	ctx     - Context for cancellation.
+//	state   - Build state with full symbol index.
+//	results - All parse results; JS/TS files only.
+//
+// Outputs:
+//
+//	None. Edges added to state.graph; count in state.result.Stats.DynamicImportEdgesResolved.
+//
+// Thread Safety: Modifies state.graph and state.result. Not safe for concurrent use.
+func (b *Builder) resolveDynamicImportEdges(ctx context.Context, state *buildState, results []*ast.ParseResult) {
+	_, span := tracer.Start(ctx, "GraphBuilder.resolveDynamicImportEdges")
+	defer span.End()
+
+	resolved := 0
+	skipped := 0
+
+	for _, r := range results {
+		if ctx.Err() != nil {
+			slog.Debug("IT-06e Bug 4: context cancelled during dynamic import resolution")
+			break
+		}
+		if r == nil {
+			continue
+		}
+		if r.Language != "javascript" && r.Language != "typescript" {
+			continue
+		}
+
+		// Find the file-level package symbol once per file.
+		sourceID := findPackageSymbolID(r)
+		if sourceID == "" {
+			continue
+		}
+		if _, exists := state.graph.GetNode(sourceID); !exists {
+			continue
+		}
+
+		for _, imp := range r.Imports {
+			if !imp.IsDynamic {
+				continue
+			}
+			// Only local (relative) imports — external packages cannot be resolved.
+			if !strings.HasPrefix(imp.Path, ".") {
+				skipped++
+				continue
+			}
+
+			semanticName := semanticNameFromImportPath(imp.Path)
+			if semanticName == "" {
+				skipped++
+				continue
+			}
+
+			candidates := state.symbolsByName[semanticName]
+			found := false
+			for _, sym := range candidates {
+				if sym.Kind != ast.SymbolKindClass && sym.Kind != ast.SymbolKindFunction {
+					continue
+				}
+				if !matchesImportPath(sym.FilePath, imp.Path) {
+					continue
+				}
+
+				err := state.graph.AddEdge(sourceID, sym.ID, EdgeTypeReferences, imp.Location)
+				if err != nil {
+					if strings.Contains(err.Error(), "already exists") {
+						found = true
+						continue
+					}
+					state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+						FromID:   sourceID,
+						ToID:     sym.ID,
+						EdgeType: EdgeTypeReferences,
+						Err:      fmt.Errorf("IT-06e dynamic import edge: %w", err),
+					})
+					continue
+				}
+
+				state.result.Stats.EdgesCreated++
+				state.result.Stats.DynamicImportEdgesResolved++
+				resolved++
+				found = true
+
+				slog.Debug("IT-06e Bug 4: dynamic import edge created",
+					slog.String("from", sourceID),
+					slog.String("to", sym.ID),
+					slog.String("module", imp.Path),
+					slog.String("semantic_name", semanticName),
+				)
+			}
+			if !found {
+				skipped++
+			}
+		}
+	}
+
+	span.SetAttributes(
+		attribute.Int("resolved", resolved),
+		attribute.Int("skipped", skipped),
+	)
+
+	if resolved > 0 {
+		slog.Debug("IT-06e Bug 4: dynamic import resolution complete",
+			slog.Int("edges_created", resolved),
+			slog.Int("skipped", skipped),
+		)
+	}
+}
+
+// resolveDecoratorArgEdges creates EdgeTypeReferences edges for class names in decorator arrays.
+//
+// Description:
+//
+//	IT-06e Bug 5: Angular and NestJS use class decorators to wire together modules:
+//
+//	  @Module({ imports: [RouterModule, AuthModule], providers: [UserService] })
+//	  export class AppModule {}
+//
+//	  @NgModule({ imports: [CommonModule, FormsModule], providers: [AuthGuard] })
+//	  export class AppModule {}
+//
+//	The TypeScript parser correctly extracts decorator names and their argument identifiers
+//	into Metadata.Decorators and Metadata.DecoratorArgs. However, the graph builder's
+//	extractEdgesPhase never processes DecoratorArgs to create REFERENCES edges.
+//
+//	The class names in imports/controllers/providers arrays are all imported symbols
+//	(via ES6 named imports at the top of the file). They appear in importNameMap for
+//	the file. This pass uses resolveViaImportMap to find the in-project symbol and
+//	creates a REFERENCES edge from the decorated class to each referenced symbol.
+//
+//	This makes the module declaration file (AppModule) appear in find_references results
+//	for any service, controller, or sub-module it references.
+//
+// Inputs:
+//
+//	ctx     - Context for cancellation.
+//	state   - Build state with full symbol index and importNameMap.
+//	results - All parse results; TypeScript files only.
+//
+// Outputs:
+//
+//	None. Edges added to state.graph; count in state.result.Stats.DecoratorArgEdgesResolved.
+//
+// Thread Safety: Modifies state.graph and state.result. Not safe for concurrent use.
+func (b *Builder) resolveDecoratorArgEdges(ctx context.Context, state *buildState, results []*ast.ParseResult) {
+	_, span := tracer.Start(ctx, "GraphBuilder.resolveDecoratorArgEdges")
+	defer span.End()
+
+	resolved := 0
+	skipped := 0
+
+	for _, r := range results {
+		if ctx.Err() != nil {
+			slog.Debug("IT-06e Bug 5: context cancelled during decorator arg resolution")
+			break
+		}
+		if r == nil || r.Language != "typescript" {
+			continue
+		}
+
+		for _, sym := range r.Symbols {
+			if sym == nil || sym.Metadata == nil || len(sym.Metadata.DecoratorArgs) == 0 {
+				continue
+			}
+
+			// The decorated class is the source of the REFERENCES edges.
+			sourceID := sym.ID
+			if _, exists := state.graph.GetNode(sourceID); !exists {
+				skipped++
+				continue
+			}
+
+			for _, argIdentifiers := range sym.Metadata.DecoratorArgs {
+				for _, argName := range argIdentifiers {
+					if argName == "" {
+						continue
+					}
+					// Only PascalCase identifiers are class/module references.
+					// Skip lowercase names (e.g. option strings, boolean literals).
+					if len(argName) == 0 || argName[0] < 'A' || argName[0] > 'Z' {
+						skipped++
+						continue
+					}
+
+					// Try to resolve via the file's import name map first.
+					// This handles: import { UserService } from './user.service'
+					// then @Module({ providers: [UserService] })
+					resolvedID := b.resolveViaImportMap(state, argName, r.FilePath, nil)
+
+					// Fall back to a name-only lookup if the import map has no entry.
+					// This handles same-file references and re-exported symbols.
+					if resolvedID == "" {
+						candidates := state.symbolsByName[argName]
+						for _, candidate := range candidates {
+							if candidate.Kind == ast.SymbolKindClass || candidate.Kind == ast.SymbolKindFunction {
+								resolvedID = candidate.ID
+								break
+							}
+						}
+					}
+
+					if resolvedID == "" {
+						skipped++
+						continue
+					}
+
+					loc := ast.Location{
+						FilePath:  r.FilePath,
+						StartLine: sym.StartLine,
+						EndLine:   sym.EndLine,
+					}
+					err := state.graph.AddEdge(sourceID, resolvedID, EdgeTypeReferences, loc)
+					if err != nil {
+						if strings.Contains(err.Error(), "already exists") {
+							// Edge already exists (created by another pass). Count it in stats.
+							state.result.Stats.DecoratorArgEdgesResolved++
+							resolved++
+							continue
+						}
+						state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+							FromID:   sourceID,
+							ToID:     resolvedID,
+							EdgeType: EdgeTypeReferences,
+							Err:      fmt.Errorf("IT-06e decorator arg edge: %w", err),
+						})
+						continue
+					}
+
+					state.result.Stats.EdgesCreated++
+					state.result.Stats.DecoratorArgEdgesResolved++
+					resolved++
+
+					slog.Debug("IT-06e Bug 5: decorator arg edge created",
+						slog.String("from", sourceID),
+						slog.String("to", resolvedID),
+						slog.String("arg", argName),
+					)
+				}
+			}
+		}
+	}
+
+	span.SetAttributes(
+		attribute.Int("resolved", resolved),
+		attribute.Int("skipped", skipped),
+	)
+
+	if resolved > 0 {
+		slog.Debug("IT-06e Bug 5: decorator arg resolution complete",
+			slog.Int("edges_created", resolved),
+			slog.Int("skipped", skipped),
+		)
+	}
+}
+
 // buildImportNameMap builds the import name lookup table from fileImports.
 //
 // Description:
@@ -1330,12 +2469,33 @@ func filterOutID(ids []string, exclude string) []string {
 //	Handles aliased imports (e.g., "merge as pd_merge"), skips wildcards
 //	and bare module imports (no Names).
 //
+//	IT-06d Bug E/D: Also processes CommonJS whole-module imports (Alias != "", Names empty)
+//	so that resolveViaImportMap can redirect bare-identifier calls (e.g., new Route()) to
+//	the cross-file class symbol instead of the same-file alias variable.
+//
 // Thread Safety: Must be called before edge extraction (single-threaded phase).
 func (b *Builder) buildImportNameMap(state *buildState) {
 	entries := 0
 	for filePath, imports := range state.fileImports {
 		for _, imp := range imports {
 			if imp.IsWildcard || len(imp.Names) == 0 {
+				// IT-06d Bug E/D: CommonJS whole-module imports: var X = require('./module')
+				// These have Alias set but Names empty. Include them so resolveViaImportMap
+				// can redirect bare calls (new Route()) to the actual cross-file class.
+				if imp.IsCommonJS && imp.Alias != "" {
+					if state.importNameMap[filePath] == nil {
+						state.importNameMap[filePath] = make(map[string]importEntry)
+					}
+					// Named imports (len(Names) > 0) take priority; only add if not present.
+					if _, exists := state.importNameMap[filePath][imp.Alias]; !exists {
+						state.importNameMap[filePath][imp.Alias] = importEntry{
+							ModulePath:   imp.Path,
+							OriginalName: imp.Alias,
+							Location:     imp.Location,
+						}
+						entries++
+					}
+				}
 				continue
 			}
 
@@ -1348,6 +2508,7 @@ func (b *Builder) buildImportNameMap(state *buildState) {
 				state.importNameMap[filePath][localName] = importEntry{
 					ModulePath:   imp.Path,
 					OriginalName: originalName,
+					Location:     imp.Location,
 				}
 				entries++
 			}
@@ -1421,12 +2582,38 @@ func (b *Builder) resolveViaImportMap(state *buildState, target string, callerFi
 //	ends with it. Uses HasSuffix (not Contains) to prevent false positives from
 //	prefix pollution (e.g., "my_pandas/core/reshape/merge.py").
 //
+//	GR-62: Handles relative imports by stripping leading dots before conversion.
+//	Python relative imports like ".globals" or "..utils" are stored with the leading
+//	dot(s) intact by the parser. Stripping the dots lets the suffix check work:
+//	".globals" → "globals" → matches "src/flask/globals.py".
+//
 // Thread Safety: This function is safe for concurrent use.
 func matchesImportPath(filePath string, importPath string) bool {
-	pathFragment := strings.ReplaceAll(importPath, ".", "/")
+	// Strip leading dots from relative imports (e.g., ".globals" → "globals").
+	// Absolute imports (e.g., "flask.globals") are unaffected by TrimLeft.
+	stripped := strings.TrimLeft(importPath, ".")
+	if stripped == "" {
+		// Bare relative import ("from . import x") — no module path to match against.
+		return false
+	}
+	// IT-06d Bug E/D: JavaScript uses "./module" style (dot-slash) while Python uses
+	// ".module" style (dot only). After TrimLeft removes the leading dots, "./module"
+	// leaves "/module" (the slash remains). Strip the leading slash so pathFragment
+	// is just "module" in both cases.
+	stripped = strings.TrimLeft(stripped, "/")
+	if stripped == "" {
+		return false
+	}
+	pathFragment := strings.ReplaceAll(stripped, ".", "/")
 	// Handle both "merge.py" and "merge/__init__.py" (Python package)
 	normalized := strings.TrimSuffix(filePath, ".py")
 	normalized = strings.TrimSuffix(normalized, "/__init__")
+	// IT-06d Bug E/D: JavaScript/TypeScript relative imports omit the extension
+	// (e.g., require('./route') refers to lib/router/route.js). Strip JS/TS
+	// extensions so HasSuffix matching works across both languages.
+	for _, jsExt := range []string{".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs"} {
+		normalized = strings.TrimSuffix(normalized, jsExt)
+	}
 	// Must match at path boundary: either the entire path, or preceded by "/"
 	if normalized == pathFragment {
 		return true
@@ -1496,6 +2683,82 @@ func extractTypeName(typeExpr string) string {
 	}
 
 	return typeExpr
+}
+
+// inferPackageFromCall infers the external package/module for an unresolved call target
+// by cross-referencing the call's dot-prefix against the calling file's import table.
+//
+// Description:
+//
+//	IT-05a: When a call target like "pd.read_csv" cannot be resolved to a symbol in the
+//	graph, this function determines which external package it belongs to by checking
+//	the file's imports. This enables accurate external boundary detection in traversal
+//	tools (get_call_chain, find_callees, etc.).
+//
+//	Resolution strategy (checked in order):
+//	  1. Dot-prefix alias match: "pd.read_csv" → prefix "pd" → import {Path: "pandas", Alias: "pd"} → "pandas"
+//	  2. Dot-prefix path-segment match: "os.MkdirAll" → prefix "os" → import {Path: "os"} → "os"
+//	  3. Bare name in import Names: "Flask()" → import {Path: "flask", Names: ["Flask"]} → "flask"
+//	  4. No match → returns "" (unknown external)
+//
+// Inputs:
+//   - call: The unresolved call site. call.Target contains the raw call text.
+//   - fileImports: The import list for the file containing the call.
+//
+// Outputs:
+//   - string: The inferred package/module path, or "" if no match found.
+//
+// Thread Safety: Safe for concurrent use (reads only).
+func inferPackageFromCall(call ast.CallSite, fileImports []ast.Import) string {
+	if len(fileImports) == 0 {
+		return ""
+	}
+
+	target := call.Target
+
+	// Strategy 1 & 2: Dot-prefix lookup.
+	// "pd.read_csv" → prefix = "pd"
+	// "os.path.join" → prefix = "os"
+	if dotIdx := strings.IndexByte(target, '.'); dotIdx > 0 {
+		prefix := target[:dotIdx]
+
+		for _, imp := range fileImports {
+			// Strategy 1: Alias match (e.g., pd → pandas)
+			if imp.Alias != "" && imp.Alias == prefix {
+				return imp.Path
+			}
+
+			// Strategy 2: Path last segment match (e.g., os → os, http → net/http)
+			lastSeg := imp.Path
+			if slashIdx := strings.LastIndexByte(imp.Path, '/'); slashIdx >= 0 {
+				lastSeg = imp.Path[slashIdx+1:]
+			}
+			// Also handle Python dotted paths: "os.path" → last segment "path",
+			// but the prefix might be "os" matching the first segment.
+			firstSeg := imp.Path
+			if dotSeg := strings.IndexByte(imp.Path, '.'); dotSeg >= 0 {
+				firstSeg = imp.Path[:dotSeg]
+			}
+			if lastSeg == prefix || firstSeg == prefix {
+				return imp.Path
+			}
+		}
+	}
+
+	// Strategy 3: Bare name in import Names.
+	// "Flask()" → import {Path: "flask", Names: ["Flask"]} → "flask"
+	// "Router()" → import {Path: "express", Names: ["Router"]} → "express"
+	for _, imp := range fileImports {
+		for _, name := range imp.Names {
+			// Handle aliased names: "merge as pd_merge" → original is "merge"
+			localName, _ := parseAliasedName(name)
+			if localName == target {
+				return imp.Path
+			}
+		}
+	}
+
+	return ""
 }
 
 // getOrCreatePlaceholder returns an existing placeholder or creates a new one.
@@ -1571,10 +2834,13 @@ func isCallable(kind ast.SymbolKind) bool {
 // This is a superset of isCallable: it additionally allows Class and Struct symbols
 // because constructor calls (e.g., DataFrameFormatter(), new Router()) target class/struct symbols.
 // R3-P1b: Fixes silently dropped constructor call edges.
+// GR-62a P-4: Also allows Variable symbols because Python stores callables in variables
+// (e.g., handler = _MergeOperation) which are then called as methods.
 func isCallTarget(kind ast.SymbolKind) bool {
 	return isCallable(kind) ||
 		kind == ast.SymbolKindClass ||
-		kind == ast.SymbolKindStruct
+		kind == ast.SymbolKindStruct ||
+		kind == ast.SymbolKindVariable
 }
 
 // validateParseResult checks if a ParseResult is valid for building.
@@ -1976,13 +3242,19 @@ func (b *Builder) computeInterfaceImplementations(ctx context.Context, state *bu
 		if sym.Kind != ast.SymbolKindInterface {
 			continue
 		}
-		// GR-40: Go, GR-40a: Python
-		if sym.Language != "go" && sym.Language != "python" {
+		// GR-40: Go, GR-40a: Python, IT-03a A-1: TypeScript
+		if sym.Language != "go" && sym.Language != "python" && sym.Language != "typescript" {
 			continue
 		}
-		if sym.Metadata == nil || len(sym.Metadata.Methods) == 0 {
-			continue // Skip empty interfaces
+		// Phase 18: Don't skip interfaces with no direct methods yet — they may gain
+		// methods via embedded/extended interfaces (Go: ReadWriter embeds Reader + Writer,
+		// TS: interface ReadWriter extends Reader, Writer {}, Python: class Combined(ReadProto, WriteProto, Protocol)).
+		// We resolve embedded methods below via EMBEDS edges, then prune still-empty ones.
+		if sym.Metadata == nil {
+			// No metadata at all — truly empty, safe to skip
+			continue
 		}
+		// Collect even if Methods is empty — will resolve via EMBEDS edges
 
 		if interfacesByLang[sym.Language] == nil {
 			interfacesByLang[sym.Language] = make(map[string]map[string]bool)
@@ -1995,13 +3267,33 @@ func (b *Builder) computeInterfaceImplementations(ctx context.Context, state *bu
 		interfacesByLang[sym.Language][sym.ID] = methodSet
 	}
 
+	// Phase 18: Resolve interface method sets by walking EMBEDS edges transitively.
+	// This fills in methods for composed interfaces (e.g., ReadWriter gets Read + Write).
+	interfaceMethodsAdded := b.resolveInterfaceMethodSets(state, interfacesByLang)
+	if interfaceMethodsAdded > 0 {
+		span.SetAttributes(attribute.Int("interface_methods_resolved", interfaceMethodsAdded))
+	}
+
+	// Phase 18: Prune interfaces that are still empty after resolution.
+	// These are purely compositional interfaces whose embedded targets weren't found.
+	// An empty method set would match everything via isMethodSuperset, causing false positives.
+	for _, ifaces := range interfacesByLang {
+		for ifaceID, methods := range ifaces {
+			if len(methods) == 0 {
+				delete(ifaces, ifaceID)
+			}
+		}
+	}
+
 	// Count interfaces for span attributes
 	goInterfaceCount := len(interfacesByLang["go"])
 	pythonProtocolCount := len(interfacesByLang["python"])
+	tsInterfaceCount := len(interfacesByLang["typescript"])
 
 	span.SetAttributes(
 		attribute.Int("interface.go_count", goInterfaceCount),
 		attribute.Int("interface.python_count", pythonProtocolCount),
+		attribute.Int("interface.typescript_count", tsInterfaceCount),
 	)
 
 	if len(interfacesByLang) == 0 {
@@ -2022,12 +3314,20 @@ func (b *Builder) computeInterfaceImplementations(ctx context.Context, state *bu
 		if sym.Kind != ast.SymbolKindStruct && sym.Kind != ast.SymbolKindType && sym.Kind != ast.SymbolKindClass {
 			continue
 		}
-		// GR-40: Go, GR-40a: Python
-		if sym.Language != "go" && sym.Language != "python" {
+		// GR-40: Go, GR-40a: Python, IT-03a A-1: TypeScript
+		if sym.Language != "go" && sym.Language != "python" && sym.Language != "typescript" {
 			continue
 		}
-		if sym.Metadata == nil || len(sym.Metadata.Methods) == 0 {
-			continue // No methods
+		// IT-03 H-3: Include types that have embeds even if they have no direct methods,
+		// because promoted methods from embedded types may satisfy interfaces.
+		if sym.Metadata == nil {
+			continue
+		}
+		// CR-20-4: Check Implements slice too — Phase 16 G-1 stores additional Go struct
+		// embeds in Implements. A type with only Implements entries (no Extends, no Methods)
+		// would be incorrectly skipped without this check.
+		if len(sym.Metadata.Methods) == 0 && sym.Metadata.Extends == "" && len(sym.Metadata.Implements) == 0 {
+			continue // No methods and no embeds
 		}
 
 		if typesByLang[sym.Language] == nil {
@@ -2041,13 +3341,30 @@ func (b *Builder) computeInterfaceImplementations(ctx context.Context, state *bu
 		typesByLang[sym.Language][sym.ID] = methodSet
 	}
 
+	// IT-03 H-3: Resolve promoted methods from EMBEDS edges.
+	// In Go, when struct A embeds struct B, A inherits B's methods (promoted methods).
+	// Walk EMBEDS edges recursively and merge embedded type methods into each type's method set.
+	promotedCount := 0
+	for _, types := range typesByLang {
+		for typeID, methodSet := range types {
+			added := b.resolvePromotedMethods(state, typeID, methodSet, make(map[string]bool))
+			promotedCount += added
+		}
+	}
+
+	if promotedCount > 0 {
+		span.SetAttributes(attribute.Int("promoted_methods_added", promotedCount))
+	}
+
 	// Count types for span attributes
 	goTypeCount := len(typesByLang["go"])
 	pythonClassCount := len(typesByLang["python"])
+	tsClassCount := len(typesByLang["typescript"])
 
 	span.SetAttributes(
 		attribute.Int("type.go_count", goTypeCount),
 		attribute.Int("type.python_count", pythonClassCount),
+		attribute.Int("type.typescript_count", tsClassCount),
 	)
 
 	if len(typesByLang) == 0 {
@@ -2160,10 +3477,199 @@ func (b *Builder) computeInterfaceImplementations(ctx context.Context, state *bu
 //
 // Thread Safety: This function is safe for concurrent use.
 func isMethodSuperset(superset, subset map[string]bool) bool {
+	// CR-20-10 note: An empty subset matches any type (mathematical superset definition).
+	// This is correct mathematically but would produce false positives for interface
+	// matching. Callers MUST prune empty-method interfaces before calling this function.
+	// The Phase 18 prune in computeInterfaceImplementations (lines 2262-2268) handles this.
 	for methodName := range subset {
 		if !superset[methodName] {
 			return false
 		}
 	}
 	return true
+}
+
+// resolvePromotedMethods follows outgoing EMBEDS edges from a type and merges
+// the embedded type's methods into the given method set.
+//
+// Description:
+//
+//	In Go, when struct A embeds struct B, all of B's methods are promoted to A.
+//	This function walks the EMBEDS edge chain recursively (A embeds B, B embeds C)
+//	and merges all discovered methods into the provided methodSet.
+//
+// Inputs:
+//   - state: Build state containing symbolsByID for method lookups.
+//   - typeID: The symbol ID of the type to resolve promoted methods for.
+//   - methodSet: The type's method set to merge promoted methods into. Modified in place.
+//   - visited: Set of already-visited type IDs to prevent infinite cycles.
+//
+// Outputs:
+//   - int: Number of promoted methods added to the method set.
+//
+// Limitations:
+//   - Only follows EMBEDS edges (not IMPLEMENTS or CALLS).
+//   - Only merges method names, not full signatures (consistent with isMethodSuperset).
+//
+// Thread Safety: Not safe for concurrent use on the same methodSet.
+//
+// CR-20-3: Depth-limited to maxEmbedResolutionDepth (20) to prevent stack overflow.
+func (b *Builder) resolvePromotedMethods(state *buildState, typeID string, methodSet map[string]bool, visited map[string]bool) int {
+	return b.resolvePromotedMethodsWithDepth(state, typeID, methodSet, visited, 0)
+}
+
+// resolvePromotedMethodsWithDepth is the depth-limited implementation of resolvePromotedMethods.
+//
+// CR-20-3: Added depth parameter to prevent stack overflow on pathological embedding chains.
+// Stops at maxEmbedResolutionDepth (20). Cycle detection via visited set is retained.
+func (b *Builder) resolvePromotedMethodsWithDepth(state *buildState, typeID string, methodSet map[string]bool, visited map[string]bool, depth int) int {
+	if depth > maxEmbedResolutionDepth {
+		return 0
+	}
+	if visited[typeID] {
+		return 0
+	}
+	visited[typeID] = true
+
+	added := 0
+
+	// Look up the node in the graph to find outgoing EMBEDS edges
+	node, exists := state.graph.GetNode(typeID)
+	if !exists || node == nil {
+		return 0
+	}
+
+	for _, edge := range node.Outgoing {
+		if edge.Type != EdgeTypeEmbeds {
+			continue
+		}
+
+		// Get the embedded type's symbol to access its methods
+		embeddedSym := state.symbolsByID[edge.ToID]
+		if embeddedSym == nil || embeddedSym.Metadata == nil {
+			continue
+		}
+
+		// Merge the embedded type's methods into our method set
+		for _, m := range embeddedSym.Metadata.Methods {
+			if !methodSet[m.Name] {
+				methodSet[m.Name] = true
+				added++
+			}
+		}
+
+		// Recurse: the embedded type may itself embed other types
+		added += b.resolvePromotedMethodsWithDepth(state, edge.ToID, methodSet, visited, depth+1)
+	}
+
+	return added
+}
+
+// resolveInterfaceMethodSets walks EMBEDS edges from interfaces and merges
+// embedded interface methods into each interface's method set.
+//
+// Description:
+//
+//	In Go, composed interfaces like ReadWriter (embedding Reader + Writer) have no
+//	direct methods — their method set is the union of their embedded interfaces' methods.
+//	This function walks EMBEDS edges transitively (with cycle detection) and merges
+//	discovered methods into each interface's method set in interfacesByLang.
+//
+//	This is structurally analogous to resolvePromotedMethods for structs, but operates
+//	on the interfacesByLang map used by computeInterfaceImplementations.
+//
+// Inputs:
+//   - state: Build state containing graph nodes and symbol data.
+//   - interfacesByLang: Map of [language][interfaceID] → method set. Modified in place.
+//
+// Outputs:
+//   - int: Total number of methods added across all interfaces.
+//
+// Limitations:
+//   - Only follows EMBEDS edges (not IMPLEMENTS or CALLS).
+//   - Only merges method names, not full signatures (consistent with isMethodSuperset).
+//
+// Thread Safety: Not safe for concurrent use on the same interfacesByLang.
+func (b *Builder) resolveInterfaceMethodSets(state *buildState, interfacesByLang map[string]map[string]map[string]bool) int {
+	totalAdded := 0
+
+	for _, interfaces := range interfacesByLang {
+		for ifaceID, methodSet := range interfaces {
+			added := b.resolveInterfaceEmbedsRecursive(state, ifaceID, methodSet, make(map[string]bool))
+			totalAdded += added
+		}
+	}
+
+	return totalAdded
+}
+
+// resolveInterfaceEmbedsRecursive follows outgoing EMBEDS edges from an interface
+// and merges the embedded interface's methods into the given method set.
+//
+// Description:
+//
+//	Recursively walks EMBEDS edges from an interface, merging method sets from
+//	embedded interfaces. Uses a visited set for cycle detection.
+//
+// Inputs:
+//   - state: Build state containing graph nodes and symbol data.
+//   - ifaceID: The symbol ID of the interface to resolve.
+//   - methodSet: The interface's method set to merge embedded methods into. Modified in place.
+//   - visited: Set of already-visited interface IDs to prevent infinite cycles.
+//
+// Outputs:
+//   - int: Number of methods added to the method set.
+//
+// Thread Safety: Not safe for concurrent use on the same methodSet.
+//
+// CR-20-3: Depth-limited to maxEmbedResolutionDepth (20) to prevent stack overflow.
+func (b *Builder) resolveInterfaceEmbedsRecursive(state *buildState, ifaceID string, methodSet map[string]bool, visited map[string]bool) int {
+	return b.resolveInterfaceEmbedsRecursiveWithDepth(state, ifaceID, methodSet, visited, 0)
+}
+
+// resolveInterfaceEmbedsRecursiveWithDepth is the depth-limited implementation.
+//
+// CR-20-3: Added depth parameter to prevent stack overflow on pathological interface
+// embedding chains. Stops at maxEmbedResolutionDepth (20). Cycle detection via visited
+// set is retained as the primary guard; depth limit is defense-in-depth.
+func (b *Builder) resolveInterfaceEmbedsRecursiveWithDepth(state *buildState, ifaceID string, methodSet map[string]bool, visited map[string]bool, depth int) int {
+	if depth > maxEmbedResolutionDepth {
+		return 0
+	}
+	if visited[ifaceID] {
+		return 0
+	}
+	visited[ifaceID] = true
+
+	added := 0
+
+	node, exists := state.graph.GetNode(ifaceID)
+	if !exists || node == nil {
+		return 0
+	}
+
+	for _, edge := range node.Outgoing {
+		if edge.Type != EdgeTypeEmbeds {
+			continue
+		}
+
+		// Get the embedded interface's symbol to access its methods
+		embeddedSym := state.symbolsByID[edge.ToID]
+		if embeddedSym == nil || embeddedSym.Metadata == nil {
+			continue
+		}
+
+		// Merge the embedded interface's methods into our method set
+		for _, m := range embeddedSym.Metadata.Methods {
+			if !methodSet[m.Name] {
+				methodSet[m.Name] = true
+				added++
+			}
+		}
+
+		// Recurse: the embedded interface may itself embed other interfaces
+		added += b.resolveInterfaceEmbedsRecursiveWithDepth(state, edge.ToID, methodSet, visited, depth+1)
+	}
+
+	return added
 }

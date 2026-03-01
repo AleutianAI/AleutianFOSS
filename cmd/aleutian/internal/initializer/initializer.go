@@ -140,24 +140,26 @@ func (i *Initializer) Init(ctx context.Context, cfg Config, progress ProgressCal
 		return nil, ErrPathNotDirectory
 	}
 
-	// Acquire lock
-	lock, err := NewFileLock(cfg.ProjectRoot)
-	if err != nil {
-		return nil, fmt.Errorf("creating lock: %w", err)
-	}
+	// Acquire lock (skipped in dry-run — read-only, no writes, no directory creation needed)
+	if !cfg.DryRun {
+		lock, err := NewFileLock(cfg.ProjectRoot)
+		if err != nil {
+			return nil, fmt.Errorf("creating lock: %w", err)
+		}
 
-	if err := lock.Acquire(); err != nil {
-		if lock.IsStale() {
-			// Try to force release stale lock
-			if err := lock.ForceRelease(); err == nil {
-				err = lock.Acquire()
+		if err := lock.Acquire(); err != nil {
+			if lock.IsStale() {
+				// Try to force release stale lock
+				if err := lock.ForceRelease(); err == nil {
+					err = lock.Acquire()
+				}
+			}
+			if err != nil {
+				return nil, fmt.Errorf("acquiring lock: %w", err)
 			}
 		}
-		if err != nil {
-			return nil, fmt.Errorf("acquiring lock: %w", err)
-		}
+		defer lock.Release()
 	}
-	defer lock.Release()
 
 	// Report progress: starting
 	if progress != nil {
@@ -445,7 +447,7 @@ func parseFileWithTimeout(ctx context.Context, filePath string, timeout time.Dur
 }
 
 // extractSymbolsSimple is a simple symbol extractor for demonstration.
-// In production, this would use tree-sitter parsers from services/code_buddy/ast/.
+// In production, this would use tree-sitter parsers from services/trace/ast/.
 func extractSymbolsSimple(ctx context.Context, filePath string, content []byte, lang string) ([]Symbol, []Edge) {
 	symbols := make([]Symbol, 0)
 	edges := make([]Edge, 0)
@@ -465,27 +467,25 @@ func extractSymbolsSimple(ctx context.Context, filePath string, content []byte, 
 		EndCol:    0,
 	})
 
-	// Simple function detection for Go files
-	if lang == "go" {
-		lines := strings.Split(string(content), "\n")
+	lines := strings.Split(string(content), "\n")
+
+	switch lang {
+	case "go":
 		for lineNum, line := range lines {
 			select {
 			case <-ctx.Done():
 				return symbols, edges
 			default:
 			}
-
-			// Simple function detection: func Name(
+			// func Name( or func (recv) Name(
 			if idx := strings.Index(line, "func "); idx >= 0 {
 				rest := line[idx+5:]
-				// Skip receiver if present
 				if strings.HasPrefix(rest, "(") {
 					closeIdx := strings.Index(rest, ")")
 					if closeIdx >= 0 {
 						rest = strings.TrimSpace(rest[closeIdx+1:])
 					}
 				}
-				// Extract function name
 				parenIdx := strings.Index(rest, "(")
 				if parenIdx > 0 {
 					name := strings.TrimSpace(rest[:parenIdx])
@@ -497,12 +497,10 @@ func extractSymbolsSimple(ctx context.Context, filePath string, content []byte, 
 							Kind:      "function",
 							FilePath:  filePath,
 							StartLine: lineNum + 1,
-							EndLine:   lineNum + 1, // Would need proper parsing
+							EndLine:   lineNum + 1,
 							StartCol:  idx,
 							EndCol:    idx + len(name),
 						})
-
-						// Add edge from file to function
 						edges = append(edges, Edge{
 							FromID:   fileID,
 							ToID:     symID,
@@ -512,6 +510,143 @@ func extractSymbolsSimple(ctx context.Context, filePath string, content []byte, 
 						})
 					}
 				}
+			}
+		}
+
+	case "python":
+		for lineNum, line := range lines {
+			select {
+			case <-ctx.Done():
+				return symbols, edges
+			default:
+			}
+			trimmed := strings.TrimLeft(line, " \t")
+			kind := ""
+			keyword := ""
+			// def name( and async def name(
+			if strings.HasPrefix(trimmed, "def ") {
+				kind, keyword = "function", "def "
+			} else if strings.HasPrefix(trimmed, "async def ") {
+				kind, keyword = "function", "async def "
+			} else if strings.HasPrefix(trimmed, "class ") {
+				kind, keyword = "class", "class "
+			}
+			if kind != "" {
+				rest := trimmed[len(keyword):]
+				// Name ends at first '(' or ':'
+				end := strings.IndexAny(rest, "(:")
+				if end > 0 {
+					name := strings.TrimSpace(rest[:end])
+					if name != "" && isValidIdentifier(name) {
+						symID := generateSymbolID(filePath, kind, name)
+						symbols = append(symbols, Symbol{
+							ID:        symID,
+							Name:      name,
+							Kind:      kind,
+							FilePath:  filePath,
+							StartLine: lineNum + 1,
+							EndLine:   lineNum + 1,
+						})
+						edges = append(edges, Edge{
+							FromID:   fileID,
+							ToID:     symID,
+							Kind:     "defines",
+							FilePath: filePath,
+							Line:     lineNum + 1,
+						})
+					}
+				}
+			}
+		}
+
+	case "javascript", "typescript":
+		for lineNum, line := range lines {
+			select {
+			case <-ctx.Done():
+				return symbols, edges
+			default:
+			}
+			trimmed := strings.TrimLeft(line, " \t")
+			kind := ""
+			name := ""
+
+			switch {
+			// function Name( or async function Name(
+			case strings.HasPrefix(trimmed, "function ") || strings.HasPrefix(trimmed, "async function "):
+				keyword := "function "
+				if strings.HasPrefix(trimmed, "async ") {
+					keyword = "async function "
+				}
+				rest := trimmed[len(keyword):]
+				parenIdx := strings.IndexAny(rest, "( ")
+				if parenIdx > 0 {
+					name = strings.TrimSpace(rest[:parenIdx])
+					kind = "function"
+				}
+			// class Name
+			case strings.HasPrefix(trimmed, "class "):
+				rest := trimmed[6:]
+				end := strings.IndexAny(rest, "{ \t(")
+				if end > 0 {
+					name = strings.TrimSpace(rest[:end])
+					kind = "class"
+				} else if len(rest) > 0 {
+					name = strings.TrimSpace(rest)
+					kind = "class"
+				}
+			// TypeScript interface Name
+			case strings.HasPrefix(trimmed, "interface "):
+				rest := trimmed[10:]
+				end := strings.IndexAny(rest, "{ \t<")
+				if end > 0 {
+					name = strings.TrimSpace(rest[:end])
+					kind = "interface"
+				}
+			// const/let/var Name = function( or Name = (
+			case strings.HasPrefix(trimmed, "const ") || strings.HasPrefix(trimmed, "let ") || strings.HasPrefix(trimmed, "var ") || strings.HasPrefix(trimmed, "export const ") || strings.HasPrefix(trimmed, "export function "):
+				// Normalize away export/async prefixes
+				rest := trimmed
+				for _, pfx := range []string{"export default ", "export async ", "export "} {
+					rest = strings.TrimPrefix(rest, pfx)
+				}
+				for _, pfx := range []string{"const ", "let ", "var ", "function ", "async function "} {
+					if strings.HasPrefix(rest, pfx) {
+						rest = rest[len(pfx):]
+						break
+					}
+				}
+				// Grab identifier up to = or (
+				eq := strings.IndexAny(rest, "=(: \t")
+				if eq > 0 {
+					candidate := strings.TrimSpace(rest[:eq])
+					if isValidIdentifier(candidate) {
+						// Only treat as function if right-hand side is a function expression
+						afterEq := strings.TrimLeft(rest[eq:], " \t=")
+						if strings.HasPrefix(afterEq, "function") || strings.HasPrefix(afterEq, "(") || strings.HasPrefix(afterEq, "async") {
+							name = candidate
+							kind = "function"
+						}
+					}
+				}
+			}
+
+			if kind != "" && name != "" && isValidIdentifier(name) {
+				symID := generateSymbolID(filePath, kind, name)
+				symbols = append(symbols, Symbol{
+					ID:        symID,
+					Name:      name,
+					Kind:      kind,
+					FilePath:  filePath,
+					StartLine: lineNum + 1,
+					EndLine:   lineNum + 1,
+				})
+				edges = append(edges, Edge{
+					FromID:   fileID,
+					ToID:     symID,
+					Kind:     "defines",
+					FilePath: filePath,
+					Line:     lineNum + 1,
+				})
 			}
 		}
 	}

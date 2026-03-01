@@ -51,6 +51,9 @@ const (
 
 	// MetricToolForcingRetries is the tool forcing retry count.
 	MetricToolForcingRetries MetricField = "tool_forcing_retries"
+
+	// MetricSurrenderRetries is the count of surrender detection retries (GR-59 Group F).
+	MetricSurrenderRetries MetricField = "surrender_retries"
 )
 
 // ValidContextEvictionPolicies contains valid eviction policy values.
@@ -163,6 +166,13 @@ type SessionConfig struct {
 	// Below this threshold, falls back to main LLM tool selection.
 	// Default: 0.7
 	ToolRouterConfidence float64 `json:"tool_router_confidence"`
+
+	// ParamExtractorModel is the Ollama model for LLM parameter extraction.
+	// IT-08e: Should be a small, fast model optimized for JSON structured output.
+	// Runs in parallel with the tool router on a separate model to avoid
+	// Ollama serialization bottlenecks.
+	// Default: "ministral-3:3b"
+	ParamExtractorModel string `json:"param_extractor_model"`
 }
 
 // DefaultSessionConfig returns production-ready default configuration.
@@ -200,6 +210,8 @@ func DefaultSessionConfig() *SessionConfig {
 		ToolRouterModel:      "granite4:micro-h",
 		ToolRouterTimeout:    20 * time.Second, // GR-44: Increased from 500ms to ensure router completes
 		ToolRouterConfidence: 0.7,
+		// IT-08e: Dedicated small model for parallel param extraction
+		ParamExtractorModel: "ministral-3:3b",
 	}
 }
 
@@ -288,7 +300,7 @@ type Session struct {
 	// ProjectRoot is the absolute path to the project.
 	ProjectRoot string `json:"project_root"`
 
-	// GraphID is the Code Buddy graph ID (set after init).
+	// GraphID is the Trace graph ID (set after init).
 	GraphID string `json:"graph_id,omitempty"`
 
 	// State is the current agent state.
@@ -345,6 +357,10 @@ type Session struct {
 	// Shared between tool router and main LLM.
 	modelManager ModelManager
 
+	// paramExtractor uses a fast LLM to extract tool parameters from queries.
+	// IT-08b: Optional - nil when LLM parameter extraction is not enabled.
+	paramExtractor ParamExtractor
+
 	// recentToolErrors tracks tools that failed recently.
 	// Fed back to the tool router to avoid suggesting the same tool.
 	recentToolErrors []ToolRouterError
@@ -362,6 +378,15 @@ type Session struct {
 	// require tool usage and should accept text responses as final answers.
 	// GR-44: Fixes death spiral where CB fires but execute phase still demands tools.
 	circuitBreakerActive bool
+
+	// graphToolHadSubstantiveResults indicates that a forced graph tool call
+	// (e.g., find_implementations, find_callers) returned substantive results.
+	// When true, shouldForceSynthesisAfterGraphTools forces synthesis to prevent
+	// the LLM from spiraling into Grep/Glob loops after already receiving
+	// authoritative graph results.
+	// GR-59 Rev 4: Direct flag eliminates fragile metadata round-trip through
+	// session trace steps which proved unreliable across Revs 2-3.
+	graphToolHadSubstantiveResults bool
 }
 
 // SafetyViolation represents a safety-blocked operation for CDCL learning.
@@ -1165,6 +1190,38 @@ func (s *Session) IsToolRouterEnabled() bool {
 	return s.Config.ToolRouterEnabled && s.toolRouter != nil
 }
 
+// -----------------------------------------------------------------------------
+// Param Extractor Methods (IT-08b)
+// -----------------------------------------------------------------------------
+
+// SetParamExtractor sets the LLM-based parameter extractor for this session.
+//
+// Description:
+//
+//	Associates a ParamExtractor instance with this session for LLM-enhanced
+//	parameter extraction. Should be called after session creation if LLM
+//	parameter extraction is enabled.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) SetParamExtractor(extractor ParamExtractor) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.paramExtractor = extractor
+}
+
+// GetParamExtractor returns the parameter extractor for this session.
+//
+// Outputs:
+//
+//	ParamExtractor - The extractor, or nil if not enabled.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) GetParamExtractor() ParamExtractor {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.paramExtractor
+}
+
 // RecordToolError records a tool failure for router feedback.
 //
 // Description:
@@ -1334,6 +1391,49 @@ func (s *Session) SetCircuitBreakerActive(active bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.circuitBreakerActive = active
+}
+
+// GraphToolHadSubstantiveResults returns true if a forced graph tool call
+// returned substantive results during this session.
+//
+// Description:
+//
+//	GR-59 Rev 4: Used by shouldForceSynthesisAfterGraphTools to detect when
+//	a forced graph tool (find_implementations, find_callers, etc.) already
+//	returned authoritative results. Prevents the LLM from spiraling into
+//	Grep/Glob loops after receiving exhaustive graph data.
+//
+// Outputs:
+//
+//	bool - True if a forced graph tool returned substantive results.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) GraphToolHadSubstantiveResults() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.graphToolHadSubstantiveResults
+}
+
+// SetGraphToolHadSubstantiveResults marks that a forced graph tool returned
+// substantive results.
+//
+// Description:
+//
+//	Called by executeToolDirectlyWithFallback when a graph tool like
+//	find_implementations returns non-zero results. Once set, all subsequent
+//	execution steps will force synthesis instead of allowing further search.
+//
+// Inputs:
+//
+//	v - True when graph tool returned results, false to reset.
+//
+// GR-59 Rev 4: Direct flag eliminates fragile metadata round-trip.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (s *Session) SetGraphToolHadSubstantiveResults(v bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.graphToolHadSubstantiveResults = v
 }
 
 // GetRecentToolErrors returns recent tool failures for router feedback.

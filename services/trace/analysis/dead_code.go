@@ -12,6 +12,7 @@ package analysis
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -219,24 +220,97 @@ func (d *DeadCodeDetector) buildCallerIndex() map[string][]string {
 }
 
 // isAlwaysAlive returns true for symbols that are never considered dead.
+//
+// IT-08 H-1: Extended from Go-only to cross-language entry point detection.
 func (d *DeadCodeDetector) isAlwaysAlive(sym *ast.Symbol) bool {
 	name := sym.Name
+	lang := strings.ToLower(sym.Language)
 
-	// main and init functions are entry points
-	if name == "main" || name == "init" {
+	// === Cross-language entry points ===
+
+	if name == "main" {
 		return true
 	}
 
-	// Test functions are entry points for test runner
-	if strings.HasPrefix(name, "Test") ||
-		strings.HasPrefix(name, "Benchmark") ||
-		strings.HasPrefix(name, "Example") {
-		return true
+	// === Go entry points ===
+
+	if lang == "" || lang == "go" {
+		if name == "init" {
+			return true
+		}
+		if strings.HasPrefix(name, "Test") ||
+			strings.HasPrefix(name, "Benchmark") ||
+			strings.HasPrefix(name, "Example") ||
+			strings.HasPrefix(name, "Fuzz") {
+			return true
+		}
+		if sym.Kind == ast.SymbolKindMethod && name == "ServeHTTP" {
+			return true
+		}
+	}
+
+	// === Python entry points ===
+
+	if lang == "python" {
+		if name == "__main__" {
+			return true
+		}
+		if sym.FilePath != "" && filepath.Base(sym.FilePath) == "__main__.py" {
+			return true
+		}
+		if strings.HasPrefix(name, "test_") {
+			return true
+		}
+		if name == "setUp" || name == "tearDown" || name == "setUpClass" || name == "tearDownClass" {
+			return true
+		}
+		if sym.Metadata != nil && len(sym.Metadata.Decorators) > 0 {
+			for _, dec := range sym.Metadata.Decorators {
+				dl := strings.ToLower(dec)
+				if strings.Contains(dl, "route") || strings.Contains(dl, ".get") ||
+					strings.Contains(dl, ".post") || strings.Contains(dl, ".put") ||
+					strings.Contains(dl, ".delete") || strings.Contains(dl, ".patch") ||
+					strings.Contains(dl, "click.command") || strings.Contains(dl, "click.group") ||
+					strings.Contains(dl, "fixture") || strings.Contains(dl, ".task") {
+					return true
+				}
+			}
+		}
+		if sym.Kind == ast.SymbolKindClass && sym.Metadata != nil &&
+			strings.HasSuffix(sym.Metadata.Extends, "TestCase") {
+			return true
+		}
+	}
+
+	// === JavaScript / TypeScript entry points ===
+
+	if lang == "javascript" || lang == "typescript" {
+		switch name {
+		case "it", "test", "describe", "beforeEach", "afterEach",
+			"beforeAll", "afterAll", "before", "after":
+			return true
+		}
+		if sym.Exported {
+			return true
+		}
+		if sym.Metadata != nil && len(sym.Metadata.Decorators) > 0 {
+			for _, dec := range sym.Metadata.Decorators {
+				switch dec {
+				case "Controller", "Get", "Post", "Put", "Delete", "Patch",
+					"Injectable", "Module", "Guard", "Interceptor", "Pipe":
+					return true
+				}
+			}
+		}
+		switch name {
+		case "getServerSideProps", "getStaticProps", "getStaticPaths",
+			"generateStaticParams", "generateMetadata":
+			return true
+		}
 	}
 
 	// Interface methods may be called via interface
 	if sym.Kind == ast.SymbolKindMethod {
-		// Check if this is implementing an interface
 		node, ok := d.graph.GetNode(sym.ID)
 		if ok {
 			for _, edge := range node.Outgoing {
