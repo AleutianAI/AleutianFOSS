@@ -95,13 +95,18 @@ tests:
     name: flask_get_call_chain
     category: TOOL_HAPPY_PATH
     description: >
-      get_call_chain tool against Flask. From Flask.run to a view function.
+      get_call_chain tool against Flask. Downstream from wsgi_app.
+      wsgi_app (app.py:1547) directly calls full_dispatch_request (app.py:991)
+      which calls dispatch_request (app.py:965). All are direct method calls
+      within Flask's app.py with no Werkzeug boundary crossing.
     query: |
-      Show the call chain from Flask.run to a view function
+      Show the downstream call chain from wsgi_app
     expected_state: COMPLETE
     reference_answer: |
-      Flask.run -> werkzeug.serving.run_simple -> wsgi_app -> full_dispatch_request ->
-      dispatch_request -> view function execution via url_map routing.
+      get_call_chain from wsgi_app shows a downstream tree including
+      full_dispatch_request and dispatch_request. At depth 2,
+      full_dispatch_request calls dispatch_request which resolves
+      the view function. This is Flask's core request dispatch pipeline.
     validations:
       - type: graph_tool_used
 
@@ -789,14 +794,18 @@ tests:
     name: flask_find_path_c
     category: TOOL_HAPPY_PATH
     description: >
-      find_path tool against Flask (test C). Between Flask.__init__ and SessionInterface.
+      find_path tool against Flask (test C). Between register_blueprint and
+      add_url_rule. Direct chain: App.register_blueprint (sansio/app.py:567) →
+      Blueprint.register (sansio/blueprints.py:273) which creates setup state
+      and executes deferred functions that call App.add_url_rule (sansio/app.py:602).
     query: |
-      Find the shortest path between Flask initialization and session handling
+      Find the shortest path between register_blueprint and add_url_rule
     expected_state: COMPLETE
     reference_answer: |
-      Flask.__init__ sets session_interface to SecureCookieSessionInterface.
-      At request time, the path goes through wsgi_app -> RequestContext.push ->
-      open_session which invokes session_interface.open_session.
+      find_path returns a path through the blueprint registration pipeline:
+      register_blueprint → Blueprint.register → (setup state) → add_url_rule.
+      This is Flask's mechanism for registering blueprint routes into the
+      main application's URL map.
     validations:
       - type: graph_tool_used
 

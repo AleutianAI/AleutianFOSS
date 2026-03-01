@@ -3194,3 +3194,334 @@ func TestTypeScriptParser_DynamicImport_ExternalCaptured(t *testing.T) {
 		t.Error("expected dynamic import for 'lodash' to be captured")
 	}
 }
+
+// IT-R2d F.1: Test that class field arrow function call sites are extracted.
+func TestTypeScriptParser_FieldArrowFunction_CallSites(t *testing.T) {
+	parser := NewTypeScriptParser()
+	source := `
+class Engine {
+    private _renderLoop = () => {
+        this.renderMeshes(activeMeshes);
+        this.scene.render();
+    };
+
+    simpleField: number = 42;
+
+    static handler = (event: Event) => {
+        console.log(event);
+        processEvent(event);
+    };
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(source), "engine.ts")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+
+	// Find Engine class
+	var engineClass *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Engine" && sym.Kind == SymbolKindClass {
+			engineClass = sym
+			break
+		}
+	}
+	if engineClass == nil {
+		t.Fatal("expected Engine class symbol")
+	}
+
+	// Find _renderLoop field
+	var renderLoop *Symbol
+	var simpleField *Symbol
+	var handler *Symbol
+	for _, child := range engineClass.Children {
+		switch child.Name {
+		case "_renderLoop":
+			renderLoop = child
+		case "simpleField":
+			simpleField = child
+		case "handler":
+			handler = child
+		}
+	}
+
+	// _renderLoop should have call sites extracted
+	if renderLoop == nil {
+		t.Fatal("expected _renderLoop field symbol")
+	}
+	if renderLoop.Receiver != "Engine" {
+		t.Errorf("expected _renderLoop.Receiver = 'Engine', got %q", renderLoop.Receiver)
+	}
+	if len(renderLoop.Calls) < 2 {
+		t.Errorf("expected _renderLoop to have >= 2 call sites, got %d", len(renderLoop.Calls))
+	} else {
+		// Verify call targets
+		targets := make(map[string]bool)
+		for _, call := range renderLoop.Calls {
+			targets[call.Target] = true
+		}
+		if !targets["renderMeshes"] {
+			t.Error("expected call to renderMeshes in _renderLoop")
+		}
+		if !targets["render"] {
+			t.Error("expected call to render in _renderLoop")
+		}
+	}
+
+	// simpleField should NOT have call sites (plain value, not arrow)
+	if simpleField == nil {
+		t.Fatal("expected simpleField symbol")
+	}
+	if len(simpleField.Calls) != 0 {
+		t.Errorf("expected simpleField to have 0 calls, got %d", len(simpleField.Calls))
+	}
+
+	// handler should have call sites (static arrow field)
+	if handler == nil {
+		t.Fatal("expected handler field symbol")
+	}
+	if len(handler.Calls) < 2 {
+		t.Errorf("expected handler to have >= 2 call sites, got %d", len(handler.Calls))
+	}
+}
+
+// IT-R2d F.1: Test that class field function expression call sites are extracted.
+func TestTypeScriptParser_FieldFunctionExpression_CallSites(t *testing.T) {
+	parser := NewTypeScriptParser()
+	source := `
+class Service {
+    processor = function(data: any) {
+        validate(data);
+        transform(data);
+    };
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(source), "service.ts")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+
+	var svc *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Service" {
+			svc = sym
+			break
+		}
+	}
+	if svc == nil {
+		t.Fatal("expected Service class symbol")
+	}
+
+	var processor *Symbol
+	for _, child := range svc.Children {
+		if child.Name == "processor" {
+			processor = child
+			break
+		}
+	}
+	if processor == nil {
+		t.Fatal("expected processor field symbol")
+	}
+	if len(processor.Calls) < 2 {
+		t.Errorf("expected processor to have >= 2 call sites, got %d", len(processor.Calls))
+	}
+}
+
+// IT-R2d F.2: Test that TS arrow function variable call sites are extracted.
+func TestTypeScriptParser_ArrowVariable_CallSites(t *testing.T) {
+	parser := NewTypeScriptParser()
+	source := `
+const renderScene = () => {
+    engine.runRenderLoop();
+    scene.render();
+};
+
+const simpleVar: number = 42;
+
+export const handler = async (req: Request) => {
+    validate(req);
+    const result = await process(req);
+    return result;
+};
+`
+	result, err := parser.Parse(context.Background(), []byte(source), "app.ts")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+
+	var renderScene *Symbol
+	var simpleVar *Symbol
+	var handler *Symbol
+	for _, sym := range result.Symbols {
+		switch sym.Name {
+		case "renderScene":
+			renderScene = sym
+		case "simpleVar":
+			simpleVar = sym
+		case "handler":
+			handler = sym
+		}
+	}
+
+	// renderScene should have Kind=Function (arrow) and call sites
+	if renderScene == nil {
+		t.Fatal("expected renderScene symbol")
+	}
+	if renderScene.Kind != SymbolKindFunction {
+		t.Errorf("expected renderScene.Kind = Function, got %v", renderScene.Kind)
+	}
+	if len(renderScene.Calls) < 2 {
+		t.Errorf("expected renderScene to have >= 2 call sites, got %d", len(renderScene.Calls))
+	} else {
+		targets := make(map[string]bool)
+		for _, call := range renderScene.Calls {
+			targets[call.Target] = true
+		}
+		if !targets["runRenderLoop"] {
+			t.Error("expected call to runRenderLoop in renderScene")
+		}
+		if !targets["render"] {
+			t.Error("expected call to render in renderScene")
+		}
+	}
+
+	// simpleVar should not have calls
+	if simpleVar == nil {
+		t.Fatal("expected simpleVar symbol")
+	}
+	if len(simpleVar.Calls) != 0 {
+		t.Errorf("expected simpleVar to have 0 calls, got %d", len(simpleVar.Calls))
+	}
+
+	// handler should have calls (async arrow)
+	if handler == nil {
+		t.Fatal("expected handler symbol")
+	}
+	if len(handler.Calls) < 2 {
+		t.Errorf("expected handler to have >= 2 call sites, got %d", len(handler.Calls))
+	}
+}
+
+// IT-R2d F.2: Test expression-body arrow variable call extraction.
+func TestTypeScriptParser_ArrowVariable_ExpressionBody_CallSites(t *testing.T) {
+	parser := NewTypeScriptParser()
+	source := `
+const transform = (x: number) => Math.sqrt(x);
+`
+	result, err := parser.Parse(context.Background(), []byte(source), "math.ts")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+
+	var transform *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "transform" {
+			transform = sym
+			break
+		}
+	}
+	if transform == nil {
+		t.Fatal("expected transform symbol")
+	}
+	if transform.Kind != SymbolKindFunction {
+		t.Errorf("expected transform.Kind = Function, got %v", transform.Kind)
+	}
+	// Expression body should have the member_expression call extracted
+	// Math.sqrt is a member expression → call to sqrt
+	// The call extraction traverses the expression body node
+}
+
+// IT-R2d F.3: Test that interface method signatures get Receiver set.
+func TestTypeScriptParser_InterfaceMethodReceiver(t *testing.T) {
+	parser := NewTypeScriptParser()
+	source := `
+interface ICamera {
+    update(): void;
+    getViewMatrix(): Matrix;
+    readonly position: Vector3;
+    name?: string;
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(source), "camera.ts")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+
+	var iface *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "ICamera" && sym.Kind == SymbolKindInterface {
+			iface = sym
+			break
+		}
+	}
+	if iface == nil {
+		t.Fatal("expected ICamera interface symbol")
+	}
+
+	if len(iface.Children) < 4 {
+		t.Fatalf("expected ICamera to have >= 4 children, got %d", len(iface.Children))
+	}
+
+	for _, child := range iface.Children {
+		if child.Receiver != "ICamera" {
+			t.Errorf("expected child %q (kind=%v) to have Receiver='ICamera', got %q",
+				child.Name, child.Kind, child.Receiver)
+		}
+	}
+
+	// Verify specific children
+	childNames := make(map[string]SymbolKind)
+	for _, child := range iface.Children {
+		childNames[child.Name] = child.Kind
+	}
+	if _, ok := childNames["update"]; !ok {
+		t.Error("expected 'update' method in ICamera children")
+	}
+	if _, ok := childNames["getViewMatrix"]; !ok {
+		t.Error("expected 'getViewMatrix' method in ICamera children")
+	}
+	if _, ok := childNames["position"]; !ok {
+		t.Error("expected 'position' property in ICamera children")
+	}
+}
+
+// IT-R2d F.3: Test that interface members with extends also get Receiver.
+func TestTypeScriptParser_InterfaceExtendsReceiver(t *testing.T) {
+	parser := NewTypeScriptParser()
+	source := `
+interface IRenderable extends IDisposable {
+    render(): void;
+    isVisible: boolean;
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(source), "renderable.ts")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+
+	var iface *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "IRenderable" {
+			iface = sym
+			break
+		}
+	}
+	if iface == nil {
+		t.Fatal("expected IRenderable interface symbol")
+	}
+
+	for _, child := range iface.Children {
+		if child.Receiver != "IRenderable" {
+			t.Errorf("expected child %q Receiver='IRenderable', got %q", child.Name, child.Receiver)
+		}
+	}
+
+	// Verify extends is preserved
+	if iface.Metadata == nil || iface.Metadata.Extends != "IDisposable" {
+		extends := ""
+		if iface.Metadata != nil {
+			extends = iface.Metadata.Extends
+		}
+		t.Errorf("expected IRenderable.Metadata.Extends = 'IDisposable', got %q", extends)
+	}
+}

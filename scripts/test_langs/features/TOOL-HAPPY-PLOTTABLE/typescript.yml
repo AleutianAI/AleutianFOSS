@@ -100,13 +100,18 @@ tests:
     name: plottable_get_call_chain
     category: TOOL_HAPPY_PATH
     description: >
-      get_call_chain tool against Plottable. From Plot.render to SVG element creation.
+      get_call_chain tool against Plottable. Downstream from Plot._paint.
+      _paint (plot.ts:752) calls _generateDrawSteps, _getDataToDraw, and
+      ProxyDrawer.draw as direct function calls. _getDataToDraw calls
+      datasets(). No render queue or event callbacks involved.
     query: |
-      Show the call chain from Plot.render to SVG element creation
+      Show the downstream call chain from Plot._paint
     expected_state: COMPLETE
     reference_answer: |
-      Plot.render -> renderImmediately -> Drawer.draw -> D3 selection calls ->
-      SVG element creation and attribute setting via the rendering pipeline.
+      get_call_chain from Plot._paint shows a downstream tree including
+      _generateDrawSteps, _getDataToDraw, and ProxyDrawer.draw. At depth 2,
+      _getDataToDraw calls datasets() to retrieve the data. This is
+      Plottable's core painting pipeline that converts data to draw steps.
     validations:
       - type: graph_tool_used
 
@@ -114,13 +119,18 @@ tests:
     name: plottable_find_path
     category: TOOL_HAPPY_PATH
     description: >
-      find_path tool against Plottable. Between Table layout and Axis rendering.
+      find_path tool against Plottable. Between Component.renderTo and
+      Component._setup. Direct chain: renderTo (component.ts:362) →
+      anchor (component.ts:112) → _setup (component.ts:169). 2-hop path
+      through Plottable's component initialization pipeline.
     query: |
-      Find the shortest path between Table layout and Axis rendering
+      Find the shortest path between Component.renderTo and Component._setup
     expected_state: COMPLETE
     reference_answer: |
-      Table.renderTo -> Component layout allocation -> Axis.renderImmediately ->
-      tick mark generation and label rendering.
+      find_path returns a 2-hop path: Component.renderTo → Component.anchor
+      → Component._setup. renderTo attaches the component to a DOM element
+      via anchor, which calls _setup to create the SVG structure
+      (background, content, foreground layers).
     validations:
       - type: graph_tool_used
 
@@ -788,14 +798,18 @@ tests:
     name: plottable_find_path_b
     category: TOOL_HAPPY_PATH
     description: >
-      find_path tool against Plottable (test B). Target: Dataset to SVG element.
+      find_path tool against Plottable (test B). Between _paint and
+      _generateDrawSteps. Direct chain: _paint (plot.ts:752) →
+      _generateDrawSteps (plot.ts:697). 1-hop path within Plottable's
+      core painting pipeline. Both functions are unique to plot.ts.
     query: |
-      Find the shortest path between Dataset data change and SVG element update
+      Find the shortest path between _paint and _generateDrawSteps
     expected_state: COMPLETE
     reference_answer: |
-      Dataset.data setter -> onUpdate callback -> Plot.render -> flush ->
-      renderImmediately -> Drawer.draw -> SVG element creation and update
-      via D3 selections.
+      find_path returns a 1-hop path: _paint → _generateDrawSteps.
+      _paint is Plot's core rendering method that calls _generateDrawSteps
+      to produce the draw steps describing how to render each dataset
+      as SVG elements.
     validations:
       - type: graph_tool_used
 
@@ -803,14 +817,18 @@ tests:
     name: plottable_find_path_c
     category: TOOL_HAPPY_PATH
     description: >
-      find_path tool against Plottable (test C). Target: Legend to Plot connection.
+      find_path tool against Plottable (test C). Between Plot._setup and
+      _createNodesForDataset. Direct chain: Plot._setup (plot.ts:192) calls
+      _createNodesForDataset (plot.ts:290) for each dataset. 1-hop path
+      within Plottable's plot initialization.
     query: |
-      Find the shortest path between Legend rendering and Plot dataset access
+      Find the shortest path between Plot._setup and _createNodesForDataset
     expected_state: COMPLETE
     reference_answer: |
-      Legend.renderImmediately accesses the registered scales and plots,
-      calling Plot.datasets to retrieve the dataset list, and uses the
-      color scale to render legend entries matching each dataset.
+      find_path returns a 1-hop path: Plot._setup → _createNodesForDataset.
+      During plot setup, _setup creates the render area SVG group and
+      then calls _createNodesForDataset for each registered dataset
+      to create the SVG nodes that will hold the rendered data.
     validations:
       - type: graph_tool_used
 

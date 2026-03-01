@@ -54,6 +54,11 @@ type FindImportantParams struct {
 	// ExcludeTests filters out symbols from test and documentation files.
 	// Default: true
 	ExcludeTests bool
+
+	// Reverse returns lowest-ranked symbols first (peripheral functions).
+	// IT-R2c Fix E: Supports "lowest PageRank" / "peripheral" queries.
+	// Default: false
+	Reverse bool
 }
 
 // ToolName returns the tool name for TypedParams interface.
@@ -66,6 +71,7 @@ func (p FindImportantParams) ToMap() map[string]any {
 		"kind":          p.Kind,
 		"package":       p.Package,
 		"exclude_tests": p.ExcludeTests,
+		"reverse":       p.Reverse,
 	}
 }
 
@@ -191,6 +197,12 @@ func (t *findImportantTool) Definition() ToolDefinition {
 				Required:    false,
 				Default:     true,
 			},
+			"reverse": {
+				Type:        ParamTypeBool,
+				Description: "Return lowest-ranked symbols first (for finding peripheral/least important functions). Default: false (highest first).",
+				Required:    false,
+				Default:     false,
+			},
 		},
 		Category:    CategoryExploration,
 		Priority:    89,
@@ -229,6 +241,7 @@ func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*R
 			attribute.String("kind", p.Kind),
 			attribute.String("package", p.Package),
 			attribute.Bool("exclude_tests", p.ExcludeTests),
+			attribute.Bool("reverse", p.Reverse),
 		),
 	)
 	defer span.End()
@@ -368,6 +381,14 @@ func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*R
 		}
 	}
 
+	// IT-R2c Fix E: Reverse order for "lowest PageRank" / "peripheral" queries.
+	// PageRank results arrive sorted descending. Reverse to ascending before trim.
+	if p.Reverse && len(filtered) > 0 {
+		for i, j := 0, len(filtered)-1; i < j; i, j = i+1, j-1 {
+			filtered[i], filtered[j] = filtered[j], filtered[i]
+		}
+	}
+
 	// Trim to requested count
 	if len(filtered) > p.Top {
 		filtered = filtered[:p.Top]
@@ -472,6 +493,14 @@ func (t *findImportantTool) parseParams(params map[string]any) (FindImportantPar
 	if etRaw, ok := params["exclude_tests"]; ok {
 		if et, ok := etRaw.(bool); ok {
 			p.ExcludeTests = et
+		}
+	}
+
+	// Extract reverse (optional, default: false)
+	// IT-R2c Fix E: Support "lowest PageRank" / "peripheral" queries.
+	if revRaw, ok := params["reverse"]; ok {
+		if rev, ok := revRaw.(bool); ok {
+			p.Reverse = rev
 		}
 	}
 

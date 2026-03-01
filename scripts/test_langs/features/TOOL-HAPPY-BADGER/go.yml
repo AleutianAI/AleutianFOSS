@@ -109,13 +109,17 @@ tests:
     name: badger_find_path
     category: TOOL_HAPPY_PATH
     description: >
-      find_path tool against Badger. Between NewTransaction and Iterator.Seek.
+      find_path tool against Badger. Between Txn.Get and getMemTables.
+      Direct static chain: Txn.Get (txn.go:434) → DB.get (db.go:749) →
+      DB.getMemTables (db.go:709). All are direct function calls within
+      the read path, no interface dispatch.
     query: |
-      Find the shortest path between DB.NewTransaction and Iterator.Seek
+      Find the shortest path between Txn.Get and getMemTables
     expected_state: COMPLETE
     reference_answer: |
-      DB.NewTransaction -> Transaction.NewIterator -> Iterator.Seek,
-      traversing the transaction and iterator creation path.
+      find_path returns a 2-hop path: Txn.Get → DB.get → DB.getMemTables.
+      This is the core read path where Get retrieves a value by first
+      checking memtables before falling through to the LSM levels.
     validations:
       - type: graph_tool_used
 

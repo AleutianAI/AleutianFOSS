@@ -40,6 +40,26 @@ forced_mappings:
     tool: find_path
     reason: "Path query is unambiguous"
 
+  # IT-R2c Fix B: Force find_important when query explicitly says "most important"
+  # or "PageRank". Without this, the LLM router misclassifies subsystem-scoped
+  # importance queries (e.g., "most important in compaction") as find_weighted_criticality.
+  # Tests affected: 5160, 5161, and ~5 others across projects.
+  - patterns:
+      - "most important.*pagerank"
+      - "pagerank.*most important"
+      - "most important functions in"
+      - "most important.*by pagerank"
+      - "important.*by pagerank"
+      - "pagerank.*in the"
+      - "lowest pagerank"
+      - "peripheral functions"
+      - "least important"
+      - "most important in the"
+      - "functions are most important"
+      - "which.*most important"
+    tool: find_important
+    reason: "Explicit importance/PageRank query — always find_important, not find_weighted_criticality"
+
   # GR-61 Option L: Intent templates for reference vs symbol disambiguation.
   #
   # Ordering constraint: Phase 1 (forced mappings) fires BEFORE Phase 2
@@ -314,6 +334,30 @@ routing_encyclopedia:
       - pattern: "find the definition of"
       - pattern: "locate the .* definition"
     reason: "Definition lookup"
+
+  # IT-R2c Fix B: Ensure find_important wins over find_weighted_criticality
+  # for importance/PageRank queries. Tests: 5160, 5161, 5260, 5261, 6161, 8060, 8160.
+  - tool: find_important
+    tier: force
+    intents:
+      - pattern: "most important.*pagerank"
+      - pattern: "pagerank.*most important"
+      - pattern: "most important functions in"
+      - pattern: "most important.*by pagerank"
+      - pattern: "important.*by pagerank"
+      - pattern: "lowest pagerank"
+      - pattern: "peripheral functions"
+      - pattern: "least important"
+      - pattern: "most important in the"
+      - pattern: "functions are most important"
+      - pattern: "which.*most important"
+    anti_signals:
+      - "crash risk"
+      - "would break"
+      - "highest risk"
+      - "production criticality"
+    conflict_with: find_weighted_criticality
+    reason: "Explicit importance/PageRank query — always find_important"
 
   - tool: find_dead_code
     tier: force

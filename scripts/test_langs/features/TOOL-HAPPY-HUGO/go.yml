@@ -100,13 +100,18 @@ tests:
     name: hugo_get_call_chain
     category: TOOL_HAPPY_PATH
     description: >
-      get_call_chain tool against Hugo. From main to render.
+      get_call_chain tool against Hugo. Downstream from LoadConfigFromDir.
+      This is a duplicate-target test with 5050 but using get_call_chain
+      to verify call chain tool produces consistent results.
+      LoadConfigFromDir (configLoader.go:119) has a rich downstream tree.
     query: |
-      Show the call chain from the main function to the page rendering logic
+      Show the downstream call chain from assemblePagesStep1
     expected_state: COMPLETE
     reference_answer: |
-      main -> commands.Execute -> hugobuilder.build -> HugoSites.Build ->
-      site rendering pipeline through pageOutput and template execution.
+      get_call_chain from assemblePagesStep1 shows a downstream tree
+      of page assembly functions. assemblePagesStep1 is defined in
+      hugolib/content_map_page.go and orchestrates page construction
+      including content mapping, page creation, and metadata assignment.
     validations:
       - type: graph_tool_used
 
@@ -114,13 +119,16 @@ tests:
     name: hugo_find_path
     category: TOOL_HAPPY_PATH
     description: >
-      find_path tool against Hugo. Between commands and tpl packages.
+      find_path tool against Hugo. Between LoadConfigFromDir and RenameKeys.
+      LoadConfigFromDir (configLoader.go:119) directly calls RenameKeys
+      (configLoader.go:229). 1-hop path, both in config/configLoader.go.
     query: |
-      Find the shortest path between the server command and template execution
+      Find the shortest path between LoadConfigFromDir and RenameKeys
     expected_state: COMPLETE
     reference_answer: |
-      commands/server.go -> hugobuilder -> HugoSites.Build -> site.render ->
-      tpl execution pipeline.
+      find_path returns a 1-hop path: LoadConfigFromDir → RenameKeys.
+      LoadConfigFromDir loads configuration from a directory and calls
+      RenameKeys to normalize configuration key names during processing.
     validations:
       - type: graph_tool_used
 
@@ -765,38 +773,38 @@ tests:
     name: hugo_get_call_chain_b
     category: TOOL_HAPPY_PATH
     description: >
-      get_call_chain tool against Hugo (test B). Target: shortcode processing.
+      get_call_chain tool against Hugo (test B). Downstream from LoadConfigFromDir.
+      LoadConfigFromDir (configLoader.go:119) calls Walk, IsValidConfigFilename,
+      UnmarshalFileToMap, RenameKeys, and other config processing functions.
     query: |
-      Show the call chain from content parsing to shortcode processing
+      Show the downstream call chain from LoadConfigFromDir
     expected_state: COMPLETE
     reference_answer: |
-      Content parsing -> pageConverter.Convert -> processShortcodes ->
-      renderShortcode -> template execution for each shortcode found
-      in the page content.
+      get_call_chain from LoadConfigFromDir shows a downstream tree including
+      Walk, IsDir, IsValidConfigFilename, UnmarshalFileToMap, RenameKeys,
+      and Set among others. This is Hugo's directory-based configuration
+      loading pipeline that reads and merges config files from disk.
     validations:
       - type: graph_tool_used
 
   - id: 5051
-    name: hugo_find_path_build_to_render
+    name: hugo_find_path_build_to_assemble
     category: TOOL_HAPPY_PATH
     description: >
-      find_path tool against Hugo (test C). Target: Build to page rendering.
-      Tests the rendering pipeline path which uses direct function calls
-      visible to the static parser (no template dispatch or closure patterns).
+      find_path tool against Hugo. Between HugoSites.Build and assemblePagesStep1.
+      Direct chain: Build (hugo_sites_build.go:63) → assemble
+      (hugo_sites_build.go:176) → assemblePagesStep1. 2-hop path through
+      Hugo's site building pipeline using direct function calls.
     query: |
-      Show the call chain from Build to page rendering
+      Find the shortest path between HugoSites.Build and assemblePagesStep1
     expected_state: COMPLETE
     reference_answer: |
-      Build -> render -> Site.render -> renderPages -> renderAndWritePage
-      -> renderForTemplate. This is the core rendering pipeline where Build
-      orchestrates site rendering, which dispatches to per-page rendering
-      and finally template execution.
+      find_path returns a 2-hop path: HugoSites.Build → assemble →
+      assemblePagesStep1. Build orchestrates the full site build process,
+      calling assemble to construct the page hierarchy, which calls
+      assemblePagesStep1 to create page output structures.
     validations:
       - type: graph_tool_used
-    debug_inspect:
-      - Build
-      - render
-      - renderPages
 
   # -- Additional find_path tests (52-53) -- expected_state: COMPLETE --
 
@@ -804,14 +812,16 @@ tests:
     name: hugo_find_path_b
     category: TOOL_HAPPY_PATH
     description: >
-      find_path tool against Hugo (test B). Between config loading and page rendering.
+      find_path tool against Hugo (test B). Between LoadConfigFromDir and
+      UnmarshalFileToMap. LoadConfigFromDir (configLoader.go:119) directly
+      calls UnmarshalFileToMap (decoder.go:80). 1-hop path.
     query: |
-      Find the shortest path between config loading and page rendering
+      Find the shortest path between LoadConfigFromDir and UnmarshalFileToMap
     expected_state: COMPLETE
     reference_answer: |
-      config.FromFile -> HugoSites initialization -> Site.Build ->
-      render pipeline -> pageOutput.render, connecting configuration
-      to the final rendered output.
+      find_path returns a 1-hop path: LoadConfigFromDir → UnmarshalFileToMap.
+      LoadConfigFromDir reads config files from a directory and calls
+      UnmarshalFileToMap to deserialize each config file into a map structure.
     validations:
       - type: graph_tool_used
 

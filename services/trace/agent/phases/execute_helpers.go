@@ -313,9 +313,20 @@ func extractPackageContextFromQuery(query string) string {
 		}
 		// IT-08d: Skip capitalized candidates — likely project names (Express, Flask).
 		// Lowercase package names (gin, flask, hugolib) pass through.
+		// IT-R2c Fix C: Exception — if the capitalized word is immediately followed by
+		// a scope keyword ("in Engine class", "in Node hierarchy"), use the capitalized
+		// word lowercased as the package. This handles class-scoped queries.
 		if i+1 < len(originalWords) {
 			origCandidate := strings.Trim(originalWords[i+1], "?,.()")
 			if len(origCandidate) > 0 && unicode.IsUpper(rune(origCandidate[0])) {
+				// Check if next word after capitalized is a scope keyword
+				if i+2 < len(words) {
+					nextNext := strings.Trim(words[i+2], "?,.()")
+					if scopeKeywords[nextNext] {
+						// "in Engine class" → "engine"
+						return strings.ToLower(origCandidate)
+					}
+				}
 				continue
 			}
 		}
@@ -836,16 +847,23 @@ func resolveConceptualName(
 			)
 		}
 	} else {
-		// For dot-notation, try the full form and the part after the dot
+		// For dot-notation (e.g., "Scene.constructor"), try the full form first.
 		syms := idx.GetByName(name)
 		if len(syms) > 0 {
 			return name
 		}
+		// IT-R2d: Check if the bare method part exists in the index.
+		// If it does, return the ORIGINAL dot-notation name — NOT the bare part.
+		// The tool-side ResolveFunctionCandidates handles dot-notation correctly
+		// via resolveTypeDotMethod(Type, Method) which uses Receiver filtering.
+		// Stripping the type prefix here (e.g., "Scene.constructor" → "constructor")
+		// loses the disambiguation context, causing "constructor" to resolve to
+		// whichever class's constructor ranks highest (e.g., Node instead of Scene).
 		parts := strings.SplitN(name, ".", 2)
 		if len(parts) == 2 {
 			syms = idx.GetByName(parts[1])
 			if len(syms) > 0 {
-				return parts[1] // Use the method name part
+				return name // Preserve dot-notation for tool-side resolution
 			}
 		}
 	}
@@ -1704,6 +1722,14 @@ var (
 	// pathToRegex matches "to X" patterns, optionally with quotes.
 	// IT-R2b Fix 1: Changed \w+ to [\w.]+ to capture dot-notation names.
 	pathToRegex = regexp.MustCompile(`(?i)\bto\s+['"]?([\w.]+)['"]?`)
+
+	// IT-R2c Fix D: Multi-word phrase regexes for conceptual resolution.
+	// Captures up to 4 words after "from"/"to" to pass to conceptual resolution.
+	// "from memtable flush to disk persistence" → from_phrase="memtable flush", to_phrase="disk persistence"
+	// The single-word regex above extracts the primary symbol name; these capture
+	// the full conceptual phrase for richer context in resolveConceptualName().
+	pathFromPhraseRegex = regexp.MustCompile(`(?i)\bfrom\s+['"]?([\w.]+(?:\s+[\w.]+){0,3})['"]?\s+to\b`)
+	pathToPhraseRegex   = regexp.MustCompile(`(?i)\bto\s+['"]?([\w.]+(?:\s+[\w.]+){0,3})['"]?(?:\s*[?.!]?\s*$)`)
 )
 
 // extractTopNFromQuery extracts a "top N" value from queries like "top 5 hotspots".
@@ -1878,6 +1904,41 @@ func extractExcludeTestsFromQuery(query string) bool {
 	return true
 }
 
+// extractReverseFromQuery detects if the user wants reverse-sorted results.
+//
+// Description:
+//
+//	Returns true when the query asks for lowest-ranked, peripheral, or least
+//	important symbols. IT-R2c Fix E: Enables find_important to return ascending
+//	results for "lowest PageRank" / "peripheral functions" queries.
+//
+// Inputs:
+//
+//   - query: The user's query string.
+//
+// Outputs:
+//
+//   - bool: true if the query implies reverse (ascending) sort order.
+func extractReverseFromQuery(query string) bool {
+	lowerQuery := strings.ToLower(query)
+	reverseIndicators := []string{
+		"lowest pagerank",
+		"least important",
+		"peripheral",
+		"least connected",
+		"least significant",
+		"bottom",
+		"least central",
+		"least influential",
+	}
+	for _, indicator := range reverseIndicators {
+		if strings.Contains(lowerQuery, indicator) {
+			return true
+		}
+	}
+	return false
+}
+
 // extractPathSymbolsFromQuery extracts "from" and "to" symbols for find_path.
 //
 // Description:
@@ -1925,6 +1986,29 @@ func extractPathSymbolsFromQuery(query string) (from, to string, ok bool) {
 		candidate := strings.TrimRight(toMatches[1], ".")
 		if isValidFunctionName(candidate) {
 			to = candidate
+		}
+	}
+
+	// IT-R2c Fix D: Extract multi-word conceptual phrases for richer resolution.
+	// When the user writes "from memtable flush to disk persistence", the single-word
+	// regex captures from="memtable" and to="disk". But conceptual resolution works
+	// better with the full phrase "memtable flush" / "disk persistence" because the
+	// extra words provide domain context for synonym expansion.
+	// Override single-word extraction with phrase when the phrase contains multiple words.
+	if fromPhraseMatches := pathFromPhraseRegex.FindStringSubmatch(query); len(fromPhraseMatches) > 1 {
+		phrase := strings.TrimSpace(fromPhraseMatches[1])
+		words := strings.Fields(phrase)
+		if len(words) > 1 {
+			// Multi-word phrase — use full phrase for conceptual resolution
+			from = phrase
+		}
+	}
+	if toPhraseMatches := pathToPhraseRegex.FindStringSubmatch(query); len(toPhraseMatches) > 1 {
+		phrase := strings.TrimSpace(toPhraseMatches[1])
+		words := strings.Fields(phrase)
+		if len(words) > 1 {
+			// Multi-word phrase — use full phrase for conceptual resolution
+			to = phrase
 		}
 	}
 

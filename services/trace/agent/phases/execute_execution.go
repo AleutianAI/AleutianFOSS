@@ -1473,7 +1473,11 @@ func (p *ExecutePhase) extractToolParameters(
 		if !ok {
 			// Try to extract any two function names from the query
 			funcName := extractFunctionNameFromQuery(query)
-			if funcName != "" && (from == "" || to == "") {
+			// IT-R2d: Guard against setting to=from. When extractPathSymbolsFromQuery
+			// finds "from" but not "to" (e.g., "between Camera.update and the final draw call"),
+			// the fallback would set to=Camera.update (same as from), causing from==to.
+			// Skip if funcName matches the already-extracted value.
+			if funcName != "" && funcName != from && funcName != to && (from == "" || to == "") {
 				if from == "" {
 					from = funcName
 				} else if to == "" {
@@ -1501,8 +1505,8 @@ func (p *ExecutePhase) extractToolParameters(
 		}, nil
 
 	case "find_important":
-		// Extract "top N", "kind", "package", and "exclude_tests" from query (same as find_hotspots).
-		// Defaults: top=10, kind="all", exclude_tests=true
+		// Extract "top N", "kind", "package", "exclude_tests", and "reverse" from query.
+		// Defaults: top=10, kind="all", exclude_tests=true, reverse=false
 		// IT-Summary Round 2: Package was never wired here (FIX-6 gap). Without this,
 		// p.Package is always "" and the Phase 2 filter in Execute() never fires.
 		// This caused 9 test regressions (7160, 7161, 5260, 5261, 5060, 5061, 8060, 6161, 8160).
@@ -1510,18 +1514,21 @@ func (p *ExecutePhase) extractToolParameters(
 		kind := extractKindFromQuery(query)
 		excludeTests := extractExcludeTestsFromQuery(query)
 		pkg := extractPackageContextFromQuery(query)
+		reverse := extractReverseFromQuery(query)
 		slog.Debug("GR-Phase1: extracted find_important params",
 			slog.String("tool", toolName),
 			slog.Int("top", top),
 			slog.String("kind", kind),
 			slog.Bool("exclude_tests", excludeTests),
 			slog.String("package", pkg),
+			slog.Bool("reverse", reverse),
 		)
 		return tools.FindImportantParams{
 			Top:          top,
 			Kind:         kind,
 			Package:      pkg,
 			ExcludeTests: excludeTests,
+			Reverse:      reverse,
 		}, nil
 
 	case "find_symbol":
@@ -1570,16 +1577,24 @@ func (p *ExecutePhase) extractToolParameters(
 		// IT-11: Must set ALL defaults explicitly — Go zero values for MinSize (0)
 		// and ShowCrossEdges (false) cause: (a) 11K micro-communities flooding output,
 		// (b) cross-community edges section missing, making coupling queries unanswerable.
-		// IT-11 J-9: Do NOT use extractPackageContextFromQuery here — it produces false
-		// positives for community queries ("natural code" → "natural", "what code" → "what")
-		// because generic words before scopeKeyword "code" pass isPackageLikeName.
-		// The LLM-enhanced path (IT-08b) handles package_filter correctly.
+		// IT-R2c Fix C: Re-enable extractPackageContextFromQuery for communities.
+		// IT-11 J-9 originally disabled this due to false positives ("natural code" → "natural").
+		// Those false positives are now mitigated by:
+		// (a) skipGeneric catching "code", "system" (already in place)
+		// (b) Only extracting when the query has explicit scope markers ("in X", "X directory")
+		// Risk of empty results from wrong package name is LOW (communities still run,
+		// just returns empty for that scope — same as find_important behavior per CR-11).
+		pkg := extractPackageContextFromQuery(query)
+		slog.Debug("IT-R2c: extracted find_communities package",
+			slog.String("tool", toolName),
+			slog.String("package", pkg),
+		)
 		return tools.FindCommunitiesParams{
 			MinSize:        3,
 			Resolution:     resolution,
 			Top:            top,
 			ShowCrossEdges: true,
-			PackageFilter:  "",
+			PackageFilter:  pkg,
 		}, nil
 
 	case "find_articulation_points":
@@ -2451,6 +2466,7 @@ func convertMapToTypedParams(toolName string, params map[string]any) (tools.Type
 			Kind:         getStringParam(params, "kind", "all"),
 			Package:      getStringParam(params, "package", ""),
 			ExcludeTests: getBoolParam(params, "exclude_tests", true),
+			Reverse:      getBoolParam(params, "reverse", false),
 		}, nil
 
 	case "find_symbol":

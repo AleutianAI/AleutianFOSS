@@ -747,14 +747,20 @@ tests:
     name: nestjs_get_call_chain_b
     category: TOOL_HAPPY_PATH
     description: >
-      get_call_chain tool against NestJS (test B). Target: guard execution pipeline.
+      get_call_chain tool against NestJS (test B). Downstream from
+      InstanceLoader.createInstancesOfDependencies. Direct chain:
+      createInstancesOfDependencies (instance-loader.ts:25) →
+      createPrototypes → createPrototypesOfProviders/Injectables/Controllers,
+      then createInstances → createInstancesOfProviders → injector.loadProvider.
     query: |
-      Show the call chain from route handler dispatch to guard canActivate execution
+      Show the downstream call chain from InstanceLoader.createInstancesOfDependencies
     expected_state: COMPLETE
     reference_answer: |
-      RouterExplorer.createRequestHandler -> RouterExecutionContext.create ->
-      GuardsConsumer.tryActivate -> iterates canActivate on each guard instance
-      to determine whether the request proceeds to the handler.
+      get_call_chain from InstanceLoader.createInstancesOfDependencies shows
+      createPrototypes and createInstances as direct callees. createPrototypes
+      calls createPrototypesOfProviders, createPrototypesOfInjectables, and
+      createPrototypesOfControllers. createInstances calls the corresponding
+      instance creation methods which delegate to the injector.
     validations:
       - type: graph_tool_used
 
@@ -779,28 +785,38 @@ tests:
     name: nestjs_find_path_b
     category: TOOL_HAPPY_PATH
     description: >
-      find_path tool against NestJS (test B). Target: dependency injection resolution path.
+      find_path tool against NestJS (test B). Between DependenciesScanner.scan
+      and reflectProviders. Direct chain: scan (scanner.ts:86) →
+      scanModulesForDependencies (scanner.ts:202) → reflectProviders
+      (scanner.ts:207). All within scanner.ts.
     query: |
-      Find the shortest path between module registration and provider instantiation
+      Find the shortest path between DependenciesScanner.scan and reflectProviders
     expected_state: COMPLETE
     reference_answer: |
-      DependenciesScanner.scan -> ModuleCompiler.compile -> InstanceLoader.createInstances ->
-      Injector.loadProvider -> resolveConstructorParams -> instantiate the provider class.
+      find_path returns a 2-hop path: DependenciesScanner.scan →
+      scanModulesForDependencies → reflectProviders. This is NestJS's
+      module scanning pipeline where scan orchestrates dependency
+      discovery and reflectProviders extracts provider metadata.
     validations:
       - type: graph_tool_used
 
   - id: 8053
-    name: nestjs_find_path_c
+    name: nestjs_get_call_chain_c
     category: TOOL_HAPPY_PATH
     description: >
-      find_path tool against NestJS (test C). Target: WebSocket gateway setup.
+      get_call_chain tool against NestJS (test C). Downstream from
+      NestFactoryStatic.create. create (nest-factory.ts:69) has 66 outgoing
+      edges including initialize, NestApplication, createGraphInspector,
+      setAbortOnError, registerLoggerConfiguration, and createNestInstance.
     query: |
-      Find the shortest path between application bootstrap and WebSocket gateway initialization
+      Show the downstream call chain from NestFactoryStatic.create
     expected_state: COMPLETE
     reference_answer: |
-      NestApplication.init -> registerModules -> WebSocketModule.register ->
-      GatewaysExplorer.explore -> binds gateway handlers to the underlying
-      WebSocket server adapter.
+      get_call_chain from NestFactoryStatic.create shows a downstream tree
+      with 66+ outgoing edges including initialize, NestApplication,
+      createGraphInspector, setAbortOnError, registerLoggerConfiguration,
+      createNestInstance, createHttpAdapter, isHttpServer, and
+      createAdapterProxy as direct callees.
     validations:
       - type: graph_tool_used
 

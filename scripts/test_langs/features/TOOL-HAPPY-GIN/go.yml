@@ -93,21 +93,21 @@ tests:
     validations:
       - type: graph_tool_used
 
-  - id: 5205
+  - id: 5350
     name: gin_get_call_chain
     category: TOOL_HAPPY_PATH
     description: >
-      get_call_chain tool against Gin. Downstream call tree from Engine.Run.
+      get_call_chain tool against Gin. Downstream call tree from Engine.addRoute.
+      addRoute (gin.go:364) calls assert1, debugPrintRoute, get, countParams,
+      countSections and other route registration functions. 26 nodes, depth 3.
     query: |
-      Show the call chain from Engine.Run to handler execution
+      Show the downstream call chain from Engine.addRoute
     expected_state: COMPLETE
     reference_answer: |
-      Engine.Run calls resolveAddress, debugPrint, updateRouteTrees,
-      Handler, and http.ListenAndServe (external). At depth 2-3,
-      sub-callees include IsDebugging, isTrustedProxy, updateRouteTree,
-      and debugPrintError. ListenAndServe is an external stdlib boundary
-      so ServeHTTP and handleHTTPRequest are not reachable in this
-      static downstream traversal.
+      get_call_chain from Engine.addRoute shows a downstream tree of 26 nodes
+      at depth 3 including assert1, debugPrintRoute, get, countParams, and
+      countSections as direct callees. Deeper levels include IsDebugging,
+      nameOfFunction, debugPrint, and other route debugging utilities.
     validations:
       - type: graph_tool_used
 
@@ -779,14 +779,16 @@ tests:
     name: gin_find_path_b
     category: TOOL_HAPPY_PATH
     description: >
-      find_path tool against Gin (test B). Between gin.New and tree.addRoute.
+      find_path tool against Gin (test B). Between RouterGroup.handle and
+      node.addRoute. Direct 1-hop call: RouterGroup.handle (routergroup.go:86)
+      calls node.addRoute directly.
     query: |
-      Find the shortest path between gin.New and adding a route to the radix tree
+      Find the shortest path between RouterGroup.handle and node.addRoute
     expected_state: COMPLETE
     reference_answer: |
-      gin.New -> Engine (with RouterGroup embedded) -> RouterGroup.GET (or similar)
-      -> RouterGroup.handle -> Engine.addRoute -> tree.addRoute, which inserts
-      the path and handlers into the radix tree.
+      find_path returns a 1-hop path: RouterGroup.handle → node.addRoute.
+      RouterGroup.handle computes the absolute path and combines handlers,
+      then calls addRoute directly on the radix tree node to insert the route.
     validations:
       - type: graph_tool_used
 

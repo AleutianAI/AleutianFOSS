@@ -935,6 +935,44 @@ func TestExtractPathSymbolsFromQuery(t *testing.T) {
 			wantTo:   "",
 			wantOk:   false,
 		},
+		// IT-R2c Fix D: Multi-word conceptual phrases.
+		{
+			name:     "multi_word_conceptual_from_to",
+			query:    "find path from memtable flush to disk persistence",
+			wantFrom: "memtable flush",
+			wantTo:   "disk persistence",
+			wantOk:   true,
+		},
+		{
+			name:     "multi_word_from_single_word_to",
+			query:    "find path from scene graph update to render",
+			wantFrom: "scene graph update",
+			wantTo:   "render",
+			wantOk:   true,
+		},
+		{
+			name:     "single_word_not_overridden_by_phrase",
+			query:    "from main to parseConfig",
+			wantFrom: "main",
+			wantTo:   "parseConfig",
+			wantOk:   true,
+		},
+		// IT-R2d: "between X and Y" where Y is conceptual (no CamelCase).
+		// Must NOT set to=from.
+		{
+			name:     "between_dot_notation_and_conceptual",
+			query:    "Find the shortest path between Camera.update and the final draw call",
+			wantFrom: "Camera.update",
+			wantTo:   "",
+			wantOk:   false,
+		},
+		{
+			name:     "between_camel_and_conceptual",
+			query:    "path between SceneManager.render and the display pipeline",
+			wantFrom: "SceneManager.render",
+			wantTo:   "",
+			wantOk:   false,
+		},
 	}
 
 	for _, tt := range tests {

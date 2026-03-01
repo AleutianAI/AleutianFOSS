@@ -3261,3 +3261,134 @@ func TestJavaScriptParser_DynamicImport_TemplateNotCaptured(t *testing.T) {
 		}
 	}
 }
+
+// IT-R2d F.1: Test that JS class field arrow function call sites are extracted.
+func TestJavaScriptParser_FieldArrowFunction_CallSites(t *testing.T) {
+	parser := NewJavaScriptParser()
+	source := `
+class Engine {
+    _renderLoop = () => {
+        this.renderMeshes(activeMeshes);
+        this.scene.render();
+    };
+
+    simpleField = 42;
+
+    static handler = (event) => {
+        console.log(event);
+        processEvent(event);
+    };
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(source), "engine.js")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+
+	// Find Engine class
+	var engineClass *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Engine" && sym.Kind == SymbolKindClass {
+			engineClass = sym
+			break
+		}
+	}
+	if engineClass == nil {
+		t.Fatal("expected Engine class symbol")
+	}
+
+	// Find field children
+	var renderLoop *Symbol
+	var simpleField *Symbol
+	var handler *Symbol
+	for _, child := range engineClass.Children {
+		switch child.Name {
+		case "_renderLoop":
+			renderLoop = child
+		case "simpleField":
+			simpleField = child
+		case "handler":
+			handler = child
+		}
+	}
+
+	// _renderLoop should have call sites extracted
+	if renderLoop == nil {
+		t.Fatal("expected _renderLoop field symbol")
+	}
+	if renderLoop.Receiver != "Engine" {
+		t.Errorf("expected _renderLoop.Receiver = 'Engine', got %q", renderLoop.Receiver)
+	}
+	if len(renderLoop.Calls) < 2 {
+		t.Errorf("expected _renderLoop to have >= 2 call sites, got %d", len(renderLoop.Calls))
+	} else {
+		targets := make(map[string]bool)
+		for _, call := range renderLoop.Calls {
+			targets[call.Target] = true
+		}
+		if !targets["renderMeshes"] {
+			t.Error("expected call to renderMeshes in _renderLoop")
+		}
+		if !targets["render"] {
+			t.Error("expected call to render in _renderLoop")
+		}
+	}
+
+	// simpleField should NOT have call sites
+	if simpleField == nil {
+		t.Fatal("expected simpleField symbol")
+	}
+	if len(simpleField.Calls) != 0 {
+		t.Errorf("expected simpleField to have 0 calls, got %d", len(simpleField.Calls))
+	}
+
+	// handler should have call sites
+	if handler == nil {
+		t.Fatal("expected handler field symbol")
+	}
+	if len(handler.Calls) < 2 {
+		t.Errorf("expected handler to have >= 2 call sites, got %d", len(handler.Calls))
+	}
+}
+
+// IT-R2d F.1: Test that JS class field function expression call sites are extracted.
+func TestJavaScriptParser_FieldFunctionExpression_CallSites(t *testing.T) {
+	parser := NewJavaScriptParser()
+	source := `
+class Service {
+    processor = function(data) {
+        validate(data);
+        transform(data);
+    };
+}
+`
+	result, err := parser.Parse(context.Background(), []byte(source), "service.js")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+
+	var svc *Symbol
+	for _, sym := range result.Symbols {
+		if sym.Name == "Service" {
+			svc = sym
+			break
+		}
+	}
+	if svc == nil {
+		t.Fatal("expected Service class symbol")
+	}
+
+	var processor *Symbol
+	for _, child := range svc.Children {
+		if child.Name == "processor" {
+			processor = child
+			break
+		}
+	}
+	if processor == nil {
+		t.Fatal("expected processor field symbol")
+	}
+	if len(processor.Calls) < 2 {
+		t.Errorf("expected processor to have >= 2 call sites, got %d", len(processor.Calls))
+	}
+}

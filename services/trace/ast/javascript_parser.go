@@ -734,10 +734,12 @@ func (p *JavaScriptParser) extractClassBody(ctx context.Context, node *sitter.No
 			}
 			dynImps = append(dynImps, imps...)
 		case jsNodeFieldDefinition:
-			mem := p.extractField(child, content, filePath, className)
+			// IT-R2d F.1: extractField now extracts call sites from arrow/function initializers.
+			mem, imps := p.extractField(ctx, child, content, filePath, className)
 			if mem != nil {
 				members = append(members, mem)
 			}
+			dynImps = append(dynImps, imps...)
 		}
 	}
 
@@ -832,11 +834,17 @@ func (p *JavaScriptParser) extractMethod(ctx context.Context, node *sitter.Node,
 }
 
 // extractField extracts a field definition from a class.
-func (p *JavaScriptParser) extractField(node *sitter.Node, content []byte, filePath string, className string) *Symbol {
+//
+// IT-R2d F.1: Now accepts ctx and returns []Import. Detects arrow function or
+// function expression initializers in class fields and extracts call sites from
+// their bodies.
+func (p *JavaScriptParser) extractField(ctx context.Context, node *sitter.Node, content []byte, filePath string, className string) (*Symbol, []Import) {
 	name := ""
 	isStatic := false
 	isPrivate := false
 	docComment := p.getPrecedingComment(node, content)
+	var arrowBodyNode *sitter.Node
+	var hasArrowFunction bool
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
@@ -848,11 +856,37 @@ func (p *JavaScriptParser) extractField(node *sitter.Node, content []byte, fileP
 			isPrivate = true
 		case jsNodeStatic:
 			isStatic = true
+		case jsNodeArrowFunction:
+			// IT-R2d F.1: Detect arrow function initializer.
+			hasArrowFunction = true
+			for j := 0; j < int(child.ChildCount()); j++ {
+				gc := child.Child(j)
+				switch gc.Type() {
+				case "statement_block":
+					arrowBodyNode = gc
+				case "call_expression", "parenthesized_expression", "object", "array",
+					"template_string", "binary_expression", "ternary_expression",
+					"await_expression", "new_expression":
+					if arrowBodyNode == nil {
+						arrowBodyNode = gc
+					}
+				}
+			}
+		case jsNodeFunctionExpression:
+			// IT-R2d F.1: Detect function expression initializer.
+			hasArrowFunction = true
+			for j := 0; j < int(child.ChildCount()); j++ {
+				gc := child.Child(j)
+				if gc.Type() == jsNodeStatementBlock {
+					arrowBodyNode = gc
+					break
+				}
+			}
 		}
 	}
 
 	if name == "" {
-		return nil
+		return nil, nil
 	}
 
 	sig := ""
@@ -861,10 +895,15 @@ func (p *JavaScriptParser) extractField(node *sitter.Node, content []byte, fileP
 	}
 	sig += name
 
+	kind := SymbolKindField
+	if hasArrowFunction {
+		kind = SymbolKindProperty
+	}
+
 	sym := &Symbol{
 		ID:            GenerateID(filePath, int(node.StartPoint().Row)+1, className+"."+name),
 		Name:          name,
-		Kind:          SymbolKindField,
+		Kind:          kind,
 		FilePath:      filePath,
 		StartLine:     int(node.StartPoint().Row) + 1,
 		EndLine:       int(node.EndPoint().Row) + 1,
@@ -887,7 +926,13 @@ func (p *JavaScriptParser) extractField(node *sitter.Node, content []byte, fileP
 		}
 	}
 
-	return sym
+	// IT-R2d F.1: Extract call sites from arrow/function body.
+	var dynImps []Import
+	if hasArrowFunction && arrowBodyNode != nil {
+		sym.Calls, dynImps = p.extractCallSites(ctx, arrowBodyNode, content, filePath)
+	}
+
+	return sym, dynImps
 }
 
 // extractVariables extracts variable declarations.

@@ -1041,6 +1041,61 @@ func TestApplyEncyclopedia_EmptyEncyclopedia(t *testing.T) {
 	}
 }
 
+// IT-R2c Fix B: Tests for find_important vs find_weighted_criticality forced mapping.
+// Verifies that "most important" queries route to find_important, not find_weighted_criticality.
+func TestPreFilter_ForcedMapping_FindImportantNotWeightedCriticality(t *testing.T) {
+	cfg := makeTestConfig()
+	// Add the find_important forced mapping (matches production config in prefilter_rules.yaml)
+	cfg.ForcedMappings = append(cfg.ForcedMappings, config.ForcedMapping{
+		Patterns: []string{
+			"most important.*pagerank",
+			"pagerank.*most important",
+			"most important functions in",
+			"most important.*by pagerank",
+			"important.*by pagerank",
+			"pagerank.*in the",
+			"lowest pagerank",
+			"peripheral functions",
+			"least important",
+			"most important in the",
+			"functions are most important",
+			"which.*most important",
+		},
+		Tool:   "find_important",
+		Reason: "Explicit importance/PageRank query",
+	})
+	pf := newTestPreFilter(cfg)
+	// Need specs that include both find_important and find_weighted_criticality
+	specs := []ToolSpec{
+		{Name: "find_important", Description: "Find important symbols by PageRank", BestFor: []string{"important", "pagerank", "centrality"}},
+		{Name: "find_weighted_criticality", Description: "Find critical functions by risk", BestFor: []string{"critical", "risk", "stability"}},
+		{Name: "find_hotspots", Description: "Find highly connected nodes", BestFor: []string{"hotspot", "connected"}},
+		{Name: "answer", Description: "Answer", BestFor: []string{"answer"}},
+	}
+
+	queries := []struct {
+		query    string
+		expected string
+		desc     string
+	}{
+		{"What are the most important functions in the compaction subsystem by PageRank?", "find_important", "explicit PageRank + most important"},
+		{"Which functions are most important in the read path versus the write path?", "find_important", "most important in subsystem"},
+		{"most important functions in the rendering module", "find_important", "most important functions in module"},
+		{"lowest pagerank functions", "find_important", "lowest pagerank → peripheral"},
+		{"find peripheral functions", "find_important", "peripheral functions"},
+	}
+
+	for _, tc := range queries {
+		t.Run(tc.desc, func(t *testing.T) {
+			result := pf.Filter(context.Background(), tc.query, specs, nil)
+			if result.ForcedTool != tc.expected {
+				t.Errorf("query %q: expected ForcedTool=%q, got %q (scores: %v)",
+					tc.query, tc.expected, result.ForcedTool, result.Scores)
+			}
+		})
+	}
+}
+
 func BenchmarkPreFilter_55Tools(b *testing.B) {
 	cfg := makeTestConfig()
 	pf := newTestPreFilter(cfg)

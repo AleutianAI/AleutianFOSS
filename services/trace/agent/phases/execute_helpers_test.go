@@ -2981,3 +2981,62 @@ func TestResolveConceptualName_DomainNounBoosting(t *testing.T) {
 		}
 	})
 }
+
+// TestResolveConceptualName_DotNotationPreserved verifies IT-R2d: when a
+// dot-notation name like "Scene.constructor" is passed, resolveConceptualName
+// must return the ORIGINAL dot-notation name (not strip it to "constructor").
+// The tool-side ResolveFunctionCandidates handles dot-notation correctly via
+// resolveTypeDotMethod(Type, Method), which uses Receiver filtering. Stripping
+// the type prefix loses disambiguation context.
+func TestResolveConceptualName_DotNotationPreserved(t *testing.T) {
+	ctx := context.Background()
+	idx := index.NewSymbolIndex()
+
+	// Add multiple "constructor" symbols with different Receivers
+	sceneConstructor := &ast.Symbol{
+		ID:        "scene.ts:2006:constructor",
+		Name:      "constructor",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "scene.ts",
+		StartLine: 2006,
+		EndLine:   2100,
+		Receiver:  "Scene",
+		Language:  "typescript",
+	}
+	nodeConstructor := &ast.Symbol{
+		ID:        "node.ts:384:constructor",
+		Name:      "constructor",
+		Kind:      ast.SymbolKindMethod,
+		FilePath:  "node.ts",
+		StartLine: 384,
+		EndLine:   420,
+		Receiver:  "Node",
+		Language:  "typescript",
+	}
+	for _, sym := range []*ast.Symbol{sceneConstructor, nodeConstructor} {
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("Failed to add %s: %v", sym.ID, err)
+		}
+	}
+
+	extractor := &mockConceptualExtractor{enabled: true}
+
+	t.Run("dot_notation_preserved_not_stripped", func(t *testing.T) {
+		// "Scene.constructor" should return "Scene.constructor" (preserving the
+		// type prefix), NOT "constructor" (which would lose disambiguation).
+		result := resolveConceptualName(ctx, "Scene.constructor",
+			"Find path from Scene.constructor to render", idx, extractor)
+		if result != "Scene.constructor" {
+			t.Errorf("IT-R2d: resolveConceptualName should preserve dot-notation 'Scene.constructor', got %q", result)
+		}
+	})
+
+	t.Run("bare_method_still_returns_bare", func(t *testing.T) {
+		// A bare "constructor" (no dot) with callable matches should return as-is.
+		result := resolveConceptualName(ctx, "constructor",
+			"Find path from constructor to render", idx, extractor)
+		if result != "constructor" {
+			t.Errorf("bare name 'constructor' should return unchanged, got %q", result)
+		}
+	})
+}

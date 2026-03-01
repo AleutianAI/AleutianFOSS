@@ -589,7 +589,6 @@ tools:
     keywords:
       - important
       - most important
-      - critical functions
       - pagerank
       - architecturally important
       - key functions
@@ -602,6 +601,8 @@ tools:
       - peripheral
       - least important
       - lowest pagerank
+      - bottom ranked
+      - least central
     use_when: >
       User wants to find the most important or influential symbols by PageRank centrality.
       Use for: 'most important functions', 'highest PageRank', 'structural importance',

@@ -542,11 +542,11 @@ func (p *TypeScriptParser) extractDeclarations(ctx context.Context, root *sitter
 				result.Symbols = append(result.Symbols, enum)
 			}
 		case "lexical_declaration":
-			p.processLexicalDeclaration(child, content, filePath, result, false)
+			p.processLexicalDeclaration(ctx, child, content, filePath, result, false)
 			// IT-06e Bug 4: scan for top-level dynamic import() patterns
 			result.Imports = append(result.Imports, p.scanForDynamicImports(child, content, filePath)...)
 		case "variable_declaration":
-			p.processVariableDeclaration(child, content, filePath, result, false)
+			p.processVariableDeclaration(ctx, child, content, filePath, result, false)
 			// IT-06e Bug 4: scan for top-level dynamic import() patterns
 			result.Imports = append(result.Imports, p.scanForDynamicImports(child, content, filePath)...)
 		case "expression_statement":
@@ -629,7 +629,7 @@ func (p *TypeScriptParser) processExportStatement(ctx context.Context, node *sit
 				result.Symbols = append(result.Symbols, enum)
 			}
 		case "lexical_declaration":
-			p.processLexicalDeclaration(child, content, filePath, result, true)
+			p.processLexicalDeclaration(ctx, child, content, filePath, result, true)
 		case "abstract_class_declaration":
 			cls, dynImps := p.processAbstractClass(ctx, child, content, filePath, decorators, true)
 			if cls != nil {
@@ -859,9 +859,13 @@ func (p *TypeScriptParser) extractClassMembers(ctx context.Context, body *sitter
 			}
 			dynImps = append(dynImps, imps...)
 		case "public_field_definition":
-			if field := p.processField(child, content, filePath); field != nil {
+			// IT-R2d F.1: processField now extracts call sites from arrow/function initializers.
+			field, imps := p.processField(ctx, child, content, filePath)
+			if field != nil {
+				field.Receiver = classSym.Name
 				classSym.Children = append(classSym.Children, field)
 			}
+			dynImps = append(dynImps, imps...)
 		}
 	}
 	return dynImps
@@ -974,12 +978,20 @@ func (p *TypeScriptParser) processMethod(ctx context.Context, node *sitter.Node,
 }
 
 // processField extracts a field definition.
-func (p *TypeScriptParser) processField(node *sitter.Node, content []byte, filePath string) *Symbol {
+//
+// IT-R2d F.1: Now accepts ctx and returns []Import. Detects arrow function or
+// function expression initializers in class fields and extracts call sites from
+// their bodies. This fixes the gap where class fields like
+// `_renderLoop = () => { this.renderMeshes(...) }` had their calls invisible
+// to the graph builder.
+func (p *TypeScriptParser) processField(ctx context.Context, node *sitter.Node, content []byte, filePath string) (*Symbol, []Import) {
 	var name string
 	var typeStr string
 	var accessModifier string
 	var isReadonly bool
 	var isStatic bool
+	var arrowBodyNode *sitter.Node
+	var hasArrowFunction bool
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
@@ -994,11 +1006,37 @@ func (p *TypeScriptParser) processField(node *sitter.Node, content []byte, fileP
 			name = string(content[child.StartByte():child.EndByte()])
 		case "type_annotation":
 			typeStr = p.extractTypeAnnotation(child, content)
+		case tsNodeArrowFunction:
+			// IT-R2d F.1: Detect arrow function initializer.
+			hasArrowFunction = true
+			for j := 0; j < int(child.ChildCount()); j++ {
+				gc := child.Child(j)
+				switch gc.Type() {
+				case tsNodeStatementBlock:
+					arrowBodyNode = gc
+				case "call_expression", "parenthesized_expression", "object", "array",
+					"template_string", "binary_expression", "ternary_expression",
+					"await_expression", "new_expression":
+					if arrowBodyNode == nil {
+						arrowBodyNode = gc
+					}
+				}
+			}
+		case "function_expression":
+			// IT-R2d F.1: Detect function expression initializer.
+			hasArrowFunction = true
+			for j := 0; j < int(child.ChildCount()); j++ {
+				gc := child.Child(j)
+				if gc.Type() == tsNodeStatementBlock {
+					arrowBodyNode = gc
+					break
+				}
+			}
 		}
 	}
 
 	if name == "" {
-		return nil
+		return nil, nil
 	}
 
 	exported := accessModifier != "private"
@@ -1011,10 +1049,15 @@ func (p *TypeScriptParser) processField(node *sitter.Node, content []byte, fileP
 		signature = "readonly " + signature
 	}
 
+	kind := SymbolKindField
+	if hasArrowFunction {
+		kind = SymbolKindProperty
+	}
+
 	sym := &Symbol{
 		ID:        GenerateID(filePath, int(node.StartPoint().Row+1), name),
 		Name:      name,
-		Kind:      SymbolKindField,
+		Kind:      kind,
 		FilePath:  filePath,
 		Language:  "typescript",
 		Exported:  exported,
@@ -1029,7 +1072,13 @@ func (p *TypeScriptParser) processField(node *sitter.Node, content []byte, fileP
 		},
 	}
 
-	return sym
+	// IT-R2d F.1: Extract call sites from arrow/function body.
+	var dynImps []Import
+	if hasArrowFunction && arrowBodyNode != nil {
+		sym.Calls, dynImps = p.extractCallSites(ctx, arrowBodyNode, content, filePath)
+	}
+
+	return sym, dynImps
 }
 
 // processInterface extracts an interface declaration.
@@ -1149,10 +1198,16 @@ func (p *TypeScriptParser) extractInterfaceMembers(body *sitter.Node, content []
 		switch child.Type() {
 		case "property_signature":
 			if prop := p.processPropertySignature(child, content, filePath); prop != nil {
+				// IT-R2d F.3: Set Receiver to interface name for Strategy 1 resolution
+				// and RECEIVES edge creation in graph builder.
+				prop.Receiver = ifaceSym.Name
 				ifaceSym.Children = append(ifaceSym.Children, prop)
 			}
 		case "method_signature":
 			if method := p.processMethodSignature(child, content, filePath); method != nil {
+				// IT-R2d F.3: Set Receiver to interface name for Strategy 1 resolution
+				// and RECEIVES edge creation in graph builder.
+				method.Receiver = ifaceSym.Name
 				ifaceSym.Children = append(ifaceSym.Children, method)
 			}
 		}
@@ -1438,7 +1493,9 @@ func (p *TypeScriptParser) processEnumMember(node *sitter.Node, content []byte, 
 }
 
 // processLexicalDeclaration handles const/let declarations.
-func (p *TypeScriptParser) processLexicalDeclaration(node *sitter.Node, content []byte, filePath string, result *ParseResult, exported bool) {
+//
+// IT-R2d F.2: Now accepts ctx for call site extraction from arrow function bodies.
+func (p *TypeScriptParser) processLexicalDeclaration(ctx context.Context, node *sitter.Node, content []byte, filePath string, result *ParseResult, exported bool) {
 	var declKind string // const or let
 
 	for i := 0; i < int(node.ChildCount()); i++ {
@@ -1447,30 +1504,41 @@ func (p *TypeScriptParser) processLexicalDeclaration(node *sitter.Node, content 
 		case "const", "let":
 			declKind = child.Type()
 		case "variable_declarator":
-			if variable := p.processVariableDeclarator(child, content, filePath, declKind, exported); variable != nil {
+			variable, dynImps := p.processVariableDeclarator(ctx, child, content, filePath, declKind, exported)
+			if variable != nil {
 				result.Symbols = append(result.Symbols, variable)
 			}
+			result.Imports = append(result.Imports, dynImps...)
 		}
 	}
 }
 
 // processVariableDeclaration handles var declarations.
-func (p *TypeScriptParser) processVariableDeclaration(node *sitter.Node, content []byte, filePath string, result *ParseResult, exported bool) {
+//
+// IT-R2d F.2: Now accepts ctx for call site extraction from arrow function bodies.
+func (p *TypeScriptParser) processVariableDeclaration(ctx context.Context, node *sitter.Node, content []byte, filePath string, result *ParseResult, exported bool) {
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
 		if child.Type() == "variable_declarator" {
-			if variable := p.processVariableDeclarator(child, content, filePath, "var", exported); variable != nil {
+			variable, dynImps := p.processVariableDeclarator(ctx, child, content, filePath, "var", exported)
+			if variable != nil {
 				result.Symbols = append(result.Symbols, variable)
 			}
+			result.Imports = append(result.Imports, dynImps...)
 		}
 	}
 }
 
 // processVariableDeclarator extracts a variable declarator.
-func (p *TypeScriptParser) processVariableDeclarator(node *sitter.Node, content []byte, filePath string, declKind string, exported bool) *Symbol {
+//
+// IT-R2d F.2: Now accepts ctx and returns []Import. Extracts call sites from
+// arrow function bodies, mirroring the JS parser's extractVariableDeclarator
+// which already handles this correctly.
+func (p *TypeScriptParser) processVariableDeclarator(ctx context.Context, node *sitter.Node, content []byte, filePath string, declKind string, exported bool) (*Symbol, []Import) {
 	var name string
 	var typeStr string
 	var hasArrowFunction bool
+	var arrowBodyNode *sitter.Node
 
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
@@ -1479,13 +1547,28 @@ func (p *TypeScriptParser) processVariableDeclarator(node *sitter.Node, content 
 			name = string(content[child.StartByte():child.EndByte()])
 		case "type_annotation":
 			typeStr = p.extractTypeAnnotation(child, content)
-		case "arrow_function":
+		case tsNodeArrowFunction:
 			hasArrowFunction = true
+			// IT-R2d F.2: Extract arrow function body for call site extraction.
+			for j := 0; j < int(child.ChildCount()); j++ {
+				gc := child.Child(j)
+				switch gc.Type() {
+				case tsNodeStatementBlock:
+					arrowBodyNode = gc
+				case "call_expression", "parenthesized_expression", "object", "array",
+					"template_string", "binary_expression", "ternary_expression",
+					"await_expression", "new_expression":
+					// Expression-body arrow: const f = (x) => doSomething(x)
+					if arrowBodyNode == nil {
+						arrowBodyNode = gc
+					}
+				}
+			}
 		}
 	}
 
 	if name == "" {
-		return nil
+		return nil, nil
 	}
 
 	kind := SymbolKindVariable
@@ -1501,7 +1584,7 @@ func (p *TypeScriptParser) processVariableDeclarator(node *sitter.Node, content 
 		signature += ": " + typeStr
 	}
 
-	return &Symbol{
+	sym := &Symbol{
 		ID:        GenerateID(filePath, int(node.StartPoint().Row+1), name),
 		Name:      name,
 		Kind:      kind,
@@ -1514,6 +1597,14 @@ func (p *TypeScriptParser) processVariableDeclarator(node *sitter.Node, content 
 		StartCol:  int(node.StartPoint().Column),
 		EndCol:    int(node.EndPoint().Column),
 	}
+
+	// IT-R2d F.2: Extract call sites from arrow function body.
+	var dynImps []Import
+	if hasArrowFunction && arrowBodyNode != nil {
+		sym.Calls, dynImps = p.extractCallSites(ctx, arrowBodyNode, content, filePath)
+	}
+
+	return sym, dynImps
 }
 
 // tsTypeSkipList contains TypeScript primitive types that should not produce TypeReference entries.
