@@ -119,18 +119,18 @@ tests:
     name: plottable_find_path
     category: TOOL_HAPPY_PATH
     description: >
-      find_path tool against Plottable. Between Component.renderTo and
-      Component._setup. Direct chain: renderTo (component.ts:362) →
-      anchor (component.ts:112) → _setup (component.ts:169). 2-hop path
-      through Plottable's component initialization pipeline.
+      find_path tool against Plottable. Between _paint and _getAttrToProjector.
+      Chain: _paint (plot.ts:752) → _additionalPaint (plot.ts:701) →
+      _getAttrToProjector (plot.ts:405). 2-hop path through Plottable's
+      painting pipeline. All three functions are unique to plot.ts.
     query: |
-      Find the shortest path between Component.renderTo and Component._setup
+      Find the shortest path between _paint and _getAttrToProjector
     expected_state: COMPLETE
     reference_answer: |
-      find_path returns a 2-hop path: Component.renderTo → Component.anchor
-      → Component._setup. renderTo attaches the component to a DOM element
-      via anchor, which calls _setup to create the SVG structure
-      (background, content, foreground layers).
+      find_path returns a 2-hop path: _paint → _additionalPaint →
+      _getAttrToProjector. _paint is the core rendering method that calls
+      _additionalPaint for subclass-specific rendering, which in turn calls
+      _getAttrToProjector to map data attributes to visual projectors.
     validations:
       - type: graph_tool_used
 
