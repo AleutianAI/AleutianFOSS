@@ -1946,6 +1946,11 @@ const (
 	// FailureTypeBatchFiltered means the router filtered out this tool call as redundant.
 	// GR-39a: Added for batch filter learning to inform CDCL clause generation.
 	FailureTypeBatchFiltered FailureType = "batch_filtered"
+
+	// FailureTypeResolutionDemotion means the post-LLM validator overrode the LLM's
+	// conceptual symbol pick because a better tier0 candidate existed.
+	// D3: Added for CRS-governed conceptual resolution prune/annotate/validate pipeline.
+	FailureTypeResolutionDemotion FailureType = "resolution_demotion"
 )
 
 // String returns the string representation of FailureType.
@@ -1958,7 +1963,8 @@ func (f FailureType) IsValid() bool {
 	switch f {
 	case FailureTypeToolError, FailureTypeCycleDetected, FailureTypeCircuitBreaker,
 		FailureTypeTimeout, FailureTypeInvalidOutput, FailureTypeSafety,
-		FailureTypeSemanticRepetition, FailureTypeBatchFiltered:
+		FailureTypeSemanticRepetition, FailureTypeBatchFiltered,
+		FailureTypeResolutionDemotion:
 		return true
 	default:
 		return false

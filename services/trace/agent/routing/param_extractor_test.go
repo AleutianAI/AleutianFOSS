@@ -285,7 +285,7 @@ func TestResolveConceptualSymbol_PicksCorrectSymbol(t *testing.T) {
 
 	result, err := extractor.ResolveConceptualSymbol(context.Background(),
 		"Show the call chain from assigning a material to a mesh through to shader compilation",
-		candidates)
+		candidates, 0, 0, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -310,7 +310,7 @@ func TestResolveConceptualSymbol_ValidatesCandidateList(t *testing.T) {
 	}
 
 	_, err = extractor.ResolveConceptualSymbol(context.Background(),
-		"assigning a material", candidates)
+		"assigning a material", candidates, 0, 0, "")
 	if err == nil {
 		t.Error("expected error when LLM returns symbol not in candidate list")
 	}
@@ -332,7 +332,7 @@ func TestResolveConceptualSymbol_PartialMatch(t *testing.T) {
 	}
 
 	result, err := extractor.ResolveConceptualSymbol(context.Background(),
-		"assigning a material", candidates)
+		"assigning a material", candidates, 0, 0, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -360,7 +360,7 @@ func TestResolveConceptualSymbol_VerboseResponse(t *testing.T) {
 	}
 
 	result, err := extractor.ResolveConceptualSymbol(context.Background(),
-		"assigning a material to a mesh", candidates)
+		"assigning a material to a mesh", candidates, 0, 0, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -385,7 +385,7 @@ func TestResolveConceptualSymbol_Disabled(t *testing.T) {
 	}
 
 	_, err = extractor.ResolveConceptualSymbol(context.Background(),
-		"assigning a material", candidates)
+		"assigning a material", candidates, 0, 0, "")
 	if err == nil {
 		t.Error("expected error when extractor is disabled")
 	}
@@ -402,7 +402,7 @@ func TestResolveConceptualSymbol_NoCandidates(t *testing.T) {
 	}
 
 	_, err = extractor.ResolveConceptualSymbol(context.Background(),
-		"assigning a material", []agent.SymbolCandidate{})
+		"assigning a material", []agent.SymbolCandidate{}, 0, 0, "")
 	if err == nil {
 		t.Error("expected error with empty candidates")
 	}
@@ -423,7 +423,7 @@ func TestResolveConceptualSymbol_ChatError(t *testing.T) {
 	}
 
 	_, err = extractor.ResolveConceptualSymbol(context.Background(),
-		"assigning a material", candidates)
+		"assigning a material", candidates, 0, 0, "")
 	if err == nil {
 		t.Error("expected error when chat fails")
 	}

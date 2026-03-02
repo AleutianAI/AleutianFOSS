@@ -62,6 +62,8 @@ construction:
   - build
   - make
   - factory
+  - __init__
+  - init
 
 instantiation:
   - new
@@ -920,6 +922,17 @@ display:
   - view
   - output
   - print
+
+# ── Database & Storage Operations ──────────────────────────────────────────
+compaction:
+  - compact
+  - compress
+  - merge
+  - gc
+  - level
+  - run
+  - consolidate
+  - sweep
 
 # ── Deletion & Cleanup ─────────────────────────────────────────────────────
 deletion:

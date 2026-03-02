@@ -319,24 +319,43 @@ func (t *findCommunitiesTool) Execute(ctx context.Context, params TypedParams) (
 	// IT-11 GAP-2: Filter by package_filter before sorting/trimming.
 	// Expansion tests ask about specific directories ("within packages/core",
 	// "within the plots directory") — without this, they get global top-20.
+	//
+	// IT-R2c Fix C2: Rebuild communities with ONLY matching nodes, not "keep
+	// community if any node matches". The old approach passed all large communities
+	// because a 226-node community spanning the whole codebase always had at least
+	// one node in the target directory. Now we trim each community to its matching
+	// subset and re-apply MinSize, so only genuinely scoped communities survive.
 	if p.PackageFilter != "" {
 		filterLower := strings.ToLower(p.PackageFilter)
 		var pkgFiltered []graph.Community
 		for _, comm := range filtered {
+			var matchingNodes []string
 			for _, nodeID := range comm.Nodes {
+				matched := false
 				pkg := t.extractPackageFromNodeID(nodeID)
 				if pkg != "" && strings.Contains(strings.ToLower(pkg), filterLower) {
-					pkgFiltered = append(pkgFiltered, comm)
-					break
+					matched = true
 				}
 				// Also check the file name part for flat-structured projects
-				if colonIdx := strings.Index(nodeID, ":"); colonIdx > 0 {
-					filePath := strings.ToLower(nodeID[:colonIdx])
-					if strings.Contains(filePath, filterLower) {
-						pkgFiltered = append(pkgFiltered, comm)
-						break
+				if !matched {
+					if colonIdx := strings.Index(nodeID, ":"); colonIdx > 0 {
+						filePath := strings.ToLower(nodeID[:colonIdx])
+						if strings.Contains(filePath, filterLower) {
+							matched = true
+						}
 					}
 				}
+				if matched {
+					matchingNodes = append(matchingNodes, nodeID)
+				}
+			}
+			if len(matchingNodes) >= p.MinSize {
+				pkgFiltered = append(pkgFiltered, graph.Community{
+					ID:    comm.ID,
+					Nodes: matchingNodes,
+					// Preserve external edges proportionally
+					ExternalEdges: comm.ExternalEdges,
+				})
 			}
 		}
 		filtered = pkgFiltered

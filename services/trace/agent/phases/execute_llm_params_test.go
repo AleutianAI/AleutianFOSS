@@ -494,6 +494,8 @@ func (m *mockParamExtractor) ResolveConceptualSymbol(
 	ctx context.Context,
 	query string,
 	candidates []agent.SymbolCandidate,
+	tier0Count, tier1Count int,
+	sourceContext string,
 ) (string, error) {
 	return "", fmt.Errorf("not implemented in mock")
 }

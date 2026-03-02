@@ -783,17 +783,20 @@ tests:
       - type: graph_tool_used
 
   - id: 5153
-    name: badger_find_path_c
+    name: badger_get_call_chain_d
     category: TOOL_HAPPY_PATH
     description: >
-      find_path tool against Badger (test C). Between WriteBatch and compaction.
+      get_call_chain tool against Badger (test D). Target: SetEntry downstream.
+      Rewritten from conceptual "WriteBatch.Set to compaction" — Set calls
+      SetEntry (4 outgoing edges) which calls modify. No static path exists
+      to compact (different subsystem, triggered asynchronously).
     query: |
-      Find the shortest path from WriteBatch.Set to compaction
+      Show the call chain from SetEntry
     expected_state: COMPLETE
     reference_answer: |
-      WriteBatch.Set -> Flush -> sendToWriteCh -> writeRequests ->
-      flushMemtable triggers -> levelsController.runCompactor when
-      level 0 tables accumulate beyond threshold.
+      SetEntry (txn.go) calls modify to apply the key-value entry to the
+      transaction's pending writes list. modify validates the entry size,
+      checks for conflicts, and adds to the pendingWrites map.
     validations:
       - type: graph_tool_used
 

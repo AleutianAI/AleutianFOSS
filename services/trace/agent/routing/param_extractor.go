@@ -453,6 +453,8 @@ func (e *ParamExtractor) parseResponse(response string) (map[string]any, error) 
 //   - ctx: Context for cancellation/timeout. Must not be nil.
 //   - query: The user's natural language query.
 //   - candidates: Symbol candidates found by keyword search of the index.
+//   - tier0Count: Number of tier0 (best match) candidates at the start of the list.
+//   - tier1Count: Number of tier1 (partial match) candidates after tier0.
 //
 // # Outputs
 //
@@ -467,6 +469,8 @@ func (e *ParamExtractor) ResolveConceptualSymbol(
 	ctx context.Context,
 	query string,
 	candidates []agent.SymbolCandidate,
+	tier0Count, tier1Count int,
+	sourceContext string,
 ) (string, error) {
 	if !e.config.Enabled {
 		return "", fmt.Errorf("conceptual resolution disabled: extractor not enabled")
@@ -509,40 +513,93 @@ Rules:
 - Return ONLY the symbol name, nothing else
 
 `)
-	sb.WriteString("Available symbols:\n")
-	cap := len(candidates)
-	if cap > 50 {
-		cap = 50
+	// D3: Add tier preference instruction when tier0 candidates exist.
+	if tier0Count > 0 {
+		sb.WriteString("IMPORTANT: Prefer ★★★ BEST MATCH candidates — they contain BOTH the domain noun AND a concept synonym from the query.\n\n")
 	}
+
+	// D3: Cap reduced from 50 to 20 (prune already limits the list).
+	symbolCap := len(candidates)
+	if symbolCap > 20 {
+		symbolCap = 20
+	}
+
 	// IT-12 Rev 4: Show edge counts when available to help the LLM pick
 	// high-connectivity symbols (better starting points for path/chain queries).
 	hasEdgeInfo := false
-	for i := 0; i < cap; i++ {
+	for i := 0; i < symbolCap; i++ {
 		if candidates[i].OutEdges > 0 || candidates[i].InEdges > 0 {
 			hasEdgeInfo = true
 			break
 		}
 	}
-	for i := 0; i < cap; i++ {
-		c := candidates[i]
+
+	// D3c: Add source context to prompt when resolving find_path to-side.
+	if sourceContext != "" {
+		sb.WriteString(fmt.Sprintf("Source function: %s\nPick the DESTINATION symbol that this function would call into:\n\n", sourceContext))
+	}
+
+	// D3 / D3c: Group candidates by tier with star markers.
+	// D3c: Show receiver type for methods (e.g., "validate (method on Context)").
+	formatCandidate := func(c agent.SymbolCandidate) string {
+		kind := c.Kind
+		if c.Receiver != "" && (c.Kind == "method" || c.Kind == "property") {
+			kind = fmt.Sprintf("method on %s", c.Receiver)
+		}
 		if hasEdgeInfo {
-			sb.WriteString(fmt.Sprintf("  - %s (%s) in %s:%d [%d calls out, %d calls in]\n",
-				c.Name, c.Kind, c.FilePath, c.Line, c.OutEdges, c.InEdges))
-		} else {
-			sb.WriteString(fmt.Sprintf("  - %s (%s) in %s:%d\n", c.Name, c.Kind, c.FilePath, c.Line))
+			return fmt.Sprintf("  - %s (%s) in %s:%d [%d calls out, %d calls in]",
+				c.Name, kind, c.FilePath, c.Line, c.OutEdges, c.InEdges)
+		}
+		return fmt.Sprintf("  - %s (%s) in %s:%d", c.Name, kind, c.FilePath, c.Line)
+	}
+
+	if tier0Count > 0 || tier1Count > 0 {
+		// D3: Grouped prompt with tier markers
+		idx := 0
+		if tier0Count > 0 {
+			sb.WriteString("★★★ BEST MATCH (domain noun + concept synonym):\n")
+			for i := 0; i < tier0Count && idx < symbolCap; i++ {
+				sb.WriteString(formatCandidate(candidates[idx]) + "\n")
+				idx++
+			}
+		}
+		if tier1Count > 0 {
+			sb.WriteString("★★ PARTIAL MATCH (domain noun or concept synonym):\n")
+			for i := 0; i < tier1Count && idx < symbolCap; i++ {
+				sb.WriteString(formatCandidate(candidates[idx]) + "\n")
+				idx++
+			}
+		}
+		if idx < symbolCap {
+			sb.WriteString("★ OTHER:\n")
+			for idx < symbolCap {
+				sb.WriteString(formatCandidate(candidates[idx]) + "\n")
+				idx++
+			}
+		}
+	} else {
+		// No tier info — flat list
+		sb.WriteString("Available symbols:\n")
+		for i := 0; i < symbolCap; i++ {
+			sb.WriteString(formatCandidate(candidates[i]) + "\n")
 		}
 	}
 
 	// IT-12 Rev 5c: Log the candidate list as presented to the LLM for debugging.
-	// Exact tier counts are logged by the caller in resolveConceptualName().
 	var candidatePreview strings.Builder
-	for i := 0; i < cap && i < 15; i++ {
+	previewCap := symbolCap
+	if previewCap > 15 {
+		previewCap = 15
+	}
+	for i := 0; i < previewCap; i++ {
 		c := candidates[i]
 		candidatePreview.WriteString(fmt.Sprintf("[%d] %s (%s, %d out, %d in) ", i+1, c.Name, c.Kind, c.OutEdges, c.InEdges))
 	}
 	e.logger.Info("IT-12: candidates presented to LLM",
 		slog.Int("total_candidates", len(candidates)),
-		slog.Int("shown_to_llm", cap),
+		slog.Int("shown_to_llm", symbolCap),
+		slog.Int("tier0_count", tier0Count),
+		slog.Int("tier1_count", tier1Count),
 		slog.String("top_15", candidatePreview.String()),
 	)
 

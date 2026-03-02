@@ -616,30 +616,95 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 		// query keywords and ask the LLM to pick the best real symbol.
 		if paramErr == nil && params != nil &&
 			deps.SymbolIndex != nil && deps.ParamExtractor != nil && deps.ParamExtractor.IsEnabled() {
+
+			// D3b: Validate extracted path params before conceptual resolution.
+			// Catches param extractor failures where "to" is a substring of "from"
+			// (e.g., from="Context.Bind" to="Bind") which would bypass resolution.
+			if hardForcing.Tool == "find_path" {
+				if fpParams, ok := params.(tools.FindPathParams); ok {
+					newFrom, newTo, paramValidated := validateExtractedPathParams(fpParams.From, fpParams.To, deps.Query)
+					if paramValidated {
+						fpParams.From = newFrom
+						fpParams.To = newTo
+						params = fpParams
+					}
+				}
+			}
+
 			switch hardForcing.Tool {
 			case "get_call_chain":
 				if gccParams, ok := params.(tools.GetCallChainParams); ok && gccParams.FunctionName != "" {
-					resolved := resolveConceptualName(ctx, gccParams.FunctionName, deps.Query,
-						deps.SymbolIndex, deps.ParamExtractor, deps.GraphAnalytics)
-					if resolved != gccParams.FunctionName {
-						gccParams.FunctionName = resolved
+					result := resolveConceptualName(ctx, gccParams.FunctionName, deps.Query,
+						deps.SymbolIndex, deps.ParamExtractor, deps.Session,
+						conceptualResolutionOpts{Analytics: deps.GraphAnalytics})
+					if result.Resolved != gccParams.FunctionName {
+						gccParams.FunctionName = result.Resolved
 						params = gccParams
+					}
+					if result.Overridden {
+						p.learnFromFailure(ctx, deps, crs.FailureEvent{
+							SessionID:    deps.Session.ID,
+							FailureType:  crs.FailureTypeResolutionDemotion,
+							Tool:         hardForcing.Tool,
+							Source:       crs.SignalSourceHard,
+							ErrorMessage: fmt.Sprintf("LLM picked tier%d [%s], overrode to tier0", result.LLMPickTier, result.LLMPick),
+						})
 					}
 				}
 			case "find_path":
 				if fpParams, ok := params.(tools.FindPathParams); ok {
+					// D3c: Resolve from-side first, then use its ID for to-side reachability + context.
+					var fromSymbolID string
+					var sourceContext string
 					if fpParams.From != "" {
-						resolved := resolveConceptualName(ctx, fpParams.From, deps.Query,
-							deps.SymbolIndex, deps.ParamExtractor, deps.GraphAnalytics)
-						if resolved != fpParams.From {
-							fpParams.From = resolved
+						result := resolveConceptualName(ctx, fpParams.From, deps.Query,
+							deps.SymbolIndex, deps.ParamExtractor, deps.Session,
+							conceptualResolutionOpts{Analytics: deps.GraphAnalytics})
+						if result.Resolved != fpParams.From {
+							fpParams.From = result.Resolved
+						}
+						if result.Overridden {
+							p.learnFromFailure(ctx, deps, crs.FailureEvent{
+								SessionID:    deps.Session.ID,
+								FailureType:  crs.FailureTypeResolutionDemotion,
+								Tool:         hardForcing.Tool,
+								Source:       crs.SignalSourceHard,
+								ErrorMessage: fmt.Sprintf("LLM picked tier%d [%s], overrode to tier0", result.LLMPickTier, result.LLMPick),
+							})
+						}
+						// D3c: Look up resolved from symbol for reachability + context
+						if deps.SymbolIndex != nil {
+							if syms := deps.SymbolIndex.GetByName(fpParams.From); len(syms) > 0 {
+								fromSymbolID = syms[0].ID
+								if syms[0].Receiver != "" {
+									sourceContext = fmt.Sprintf("%s (method on %s in %s:%d)",
+										syms[0].Name, syms[0].Receiver, syms[0].FilePath, syms[0].StartLine)
+								} else {
+									sourceContext = fmt.Sprintf("%s (%s in %s:%d)",
+										syms[0].Name, syms[0].Kind.String(), syms[0].FilePath, syms[0].StartLine)
+								}
+							}
 						}
 					}
 					if fpParams.To != "" {
-						resolved := resolveConceptualName(ctx, fpParams.To, deps.Query,
-							deps.SymbolIndex, deps.ParamExtractor, deps.GraphAnalytics)
-						if resolved != fpParams.To {
-							fpParams.To = resolved
+						result := resolveConceptualName(ctx, fpParams.To, deps.Query,
+							deps.SymbolIndex, deps.ParamExtractor, deps.Session,
+							conceptualResolutionOpts{
+								Analytics:     deps.GraphAnalytics,
+								FromSymbolID:  fromSymbolID,
+								SourceContext: sourceContext,
+							})
+						if result.Resolved != fpParams.To {
+							fpParams.To = result.Resolved
+						}
+						if result.Overridden {
+							p.learnFromFailure(ctx, deps, crs.FailureEvent{
+								SessionID:    deps.Session.ID,
+								FailureType:  crs.FailureTypeResolutionDemotion,
+								Tool:         hardForcing.Tool,
+								Source:       crs.SignalSourceHard,
+								ErrorMessage: fmt.Sprintf("LLM picked tier%d [%s], overrode to tier0", result.LLMPickTier, result.LLMPick),
+							})
 						}
 					}
 					params = fpParams

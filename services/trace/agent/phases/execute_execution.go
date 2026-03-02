@@ -2170,10 +2170,24 @@ func (p *ExecutePhase) extractToolParameters(
 		// "call chain from assigning a material to shader compilation"), search the
 		// symbol index for keywords and use the LLM to pick the best starting symbol.
 		if deps != nil && deps.SymbolIndex != nil && deps.ParamExtractor != nil {
-			resolved := resolveConceptualName(goCtx, funcName, query,
-				deps.SymbolIndex, deps.ParamExtractor, deps.GraphAnalytics)
-			if resolved != funcName {
-				funcName = resolved
+			var session *agent.Session
+			if deps != nil {
+				session = deps.Session
+			}
+			result := resolveConceptualName(goCtx, funcName, query,
+				deps.SymbolIndex, deps.ParamExtractor, session,
+				conceptualResolutionOpts{Analytics: deps.GraphAnalytics})
+			if result.Resolved != funcName {
+				funcName = result.Resolved
+			}
+			if result.Overridden {
+				p.learnFromFailure(goCtx, deps, crs.FailureEvent{
+					SessionID:    deps.Session.ID,
+					FailureType:  crs.FailureTypeResolutionDemotion,
+					Tool:         "get_call_chain",
+					Source:       crs.SignalSourceHard,
+					ErrorMessage: fmt.Sprintf("LLM picked tier%d [%s], overrode to tier0", result.LLMPickTier, result.LLMPick),
+				})
 			}
 		}
 
