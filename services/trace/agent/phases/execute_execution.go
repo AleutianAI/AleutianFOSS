@@ -2738,7 +2738,7 @@ func (p *ExecutePhase) executeToolDirectlyWithFallback(
 	// analyzed every source file. The LLM must synthesize from these results,
 	// not spiral into Grep/Glob loops trying to verify or search independently.
 	if graphToolsWithSubstantiveResults[toolName] &&
-		result != nil && result.Success {
+		result != nil && len(result.OutputText) > 0 {
 		deps.Session.SetGraphToolHadSubstantiveResults(true)
 		slog.Info("GR-59 Rev 4: Forced graph tool completed — will force synthesis",
 			slog.String("session_id", deps.Session.ID),

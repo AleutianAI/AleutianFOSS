@@ -58,8 +58,11 @@ func TestFindPathTool_IT12Rev3(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
 		}
-		if !result.Success {
-			t.Fatalf("Execute() should succeed even with no path: %s", result.Error)
+		if result.Success {
+			t.Fatalf("Execute() should return Success=false for disconnected symbols")
+		}
+		if result.Error == "" {
+			t.Error("expected non-empty Error for disconnected symbols")
 		}
 
 		output, ok := result.Output.(FindPathOutput)

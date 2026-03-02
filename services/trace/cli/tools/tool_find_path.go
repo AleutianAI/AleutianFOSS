@@ -263,11 +263,21 @@ func (t *findPathTool) Execute(ctx context.Context, params TypedParams) (*Result
 			Length:  -1,
 			Message: fmt.Sprintf("Symbol '%s' not found", p.From),
 		}
+		notFoundStep := crs.NewTraceStepBuilder().
+			WithAction("graph_shortest_path").
+			WithTarget(fmt.Sprintf("%s->%s", p.From, p.To)).
+			WithTool("ShortestPath").
+			WithDuration(time.Since(start)).
+			WithMetadata("error", "from_symbol_not_found").
+			WithMetadata("from", p.From).
+			Build()
 		return &Result{
-			Success:    true,
+			Success:    false,
+			Error:      fmt.Sprintf("symbol '%s' not found in codebase", p.From),
 			Output:     output,
 			OutputText: fmt.Sprintf("Symbol '%s' not found in the codebase.", p.From),
 			TokensUsed: 10,
+			TraceStep:  &notFoundStep,
 			Duration:   time.Since(start),
 		}, nil
 	}
@@ -280,11 +290,21 @@ func (t *findPathTool) Execute(ctx context.Context, params TypedParams) (*Result
 			Length:  -1,
 			Message: fmt.Sprintf("Symbol '%s' not found", p.To),
 		}
+		notFoundStep := crs.NewTraceStepBuilder().
+			WithAction("graph_shortest_path").
+			WithTarget(fmt.Sprintf("%s->%s", p.From, p.To)).
+			WithTool("ShortestPath").
+			WithDuration(time.Since(start)).
+			WithMetadata("error", "to_symbol_not_found").
+			WithMetadata("to", p.To).
+			Build()
 		return &Result{
-			Success:    true,
+			Success:    false,
+			Error:      fmt.Sprintf("symbol '%s' not found in codebase", p.To),
 			Output:     output,
 			OutputText: fmt.Sprintf("Symbol '%s' not found in the codebase.", p.To),
 			TokensUsed: 10,
+			TraceStep:  &notFoundStep,
 			Duration:   time.Since(start),
 		}, nil
 	}
@@ -407,14 +427,19 @@ func (t *findPathTool) Execute(ctx context.Context, params TypedParams) (*Result
 	// Format text output
 	outputText := t.formatText(p.From, p.To, pathResult)
 
-	return &Result{
-		Success:    true,
+	pathFound := pathResult != nil && pathResult.Length >= 0
+	r := &Result{
+		Success:    pathFound,
 		Output:     output,
 		OutputText: outputText,
 		TokensUsed: estimateTokens(outputText),
 		TraceStep:  &traceStep,
 		Duration:   time.Since(start),
-	}, nil
+	}
+	if !pathFound {
+		r.Error = fmt.Sprintf("no path found between '%s' and '%s'", p.From, p.To)
+	}
+	return r, nil
 }
 
 // parseParams validates and extracts typed parameters from the raw map.

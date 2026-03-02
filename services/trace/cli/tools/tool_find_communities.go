@@ -396,14 +396,20 @@ func (t *findCommunitiesTool) Execute(ctx context.Context, params TypedParams) (
 		slog.Bool("converged", result.Converged),
 	)
 
-	return &Result{
-		Success:    true,
+	hasResults := len(filtered) > 0
+	r := &Result{
+		Success:    hasResults,
 		Output:     output,
 		OutputText: outputText,
 		TokensUsed: estimateTokens(outputText),
 		TraceStep:  &traceStep,
 		Duration:   time.Since(start),
-	}, nil
+	}
+	if !hasResults {
+		r.Error = fmt.Sprintf("Leiden found %d communities but 0 survived filtering (MinSize=%d, PackageFilter='%s')",
+			len(result.Communities), p.MinSize, p.PackageFilter)
+	}
+	return r, nil
 }
 
 // parseParams validates and extracts typed parameters from the raw map.

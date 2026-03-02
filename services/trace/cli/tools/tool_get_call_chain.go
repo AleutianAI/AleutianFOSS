@@ -356,7 +356,8 @@ func (t *getCallChainTool) Execute(ctx context.Context, params TypedParams) (*Re
 			WithMetadata("depth", "0").
 			Build()
 		return &Result{
-			Success:    true,
+			Success:    false,
+			Error:      fmt.Sprintf("function '%s' not found in codebase", p.FunctionName),
 			Output:     output,
 			OutputText: fmt.Sprintf("No function named '%s' found in the codebase.", p.FunctionName),
 			TokensUsed: 10,
