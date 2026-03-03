@@ -720,7 +720,10 @@ func (p *ExecutePhase) generateToolClauses(ctx context.Context, deps *Dependenci
 		return
 	}
 
-	// On empty results → soft clause (FailureTypeInvalidOutput)
+	// On empty results → hard clause (FailureTypeInvalidOutput).
+	// CDCL clauses must use SignalSourceHard per CRS validation (types.go:2190).
+	// Empty results from graph tools ARE hard signals — the tool ran authoritatively
+	// and found nothing. This is a definitive learned constraint.
 	resultCount := extractResultCount(result)
 	slog.Info("CRS-WIRE-02: extractResultCount",
 		slog.String("session_id", sessionID),
@@ -736,7 +739,7 @@ func (p *ExecutePhase) generateToolClauses(ctx context.Context, deps *Dependenci
 				{Variable: fmt.Sprintf("tool:%s", inv.Tool), Negated: false},
 				{Variable: "outcome:empty", Negated: true},
 			},
-			Source:      crs.SignalSourceSoft,
+			Source:      crs.SignalSourceHard,
 			LearnedAt:   time.Now().UnixMilli(),
 			FailureType: crs.FailureTypeInvalidOutput,
 			SessionID:   sessionID,
@@ -748,7 +751,7 @@ func (p *ExecutePhase) generateToolClauses(ctx context.Context, deps *Dependenci
 				slog.String("error", addErr.Error()),
 			)
 		} else {
-			slog.Info("CRS-WIRE-02: CDCL soft clause generated",
+			slog.Info("CRS-WIRE-02: CDCL empty-result clause generated",
 				slog.String("session_id", sessionID),
 				slog.String("tool", inv.Tool),
 				slog.String("clause_id", clause.ID),
@@ -2895,6 +2898,19 @@ func (p *ExecutePhase) executeToolDirectlyWithFallback(
 	}
 
 	deps.Session.RecordTraceStep(stepBuilder.Build())
+
+	// CRS-WIRE-02: Generate CDCL clauses for forced tool path.
+	// The normal tool execution path calls p.recordTraceStep() which includes
+	// generateToolClauses(). The forced tool path bypasses p.recordTraceStep(),
+	// so we must call generateToolClauses() directly here.
+	if deps.Session.HasCRS() {
+		inv := &agent.ToolInvocation{Tool: toolName}
+		var errMsg string
+		if err != nil {
+			errMsg = err.Error()
+		}
+		p.generateToolClauses(ctx, deps, inv, result, errMsg)
+	}
 
 	// GR-59 Rev 4: Set session flag when forced graph tool completes successfully.
 	// Graph results are authoritative whether positive ("Found 3 implementations")
