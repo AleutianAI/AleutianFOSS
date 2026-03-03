@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -649,7 +650,162 @@ func (p *ExecutePhase) recordTraceStep(deps *Dependencies, inv *agent.ToolInvoca
 			)
 		}
 	}
+
+	// CRS-WIRE-02: Generate CDCL clauses for error and empty-result conditions.
+	// This provides Layer 2 (CDCL clause generation) for ALL tools centrally,
+	// complementing the per-tool CRSRecorder in patterns/reason packages.
+	if deps.Session.HasCRS() {
+		p.generateToolClauses(context.Background(), deps, inv, result, errMsg)
+	}
 }
+
+// generateToolClauses creates CDCL clauses for tool error and empty-result conditions.
+//
+// Description:
+//
+//	Examines each tool execution result and generates CDCL clauses when the tool
+//	errors or returns empty results. Error conditions produce hard clauses
+//	(FailureTypeToolError); empty results produce soft clauses (FailureTypeInvalidOutput).
+//
+// Inputs:
+//   - ctx: Context for CRS operations.
+//   - deps: Session dependencies with CRS access.
+//   - inv: The tool invocation that was executed.
+//   - result: The tool's Result (may be nil on error).
+//   - errMsg: Non-empty if the tool errored.
+//
+// Outputs:
+//
+//	None (clauses are added to CRS as side effects).
+//
+// Thread Safety: Safe — CRS.AddClause is thread-safe.
+func (p *ExecutePhase) generateToolClauses(ctx context.Context, deps *Dependencies, inv *agent.ToolInvocation, result *tools.Result, errMsg string) {
+	crsInstance := deps.Session.GetCRS()
+	sessionID := deps.Session.ID
+
+	slog.Info("CRS-WIRE-02: generateToolClauses called",
+		slog.String("session_id", sessionID),
+		slog.String("tool", inv.Tool),
+		slog.Bool("has_error", errMsg != ""),
+		slog.Bool("has_result", result != nil),
+	)
+
+	// On error → hard clause (FailureTypeToolError)
+	if errMsg != "" {
+		clause := &crs.Clause{
+			ID: fmt.Sprintf("tool_error_%s_%d", inv.Tool, time.Now().UnixMilli()),
+			Literals: []crs.Literal{
+				{Variable: fmt.Sprintf("tool:%s", inv.Tool), Negated: true},
+				{Variable: fmt.Sprintf("error:%s", crs.ErrorCategoryInternal), Negated: true},
+			},
+			Source:      crs.SignalSourceHard,
+			LearnedAt:   time.Now().UnixMilli(),
+			FailureType: crs.FailureTypeToolError,
+			SessionID:   sessionID,
+		}
+		if addErr := crsInstance.AddClause(ctx, clause); addErr != nil {
+			slog.Warn("CRS-WIRE-02: CDCL clause generation failed",
+				slog.String("tool", inv.Tool),
+				slog.String("clause_type", "tool_error"),
+				slog.String("error", addErr.Error()),
+			)
+		} else {
+			slog.Info("CRS-WIRE-02: CDCL hard clause generated",
+				slog.String("session_id", sessionID),
+				slog.String("tool", inv.Tool),
+				slog.String("clause_id", clause.ID),
+				slog.String("failure_type", string(crs.FailureTypeToolError)),
+			)
+		}
+		return
+	}
+
+	// On empty results → soft clause (FailureTypeInvalidOutput)
+	resultCount := extractResultCount(result)
+	slog.Info("CRS-WIRE-02: extractResultCount",
+		slog.String("session_id", sessionID),
+		slog.String("tool", inv.Tool),
+		slog.Int("result_count", resultCount),
+		slog.Bool("has_result", result != nil),
+		slog.Bool("success", result != nil && result.Success),
+	)
+	if result != nil && result.Success && resultCount == 0 {
+		clause := &crs.Clause{
+			ID: fmt.Sprintf("empty_result_%s_%d", inv.Tool, time.Now().UnixMilli()),
+			Literals: []crs.Literal{
+				{Variable: fmt.Sprintf("tool:%s", inv.Tool), Negated: false},
+				{Variable: "outcome:empty", Negated: true},
+			},
+			Source:      crs.SignalSourceSoft,
+			LearnedAt:   time.Now().UnixMilli(),
+			FailureType: crs.FailureTypeInvalidOutput,
+			SessionID:   sessionID,
+		}
+		if addErr := crsInstance.AddClause(ctx, clause); addErr != nil {
+			slog.Warn("CRS-WIRE-02: CDCL clause generation failed",
+				slog.String("tool", inv.Tool),
+				slog.String("clause_type", "empty_result"),
+				slog.String("error", addErr.Error()),
+			)
+		} else {
+			slog.Info("CRS-WIRE-02: CDCL soft clause generated",
+				slog.String("session_id", sessionID),
+				slog.String("tool", inv.Tool),
+				slog.String("clause_id", clause.ID),
+				slog.String("failure_type", string(crs.FailureTypeInvalidOutput)),
+				slog.Int("result_count", resultCount),
+			)
+		}
+	}
+}
+
+// extractResultCount extracts the result count from a tool result.
+//
+// Description:
+//
+//	Uses a priority chain to determine the discrete result count:
+//	(1) Result.ResultCount field (set by tools), (2) TraceStep metadata "match_count",
+//	(3) -1 indicating unknown (avoids false empty-result clauses).
+//
+// Inputs:
+//   - result: The tool's Result (may be nil).
+//
+// Outputs:
+//   - int: The result count, or -1 if unknown.
+//
+// Limitations:
+//   - Returns -1 for tools that don't set ResultCount and lack TraceStep metadata.
+func extractResultCount(result *tools.Result) int {
+	if result == nil {
+		return -1
+	}
+	// Priority 1: Direct field (set by IT_CRS_03 tools via Result.ResultCount).
+	// ResultCount > 0 is unambiguous.
+	if result.ResultCount > 0 {
+		return result.ResultCount
+	}
+	// Priority 2: TraceStep metadata (set by graph tools via match_count).
+	// This resolves the ResultCount=0 ambiguity: if the tool populated
+	// match_count metadata, it intentionally reported its count.
+	if result.TraceStep != nil && result.TraceStep.Metadata != nil {
+		for _, key := range resultCountKeys {
+			if mc, ok := result.TraceStep.Metadata[key]; ok {
+				if n, err := strconv.Atoi(mc); err == nil {
+					return n
+				}
+			}
+		}
+	}
+	// Priority 3: If tool set ResultCount=0 AND has a TraceStep (indicating
+	// it's a CRS-aware tool), trust the zero.
+	if result.ResultCount == 0 && result.TraceStep != nil {
+		return 0
+	}
+	return -1 // Unknown — tool doesn't support ResultCount
+}
+
+// resultCountKeys are TraceStep metadata keys that indicate discrete result counts.
+var resultCountKeys = []string{"match_count", "final_count", "path_length"}
 
 // extractSymbolsFromResult extracts symbol IDs from a tool result.
 func extractSymbolsFromResult(result *tools.Result) []string {
@@ -990,6 +1146,12 @@ func (p *ExecutePhase) updateContextWithResults(ctx context.Context, deps *Depen
 			tokensUsed = (len(outputText) + 3) / 4
 		}
 
+		// IT_CRS_03 AC-3: Extract tool name from TraceStep for pass-through decisions.
+		toolName := ""
+		if result.TraceStep != nil {
+			toolName = result.TraceStep.Tool
+		}
+
 		agentResult := agent.ToolResult{
 			InvocationID: uuid.NewString(),
 			Success:      result.Success,
@@ -999,6 +1161,8 @@ func (p *ExecutePhase) updateContextWithResults(ctx context.Context, deps *Depen
 			TokensUsed:   tokensUsed,
 			Cached:       result.Cached,
 			Truncated:    truncated,
+			Tool:         toolName,          // IT_CRS_03 AC-3
+			ProofDelta:   result.ProofDelta, // IT_CRS_03 AC-8
 		}
 
 		// Append to ToolResults - safe because session access is serialized
@@ -2831,10 +2995,16 @@ func (p *ExecutePhase) updateProofNumber(ctx context.Context, deps *Dependencies
 		reason = "tool_failure: " + result.Error
 	}
 
+	// IT_CRS_03 AC-8: Use tool-specified proof delta when available.
+	var delta uint64 = 1
+	if result.ProofDelta > 0 {
+		delta = uint64(result.ProofDelta)
+	}
+
 	err := crsInstance.UpdateProofNumber(ctx, crs.ProofUpdate{
 		NodeID: nodeID,
 		Type:   updateType,
-		Delta:  1,
+		Delta:  delta,
 		Reason: reason,
 		Source: crs.SignalSourceHard, // Tool execution is a hard signal
 	})

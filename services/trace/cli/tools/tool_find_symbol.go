@@ -222,10 +222,14 @@ func (t *findSymbolTool) Execute(ctx context.Context, params TypedParams) (*Resu
 	// Use index to find symbols by name
 	var matches []*ast.Symbol
 	var usedFuzzy bool
+	strategy := "fallback" // IT_CRS_01: Track resolution strategy for CRS metadata
 
 	if t.index != nil {
 		// Try exact match first (fast path)
 		matches = t.index.GetByName(p.Name)
+		if len(matches) > 0 {
+			strategy = "exact"
+		}
 
 		// If no exact match, try fuzzy search (fallback)
 		if len(matches) == 0 {
@@ -236,6 +240,7 @@ func (t *findSymbolTool) Execute(ctx context.Context, params TypedParams) (*Resu
 			if err == nil && len(fuzzyMatches) > 0 {
 				matches = fuzzyMatches
 				usedFuzzy = true
+				strategy = "fuzzy"
 
 				t.logger.Info("find_symbol: exact match failed, using fuzzy search",
 					slog.String("query", p.Name),
@@ -289,17 +294,27 @@ func (t *findSymbolTool) Execute(ctx context.Context, params TypedParams) (*Resu
 		WithTool("find_symbol").
 		WithDuration(duration).
 		WithMetadata("match_count", fmt.Sprintf("%d", len(filtered))).
-		WithMetadata("used_fuzzy", fmt.Sprintf("%v", usedFuzzy)).
+		WithMetadata("used_fuzzy", fmt.Sprintf("%t", usedFuzzy)).
 		WithMetadata("kind_filter", p.Kind).
+		WithMetadata("resolution_strategy", strategy).
+		WithMetadata("hollow_success", fmt.Sprintf("%t", len(filtered) == 0)).
 		Build()
 
+	// IT_CRS_03 AC-8: Set proof delta based on resolution quality.
+	proofDelta := 2 // Strong signal: exact match
+	if usedFuzzy {
+		proofDelta = 1 // Weak signal: fuzzy match
+	}
+
 	return &Result{
-		Success:    true,
-		Output:     output,
-		OutputText: outputText,
-		TokensUsed: estimateTokens(outputText),
-		TraceStep:  &toolStep,
-		Duration:   duration,
+		Success:     true,
+		Output:      output,
+		OutputText:  outputText,
+		TokensUsed:  estimateTokens(outputText),
+		TraceStep:   &toolStep,
+		Duration:    duration,
+		ResultCount: output.MatchCount,
+		ProofDelta:  proofDelta,
 	}, nil
 }
 

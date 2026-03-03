@@ -419,7 +419,7 @@ func TestFindCalleesTool_TraceStepPopulated(t *testing.T) {
 	if result.TraceStep.Metadata == nil {
 		t.Fatal("TraceStep.Metadata should not be nil")
 	}
-	for _, key := range []string{"resolved_count", "external_count", "total_count"} {
+	for _, key := range []string{"resolved_count", "external_count", "total_count", "resolution_strategy", "truncated"} {
 		if _, ok := result.TraceStep.Metadata[key]; !ok {
 			t.Errorf("TraceStep.Metadata should contain %q", key)
 		}

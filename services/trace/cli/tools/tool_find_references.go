@@ -255,6 +255,7 @@ func (t *findReferencesTool) Execute(ctx context.Context, params TypedParams) (*
 	var sym *ast.Symbol
 	var fuzzy bool
 	var resolveErr error
+	strategy := "fallback" // IT_CRS_01: Track resolution strategy for CRS metadata
 
 	if p.PackageHint != "" && t.index != nil {
 		exactMatches := t.index.GetByName(p.SymbolName)
@@ -263,6 +264,7 @@ func (t *findReferencesTool) Execute(ctx context.Context, params TypedParams) (*
 			if len(filtered) < len(exactMatches) {
 				// Package hint narrowed the matches — pick the most significant
 				sym = pickMostSignificantSymbol(filtered)
+				strategy = "package_hint"
 				logger.Info("IT-06c: find_references resolved via package hint",
 					slog.String("symbol", p.SymbolName),
 					slog.String("hint", p.PackageHint),
@@ -279,6 +281,13 @@ func (t *findReferencesTool) Execute(ctx context.Context, params TypedParams) (*
 	if sym == nil {
 		sym, fuzzy, resolveErr = ResolveFunctionWithFuzzy(ctx, t.index, p.SymbolName, logger,
 			WithKindFilter(KindFilterAny))
+		if resolveErr == nil {
+			if fuzzy {
+				strategy = "fuzzy"
+			} else {
+				strategy = "exact"
+			}
+		}
 	}
 
 	if resolveErr != nil {
@@ -303,6 +312,7 @@ func (t *findReferencesTool) Execute(ctx context.Context, params TypedParams) (*
 			WithDuration(duration).
 			WithMetadata("reference_count", "0").
 			WithMetadata("symbol_resolved", "false").
+			WithMetadata("resolution_strategy", strategy).
 			Build()
 
 		return &Result{
@@ -411,15 +421,17 @@ func (t *findReferencesTool) Execute(ctx context.Context, params TypedParams) (*
 		WithMetadata("resolved_name", sym.Name).
 		WithMetadata("symbol_kind", sym.Kind.String()).
 		WithMetadata("fuzzy_match", fmt.Sprintf("%t", fuzzy)).
+		WithMetadata("resolution_strategy", strategy).
 		Build()
 
 	return &Result{
-		Success:    true,
-		Output:     output,
-		OutputText: outputText,
-		TokensUsed: estimateTokens(outputText),
-		TraceStep:  &toolStep,
-		Duration:   duration,
+		Success:     true,
+		Output:      output,
+		OutputText:  outputText,
+		TokensUsed:  estimateTokens(outputText),
+		TraceStep:   &toolStep,
+		Duration:    duration,
+		ResultCount: output.ReferenceCount,
 	}, nil
 }
 

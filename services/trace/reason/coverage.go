@@ -14,6 +14,7 @@ import (
 	"context"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
@@ -34,6 +35,7 @@ import (
 type TestCoverageFinder struct {
 	graph *graph.Graph
 	index *index.SymbolIndex
+	crs   CRSRecorder
 }
 
 // NewTestCoverageFinder creates a new TestCoverageFinder.
@@ -54,7 +56,13 @@ func NewTestCoverageFinder(g *graph.Graph, idx *index.SymbolIndex) *TestCoverage
 	return &TestCoverageFinder{
 		graph: g,
 		index: idx,
+		crs:   &NopCRSRecorder{},
 	}
+}
+
+// SetCRS configures CRS recording for this finder.
+func (f *TestCoverageFinder) SetCRS(recorder CRSRecorder) {
+	f.crs = recorder
 }
 
 // TestCoverage is the result of coverage analysis for a symbol.
@@ -135,6 +143,11 @@ func (f *TestCoverageFinder) FindTestCoverage(
 	if ctx == nil {
 		return nil, ErrInvalidInput
 	}
+
+	start := time.Now()
+	ctx, span := startCoverageSpan(ctx, targetID)
+	defer span.End()
+
 	if err := ctx.Err(); err != nil {
 		return nil, ErrContextCanceled
 	}
@@ -212,6 +225,12 @@ func (f *TestCoverageFinder) FindTestCoverage(
 
 	// Calculate confidence
 	result.Confidence = f.calculateCoverageConfidence(result)
+
+	dur := time.Since(start)
+	testCount := len(result.DirectTests) + len(result.IndirectTests)
+	setCoverageSpanResult(span, result.IsCovered, nil)
+	recordCoverageMetrics(ctx, dur, result.IsCovered, nil)
+	f.crs.RecordToolStep(ctx, "find_test_coverage", testCount, dur, nil)
 
 	return result, nil
 }

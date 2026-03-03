@@ -910,3 +910,36 @@ func TestFindHotspots_FiltersTestFiles(t *testing.T) {
 		}
 	})
 }
+
+func TestFindHotspots_CRS_Metadata(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphForHotspots(t)
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindHotspotsTool(analytics, idx)
+
+	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{}})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if result.TraceStep == nil {
+		t.Fatal("TraceStep should be populated")
+	}
+
+	meta := result.TraceStep.Metadata
+	requiredKeys := []string{
+		"top", "kind", "package", "exclude_tests", "sort_by",
+		"raw_count", "post_dunder_count", "final_count",
+	}
+	for _, key := range requiredKeys {
+		t.Run("has_"+key, func(t *testing.T) {
+			if _, ok := meta[key]; !ok {
+				t.Errorf("TraceStep.Metadata missing '%s'", key)
+			}
+		})
+	}
+}

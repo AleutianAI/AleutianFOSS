@@ -372,7 +372,7 @@ func TestFindCallersTool_TraceStepPopulated(t *testing.T) {
 	if result.TraceStep.Metadata == nil {
 		t.Fatal("TraceStep.Metadata should not be nil")
 	}
-	for _, key := range []string{"match_count", "total_callers", "used_inheritance_path"} {
+	for _, key := range []string{"match_count", "total_callers", "used_inheritance_path", "resolution_strategy", "truncated"} {
 		if _, ok := result.TraceStep.Metadata[key]; !ok {
 			t.Errorf("TraceStep.Metadata should contain %q", key)
 		}
@@ -437,5 +437,29 @@ func TestFindCallers_DefinitiveFooter(t *testing.T) {
 	}
 	if !strings.Contains(result.OutputText, "Do NOT use Grep or Read to verify") {
 		t.Error("expected 'Do NOT use Grep or Read' in success path output")
+	}
+}
+
+// IT_CRS_03 AC-5: Verify inheritance_depth and inherited_caller_count metadata.
+func TestFindCallers_InheritanceMetadata(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithCallers(t)
+	tool := NewFindCallersTool(g, idx)
+
+	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+		"function_name": "parseConfig",
+	}})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.TraceStep == nil {
+		t.Fatal("TraceStep should be populated")
+	}
+
+	meta := result.TraceStep.Metadata
+	for _, key := range []string{"inheritance_depth", "inherited_caller_count"} {
+		if _, ok := meta[key]; !ok {
+			t.Errorf("TraceStep.Metadata missing '%s'", key)
+		}
 	}
 }

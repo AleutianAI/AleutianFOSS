@@ -66,6 +66,13 @@ type conceptualResolutionOpts struct {
 	// When non-empty, prepended to the LLM prompt so the model knows what
 	// the destination should connect to.
 	SourceContext string
+
+	// AcceptAnyKind when true means non-callable index matches (types, structs,
+	// interfaces) are accepted as valid. Used by find_symbol, find_implementations,
+	// and find_references which target any symbol kind, not just functions/methods.
+	// IT_CRS_01: Without this, those tools would incorrectly enter LLM resolution
+	// when the name matches a type in the index.
+	AcceptAnyKind bool
 }
 
 func resolveConceptualName(
@@ -101,6 +108,12 @@ func resolveConceptualName(
 	if !isDotNotation {
 		syms := idx.GetByName(name)
 		if len(syms) > 0 {
+			// IT_CRS_01: When AcceptAnyKind is set, any index match is valid.
+			// find_symbol, find_implementations, and find_references target types/interfaces
+			// as well as functions, so non-callable matches should not trigger LLM resolution.
+			if opts.AcceptAnyKind {
+				return unchanged
+			}
 			hasCallable := false
 			for _, sym := range syms {
 				if sym.Kind == ast.SymbolKindFunction || sym.Kind == ast.SymbolKindMethod {

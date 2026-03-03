@@ -285,12 +285,13 @@ func TestGetSingleFormattedResult_FindCyclesNoPassThrough(t *testing.T) {
 		{
 			Success: true,
 			Output:  "Found 3 circular dependencies:\n\nCycle 1 (4 nodes):\n  funcA() [core/a.go:10]\n  -> funcB() [core/b.go:10]\n  -> funcA() (cycle back)\n\n",
+			Tool:    "find_cycles", // IT_CRS_03 AC-3: Tool name check replaces substring match
 		},
 	}
 
 	_, ok := getSingleFormattedResult(results)
 	if ok {
-		t.Fatal("expected NO pass-through for find_cycles — output contains 'circular dependencies'")
+		t.Fatal("expected NO pass-through for find_cycles — Tool='find_cycles' blocks pass-through")
 	}
 }
 
@@ -300,12 +301,13 @@ func TestGetSingleFormattedResult_FindCyclesZeroNoPassThrough(t *testing.T) {
 		{
 			Success: true,
 			Output:  "No circular dependencies found.\nThis is good news! The codebase has no detectable cycles.\n",
+			Tool:    "find_cycles", // IT_CRS_03 AC-3: Tool name check replaces substring match
 		},
 	}
 
 	_, ok := getSingleFormattedResult(results)
 	if ok {
-		t.Fatal("expected NO pass-through for find_cycles zero result — output contains 'circular dependencies'")
+		t.Fatal("expected NO pass-through for find_cycles zero result — Tool='find_cycles' blocks pass-through")
 	}
 }
 

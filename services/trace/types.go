@@ -712,6 +712,7 @@ type FindCodeSmellsRequest struct {
 	GraphID      string `json:"graph_id" binding:"required"`
 	Scope        string `json:"scope"`
 	MinSeverity  string `json:"min_severity"`
+	ContextLines int    `json:"context_lines"`
 	IncludeTests bool   `json:"include_tests"`
 }
 

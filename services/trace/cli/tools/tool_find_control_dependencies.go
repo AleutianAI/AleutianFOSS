@@ -317,6 +317,16 @@ func (t *findControlDependenciesTool) executeOnce(ctx context.Context, p FindCon
 	}
 
 	if controlDeps == nil {
+		// CRS: Populate metadata even on empty result path
+		if traceStep.Metadata == nil {
+			traceStep.Metadata = make(map[string]string)
+		}
+		traceStep.Metadata["target"] = p.Target
+		traceStep.Metadata["depth"] = fmt.Sprintf("%d", p.Depth)
+		traceStep.Metadata["raw_dependency_count"] = "0"
+		traceStep.Metadata["dependency_count"] = "0"
+		traceStep.Metadata["top_controllers_count"] = "0"
+
 		return &Result{
 			Success: true,
 			Output: FindControlDependenciesOutput{
@@ -358,13 +368,24 @@ func (t *findControlDependenciesTool) executeOnce(ctx context.Context, p FindCon
 		slog.Int("dependencies", len(filteredDeps)),
 	)
 
+	// CRS: Add pipeline metadata
+	if traceStep.Metadata == nil {
+		traceStep.Metadata = make(map[string]string)
+	}
+	traceStep.Metadata["target"] = p.Target
+	traceStep.Metadata["depth"] = fmt.Sprintf("%d", p.Depth)
+	traceStep.Metadata["raw_dependency_count"] = fmt.Sprintf("%d", len(deps))
+	traceStep.Metadata["dependency_count"] = fmt.Sprintf("%d", len(filteredDeps))
+	traceStep.Metadata["top_controllers_count"] = fmt.Sprintf("%d", output.Summary.TopControllers)
+
 	return &Result{
-		Success:    true,
-		Output:     output,
-		OutputText: outputText,
-		TokensUsed: estimateTokens(outputText),
-		TraceStep:  &traceStep,
-		Duration:   time.Since(start),
+		Success:     true,
+		Output:      output,
+		OutputText:  outputText,
+		TokensUsed:  estimateTokens(outputText),
+		TraceStep:   &traceStep,
+		Duration:    time.Since(start),
+		ResultCount: output.DependencyCount,
 	}, nil
 }
 

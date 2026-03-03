@@ -490,3 +490,39 @@ func TestFindCriticalPathTool_TraceStepIntegration(t *testing.T) {
 		t.Errorf("Result should include TokensUsed estimation")
 	}
 }
+
+func TestFindCriticalPathTool_CRS_Metadata(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphForCriticalPath(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindCriticalPathTool(analytics, idx)
+
+	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+		"target": "D",
+		"entry":  "cmd/main.go:10:main",
+	}})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if result.TraceStep == nil {
+		t.Fatal("TraceStep should be populated")
+	}
+
+	meta := result.TraceStep.Metadata
+	requiredKeys := []string{
+		"target", "entry", "path_length", "is_reachable",
+	}
+	for _, key := range requiredKeys {
+		t.Run("has_"+key, func(t *testing.T) {
+			if _, ok := meta[key]; !ok {
+				t.Errorf("TraceStep.Metadata missing '%s'", key)
+			}
+		})
+	}
+}

@@ -513,3 +513,38 @@ func TestFindLoopsTool_TraceStep(t *testing.T) {
 		}
 	}
 }
+
+func TestFindLoopsTool_CRS_Metadata(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithLoops(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindLoopsTool(analytics, idx)
+
+	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{}})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if result.TraceStep == nil {
+		t.Fatal("TraceStep should be populated")
+	}
+
+	meta := result.TraceStep.Metadata
+	requiredKeys := []string{
+		"top", "min_size", "show_nesting",
+		"raw_loop_count", "final_count",
+		"direct_recursion_count", "mutual_recursion_count", "complex_cycle_count",
+	}
+	for _, key := range requiredKeys {
+		t.Run("has_"+key, func(t *testing.T) {
+			if _, ok := meta[key]; !ok {
+				t.Errorf("TraceStep.Metadata missing '%s'", key)
+			}
+		})
+	}
+}

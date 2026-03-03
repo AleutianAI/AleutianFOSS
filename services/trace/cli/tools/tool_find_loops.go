@@ -317,8 +317,20 @@ func (t *findLoopsTool) executeOnce(ctx context.Context, p FindLoopsParams) (*Re
 
 	// Detect loops using dominator-based algorithm
 	loopNest, traceStep := t.analytics.DetectLoopsWithCRS(ctx, domTree)
+
+	// CRS: Ensure metadata map exists for all paths
+	if traceStep.Metadata == nil {
+		traceStep.Metadata = make(map[string]string)
+	}
+	traceStep.Metadata["top"] = fmt.Sprintf("%d", p.Top)
+	traceStep.Metadata["min_size"] = fmt.Sprintf("%d", p.MinSize)
+	traceStep.Metadata["show_nesting"] = fmt.Sprintf("%v", p.ShowNesting)
+
 	if loopNest == nil || len(loopNest.Loops) == 0 {
 		// No loops found - return success with empty result
+		traceStep.Metadata["raw_loop_count"] = "0"
+		traceStep.Metadata["final_count"] = "0"
+
 		span.SetAttributes(attribute.Int("loops_found", 0))
 		output := FindLoopsOutput{
 			Loops: []LoopInfo{},
@@ -349,6 +361,13 @@ func (t *findLoopsTool) executeOnce(ctx context.Context, p FindLoopsParams) (*Re
 	// Classify recursion types
 	summary := t.classifyRecursionTypes(filteredLoops, loopNest)
 
+	// CRS: Add pipeline metadata
+	traceStep.Metadata["raw_loop_count"] = fmt.Sprintf("%d", len(loopNest.Loops))
+	traceStep.Metadata["final_count"] = fmt.Sprintf("%d", len(filteredLoops))
+	traceStep.Metadata["direct_recursion_count"] = fmt.Sprintf("%d", summary.DirectRecursion)
+	traceStep.Metadata["mutual_recursion_count"] = fmt.Sprintf("%d", summary.MutualRecursion)
+	traceStep.Metadata["complex_cycle_count"] = fmt.Sprintf("%d", summary.ComplexCycles)
+
 	// Build typed output
 	output := t.buildOutput(filteredLoops, loopNest, p.ShowNesting, summary, p.Top)
 
@@ -371,12 +390,13 @@ func (t *findLoopsTool) executeOnce(ctx context.Context, p FindLoopsParams) (*Re
 	)
 
 	return &Result{
-		Success:    true,
-		Output:     output,
-		OutputText: outputText,
-		TokensUsed: estimateTokens(outputText),
-		TraceStep:  &traceStep,
-		Duration:   time.Since(start),
+		Success:     true,
+		Output:      output,
+		OutputText:  outputText,
+		TokensUsed:  estimateTokens(outputText),
+		TraceStep:   &traceStep,
+		Duration:    time.Since(start),
+		ResultCount: output.Summary.TotalLoops,
 	}, nil
 }
 

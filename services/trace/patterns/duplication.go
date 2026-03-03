@@ -13,14 +13,13 @@ package patterns
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
-	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
 )
 
@@ -45,6 +44,10 @@ type DuplicationOptions struct {
 
 	// SimilarityThreshold is the minimum similarity (default: 0.8).
 	SimilarityThreshold float64
+
+	// Type filters results by duplication type ("exact", "near", "structural").
+	// Empty string means all types.
+	Type string
 
 	// IncludeTests includes test files in analysis.
 	IncludeTests bool
@@ -75,11 +78,11 @@ func DefaultDuplicationOptions() DuplicationOptions {
 //
 // This type is safe for concurrent use.
 type DuplicationFinder struct {
-	graph         *graph.Graph
 	idx           *index.SymbolIndex
+	fileReader    *FileReader
+	crs           CRSRecorder
 	fingerprinter *Fingerprinter
 	lshIndex      *LSHIndex
-	projectRoot   string
 	mu            sync.RWMutex
 	indexed       bool
 }
@@ -93,14 +96,13 @@ type DuplicationFinder struct {
 //
 // # Inputs
 //
-//   - g: Code graph for symbol information.
 //   - idx: Symbol index for lookups.
 //   - projectRoot: Project root directory for reading source files.
 //
 // # Outputs
 //
 //   - *DuplicationFinder: Configured finder.
-func NewDuplicationFinder(g *graph.Graph, idx *index.SymbolIndex, projectRoot string) *DuplicationFinder {
+func NewDuplicationFinder(idx *index.SymbolIndex, projectRoot string) *DuplicationFinder {
 	fpConfig := DefaultFingerprintConfig()
 	fingerprinter := NewFingerprinter(fpConfig)
 
@@ -108,13 +110,43 @@ func NewDuplicationFinder(g *graph.Graph, idx *index.SymbolIndex, projectRoot st
 	lshIndex := NewLSHIndex(20, 5)
 
 	return &DuplicationFinder{
-		graph:         g,
 		idx:           idx,
+		fileReader:    NewFileReader(projectRoot),
+		crs:           &NopCRSRecorder{},
 		fingerprinter: fingerprinter,
 		lshIndex:      lshIndex,
-		projectRoot:   projectRoot,
 		indexed:       false,
 	}
+}
+
+// NewDuplicationFinderWithReader creates a duplication finder with a shared FileReader.
+//
+// # Inputs
+//
+//   - idx: Symbol index for lookups.
+//   - reader: Shared cached file reader.
+//
+// # Outputs
+//
+//   - *DuplicationFinder: Configured finder.
+func NewDuplicationFinderWithReader(idx *index.SymbolIndex, reader *FileReader) *DuplicationFinder {
+	fpConfig := DefaultFingerprintConfig()
+	fingerprinter := NewFingerprinter(fpConfig)
+	lshIndex := NewLSHIndex(20, 5)
+
+	return &DuplicationFinder{
+		idx:           idx,
+		fileReader:    reader,
+		crs:           &NopCRSRecorder{},
+		fingerprinter: fingerprinter,
+		lshIndex:      lshIndex,
+		indexed:       false,
+	}
+}
+
+// SetCRS configures CRS recording for this finder.
+func (d *DuplicationFinder) SetCRS(recorder CRSRecorder) {
+	d.crs = recorder
 }
 
 // BuildIndex builds the fingerprint index for the codebase.
@@ -172,7 +204,7 @@ func (d *DuplicationFinder) BuildIndex(ctx context.Context, opts *DuplicationOpt
 		}
 
 		// Read source code
-		code, err := d.readSymbolCode(sym)
+		code, err := d.fileReader.ReadSymbolCode(sym)
 		if err != nil {
 			continue // Skip symbols we can't read
 		}
@@ -211,7 +243,7 @@ func (d *DuplicationFinder) BuildIndex(ctx context.Context, opts *DuplicationOpt
 //
 // # Example
 //
-//	finder := NewDuplicationFinder(graph, index, "/project")
+//	finder := NewDuplicationFinder(index, "/project")
 //	dups, err := finder.FindDuplication(ctx, "pkg/auth", nil)
 func (d *DuplicationFinder) FindDuplication(
 	ctx context.Context,
@@ -221,6 +253,10 @@ func (d *DuplicationFinder) FindDuplication(
 	if ctx == nil {
 		return nil, ErrInvalidInput
 	}
+
+	start := time.Now()
+	ctx, span := startDuplicationSpan(ctx, scope)
+	defer span.End()
 
 	if opts == nil {
 		defaults := DefaultDuplicationOptions()
@@ -269,6 +305,11 @@ func (d *DuplicationFinder) FindDuplication(
 		// Determine duplication type
 		dupType := d.classifyDuplication(fp1, fp2, pair.Similarity)
 
+		// Filter by type if specified
+		if opts.Type != "" && string(dupType) != opts.Type {
+			continue
+		}
+
 		// Create Duplication result
 		dup := Duplication{
 			Type:       string(dupType),
@@ -303,6 +344,11 @@ func (d *DuplicationFinder) FindDuplication(
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].Similarity > results[j].Similarity
 	})
+
+	dur := time.Since(start)
+	setDuplicationSpanResult(span, len(results), nil)
+	recordDuplicationMetrics(ctx, dur, len(results), nil)
+	d.crs.RecordToolStep(ctx, "find_duplication", len(results), dur, nil)
 
 	return results, nil
 }
@@ -360,7 +406,7 @@ func (d *DuplicationFinder) FindDuplicatesOf(
 			return nil, ErrPatternNotFound
 		}
 
-		code, err := d.readSymbolCode(sym)
+		code, err := d.fileReader.ReadSymbolCode(sym)
 		if err != nil {
 			return nil, fmt.Errorf("reading symbol code: %w", err)
 		}
@@ -424,31 +470,6 @@ func (d *DuplicationFinder) FindDuplicatesOf(
 	})
 
 	return results, nil
-}
-
-// readSymbolCode reads the source code for a symbol.
-func (d *DuplicationFinder) readSymbolCode(sym *ast.Symbol) (string, error) {
-	if sym == nil {
-		return "", fmt.Errorf("nil symbol")
-	}
-
-	filePath := filepath.Join(d.projectRoot, sym.FilePath)
-
-	content, err := os.ReadFile(filePath)
-	if err != nil {
-		return "", fmt.Errorf("reading file %s: %w", filePath, err)
-	}
-
-	lines := strings.Split(string(content), "\n")
-
-	// Bounds check
-	if sym.StartLine < 1 || sym.EndLine > len(lines) {
-		return "", fmt.Errorf("symbol lines out of bounds")
-	}
-
-	// Extract symbol code (1-indexed to 0-indexed)
-	symbolLines := lines[sym.StartLine-1 : sym.EndLine]
-	return strings.Join(symbolLines, "\n"), nil
 }
 
 // classifyDuplication determines the type of duplication.

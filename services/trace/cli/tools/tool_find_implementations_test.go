@@ -546,7 +546,7 @@ func TestFindImplementationsTool_TraceStepPopulated(t *testing.T) {
 	if result.TraceStep.Metadata == nil {
 		t.Fatal("TraceStep.Metadata should not be nil")
 	}
-	for _, key := range []string{"match_count", "total_implementations", "index_used"} {
+	for _, key := range []string{"match_count", "total_implementations", "index_used", "resolution_strategy"} {
 		if _, ok := result.TraceStep.Metadata[key]; !ok {
 			t.Errorf("TraceStep.Metadata should contain %q", key)
 		}

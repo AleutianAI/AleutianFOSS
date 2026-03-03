@@ -254,6 +254,7 @@ func (t *findCallersTool) Execute(ctx context.Context, params TypedParams) (*Res
 	var legacyResults map[string]*graph.QueryResult
 	var queryErrors int
 	usedInheritancePath := false
+	strategy := "fallback" // IT_CRS_01: Track resolution strategy for CRS metadata
 
 	if t.index != nil {
 		var symbols []*ast.Symbol
@@ -263,6 +264,7 @@ func (t *findCallersTool) Execute(ctx context.Context, params TypedParams) (*Res
 		if strings.Contains(p.FunctionName, ".") {
 			symbol, _, err := ResolveFunctionWithFuzzy(ctx, t.index, p.FunctionName, t.logger)
 			if err == nil {
+				strategy = "dot_notation"
 				t.logger.Info("dot-notation resolved",
 					slog.String("tool", "find_callers"),
 					slog.String("query", p.FunctionName),
@@ -278,12 +280,16 @@ func (t *findCallersTool) Execute(ctx context.Context, params TypedParams) (*Res
 			// disambiguate by preferring symbols from the hinted package/directory.
 			if len(symbols) > 1 && p.PackageHint != "" {
 				symbols = filterByPackageHint(symbols, p.PackageHint, t.logger, "find_callers")
+				strategy = "package_hint"
+			} else if len(symbols) > 0 {
+				strategy = "exact"
 			}
 
 			// P1: If no exact match, try fuzzy search (Feb 14, 2026)
 			if len(symbols) == 0 {
 				symbol, fuzzy, err := ResolveFunctionWithFuzzy(ctx, t.index, p.FunctionName, t.logger)
 				if err == nil && fuzzy {
+					strategy = "fuzzy"
 					t.logger.Info("P1: Using fuzzy match for function",
 						slog.String("tool", "find_callers"),
 						slog.String("query", p.FunctionName),
@@ -390,6 +396,38 @@ func (t *findCallersTool) Execute(ctx context.Context, params TypedParams) (*Res
 
 	duration := time.Since(start)
 
+	// IT_CRS_01: Compute truncated flag from inheritance results
+	truncated := false
+	if usedInheritancePath {
+		for _, iqr := range inheritanceResults {
+			if iqr != nil && iqr.Truncated {
+				truncated = true
+				break
+			}
+		}
+	} else {
+		for _, qr := range legacyResults {
+			if qr != nil && qr.Truncated {
+				truncated = true
+				break
+			}
+		}
+	}
+
+	// IT_CRS_03 AC-5: Compute inheritance metadata for CRS diagnostics.
+	inheritanceDepth := 0
+	inheritedCallerCount := 0
+	if usedInheritancePath {
+		inheritanceDepth = len(inheritanceResults)
+		for _, iqr := range inheritanceResults {
+			if iqr != nil && iqr.InheritedCallers != nil {
+				for _, qr := range iqr.InheritedCallers {
+					inheritedCallerCount += len(qr.Symbols)
+				}
+			}
+		}
+	}
+
 	// Build CRS TraceStep for reasoning trace continuity
 	toolStep := crs.NewTraceStepBuilder().
 		WithAction("tool_find_callers").
@@ -398,16 +436,21 @@ func (t *findCallersTool) Execute(ctx context.Context, params TypedParams) (*Res
 		WithDuration(duration).
 		WithMetadata("match_count", fmt.Sprintf("%d", output.MatchCount)).
 		WithMetadata("total_callers", fmt.Sprintf("%d", output.TotalCallers)).
-		WithMetadata("used_inheritance_path", fmt.Sprintf("%v", usedInheritancePath)).
+		WithMetadata("used_inheritance_path", fmt.Sprintf("%t", usedInheritancePath)).
+		WithMetadata("resolution_strategy", strategy).
+		WithMetadata("truncated", fmt.Sprintf("%t", truncated)).
+		WithMetadata("inheritance_depth", fmt.Sprintf("%d", inheritanceDepth)).
+		WithMetadata("inherited_caller_count", fmt.Sprintf("%d", inheritedCallerCount)).
 		Build()
 
 	return &Result{
-		Success:    true,
-		Output:     output,
-		OutputText: outputText,
-		TokensUsed: estimateTokens(outputText),
-		TraceStep:  &toolStep,
-		Duration:   duration,
+		Success:     true,
+		Output:      output,
+		OutputText:  outputText,
+		TokensUsed:  estimateTokens(outputText),
+		TraceStep:   &toolStep,
+		Duration:    duration,
+		ResultCount: output.MatchCount,
 	}, nil
 }
 

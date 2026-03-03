@@ -357,13 +357,25 @@ func (t *findMergePointsTool) executeOnce(ctx context.Context, p FindMergePoints
 		slog.Int("total_merge_points", len(frontier.MergePoints)),
 	)
 
+	// CRS: Add pipeline metadata
+	if traceStep.Metadata == nil {
+		traceStep.Metadata = make(map[string]string)
+	}
+	traceStep.Metadata["top"] = fmt.Sprintf("%d", p.Top)
+	traceStep.Metadata["min_sources"] = fmt.Sprintf("%d", p.MinSources)
+	traceStep.Metadata["raw_merge_count"] = fmt.Sprintf("%d", len(frontier.MergePoints))
+	traceStep.Metadata["final_count"] = fmt.Sprintf("%d", len(mergePoints))
+	traceStep.Metadata["max_convergence"] = fmt.Sprintf("%d", output.Summary.MaxConvergence)
+	traceStep.Metadata["avg_convergence"] = fmt.Sprintf("%.2f", output.Summary.AvgConvergence)
+
 	return &Result{
-		Success:    true,
-		Output:     output,
-		OutputText: outputText,
-		TokensUsed: estimateTokens(outputText),
-		TraceStep:  &traceStep,
-		Duration:   time.Since(start),
+		Success:     true,
+		Output:      output,
+		OutputText:  outputText,
+		TokensUsed:  estimateTokens(outputText),
+		TraceStep:   &traceStep,
+		Duration:    time.Since(start),
+		ResultCount: output.Summary.Returned,
 	}, nil
 }
 

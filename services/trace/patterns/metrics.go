@@ -124,3 +124,194 @@ func recordPatternByType(ctx context.Context, patternType string) {
 		attribute.String("pattern_type", patternType),
 	))
 }
+
+// ============================================================================
+// Smell Finder OTel
+// ============================================================================
+
+// startSmellsSpan creates a span for code smell detection.
+func startSmellsSpan(ctx context.Context, scope string) (context.Context, trace.Span) {
+	return tracer.Start(ctx, "patterns.SmellFinder.FindCodeSmells",
+		trace.WithAttributes(
+			attribute.String("smells.scope", scope),
+		),
+	)
+}
+
+// setSmellsSpanResult sets result attributes on a smell detection span.
+func setSmellsSpanResult(span trace.Span, count int, err error) {
+	span.SetAttributes(
+		attribute.Int("smells.count", count),
+		attribute.Bool("smells.success", err == nil),
+	)
+	if err != nil {
+		span.RecordError(err)
+	}
+}
+
+// recordSmellsMetrics records metrics for smell detection.
+func recordSmellsMetrics(ctx context.Context, duration time.Duration, count int, err error) {
+	if initErr := initMetrics(); initErr != nil {
+		return
+	}
+	attrs := metric.WithAttributes(
+		attribute.String("tool", "find_code_smells"),
+		attribute.Bool("success", err == nil),
+	)
+	detectLatency.Record(ctx, duration.Seconds(), attrs)
+	detectTotal.Add(ctx, 1, attrs)
+	patternsFound.Record(ctx, int64(count))
+}
+
+// ============================================================================
+// Duplication Finder OTel
+// ============================================================================
+
+// startDuplicationSpan creates a span for duplication detection.
+func startDuplicationSpan(ctx context.Context, scope string) (context.Context, trace.Span) {
+	return tracer.Start(ctx, "patterns.DuplicationFinder.FindDuplication",
+		trace.WithAttributes(
+			attribute.String("duplication.scope", scope),
+		),
+	)
+}
+
+// setDuplicationSpanResult sets result attributes on a duplication detection span.
+func setDuplicationSpanResult(span trace.Span, count int, err error) {
+	span.SetAttributes(
+		attribute.Int("duplication.count", count),
+		attribute.Bool("duplication.success", err == nil),
+	)
+	if err != nil {
+		span.RecordError(err)
+	}
+}
+
+// recordDuplicationMetrics records metrics for duplication detection.
+func recordDuplicationMetrics(ctx context.Context, duration time.Duration, count int, err error) {
+	if initErr := initMetrics(); initErr != nil {
+		return
+	}
+	attrs := metric.WithAttributes(
+		attribute.String("tool", "find_duplication"),
+		attribute.Bool("success", err == nil),
+	)
+	detectLatency.Record(ctx, duration.Seconds(), attrs)
+	detectTotal.Add(ctx, 1, attrs)
+	patternsFound.Record(ctx, int64(count))
+}
+
+// ============================================================================
+// Circular Dependency Finder OTel
+// ============================================================================
+
+// startCircularDepsSpan creates a span for circular dependency detection.
+func startCircularDepsSpan(ctx context.Context, scope string, depType CircularDepType) (context.Context, trace.Span) {
+	return tracer.Start(ctx, "patterns.CircularDepFinder.FindCircularDeps",
+		trace.WithAttributes(
+			attribute.String("circular_deps.scope", scope),
+			attribute.String("circular_deps.type", string(depType)),
+		),
+	)
+}
+
+// setCircularDepsSpanResult sets result attributes on a circular dep detection span.
+func setCircularDepsSpanResult(span trace.Span, count int, err error) {
+	span.SetAttributes(
+		attribute.Int("circular_deps.count", count),
+		attribute.Bool("circular_deps.success", err == nil),
+	)
+	if err != nil {
+		span.RecordError(err)
+	}
+}
+
+// recordCircularDepsMetrics records metrics for circular dependency detection.
+func recordCircularDepsMetrics(ctx context.Context, duration time.Duration, count int, err error) {
+	if initErr := initMetrics(); initErr != nil {
+		return
+	}
+	attrs := metric.WithAttributes(
+		attribute.String("tool", "find_circular_deps"),
+		attribute.Bool("success", err == nil),
+	)
+	detectLatency.Record(ctx, duration.Seconds(), attrs)
+	detectTotal.Add(ctx, 1, attrs)
+	patternsFound.Record(ctx, int64(count))
+}
+
+// ============================================================================
+// Convention Extractor OTel
+// ============================================================================
+
+// startConventionsSpan creates a span for convention extraction.
+func startConventionsSpan(ctx context.Context, scope string) (context.Context, trace.Span) {
+	return tracer.Start(ctx, "patterns.ConventionExtractor.ExtractConventions",
+		trace.WithAttributes(
+			attribute.String("conventions.scope", scope),
+		),
+	)
+}
+
+// setConventionsSpanResult sets result attributes on a convention extraction span.
+func setConventionsSpanResult(span trace.Span, count int, err error) {
+	span.SetAttributes(
+		attribute.Int("conventions.count", count),
+		attribute.Bool("conventions.success", err == nil),
+	)
+	if err != nil {
+		span.RecordError(err)
+	}
+}
+
+// recordConventionsMetrics records metrics for convention extraction.
+func recordConventionsMetrics(ctx context.Context, duration time.Duration, count int, err error) {
+	if initErr := initMetrics(); initErr != nil {
+		return
+	}
+	attrs := metric.WithAttributes(
+		attribute.String("tool", "extract_conventions"),
+		attribute.Bool("success", err == nil),
+	)
+	detectLatency.Record(ctx, duration.Seconds(), attrs)
+	detectTotal.Add(ctx, 1, attrs)
+	patternsFound.Record(ctx, int64(count))
+}
+
+// ============================================================================
+// Dead Code Finder OTel
+// ============================================================================
+
+// startDeadCodeSpan creates a span for dead code detection.
+func startDeadCodeSpan(ctx context.Context, scope string) (context.Context, trace.Span) {
+	return tracer.Start(ctx, "patterns.DeadCodeFinder.FindDeadCode",
+		trace.WithAttributes(
+			attribute.String("dead_code.scope", scope),
+		),
+	)
+}
+
+// setDeadCodeSpanResult sets result attributes on a dead code detection span.
+func setDeadCodeSpanResult(span trace.Span, count int, err error) {
+	span.SetAttributes(
+		attribute.Int("dead_code.count", count),
+		attribute.Bool("dead_code.success", err == nil),
+	)
+	if err != nil {
+		span.RecordError(err)
+	}
+}
+
+// recordDeadCodeMetrics records metrics for dead code detection.
+func recordDeadCodeMetrics(ctx context.Context, duration time.Duration, count int, err error) {
+	if initErr := initMetrics(); initErr != nil {
+		return
+	}
+	attrs := metric.WithAttributes(
+		attribute.String("tool", "find_dead_code"),
+		attribute.Bool("success", err == nil),
+	)
+	detectLatency.Record(ctx, duration.Seconds(), attrs)
+	detectTotal.Add(ctx, 1, attrs)
+	patternsFound.Record(ctx, int64(count))
+}

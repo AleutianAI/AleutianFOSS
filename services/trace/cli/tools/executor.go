@@ -23,7 +23,14 @@ import (
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/transaction"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// Package-level tracer for the tool executor.
+var executorTracer = otel.Tracer("aleutian.tools.executor")
 
 // Sentinel errors for the executor.
 var (
@@ -186,6 +193,19 @@ func (e *Executor) Execute(ctx context.Context, invocation *Invocation) (*Result
 		invocation.ID = uuid.NewString()
 	}
 
+	// OTel span wrapping the entire tool execution
+	ctx, span := executorTracer.Start(ctx, "tools.Executor.Execute",
+		trace.WithAttributes(
+			attribute.String("tool.name", invocation.ToolName),
+			attribute.String("tool.invocation_id", invocation.ID),
+		),
+	)
+	defer func() {
+		if span.IsRecording() {
+			span.End()
+		}
+	}()
+
 	logger := slog.With(
 		"tool", invocation.ToolName,
 		"invocation_id", invocation.ID,
@@ -218,6 +238,11 @@ func (e *Executor) Execute(ctx context.Context, invocation *Invocation) (*Result
 		if cached, ok := e.cache.get(invocation.ToolName, invocation.Parameters); ok {
 			logger.Debug("Cache hit")
 			cached.Cached = true
+			span.SetAttributes(
+				attribute.Bool("tool.cached", true),
+				attribute.Bool("tool.success", cached.Success),
+			)
+			span.SetStatus(codes.Ok, "cache hit")
 			return cached, nil
 		}
 	}
@@ -296,7 +321,10 @@ func (e *Executor) Execute(ctx context.Context, invocation *Invocation) (*Result
 	}
 
 	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		span.RecordError(err)
 		if errors.Is(err, context.DeadlineExceeded) {
+			span.SetAttributes(attribute.Bool("tool.timeout", true))
 			logger.Error("Tool execution timed out", "timeout", timeout)
 			return nil, fmt.Errorf("%w: %s after %v", ErrTimeout, invocation.ToolName, timeout)
 		}
@@ -319,6 +347,15 @@ func (e *Executor) Execute(ctx context.Context, invocation *Invocation) (*Result
 
 	// Attach result to invocation
 	invocation.Result = result
+
+	// Record result attributes on the span
+	span.SetAttributes(
+		attribute.Bool("tool.success", result.Success),
+		attribute.Int64("tool.duration_ms", int64(result.Duration/time.Millisecond)),
+		attribute.Int("tool.tokens_used", result.TokensUsed),
+		attribute.Bool("tool.cached", result.Cached),
+	)
+	span.SetStatus(codes.Ok, "")
 
 	logger.Debug("Tool executed",
 		"success", result.Success,

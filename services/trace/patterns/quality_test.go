@@ -24,9 +24,8 @@ import (
 // ============================================================================
 
 func TestNewSmellFinder(t *testing.T) {
-	g := graph.NewGraph("/test")
 	idx := index.NewSymbolIndex()
-	finder := NewSmellFinder(g, idx, "/test")
+	finder := NewSmellFinder(idx, "/test")
 
 	if finder == nil {
 		t.Fatal("NewSmellFinder returned nil")
@@ -34,9 +33,8 @@ func TestNewSmellFinder(t *testing.T) {
 }
 
 func TestSmellFinder_FindCodeSmells_NilContext(t *testing.T) {
-	g := graph.NewGraph("/test")
 	idx := index.NewSymbolIndex()
-	finder := NewSmellFinder(g, idx, "/test")
+	finder := NewSmellFinder(idx, "/test")
 
 	_, err := finder.FindCodeSmells(nil, "", nil)
 
@@ -46,9 +44,8 @@ func TestSmellFinder_FindCodeSmells_NilContext(t *testing.T) {
 }
 
 func TestSmellFinder_FindCodeSmells_EmptyIndex(t *testing.T) {
-	g := graph.NewGraph("/test")
 	idx := index.NewSymbolIndex()
-	finder := NewSmellFinder(g, idx, "/test")
+	finder := NewSmellFinder(idx, "/test")
 
 	ctx := context.Background()
 	smells, err := finder.FindCodeSmells(ctx, "", nil)
@@ -63,9 +60,8 @@ func TestSmellFinder_FindCodeSmells_EmptyIndex(t *testing.T) {
 }
 
 func TestSmellFinder_Summary(t *testing.T) {
-	g := graph.NewGraph("/test")
 	idx := index.NewSymbolIndex()
-	finder := NewSmellFinder(g, idx, "/test")
+	finder := NewSmellFinder(idx, "/test")
 
 	// Empty
 	summary := finder.Summary(nil)
@@ -520,7 +516,6 @@ func TestIsLowerCamelCase(t *testing.T) {
 // ============================================================================
 
 func TestSmellDetection_LongFunction(t *testing.T) {
-	g := graph.NewGraph("/test")
 	idx := index.NewSymbolIndex()
 
 	// Create a long function (60 lines)
@@ -538,7 +533,7 @@ func TestSmellDetection_LongFunction(t *testing.T) {
 
 	idx.Add(longFunc)
 
-	finder := NewSmellFinder(g, idx, "/nonexistent") // No file access
+	finder := NewSmellFinder(idx, "/nonexistent") // No file access
 
 	ctx := context.Background()
 	opts := DefaultSmellOptions()
@@ -561,7 +556,6 @@ func TestSmellDetection_LongFunction(t *testing.T) {
 }
 
 func TestSmellDetection_GodObject(t *testing.T) {
-	g := graph.NewGraph("/test")
 	idx := index.NewSymbolIndex()
 
 	// Create a type
@@ -593,7 +587,7 @@ func TestSmellDetection_GodObject(t *testing.T) {
 		idx.Add(method)
 	}
 
-	finder := NewSmellFinder(g, idx, "/nonexistent")
+	finder := NewSmellFinder(idx, "/nonexistent")
 
 	ctx := context.Background()
 	opts := DefaultSmellOptions()

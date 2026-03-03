@@ -275,11 +275,13 @@ func getSingleFormattedResult(results []agent.ToolResult) (string, bool) {
 	var errorCount int
 	var emptySuccessCount int
 	var singleOutput string
+	var singleTool string // IT_CRS_03 AC-3: Track tool name for pass-through decisions
 
 	for _, result := range results {
 		if result.Success && result.Output != "" {
 			successCount++
 			singleOutput = result.Output
+			singleTool = result.Tool
 		} else if result.Success && result.Output == "" {
 			// CR-20-6: Track success-with-empty-output separately. This indicates
 			// another tool ran but produced nothing — the full synthesis path should
@@ -322,7 +324,8 @@ func getSingleFormattedResult(results []agent.ToolResult) (string, bool) {
 	// that return definitive lists (find_callers, find_implementations), find_cycles
 	// returns global unscoped results that LLM synthesis must narrate in context
 	// of the user's query (package scoping, sorting, relevance filtering).
-	if strings.Contains(trimmed, "circular dependencies") {
+	// IT_CRS_03 AC-3: Use tool name instead of fragile substring matching.
+	if singleTool == "find_cycles" {
 		return "", false
 	}
 

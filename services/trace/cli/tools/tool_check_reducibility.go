@@ -284,7 +284,19 @@ func (t *checkReducibilityTool) executeOnce(ctx context.Context, p CheckReducibi
 
 	// Check reducibility
 	result, traceStep := t.analytics.CheckReducibilityWithCRS(ctx, domTree)
+
+	// CRS: Ensure metadata map exists
+	if traceStep.Metadata == nil {
+		traceStep.Metadata = make(map[string]string)
+	}
+	traceStep.Metadata["show_irreducible"] = fmt.Sprintf("%v", p.ShowIrreducible)
+
 	if result == nil {
+		// Fully reducible — no irreducible regions
+		traceStep.Metadata["is_reducible"] = "true"
+		traceStep.Metadata["irreducible_region_count"] = "0"
+		traceStep.Metadata["quality_score"] = "1.00"
+
 		outputText := "Reducibility Analysis:\n\nStatus: REDUCIBLE (Well-structured)\nScore: 100.0% (Excellent)\nGraph structure is well-formed.\n"
 		return &Result{
 			Success: true,
@@ -306,6 +318,11 @@ func (t *checkReducibilityTool) executeOnce(ctx context.Context, p CheckReducibi
 		}, nil
 	}
 
+	// CRS: Add result metadata for non-nil result
+	traceStep.Metadata["is_reducible"] = fmt.Sprintf("%v", result.IsReducible)
+	traceStep.Metadata["irreducible_region_count"] = fmt.Sprintf("%d", len(result.IrreducibleRegions))
+	traceStep.Metadata["quality_score"] = fmt.Sprintf("%.2f", result.Score)
+
 	// Build output
 	output := t.buildOutput(result, p.ShowIrreducible)
 
@@ -326,13 +343,18 @@ func (t *checkReducibilityTool) executeOnce(ctx context.Context, p CheckReducibi
 		slog.Int("irreducible_regions", len(result.IrreducibleRegions)),
 	)
 
+	reducibleCount := 0
+	if output.IsReducible {
+		reducibleCount = 1
+	}
 	return &Result{
-		Success:    true,
-		Output:     output,
-		OutputText: outputText,
-		TokensUsed: estimateTokens(outputText),
-		TraceStep:  &traceStep,
-		Duration:   time.Since(start),
+		Success:     true,
+		Output:      output,
+		OutputText:  outputText,
+		TokensUsed:  estimateTokens(outputText),
+		TraceStep:   &traceStep,
+		Duration:    time.Since(start),
+		ResultCount: reducibleCount,
 	}, nil
 }
 

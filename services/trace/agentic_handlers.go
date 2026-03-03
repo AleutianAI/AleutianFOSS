@@ -1119,10 +1119,11 @@ func (h *Handlers) HandleFindCodeSmells(c *gin.Context) {
 		minSeverity = patterns.SeverityWarning
 	}
 
-	finder := patterns.NewSmellFinder(cached.Graph, cached.Index, cached.ProjectRoot)
+	finder := patterns.NewSmellFinder(cached.Index, cached.ProjectRoot)
 	opts := &patterns.SmellOptions{
 		Thresholds:   patterns.DefaultSmellThresholds(),
 		MinSeverity:  minSeverity,
+		ContextLines: req.ContextLines,
 		IncludeTests: req.IncludeTests,
 	}
 
@@ -1170,19 +1171,16 @@ func (h *Handlers) HandleFindDuplication(c *gin.Context) {
 		return
 	}
 
-	minSimilarity := req.MinSimilarity
-	if minSimilarity <= 0 {
-		minSimilarity = 0.8
+	finder := patterns.NewDuplicationFinder(cached.Index, cached.ProjectRoot)
+
+	opts := patterns.DefaultDuplicationOptions()
+	if req.MinSimilarity > 0 {
+		opts.SimilarityThreshold = req.MinSimilarity
 	}
+	opts.Type = req.Type
+	opts.IncludeTests = req.IncludeTests
 
-	finder := patterns.NewDuplicationFinder(cached.Graph, cached.Index, cached.ProjectRoot)
-
-	opts := &patterns.DuplicationOptions{
-		SimilarityThreshold: minSimilarity,
-		IncludeTests:        req.IncludeTests,
-	}
-
-	if _, err := finder.BuildIndex(c.Request.Context(), opts); err != nil {
+	if _, err := finder.BuildIndex(c.Request.Context(), &opts); err != nil {
 		logger.Error("Failed to build duplication index", "error", err)
 		c.JSON(http.StatusInternalServerError, ErrorResponse{
 			Error: "Failed to build duplication index",
@@ -1191,7 +1189,7 @@ func (h *Handlers) HandleFindDuplication(c *gin.Context) {
 		return
 	}
 
-	result, err := finder.FindDuplication(c.Request.Context(), req.Scope, opts)
+	result, err := finder.FindDuplication(c.Request.Context(), req.Scope, &opts)
 	if err != nil {
 		logger.Error("Failed to find duplication", "error", err)
 		c.JSON(http.StatusInternalServerError, ErrorResponse{
@@ -1288,11 +1286,11 @@ func (h *Handlers) HandleExtractConventions(c *gin.Context) {
 
 	extractor := patterns.NewConventionExtractor(cached.Index, cached.ProjectRoot)
 
-	opts := &patterns.ConventionOptions{
-		IncludeTests: req.IncludeTests,
-	}
+	opts := patterns.DefaultConventionOptions()
+	opts.Types = req.Types
+	opts.IncludeTests = req.IncludeTests
 
-	result, err := extractor.ExtractConventions(c.Request.Context(), req.Scope, opts)
+	result, err := extractor.ExtractConventions(c.Request.Context(), req.Scope, &opts)
 	if err != nil {
 		logger.Error("Failed to extract conventions", "error", err)
 		c.JSON(http.StatusInternalServerError, ErrorResponse{

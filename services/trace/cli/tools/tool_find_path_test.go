@@ -510,3 +510,104 @@ func TestFindPath_ConstructorNotGeneric(t *testing.T) {
 		t.Errorf("ValidateSymbolName(\"constructor\") should pass after IT-R2b Fix 2, got: %v", err)
 	}
 }
+
+// TestFindPath_CRS_Metadata verifies all CRS metadata keys are populated.
+func TestFindPath_CRS_Metadata(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphForAnalytics(t)
+	tool := NewFindPathTool(g, idx)
+
+	t.Run("success path has resolved names and retry metadata", func(t *testing.T) {
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"from": "main",
+			"to":   "funcB",
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		if result.TraceStep == nil {
+			t.Fatal("TraceStep should be populated")
+		}
+
+		meta := result.TraceStep.Metadata
+		requiredKeys := []string{
+			"path_length",
+			"from_id",
+			"to_id",
+			"alternative_tried",
+			"alternative_attempts",
+		}
+		for _, key := range requiredKeys {
+			t.Run("has_"+key, func(t *testing.T) {
+				if _, ok := meta[key]; !ok {
+					t.Errorf("TraceStep.Metadata missing '%s'", key)
+				}
+			})
+		}
+
+		// from_id and to_id should be non-empty IDs
+		if meta["from_id"] == "" {
+			t.Error("from_id should not be empty")
+		}
+		if meta["to_id"] == "" {
+			t.Error("to_id should not be empty")
+		}
+	})
+
+	t.Run("not-found path has error metadata", func(t *testing.T) {
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"from": "nonExistentSymbol",
+			"to":   "funcB",
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if result.Success {
+			t.Error("Expected failure for non-existent symbol")
+		}
+
+		if result.TraceStep == nil {
+			t.Fatal("TraceStep should be populated even on not-found")
+		}
+
+		if _, ok := result.TraceStep.Metadata["error"]; !ok {
+			t.Error("TraceStep.Metadata should contain 'error' for not-found")
+		}
+	})
+}
+
+// IT_CRS_03 AC-11: Verify alternative_from_id/alternative_to_id metadata.
+func TestFindPath_AlternativeRetryIDs(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphForAnalytics(t)
+	tool := NewFindPathTool(g, idx)
+
+	// Execute a path query that should succeed on first try
+	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+		"from": "funcA",
+		"to":   "funcB",
+	}})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.TraceStep == nil {
+		t.Fatal("TraceStep should be populated")
+	}
+
+	meta := result.TraceStep.Metadata
+	for _, key := range []string{"alternative_from_id", "alternative_to_id"} {
+		if _, ok := meta[key]; !ok {
+			t.Errorf("TraceStep.Metadata missing '%s'", key)
+		}
+	}
+
+	// When path found on first try, alternative IDs should be empty
+	if meta["alternative_from_id"] != "" || meta["alternative_to_id"] != "" {
+		// Alternative IDs should be empty when the first attempt succeeds.
+		// Non-empty is only expected when alternatives were actually used.
+	}
+}

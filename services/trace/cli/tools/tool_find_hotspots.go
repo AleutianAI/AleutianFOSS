@@ -449,6 +449,19 @@ func (t *findHotspotsTool) Execute(ctx context.Context, params TypedParams) (*Re
 		)
 	}
 
+	// CRS: Add pipeline metadata
+	if traceStep.Metadata == nil {
+		traceStep.Metadata = make(map[string]string)
+	}
+	traceStep.Metadata["top"] = fmt.Sprintf("%d", p.Top)
+	traceStep.Metadata["kind"] = p.Kind
+	traceStep.Metadata["package"] = p.Package
+	traceStep.Metadata["exclude_tests"] = fmt.Sprintf("%v", p.ExcludeTests)
+	traceStep.Metadata["sort_by"] = p.SortBy
+	traceStep.Metadata["raw_count"] = fmt.Sprintf("%d", len(hotspots)+dundarFiltered)
+	traceStep.Metadata["post_dunder_count"] = fmt.Sprintf("%d", len(hotspots))
+	traceStep.Metadata["final_count"] = fmt.Sprintf("%d", len(filtered))
+
 	// Build typed output
 	output := t.buildOutput(filtered)
 
@@ -456,12 +469,13 @@ func (t *findHotspotsTool) Execute(ctx context.Context, params TypedParams) (*Re
 	outputText := t.formatText(filtered, p.Package, p.SortBy)
 
 	return &Result{
-		Success:    true,
-		Output:     output,
-		OutputText: outputText,
-		TokensUsed: estimateTokens(outputText),
-		TraceStep:  &traceStep,
-		Duration:   time.Since(start),
+		Success:     true,
+		Output:      output,
+		OutputText:  outputText,
+		TokensUsed:  estimateTokens(outputText),
+		TraceStep:   &traceStep,
+		Duration:    time.Since(start),
+		ResultCount: output.HotspotCount,
 	}, nil
 }
 

@@ -69,7 +69,7 @@ func TestFindReferencesTool_TraceStepPopulated(t *testing.T) {
 		t.Fatal("TraceStep.Metadata should not be nil")
 	}
 	// IT-06 Change 4: Enhanced metadata keys
-	for _, key := range []string{"reference_count", "symbol_resolved", "resolved_name", "symbol_kind", "fuzzy_match"} {
+	for _, key := range []string{"reference_count", "symbol_resolved", "resolved_name", "symbol_kind", "fuzzy_match", "resolution_strategy"} {
 		if _, ok := result.TraceStep.Metadata[key]; !ok {
 			t.Errorf("TraceStep.Metadata should contain %q", key)
 		}

@@ -342,12 +342,13 @@ func (t *findCommonDependencyTool) Execute(ctx context.Context, params TypedPara
 	)
 
 	return &Result{
-		Success:    true,
-		Output:     output,
-		OutputText: outputText,
-		TokensUsed: estimateTokens(outputText),
-		TraceStep:  &traceStep,
-		Duration:   duration,
+		Success:     true,
+		Output:      output,
+		OutputText:  outputText,
+		TokensUsed:  estimateTokens(outputText),
+		TraceStep:   &traceStep,
+		Duration:    duration,
+		ResultCount: output.TargetsResolved,
 	}, nil
 }
 
@@ -479,6 +480,10 @@ func (t *findCommonDependencyTool) buildTraceStep(
 	lcd string,
 	domStep, lcdStep crs.TraceStep,
 ) crs.TraceStep {
+	lcdFound := "0"
+	if lcd != "" {
+		lcdFound = "1"
+	}
 	return crs.NewTraceStepBuilder().
 		WithAction("tool_find_common_dependency").
 		WithTarget(entry).
@@ -487,6 +492,7 @@ func (t *findCommonDependencyTool) buildTraceStep(
 		WithMetadata("entry", entry).
 		WithMetadata("target_count", fmt.Sprintf("%d", targetCount)).
 		WithMetadata("lcd", lcd).
+		WithMetadata("lcd_found", lcdFound).
 		WithMetadata("dom_iterations", domStep.Metadata["iterations"]).
 		WithMetadata("dom_converged", domStep.Metadata["converged"]).
 		Build()

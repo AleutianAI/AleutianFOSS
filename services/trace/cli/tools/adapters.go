@@ -25,7 +25,13 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/explore"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// Package-level tracer for adapter tools.
+var adaptersTracer = otel.Tracer("tools.adapters")
 
 // RegisterExploreTools registers all CB-20 explore tools with the registry.
 //
@@ -181,6 +187,10 @@ func (t *findEntryPointsTool) Definition() ToolDefinition {
 }
 
 func (t *findEntryPointsTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	ctx, span := adaptersTracer.Start(ctx, "findEntryPointsTool.Execute",
+		trace.WithAttributes(attribute.String("tool", "find_entry_points")))
+	defer span.End()
+
 	m := params.ToMap()
 	opts := explore.DefaultEntryPointOptions()
 
@@ -207,10 +217,11 @@ func (t *findEntryPointsTool) Execute(ctx context.Context, params TypedParams) (
 
 	output, _ := json.Marshal(result)
 	return &Result{
-		Success:    true,
-		Output:     result,
-		OutputText: string(output),
-		TokensUsed: estimateTokens(string(output)),
+		Success:     true,
+		Output:      result,
+		OutputText:  string(output),
+		TokensUsed:  estimateTokens(string(output)),
+		ResultCount: result.TotalFound,
 	}, nil
 }
 
@@ -264,6 +275,10 @@ func (t *traceDataFlowTool) Definition() ToolDefinition {
 }
 
 func (t *traceDataFlowTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	ctx, span := adaptersTracer.Start(ctx, "traceDataFlowTool.Execute",
+		trace.WithAttributes(attribute.String("tool", "trace_data_flow")))
+	defer span.End()
+
 	m := params.ToMap()
 	symbolID, ok := m["symbol_id"].(string)
 	if !ok || symbolID == "" {
@@ -282,10 +297,11 @@ func (t *traceDataFlowTool) Execute(ctx context.Context, params TypedParams) (*R
 
 	output, _ := json.Marshal(result)
 	return &Result{
-		Success:    true,
-		Output:     result,
-		OutputText: string(output),
-		TokensUsed: estimateTokens(string(output)),
+		Success:     true,
+		Output:      result,
+		OutputText:  string(output),
+		TokensUsed:  estimateTokens(string(output)),
+		ResultCount: len(result.Sources) + len(result.Transforms) + len(result.Sinks),
 	}, nil
 }
 
@@ -339,6 +355,10 @@ func (t *traceErrorFlowTool) Definition() ToolDefinition {
 }
 
 func (t *traceErrorFlowTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	ctx, span := adaptersTracer.Start(ctx, "traceErrorFlowTool.Execute",
+		trace.WithAttributes(attribute.String("tool", "trace_error_flow")))
+	defer span.End()
+
 	m := params.ToMap()
 	symbolID, ok := m["symbol_id"].(string)
 	if !ok || symbolID == "" {
@@ -357,10 +377,11 @@ func (t *traceErrorFlowTool) Execute(ctx context.Context, params TypedParams) (*
 
 	output, _ := json.Marshal(result)
 	return &Result{
-		Success:    true,
-		Output:     result,
-		OutputText: string(output),
-		TokensUsed: estimateTokens(string(output)),
+		Success:     true,
+		Output:      result,
+		OutputText:  string(output),
+		TokensUsed:  estimateTokens(string(output)),
+		ResultCount: len(result.Origins) + len(result.Handlers) + len(result.Escapes),
 	}, nil
 }
 
@@ -416,6 +437,10 @@ func (t *buildMinimalContextTool) Definition() ToolDefinition {
 }
 
 func (t *buildMinimalContextTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	ctx, span := adaptersTracer.Start(ctx, "buildMinimalContextTool.Execute",
+		trace.WithAttributes(attribute.String("tool", "build_minimal_context")))
+	defer span.End()
+
 	m := params.ToMap()
 	symbolID, ok := m["symbol_id"].(string)
 	if !ok || symbolID == "" {
@@ -478,10 +503,11 @@ func (t *buildMinimalContextTool) Execute(ctx context.Context, params TypedParam
 
 	output, _ := json.Marshal(result)
 	return &Result{
-		Success:    true,
-		Output:     result,
-		OutputText: string(output),
-		TokensUsed: estimateTokens(string(output)),
+		Success:     true,
+		Output:      result,
+		OutputText:  string(output),
+		TokensUsed:  estimateTokens(string(output)),
+		ResultCount: len(result.Types) + len(result.Interfaces) + len(result.KeyCallees),
 	}, nil
 }
 
@@ -541,6 +567,10 @@ func (t *findSimilarCodeTool) Definition() ToolDefinition {
 }
 
 func (t *findSimilarCodeTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	ctx, span := adaptersTracer.Start(ctx, "findSimilarCodeTool.Execute",
+		trace.WithAttributes(attribute.String("tool", "find_similar_code")))
+	defer span.End()
+
 	m := params.ToMap()
 	symbolID, ok := m["symbol_id"].(string)
 	if !ok || symbolID == "" {
@@ -579,10 +609,11 @@ func (t *findSimilarCodeTool) Execute(ctx context.Context, params TypedParams) (
 
 	output, _ := json.Marshal(result)
 	return &Result{
-		Success:    true,
-		Output:     result,
-		OutputText: string(output),
-		TokensUsed: estimateTokens(string(output)),
+		Success:     true,
+		Output:      result,
+		OutputText:  string(output),
+		TokensUsed:  estimateTokens(string(output)),
+		ResultCount: len(result.Results),
 	}, nil
 }
 
@@ -630,6 +661,10 @@ func (t *summarizeFileTool) Definition() ToolDefinition {
 }
 
 func (t *summarizeFileTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	ctx, span := adaptersTracer.Start(ctx, "summarizeFileTool.Execute",
+		trace.WithAttributes(attribute.String("tool", "summarize_file")))
+	defer span.End()
+
 	m := params.ToMap()
 	filePath, ok := m["file_path"].(string)
 	if !ok || filePath == "" {
@@ -643,10 +678,11 @@ func (t *summarizeFileTool) Execute(ctx context.Context, params TypedParams) (*R
 
 	output, _ := json.Marshal(result)
 	return &Result{
-		Success:    true,
-		Output:     result,
-		OutputText: string(output),
-		TokensUsed: estimateTokens(string(output)),
+		Success:     true,
+		Output:      result,
+		OutputText:  string(output),
+		TokensUsed:  estimateTokens(string(output)),
+		ResultCount: len(result.Types) + len(result.Functions),
 	}, nil
 }
 
@@ -694,6 +730,10 @@ func (t *findConfigUsageTool) Definition() ToolDefinition {
 }
 
 func (t *findConfigUsageTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	ctx, span := adaptersTracer.Start(ctx, "findConfigUsageTool.Execute",
+		trace.WithAttributes(attribute.String("tool", "find_config_usage")))
+	defer span.End()
+
 	m := params.ToMap()
 	configKey, _ := m["config_key"].(string)
 
@@ -714,10 +754,11 @@ func (t *findConfigUsageTool) Execute(ctx context.Context, params TypedParams) (
 
 	output, _ := json.Marshal(result)
 	return &Result{
-		Success:    true,
-		Output:     result,
-		OutputText: string(output),
-		TokensUsed: estimateTokens(string(output)),
+		Success:     true,
+		Output:      result,
+		OutputText:  string(output),
+		TokensUsed:  estimateTokens(string(output)),
+		ResultCount: len(result.UsedIn),
 	}, nil
 }
 
@@ -833,6 +874,10 @@ type ListPackagesResult struct {
 }
 
 func (t *listPackagesTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	ctx, span := adaptersTracer.Start(ctx, "listPackagesTool.Execute",
+		trace.WithAttributes(attribute.String("tool", "list_packages")))
+	defer span.End()
+
 	m := params.ToMap()
 	start := time.Now()
 
@@ -961,12 +1006,13 @@ func (t *listPackagesTool) Execute(ctx context.Context, params TypedParams) (*Re
 
 	output, _ := json.Marshal(result)
 	return &Result{
-		Success:    true,
-		Output:     result,
-		OutputText: string(output),
-		TokensUsed: estimateTokens(string(output)),
-		Duration:   duration,
-		TraceStep:  &traceStep,
+		Success:     true,
+		Output:      result,
+		OutputText:  string(output),
+		TokensUsed:  estimateTokens(string(output)),
+		Duration:    duration,
+		TraceStep:   &traceStep,
+		ResultCount: result.TotalCount,
 		Metadata: map[string]any{
 			"level":           "package",
 			"packages_found":  result.TotalCount,

@@ -13,6 +13,7 @@ package reason
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
@@ -76,6 +77,7 @@ const (
 type RefactorSuggester struct {
 	graph *graph.Graph
 	index *index.SymbolIndex
+	crs   CRSRecorder
 }
 
 // NewRefactorSuggester creates a new RefactorSuggester.
@@ -97,7 +99,13 @@ func NewRefactorSuggester(g *graph.Graph, idx *index.SymbolIndex) *RefactorSugge
 	return &RefactorSuggester{
 		graph: g,
 		index: idx,
+		crs:   &NopCRSRecorder{},
 	}
+}
+
+// SetCRS configures CRS recording for this suggester.
+func (r *RefactorSuggester) SetCRS(recorder CRSRecorder) {
+	r.crs = recorder
 }
 
 // CodeMetrics contains measured characteristics of code.
@@ -225,6 +233,11 @@ func (r *RefactorSuggester) SuggestRefactor(
 	if ctx == nil {
 		return nil, ErrInvalidInput
 	}
+
+	start := time.Now()
+	ctx, span := startRefactorSpan(ctx, targetID)
+	defer span.End()
+
 	if err := ctx.Err(); err != nil {
 		return nil, ErrContextCanceled
 	}
@@ -261,6 +274,11 @@ func (r *RefactorSuggester) SuggestRefactor(
 
 	// Sort suggestions by priority
 	r.prioritizeSuggestions(result.Suggestions)
+
+	dur := time.Since(start)
+	setRefactorSpanResult(span, len(result.Suggestions), nil)
+	recordRefactorMetrics(ctx, dur, len(result.Suggestions), nil)
+	r.crs.RecordToolStep(ctx, "suggest_refactor", len(result.Suggestions), dur, nil)
 
 	return result, nil
 }

@@ -236,6 +236,7 @@ func (t *findImplementationsTool) Execute(ctx context.Context, params TypedParam
 	// CR-20-7: Store all index symbols at function scope so formatText can reuse them
 	// instead of performing a redundant index lookup on the "not found" path.
 	var allIndexSymbols []*ast.Symbol
+	strategy := "fallback" // IT_CRS_01: Track resolution strategy for CRS metadata
 
 	if t.index != nil {
 		symbols := t.index.GetByName(p.InterfaceName)
@@ -244,6 +245,9 @@ func (t *findImplementationsTool) Execute(ctx context.Context, params TypedParam
 		// disambiguate before kind-filtering.
 		if len(symbols) > 1 && p.PackageHint != "" {
 			symbols = filterByPackageHint(symbols, p.PackageHint, t.logger, "find_implementations")
+			strategy = "package_hint"
+		} else if len(symbols) > 0 {
+			strategy = "exact"
 		}
 
 		allIndexSymbols = symbols
@@ -358,15 +362,17 @@ func (t *findImplementationsTool) Execute(ctx context.Context, params TypedParam
 		WithMetadata("match_count", fmt.Sprintf("%d", output.MatchCount)).
 		WithMetadata("total_implementations", fmt.Sprintf("%d", output.TotalImplementations)).
 		WithMetadata("index_used", fmt.Sprintf("%v", t.index != nil)).
+		WithMetadata("resolution_strategy", strategy).
 		Build()
 
 	return &Result{
-		Success:    true,
-		Output:     output,
-		OutputText: outputText,
-		TokensUsed: estimateTokens(outputText),
-		TraceStep:  &toolStep,
-		Duration:   duration,
+		Success:     true,
+		Output:      output,
+		OutputText:  outputText,
+		TokensUsed:  estimateTokens(outputText),
+		TraceStep:   &toolStep,
+		Duration:    duration,
+		ResultCount: output.MatchCount,
 	}, nil
 }
 

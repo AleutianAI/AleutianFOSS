@@ -308,6 +308,13 @@ func (t *findCommunitiesTool) Execute(ctx context.Context, params TypedParams) (
 		attribute.String("trace_action", traceStep.Action),
 	)
 
+	// CRS Gap 1E: Record input parameters in traceStep for decision replay.
+	if traceStep.Metadata == nil {
+		traceStep.Metadata = make(map[string]string)
+	}
+	traceStep.Metadata["resolution"] = fmt.Sprintf("%.2f", p.Resolution)
+	traceStep.Metadata["min_size"] = fmt.Sprintf("%d", p.MinSize)
+
 	// Filter communities by min_size (already done in Leiden, but double-check)
 	var filtered []graph.Community
 	for _, comm := range result.Communities {
@@ -315,6 +322,9 @@ func (t *findCommunitiesTool) Execute(ctx context.Context, params TypedParams) (
 			filtered = append(filtered, comm)
 		}
 	}
+
+	// CRS Gap 1C: Record post-MinSize count so CRS sees pipeline attrition.
+	traceStep.Metadata["post_minsize_count"] = fmt.Sprintf("%d", len(filtered))
 
 	// IT-11 GAP-2: Filter by package_filter before sorting/trimming.
 	// Expansion tests ask about specific directories ("within packages/core",
@@ -327,7 +337,14 @@ func (t *findCommunitiesTool) Execute(ctx context.Context, params TypedParams) (
 	// subset and re-apply MinSize, so only genuinely scoped communities survive.
 	if p.PackageFilter != "" {
 		filterLower := strings.ToLower(p.PackageFilter)
+		nodesBefore := 0
+		for _, comm := range filtered {
+			nodesBefore += len(comm.Nodes)
+		}
+		commBeforeFilter := len(filtered)
+
 		var pkgFiltered []graph.Community
+		nodesAfter := 0
 		for _, comm := range filtered {
 			var matchingNodes []string
 			for _, nodeID := range comm.Nodes {
@@ -356,9 +373,16 @@ func (t *findCommunitiesTool) Execute(ctx context.Context, params TypedParams) (
 					// Preserve external edges proportionally
 					ExternalEdges: comm.ExternalEdges,
 				})
+				nodesAfter += len(matchingNodes)
 			}
 		}
 		filtered = pkgFiltered
+
+		// CRS Gap 1C: Record PackageFilter impact on pipeline.
+		traceStep.Metadata["package_filter"] = p.PackageFilter
+		traceStep.Metadata["pkgfilter_nodes_before"] = fmt.Sprintf("%d", nodesBefore)
+		traceStep.Metadata["pkgfilter_nodes_after"] = fmt.Sprintf("%d", nodesAfter)
+		traceStep.Metadata["pkgfilter_communities_dropped"] = fmt.Sprintf("%d", commBeforeFilter-len(filtered))
 	}
 
 	// Sort by size (largest first)
@@ -371,6 +395,9 @@ func (t *findCommunitiesTool) Execute(ctx context.Context, params TypedParams) (
 		filtered = filtered[:p.Top]
 	}
 
+	// CRS Gap 1C: Record post-trim count.
+	traceStep.Metadata["post_trim_count"] = fmt.Sprintf("%d", len(filtered))
+
 	span.SetAttributes(attribute.Int("filtered_communities", len(filtered)))
 
 	// Identify cross-package communities
@@ -381,6 +408,11 @@ func (t *findCommunitiesTool) Execute(ctx context.Context, params TypedParams) (
 	if p.ShowCrossEdges && len(filtered) > 1 {
 		crossEdges = t.calculateCrossCommunityEdges(filtered)
 	}
+
+	// CRS Gap 1C: Record cross-package and cross-edge counts.
+	traceStep.Metadata["cross_pkg_count"] = fmt.Sprintf("%d", len(crossPkgIDs))
+	traceStep.Metadata["cross_edge_count"] = fmt.Sprintf("%d", len(crossEdges))
+	traceStep.Metadata["final_count"] = fmt.Sprintf("%d", len(filtered))
 
 	// Build typed output
 	output := t.buildOutput(result, filtered, crossPkgIDs, crossEdges)
@@ -398,12 +430,13 @@ func (t *findCommunitiesTool) Execute(ctx context.Context, params TypedParams) (
 
 	hasResults := len(filtered) > 0
 	r := &Result{
-		Success:    hasResults,
-		Output:     output,
-		OutputText: outputText,
-		TokensUsed: estimateTokens(outputText),
-		TraceStep:  &traceStep,
-		Duration:   time.Since(start),
+		Success:     hasResults,
+		Output:      output,
+		OutputText:  outputText,
+		TokensUsed:  estimateTokens(outputText),
+		TraceStep:   &traceStep,
+		Duration:    time.Since(start),
+		ResultCount: output.CommunityCount,
 	}
 	if !hasResults {
 		r.Error = fmt.Sprintf("Leiden found %d communities but 0 survived filtering (MinSize=%d, PackageFilter='%s')",

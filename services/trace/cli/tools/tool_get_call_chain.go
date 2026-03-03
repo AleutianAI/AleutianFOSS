@@ -307,7 +307,7 @@ func (t *getCallChainTool) Execute(ctx context.Context, params TypedParams) (*Re
 				syms[i] = n.Symbol
 			}
 			// IT-06c: Try package hint disambiguation first, then fall back
-			// to the existing disambiguateGraphNodes heuristic.
+			// to the existing DisambiguateGraphNodes heuristic.
 			if p.PackageHint != "" {
 				filtered := filterByPackageHint(syms, p.PackageHint, t.logger, "get_call_chain")
 				if len(filtered) == 1 {
@@ -320,14 +320,14 @@ func (t *getCallChainTool) Execute(ctx context.Context, params TypedParams) (*Re
 					)
 				} else {
 					// Multiple still remain after hint — use existing disambiguation
-					best := disambiguateGraphNodes(filtered)
+					best := DisambiguateGraphNodes(filtered)
 					if best != nil {
 						symbolID = best.ID
 					}
 				}
 			}
 			if symbolID == "" {
-				best := disambiguateGraphNodes(syms)
+				best := DisambiguateGraphNodes(syms)
 				if best != nil {
 					symbolID = best.ID
 					t.logger.Debug("get_call_chain: resolved via graph fallback with disambiguation",
@@ -415,6 +415,11 @@ func (t *getCallChainTool) Execute(ctx context.Context, params TypedParams) (*Re
 		}, nil
 	}
 
+	// IT_CRS_03 AC-13: Capture original candidate state before retry loop.
+	originalCandidateID := symbolID
+	originalEdgeCount := len(traversal.Edges)
+	candidateRetried := false
+
 	// IT-12 Rev 3+4: If traversal produced shallow results and we have
 	// alternative candidates, retry with the next candidate. This handles:
 	// - Rev 3: Type resolved but a function with the same name has call edges
@@ -446,6 +451,7 @@ func (t *getCallChainTool) Execute(ctx context.Context, params TypedParams) (*Re
 				)
 				symbolID = altCandidate.ID
 				traversal = altTraversal
+				candidateRetried = true
 				break
 			}
 		}
@@ -501,6 +507,12 @@ func (t *getCallChainTool) Execute(ctx context.Context, params TypedParams) (*Re
 
 	duration := time.Since(start)
 
+	// Determine resolution method for CRS metadata
+	resolutionMethod := "index"
+	if len(candidates) == 0 {
+		resolutionMethod = "graph_fallback"
+	}
+
 	// Build CRS TraceStep for reasoning trace continuity
 	toolStep := crs.NewTraceStepBuilder().
 		WithAction("tool_get_call_chain").
@@ -510,16 +522,23 @@ func (t *getCallChainTool) Execute(ctx context.Context, params TypedParams) (*Re
 		WithMetadata("chain_length", fmt.Sprintf("%d", len(traversal.VisitedNodes))).
 		WithMetadata("depth", fmt.Sprintf("%d", traversal.Depth)).
 		WithMetadata("direction", p.Direction).
-		WithMetadata("truncated", fmt.Sprintf("%v", traversal.Truncated)).
+		WithMetadata("truncated", fmt.Sprintf("%t", traversal.Truncated)).
+		WithMetadata("resolved_id", symbolID).
+		WithMetadata("resolution_method", resolutionMethod).
+		WithMetadata("candidates_count", fmt.Sprintf("%d", len(candidates))).
+		WithMetadata("candidate_retried", fmt.Sprintf("%t", candidateRetried)).
+		WithMetadata("original_candidate_id", originalCandidateID).
+		WithMetadata("original_edge_count", fmt.Sprintf("%d", originalEdgeCount)).
 		Build()
 
 	return &Result{
-		Success:    true,
-		Output:     output,
-		OutputText: outputText,
-		TokensUsed: estimateTokens(outputText),
-		TraceStep:  &toolStep,
-		Duration:   duration,
+		Success:     true,
+		Output:      output,
+		OutputText:  outputText,
+		TokensUsed:  estimateTokens(outputText),
+		TraceStep:   &toolStep,
+		Duration:    duration,
+		ResultCount: output.NodeCount,
 	}, nil
 }
 
@@ -1007,7 +1026,7 @@ func mergeTraversals(primary, secondary *graph.TraversalResult) {
 	}
 }
 
-// disambiguateGraphNodes picks the best symbol from multiple graph nodes with the
+// DisambiguateGraphNodes picks the best symbol from multiple graph nodes with the
 // same name using multi-signal scoring. Uses the same penalty signals as
 // phases.disambiguateMultipleMatches (IT-05 SR1) to maintain scoring consistency.
 //
@@ -1033,7 +1052,7 @@ func mergeTraversals(primary, secondary *graph.TraversalResult) {
 //	*ast.Symbol - The best-scoring symbol.
 //
 // Thread Safety: Safe for concurrent use (stateless function).
-func disambiguateGraphNodes(syms []*ast.Symbol) *ast.Symbol {
+func DisambiguateGraphNodes(syms []*ast.Symbol) *ast.Symbol {
 	if len(syms) == 0 {
 		return nil
 	}
@@ -1042,10 +1061,10 @@ func disambiguateGraphNodes(syms []*ast.Symbol) *ast.Symbol {
 	}
 
 	best := syms[0]
-	bestScore := scoreGraphNode(best)
+	bestScore := ScoreGraphNode(best)
 
 	for _, s := range syms[1:] {
-		sc := scoreGraphNode(s)
+		sc := ScoreGraphNode(s)
 		if sc < bestScore {
 			best = s
 			bestScore = sc
@@ -1055,14 +1074,14 @@ func disambiguateGraphNodes(syms []*ast.Symbol) *ast.Symbol {
 	return best
 }
 
-// scoreGraphNode computes a disambiguation score for a graph node symbol.
+// ScoreGraphNode computes a disambiguation score for a graph node symbol.
 // Lower scores indicate more relevant symbols. Aligned with
 // phases.scoreForDisambiguation to maintain cross-package scoring consistency.
-func scoreGraphNode(sym *ast.Symbol) int {
+func ScoreGraphNode(sym *ast.Symbol) int {
 	score := 0
 
 	// Test file penalty
-	if isGraphNodeTestFile(sym.FilePath) {
+	if IsGraphNodeTestFile(sym.FilePath) {
 		score += 50000
 	}
 
@@ -1095,9 +1114,9 @@ func scoreGraphNode(sym *ast.Symbol) int {
 	return score
 }
 
-// isGraphNodeTestFile checks if a file path indicates a test file.
+// IsGraphNodeTestFile checks if a file path indicates a test file.
 // Mirrors phases.isTestFilePath and index.isTestFile for cross-package consistency.
-func isGraphNodeTestFile(filePath string) bool {
+func IsGraphNodeTestFile(filePath string) bool {
 	lower := strings.ToLower(filePath)
 
 	for _, dir := range []string{"test/", "tests/", "__tests__/", "testing/"} {

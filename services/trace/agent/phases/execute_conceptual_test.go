@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
@@ -1248,4 +1249,105 @@ func TestSearchSymbolCandidates_PopulatesReceiver(t *testing.T) {
 	if !foundNoReceiver {
 		t.Error("D3c: expected empty Receiver on function candidate")
 	}
+}
+
+// TestResolveConceptualName_TraceStepEmission verifies IT_CRS_02: conceptual_prune
+// and conceptual_validate TraceSteps are emitted when resolveConceptualName goes
+// through LLM resolution.
+func TestResolveConceptualName_TraceStepEmission(t *testing.T) {
+	ctx := context.Background()
+	idx := index.NewSymbolIndex()
+
+	// Add a struct-only symbol so resolution continues to LLM path.
+	siteStruct := &ast.Symbol{
+		ID:        "hugolib/site.go:91:Site",
+		Name:      "Site",
+		Kind:      ast.SymbolKindStruct,
+		FilePath:  "hugolib/site.go",
+		StartLine: 91,
+		EndLine:   200,
+		Package:   "hugolib",
+		Exported:  true,
+		Language:  "go",
+	}
+	newHugoSites := &ast.Symbol{
+		ID:        "hugolib/hugo_sites.go:20:newHugoSites",
+		Name:      "newHugoSites",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "hugolib/hugo_sites.go",
+		StartLine: 20,
+		EndLine:   50,
+		Package:   "hugolib",
+		Exported:  false,
+		Language:  "go",
+	}
+	for _, sym := range []*ast.Symbol{siteStruct, newHugoSites} {
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("Failed to add %s: %v", sym.ID, err)
+		}
+	}
+
+	// Create a session with trace recorder to capture TraceSteps.
+	session, err := agent.NewSession("/test/project", nil)
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+	recorder := crs.NewTraceRecorder(crs.DefaultTraceConfig())
+	session.SetTraceRecorder(recorder)
+
+	extractor := &mockConceptualExtractor{
+		enabled: true,
+		resolveFunc: func(_ context.Context, _ string, _ []agent.SymbolCandidate) (string, error) {
+			return "newHugoSites", nil
+		},
+	}
+
+	result := resolveConceptualName(ctx, "Site", "call chain from site initialization",
+		idx, extractor, session, conceptualResolutionOpts{})
+	if result.Resolved != "newHugoSites" {
+		t.Fatalf("expected 'newHugoSites', got %q", result.Resolved)
+	}
+
+	steps := session.GetTraceSteps()
+
+	t.Run("conceptual_prune emitted", func(t *testing.T) {
+		found := false
+		for _, step := range steps {
+			if step.Action == "conceptual_prune" {
+				found = true
+				if step.Tool != "resolve_conceptual" {
+					t.Errorf("conceptual_prune Tool = %q, want 'resolve_conceptual'", step.Tool)
+				}
+				if step.Metadata["hallucinated"] != "Site" {
+					t.Errorf("hallucinated = %q, want 'Site'", step.Metadata["hallucinated"])
+				}
+				break
+			}
+		}
+		if !found {
+			t.Errorf("IT_CRS_02: no conceptual_prune TraceStep found in %d steps", len(steps))
+		}
+	})
+
+	t.Run("conceptual_validate emitted", func(t *testing.T) {
+		found := false
+		for _, step := range steps {
+			if step.Action == "conceptual_validate" {
+				found = true
+				if step.Tool != "resolve_conceptual" {
+					t.Errorf("conceptual_validate Tool = %q, want 'resolve_conceptual'", step.Tool)
+				}
+				if step.Metadata["hallucinated"] != "Site" {
+					t.Errorf("hallucinated = %q, want 'Site'", step.Metadata["hallucinated"])
+				}
+				if step.Metadata["llm_pick"] != "newHugoSites" {
+					t.Errorf("llm_pick = %q, want 'newHugoSites'", step.Metadata["llm_pick"])
+				}
+				break
+			}
+		}
+		if !found {
+			t.Errorf("IT_CRS_02: no conceptual_validate TraceStep found in %d steps", len(steps))
+		}
+	})
 }

@@ -324,8 +324,18 @@ func (t *findCriticalPathTool) executeOnce(ctx context.Context, p FindCriticalPa
 		}, nil
 	}
 
+	// CRS: Add pipeline metadata for all paths
+	if traceStep.Metadata == nil {
+		traceStep.Metadata = make(map[string]string)
+	}
+	traceStep.Metadata["target"] = p.Target
+	traceStep.Metadata["entry"] = entry
+
 	// Handle unreachable target (empty path)
 	if len(criticalPath) == 0 {
+		traceStep.Metadata["path_length"] = "0"
+		traceStep.Metadata["is_reachable"] = "false"
+
 		output := FindCriticalPathOutput{
 			Target:       targetID,
 			Entry:        entry,
@@ -357,6 +367,10 @@ func (t *findCriticalPathTool) executeOnce(ctx context.Context, p FindCriticalPa
 		}, nil
 	}
 
+	// CRS: Record success path metadata
+	traceStep.Metadata["path_length"] = fmt.Sprintf("%d", len(criticalPath))
+	traceStep.Metadata["is_reachable"] = "true"
+
 	// Build output
 	output := FindCriticalPathOutput{
 		Target:       targetID,
@@ -384,12 +398,13 @@ func (t *findCriticalPathTool) executeOnce(ctx context.Context, p FindCriticalPa
 	)
 
 	return &Result{
-		Success:    true,
-		Output:     output,
-		OutputText: outputText,
-		TokensUsed: estimateTokens(outputText),
-		TraceStep:  &traceStep,
-		Duration:   time.Since(start),
+		Success:     true,
+		Output:      output,
+		OutputText:  outputText,
+		TokensUsed:  estimateTokens(outputText),
+		TraceStep:   &traceStep,
+		Duration:    time.Since(start),
+		ResultCount: output.PathLength,
 	}, nil
 }
 

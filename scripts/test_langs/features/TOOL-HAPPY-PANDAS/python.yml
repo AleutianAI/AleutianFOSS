@@ -794,17 +794,18 @@ tests:
     name: pandas_get_call_chain_b
     category: TOOL_HAPPY_PATH
     description: >
-      get_call_chain tool against Pandas (test B). Target: _read downstream.
-      Rewritten from conceptual "read_excel to DataFrame construction" —
-      _read (parsers/readers.py) has 27 outgoing edges including
-      validate_integer, _validate_names, and parser helpers.
+      get_call_chain tool against Pandas (test B). Target: _clean_na_values downstream.
+      Rewritten from _read (ambiguous — exists in both parsers/readers.py and io/html.py).
+      _clean_na_values (parsers/readers.py:2079) is unique and has multiple outgoing edges:
+      _stringify_na_values, _floatify_na_values, is_list_like, plus dict/list branching.
     query: |
-      Show the call chain from _read in the parsers module
+      Show the call chain from _clean_na_values
     expected_state: COMPLETE
     reference_answer: |
-      _read (readers.py) calls validate_integer for nrows validation,
-      _validate_names to check column names, and delegates to the
-      engine's read method to parse the data into arrays.
+      _clean_na_values (readers.py) handles NA value normalization for CSV parsing.
+      It calls is_list_like to check input types, _stringify_na_values to convert
+      values to string representations, and _floatify_na_values to create float
+      versions of NA values. Dict inputs are iterated with per-column NA value sets.
     validations:
       - type: graph_tool_used
 

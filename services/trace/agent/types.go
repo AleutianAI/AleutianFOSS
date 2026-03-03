@@ -452,6 +452,15 @@ type ToolResult struct {
 
 	// Truncated indicates if output was truncated.
 	Truncated bool `json:"truncated"`
+
+	// Tool is the tool name that produced this result.
+	// IT_CRS_03 AC-3: Used by getSingleFormattedResult() for tool-specific
+	// pass-through decisions instead of fragile substring matching.
+	Tool string `json:"tool,omitempty"`
+
+	// ProofDelta overrides the default CRS proof delta when non-zero.
+	// IT_CRS_03 AC-8: Higher values = stronger signal (exact match = 2, fuzzy = 1).
+	ProofDelta int `json:"proof_delta,omitempty"`
 }
 
 // DurationMs returns the duration in milliseconds.

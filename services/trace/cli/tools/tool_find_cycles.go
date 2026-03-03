@@ -296,6 +296,26 @@ func (t *findCyclesTool) Execute(ctx context.Context, params TypedParams) (*Resu
 		)
 	}
 
+	// CRS: Add pipeline metadata
+	if traceStep.Metadata == nil {
+		traceStep.Metadata = make(map[string]string)
+	}
+	traceStep.Metadata["min_size"] = fmt.Sprintf("%d", p.MinSize)
+	traceStep.Metadata["limit"] = fmt.Sprintf("%d", p.Limit)
+	traceStep.Metadata["package_filter"] = p.PackageFilter
+	traceStep.Metadata["sort_by"] = p.SortBy
+	traceStep.Metadata["raw_cycle_count"] = fmt.Sprintf("%d", len(cycles))
+	traceStep.Metadata["final_count"] = fmt.Sprintf("%d", len(filtered))
+
+	// IT_CRS_03 AC-2: Detect zero-edge anomaly (nodes present but no edges).
+	if graphEdges, ok := traceStep.Metadata["graph_edges"]; ok {
+		if graphEdges == "0" {
+			if graphNodes, ok2 := traceStep.Metadata["graph_nodes"]; ok2 && graphNodes != "0" {
+				traceStep.Metadata["anomaly"] = "zero_edges_with_nodes"
+			}
+		}
+	}
+
 	// Build typed output
 	output := t.buildOutput(filtered)
 
@@ -303,12 +323,13 @@ func (t *findCyclesTool) Execute(ctx context.Context, params TypedParams) (*Resu
 	outputText := t.formatText(filtered)
 
 	return &Result{
-		Success:    true,
-		Output:     output,
-		OutputText: outputText,
-		TokensUsed: estimateTokens(outputText),
-		TraceStep:  &traceStep,
-		Duration:   time.Since(start),
+		Success:     true,
+		Output:      output,
+		OutputText:  outputText,
+		TokensUsed:  estimateTokens(outputText),
+		TraceStep:   &traceStep,
+		Duration:    time.Since(start),
+		ResultCount: output.CycleCount,
 	}, nil
 }
 

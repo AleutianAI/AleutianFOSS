@@ -1243,3 +1243,218 @@ func TestFindCommunitiesTool_TraceStepPopulated(t *testing.T) {
 		t.Error("TraceStep.Duration should be > 0")
 	}
 }
+
+// TestFindCommunities_HollowSuccess_ReturnsFalse verifies that when all
+// communities are eliminated by filtering, Result.Success is false.
+// CRS Gap 1A: Prevents proof number decrement on empty results.
+func TestFindCommunities_HollowSuccess_ReturnsFalse(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphForCommunities(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindCommunitiesTool(analytics, idx)
+
+	t.Run("min_size eliminates all communities", func(t *testing.T) {
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"min_size": 100, // No community has 100 members
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if result.Success {
+			t.Error("Expected Success=false when all communities eliminated by min_size")
+		}
+		if result.Error == "" {
+			t.Error("Expected non-empty Error describing filter result")
+		}
+	})
+
+	t.Run("package_filter eliminates all communities", func(t *testing.T) {
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"min_size":       1,
+			"package_filter": "nonexistent_package",
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if result.Success {
+			t.Error("Expected Success=false when package_filter eliminates all communities")
+		}
+		if result.Error == "" {
+			t.Error("Expected non-empty Error describing filter result")
+		}
+	})
+}
+
+// TestFindCommunities_CRS_PostFilterMetadata verifies that the TraceStep
+// contains pipeline attrition metadata at every filtering stage.
+// CRS Gap 1C: Makes the 6-stage filter pipeline visible to CRS.
+func TestFindCommunities_CRS_PostFilterMetadata(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphForCommunities(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindCommunitiesTool(analytics, idx)
+
+	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+		"min_size": 1,
+	}})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+	if result.TraceStep == nil {
+		t.Fatal("TraceStep should not be nil")
+	}
+
+	meta := result.TraceStep.Metadata
+	if meta == nil {
+		t.Fatal("TraceStep.Metadata should not be nil")
+	}
+
+	// Pipeline metadata keys that must always be present
+	requiredKeys := []string{
+		"post_minsize_count",
+		"post_trim_count",
+		"cross_pkg_count",
+		"cross_edge_count",
+		"final_count",
+	}
+	for _, key := range requiredKeys {
+		if _, ok := meta[key]; !ok {
+			t.Errorf("TraceStep.Metadata missing required key %q", key)
+		}
+	}
+
+	// final_count should match the actual community count in output
+	output, ok := result.Output.(FindCommunitiesOutput)
+	if !ok {
+		t.Fatalf("Output is not FindCommunitiesOutput, got %T", result.Output)
+	}
+	if meta["final_count"] != fmt.Sprintf("%d", output.CommunityCount) {
+		t.Errorf("final_count=%q doesn't match CommunityCount=%d",
+			meta["final_count"], output.CommunityCount)
+	}
+}
+
+// TestFindCommunities_CRS_PackageFilterTrimStats verifies that when a
+// PackageFilter is applied, the TraceStep records node-level trim stats.
+// CRS Gap 1C: Enables CRS to diagnose why N communities became M.
+func TestFindCommunities_CRS_PackageFilterTrimStats(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphForCommunities(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindCommunitiesTool(analytics, idx)
+
+	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+		"min_size":       1,
+		"package_filter": "auth",
+	}})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.TraceStep == nil {
+		t.Fatal("TraceStep should not be nil")
+	}
+
+	meta := result.TraceStep.Metadata
+	if meta == nil {
+		t.Fatal("TraceStep.Metadata should not be nil")
+	}
+
+	// PackageFilter-specific keys must be present when filter is non-empty
+	pkgFilterKeys := []string{
+		"package_filter",
+		"pkgfilter_nodes_before",
+		"pkgfilter_nodes_after",
+		"pkgfilter_communities_dropped",
+	}
+	for _, key := range pkgFilterKeys {
+		val, ok := meta[key]
+		if !ok {
+			t.Errorf("TraceStep.Metadata missing PackageFilter key %q", key)
+			continue
+		}
+		t.Logf("  %s = %s", key, val)
+	}
+
+	// package_filter should match the input
+	if meta["package_filter"] != "auth" {
+		t.Errorf("package_filter=%q, want %q", meta["package_filter"], "auth")
+	}
+
+	// nodes_after should be <= nodes_before (filtering only removes)
+	if meta["pkgfilter_nodes_before"] < meta["pkgfilter_nodes_after"] {
+		t.Errorf("nodes_after (%s) > nodes_before (%s) — filter should only remove nodes",
+			meta["pkgfilter_nodes_after"], meta["pkgfilter_nodes_before"])
+	}
+}
+
+// TestFindCommunities_CRS_ResolutionRecorded verifies that the Leiden
+// resolution and min_size parameters are recorded in TraceStep metadata.
+// CRS Gap 1E: Enables CRS to learn which parameter combos work.
+func TestFindCommunities_CRS_ResolutionRecorded(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphForCommunities(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindCommunitiesTool(analytics, idx)
+
+	t.Run("default resolution and min_size", func(t *testing.T) {
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if result.TraceStep == nil || result.TraceStep.Metadata == nil {
+			t.Fatal("TraceStep or Metadata is nil")
+		}
+
+		meta := result.TraceStep.Metadata
+		if meta["resolution"] != "1.00" {
+			t.Errorf("resolution=%q, want %q", meta["resolution"], "1.00")
+		}
+		if meta["min_size"] != "3" {
+			t.Errorf("min_size=%q, want %q", meta["min_size"], "3")
+		}
+	})
+
+	t.Run("custom resolution and min_size", func(t *testing.T) {
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"resolution": 2.5,
+			"min_size":   1,
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if result.TraceStep == nil || result.TraceStep.Metadata == nil {
+			t.Fatal("TraceStep or Metadata is nil")
+		}
+
+		meta := result.TraceStep.Metadata
+		if meta["resolution"] != "2.50" {
+			t.Errorf("resolution=%q, want %q", meta["resolution"], "2.50")
+		}
+		if meta["min_size"] != "1" {
+			t.Errorf("min_size=%q, want %q", meta["min_size"], "1")
+		}
+	})
+}

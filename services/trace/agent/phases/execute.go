@@ -651,6 +651,101 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 						})
 					}
 				}
+			case "find_callers":
+				if fcParams, ok := params.(tools.FindCallersParams); ok && fcParams.FunctionName != "" {
+					result := resolveConceptualName(ctx, fcParams.FunctionName, deps.Query,
+						deps.SymbolIndex, deps.ParamExtractor, deps.Session,
+						conceptualResolutionOpts{Analytics: deps.GraphAnalytics})
+					if result.Resolved != fcParams.FunctionName {
+						fcParams.FunctionName = result.Resolved
+						params = fcParams
+					}
+					if result.Overridden {
+						p.learnFromFailure(ctx, deps, crs.FailureEvent{
+							SessionID:    deps.Session.ID,
+							FailureType:  crs.FailureTypeResolutionDemotion,
+							Tool:         hardForcing.Tool,
+							Source:       crs.SignalSourceHard,
+							ErrorMessage: fmt.Sprintf("LLM picked tier%d [%s], overrode to tier0", result.LLMPickTier, result.LLMPick),
+						})
+					}
+				}
+			case "find_callees":
+				if fceParams, ok := params.(tools.FindCalleesParams); ok && fceParams.FunctionName != "" {
+					result := resolveConceptualName(ctx, fceParams.FunctionName, deps.Query,
+						deps.SymbolIndex, deps.ParamExtractor, deps.Session,
+						conceptualResolutionOpts{Analytics: deps.GraphAnalytics})
+					if result.Resolved != fceParams.FunctionName {
+						fceParams.FunctionName = result.Resolved
+						params = fceParams
+					}
+					if result.Overridden {
+						p.learnFromFailure(ctx, deps, crs.FailureEvent{
+							SessionID:    deps.Session.ID,
+							FailureType:  crs.FailureTypeResolutionDemotion,
+							Tool:         hardForcing.Tool,
+							Source:       crs.SignalSourceHard,
+							ErrorMessage: fmt.Sprintf("LLM picked tier%d [%s], overrode to tier0", result.LLMPickTier, result.LLMPick),
+						})
+					}
+				}
+			case "find_implementations":
+				if fiParams, ok := params.(tools.FindImplementationsParams); ok && fiParams.InterfaceName != "" {
+					result := resolveConceptualName(ctx, fiParams.InterfaceName, deps.Query,
+						deps.SymbolIndex, deps.ParamExtractor, deps.Session,
+						conceptualResolutionOpts{Analytics: deps.GraphAnalytics, AcceptAnyKind: true})
+					if result.Resolved != fiParams.InterfaceName {
+						fiParams.InterfaceName = result.Resolved
+						params = fiParams
+					}
+					if result.Overridden {
+						p.learnFromFailure(ctx, deps, crs.FailureEvent{
+							SessionID:    deps.Session.ID,
+							FailureType:  crs.FailureTypeResolutionDemotion,
+							Tool:         hardForcing.Tool,
+							Source:       crs.SignalSourceHard,
+							ErrorMessage: fmt.Sprintf("LLM picked tier%d [%s], overrode to tier0", result.LLMPickTier, result.LLMPick),
+						})
+					}
+				}
+			case "find_references":
+				if frParams, ok := params.(tools.FindReferencesParams); ok && frParams.SymbolName != "" {
+					result := resolveConceptualName(ctx, frParams.SymbolName, deps.Query,
+						deps.SymbolIndex, deps.ParamExtractor, deps.Session,
+						conceptualResolutionOpts{Analytics: deps.GraphAnalytics, AcceptAnyKind: true})
+					if result.Resolved != frParams.SymbolName {
+						frParams.SymbolName = result.Resolved
+						params = frParams
+					}
+					if result.Overridden {
+						p.learnFromFailure(ctx, deps, crs.FailureEvent{
+							SessionID:    deps.Session.ID,
+							FailureType:  crs.FailureTypeResolutionDemotion,
+							Tool:         hardForcing.Tool,
+							Source:       crs.SignalSourceHard,
+							ErrorMessage: fmt.Sprintf("LLM picked tier%d [%s], overrode to tier0", result.LLMPickTier, result.LLMPick),
+						})
+					}
+				}
+			case "find_symbol":
+				if fsParams, ok := params.(tools.FindSymbolParams); ok && fsParams.Name != "" {
+					result := resolveConceptualName(ctx, fsParams.Name, deps.Query,
+						deps.SymbolIndex, deps.ParamExtractor, deps.Session,
+						conceptualResolutionOpts{Analytics: deps.GraphAnalytics, AcceptAnyKind: true})
+					if result.Resolved != fsParams.Name {
+						fsParams.Name = result.Resolved
+						params = fsParams
+					}
+					if result.Overridden {
+						p.learnFromFailure(ctx, deps, crs.FailureEvent{
+							SessionID:    deps.Session.ID,
+							FailureType:  crs.FailureTypeResolutionDemotion,
+							Tool:         hardForcing.Tool,
+							Source:       crs.SignalSourceHard,
+							ErrorMessage: fmt.Sprintf("LLM picked tier%d [%s], overrode to tier0", result.LLMPickTier, result.LLMPick),
+						})
+					}
+				}
 			case "find_path":
 				if fpParams, ok := params.(tools.FindPathParams); ok {
 					// D3c: Resolve from-side first, then use its ID for to-side reachability + context.
@@ -675,13 +770,21 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 						// D3c: Look up resolved from symbol for reachability + context
 						if deps.SymbolIndex != nil {
 							if syms := deps.SymbolIndex.GetByName(fpParams.From); len(syms) > 0 {
-								fromSymbolID = syms[0].ID
-								if syms[0].Receiver != "" {
+								// IT_CRS_02: When multiple symbols match, disambiguate
+								// to pick the best candidate (non-test, exported, shallow).
+								best := syms[0]
+								if len(syms) > 1 {
+									if disambiguated := tools.DisambiguateGraphNodes(syms); disambiguated != nil {
+										best = disambiguated
+									}
+								}
+								fromSymbolID = best.ID
+								if best.Receiver != "" {
 									sourceContext = fmt.Sprintf("%s (method on %s in %s:%d)",
-										syms[0].Name, syms[0].Receiver, syms[0].FilePath, syms[0].StartLine)
+										best.Name, best.Receiver, best.FilePath, best.StartLine)
 								} else {
 									sourceContext = fmt.Sprintf("%s (%s in %s:%d)",
-										syms[0].Name, syms[0].Kind.String(), syms[0].FilePath, syms[0].StartLine)
+										best.Name, best.Kind.String(), best.FilePath, best.StartLine)
 								}
 							}
 						}
@@ -706,6 +809,10 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 								ErrorMessage: fmt.Sprintf("LLM picked tier%d [%s], overrode to tier0", result.LLMPickTier, result.LLMPick),
 							})
 						}
+						// IT_CRS_02: To-side disambiguation is not needed at agent level.
+						// GetByName returns symbols with identical names, so there's nothing
+						// to update on fpParams.To. The tool's internal ResolveFunctionWithFuzzy
+						// handles To-side symbol resolution with its own multi-candidate retry.
 					}
 					params = fpParams
 				}
@@ -2445,6 +2552,20 @@ var graphToolsWithSubstantiveResults = map[string]bool{
 	"find_module_api":           true,
 	"check_reducibility":        true,
 	"find_similar_code":         true, // IT-06c I-11: Was missing, preventing forced synthesis
+	// Analytics-layer CRS tool names (PascalCase, used in TraceStep.Tool by *WithCRS methods)
+	// CRS Gap 1D: sessionHasPriorGraphToolResults checks step.Tool against this map,
+	// but analytics tools emit PascalCase names, not the snake_case tool names above.
+	"DetectCommunities":        true,
+	"HotSpots":                 true,
+	"DeadCode":                 true,
+	"CyclicDependencies":       true,
+	"ShortestPath":             true, // find_path
+	"ArticulationPoints":       true,
+	"DetectLoops":              true,
+	"ComputeControlDependence": true,
+	"Dominators":               true,
+	"PageRank":                 true,
+	"CheckReducibility":        true,
 }
 
 // shouldForceSynthesisAfterGraphTools determines if we should force synthesis
@@ -2548,13 +2669,19 @@ func (p *ExecutePhase) sessionHasPriorGraphToolResults(deps *Dependencies) bool 
 	traceSteps := deps.Session.GetTraceSteps()
 	// Result count metadata keys used by graph tools to indicate substantive output.
 	resultCountKeys := []string{
-		"match_count",           // find_callers, find_implementations
-		"total_callers",         // find_callers
-		"total_implementations", // find_implementations
-		"resolved_count",        // find_callees
-		"total_count",           // find_callees
-		"reference_count",       // find_references
-		"chain_length",          // get_call_chain
+		"match_count",              // find_callers, find_implementations
+		"total_callers",            // find_callers
+		"total_implementations",    // find_implementations
+		"resolved_count",           // find_callees
+		"total_count",              // find_callees
+		"reference_count",          // find_references
+		"chain_length",             // get_call_chain
+		"final_count",              // find_communities, find_cycles, find_dead_code, find_extractable_regions, find_hotspots, find_important, find_loops, find_merge_points
+		"path_length",              // find_path, find_critical_path
+		"result_count",             // find_articulation_points
+		"target_count",             // find_common_dependency
+		"dependency_count",         // find_control_dependencies
+		"irreducible_region_count", // check_reducibility
 	}
 
 	for _, step := range traceSteps {

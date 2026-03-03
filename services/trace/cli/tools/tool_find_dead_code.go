@@ -291,6 +291,7 @@ func (t *findDeadCodeTool) Execute(ctx context.Context, params TypedParams) (*Re
 	// package-only had results, fall back to include exported in that scope.
 	// This prevents empty results when the user asks about a specific area
 	// where all symbols happen to be exported (common in library codebases).
+	exportFallbackApplied := false
 	if p.Package != "" && len(filtered) == 0 && len(pkgScoped) > 0 && !p.IncludeExported {
 		t.logger.Debug("package scope fallback: including exported symbols in scoped results",
 			slog.String("tool", "find_dead_code"),
@@ -298,6 +299,7 @@ func (t *findDeadCodeTool) Execute(ctx context.Context, params TypedParams) (*Re
 			slog.Int("scoped_count", len(pkgScoped)),
 		)
 		filtered = pkgScoped
+		exportFallbackApplied = true
 	}
 
 	// Phase 3: Filter out test and documentation file symbols
@@ -349,6 +351,19 @@ func (t *findDeadCodeTool) Execute(ctx context.Context, params TypedParams) (*Re
 		)
 	}
 
+	// CRS: Add pipeline metadata
+	if traceStep.Metadata == nil {
+		traceStep.Metadata = make(map[string]string)
+	}
+	traceStep.Metadata["include_exported"] = fmt.Sprintf("%t", p.IncludeExported)
+	traceStep.Metadata["package"] = p.Package
+	traceStep.Metadata["exclude_tests"] = fmt.Sprintf("%t", p.ExcludeTests)
+	traceStep.Metadata["limit"] = fmt.Sprintf("%d", p.Limit)
+	traceStep.Metadata["raw_count"] = fmt.Sprintf("%d", len(deadCode))
+	traceStep.Metadata["post_pkg_filter_count"] = fmt.Sprintf("%d", len(pkgScoped))
+	traceStep.Metadata["final_count"] = fmt.Sprintf("%d", len(filtered))
+	traceStep.Metadata["export_fallback_applied"] = fmt.Sprintf("%t", exportFallbackApplied)
+
 	// Build typed output
 	output := t.buildOutput(filtered)
 
@@ -356,12 +371,13 @@ func (t *findDeadCodeTool) Execute(ctx context.Context, params TypedParams) (*Re
 	outputText := t.formatText(filtered, len(deadCode))
 
 	return &Result{
-		Success:    true,
-		Output:     output,
-		OutputText: outputText,
-		TokensUsed: estimateTokens(outputText),
-		TraceStep:  &traceStep,
-		Duration:   time.Since(start),
+		Success:     true,
+		Output:      output,
+		OutputText:  outputText,
+		TokensUsed:  estimateTokens(outputText),
+		TraceStep:   &traceStep,
+		Duration:    time.Since(start),
+		ResultCount: output.DeadCodeCount,
 	}, nil
 }
 

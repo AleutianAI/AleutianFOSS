@@ -283,13 +283,23 @@ func (t *findArticulationPointsTool) Execute(ctx context.Context, params TypedPa
 	traceStep.Metadata["fragility_score"] = fmt.Sprintf("%.4f", fragilityScore)
 	traceStep.Metadata["fragility_level"] = output.FragilityLevel
 
+	// CRS Gap: Add result count, node count, and input params for self-contained trace
+	traceStep.Metadata["result_count"] = fmt.Sprintf("%d", len(output.ArticulationPoints))
+	traceStep.Metadata["total_points"] = fmt.Sprintf("%d", len(result.Points))
+	traceStep.Metadata["node_count"] = fmt.Sprintf("%d", result.NodeCount)
+	traceStep.Metadata["bridges_included"] = fmt.Sprintf("%v", p.IncludeBridges)
+	traceStep.Metadata["bridge_count"] = fmt.Sprintf("%d", len(result.Bridges))
+	traceStep.Metadata["top"] = fmt.Sprintf("%d", p.Top)
+
+	hasResults := len(output.ArticulationPoints) > 0
 	return &Result{
-		Success:    true,
-		Output:     output,
-		OutputText: outputText,
-		TokensUsed: estimateTokens(outputText),
-		TraceStep:  &traceStep,
-		Duration:   time.Since(start),
+		Success:     hasResults,
+		Output:      output,
+		OutputText:  outputText,
+		TokensUsed:  estimateTokens(outputText),
+		TraceStep:   &traceStep,
+		Duration:    time.Since(start),
+		ResultCount: len(output.ArticulationPoints),
 	}, nil
 }
 

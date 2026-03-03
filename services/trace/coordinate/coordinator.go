@@ -44,6 +44,9 @@ type MultiFileChangeCoordinator struct {
 	blast     *analysis.BlastRadiusAnalyzer
 	validator *reason.ChangeValidator
 
+	// CRS Layer 2: CDCL clause generation recorder.
+	crs CRSRecorder
+
 	// Internal state
 	mu    sync.RWMutex
 	plans map[string]*ChangePlan
@@ -89,8 +92,31 @@ func NewMultiFileChangeCoordinator(
 		breaking:  breaking,
 		blast:     blast,
 		validator: validator,
+		crs:       &NopCRSRecorder{},
 		plans:     make(map[string]*ChangePlan),
 	}
+}
+
+// SetCRS sets the CRS recorder for CDCL clause generation.
+//
+// # Description
+//
+// Replaces the default NopCRSRecorder with a real recorder that emits
+// CRS tool steps for PlanChanges and ValidatePlan operations.
+//
+// # Inputs
+//
+//   - recorder: The CRS recorder to use. Must not be nil.
+//
+// # Thread Safety
+//
+// Must be called before any concurrent use of PlanChanges or ValidatePlan.
+// Typically called once during initialization.
+func (c *MultiFileChangeCoordinator) SetCRS(recorder CRSRecorder) {
+	if recorder == nil {
+		return
+	}
+	c.crs = recorder
 }
 
 // PlanChanges creates a coordinated change plan.
@@ -130,6 +156,11 @@ func (c *MultiFileChangeCoordinator) PlanChanges(
 	if ctx == nil {
 		return nil, ErrInvalidInput
 	}
+
+	start := time.Now()
+	ctx, span := startPlanSpan(ctx, changes.PrimaryChange.TargetID)
+	defer span.End()
+
 	if err := ctx.Err(); err != nil {
 		return nil, ErrContextCanceled
 	}
@@ -202,6 +233,11 @@ func (c *MultiFileChangeCoordinator) PlanChanges(
 	c.plans[planID] = plan
 	c.mu.Unlock()
 
+	dur := time.Since(start)
+	setPlanSpanResult(span, plan.TotalFiles, nil)
+	recordPlanMetrics(ctx, dur, nil)
+	c.crs.RecordToolStep(ctx, "plan_changes", plan.TotalFiles, dur, nil)
+
 	return plan, nil
 }
 
@@ -240,6 +276,15 @@ func (c *MultiFileChangeCoordinator) ValidatePlan(
 	if ctx == nil {
 		return nil, ErrInvalidInput
 	}
+
+	planID := ""
+	if plan != nil {
+		planID = plan.ID
+	}
+	start := time.Now()
+	ctx, span := startValidatePlanSpan(ctx, planID)
+	defer span.End()
+
 	if plan == nil {
 		return nil, fmt.Errorf("%w: plan is nil", ErrInvalidInput)
 	}
@@ -321,6 +366,16 @@ func (c *MultiFileChangeCoordinator) ValidatePlan(
 				fmt.Sprintf("%s:%d: %s", vr.filePath, w.Line, w.Message))
 		}
 	}
+
+	dur := time.Since(start)
+	totalErrors := len(result.SyntaxErrors) + len(result.TypeErrors) + len(result.ImportErrors)
+	setValidatePlanSpanResult(span, result.Valid, totalErrors, nil)
+	recordValidatePlanMetrics(ctx, dur, nil)
+	var validationErr error
+	if !result.Valid {
+		validationErr = fmt.Errorf("validation failed with %d errors", totalErrors)
+	}
+	c.crs.RecordToolStep(ctx, "validate_plan", totalErrors, dur, validationErr)
 
 	return result, nil
 }

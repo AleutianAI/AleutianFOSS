@@ -325,7 +325,7 @@ func (t *findPathTool) Execute(ctx context.Context, params TypedParams) (*Result
 	// Find shortest path
 	pathStart := time.Now()
 	pathResult, err := t.graph.ShortestPath(ctx, fromID, toID)
-	pathDuration := time.Since(pathStart)
+	pathDuration := time.Since(pathStart) // Accumulates retry durations below
 
 	// Create CRS TraceStep
 	var traceStep crs.TraceStep
@@ -347,20 +347,9 @@ func (t *findPathTool) Execute(ctx context.Context, params TypedParams) (*Result
 		}, nil
 	}
 
-	traceStep = crs.NewTraceStepBuilder().
-		WithAction("graph_shortest_path").
-		WithTarget(fmt.Sprintf("%s->%s", p.From, p.To)).
-		WithTool("ShortestPath").
-		WithDuration(pathDuration).
-		WithMetadata("path_length", fmt.Sprintf("%d", pathResult.Length)).
-		WithMetadata("from_id", fromID).
-		WithMetadata("to_id", toID).
-		Build()
-
 	span.SetAttributes(
 		attribute.Int("path_length", pathResult.Length),
 		attribute.Int("path_nodes", len(pathResult.Path)),
-		attribute.String("trace_action", traceStep.Action),
 	)
 
 	// Structured logging for edge cases
@@ -379,14 +368,18 @@ func (t *findPathTool) Execute(ctx context.Context, params TypedParams) (*Result
 	// IT-12 Rev 3: If no path found and we have alternative candidates,
 	// try other From/To combinations. Try alt-From with original To first,
 	// then original From with alt-To. Max 3 extra attempts total.
+	alternativeTried := false
+	alternativeAttempts := 0
+	alternativeFromID := "" // IT_CRS_03 AC-11: Track which alternative IDs succeeded
+	alternativeToID := ""
 	if pathResult.Length < 0 && (len(fromCandidates) > 1 || len(toCandidates) > 1) {
+		alternativeTried = true
 		t.logger.Info("find_path: no path with primary candidates, trying alternatives",
 			slog.String("from", p.From),
 			slog.String("to", p.To),
 			slog.Int("from_candidates", len(fromCandidates)),
 			slog.Int("to_candidates", len(toCandidates)),
 		)
-		attempts := 0
 		found := false
 		for fi, fc := range fromCandidates {
 			for ti, tc := range toCandidates {
@@ -397,11 +390,13 @@ func (t *findPathTool) Execute(ctx context.Context, params TypedParams) (*Result
 				if fc.ID == tc.ID {
 					continue
 				}
-				if attempts >= 3 {
+				if alternativeAttempts >= 3 {
 					break
 				}
-				attempts++
+				alternativeAttempts++
+				altStart := time.Now()
 				altResult, altErr := t.graph.ShortestPath(ctx, fc.ID, tc.ID)
+				pathDuration += time.Since(altStart)
 				if altErr == nil && altResult.Length >= 0 {
 					t.logger.Info("find_path: alternative candidates found path",
 						slog.String("from_id", fc.ID),
@@ -409,17 +404,34 @@ func (t *findPathTool) Execute(ctx context.Context, params TypedParams) (*Result
 						slog.Int("length", altResult.Length),
 					)
 					pathResult = altResult
+					alternativeFromID = fc.ID
+					alternativeToID = tc.ID
 					fromID = fc.ID
 					toID = tc.ID
 					found = true
 					break
 				}
 			}
-			if found || attempts >= 3 {
+			if found || alternativeAttempts >= 3 {
 				break
 			}
 		}
 	}
+
+	// CRS: Build final traceStep AFTER retry loop so metadata reflects actual outcome
+	traceStep = crs.NewTraceStepBuilder().
+		WithAction("graph_shortest_path").
+		WithTarget(fmt.Sprintf("%s->%s", p.From, p.To)).
+		WithTool("ShortestPath").
+		WithDuration(pathDuration).
+		WithMetadata("path_length", fmt.Sprintf("%d", pathResult.Length)).
+		WithMetadata("from_id", fromID).
+		WithMetadata("to_id", toID).
+		WithMetadata("alternative_tried", fmt.Sprintf("%t", alternativeTried)).
+		WithMetadata("alternative_attempts", fmt.Sprintf("%d", alternativeAttempts)).
+		WithMetadata("alternative_from_id", alternativeFromID).
+		WithMetadata("alternative_to_id", alternativeToID).
+		Build()
 
 	// Build typed output
 	output := t.buildOutput(p.From, p.To, pathResult)
@@ -429,12 +441,13 @@ func (t *findPathTool) Execute(ctx context.Context, params TypedParams) (*Result
 
 	pathFound := pathResult != nil && pathResult.Length >= 0
 	r := &Result{
-		Success:    pathFound,
-		Output:     output,
-		OutputText: outputText,
-		TokensUsed: estimateTokens(outputText),
-		TraceStep:  &traceStep,
-		Duration:   time.Since(start),
+		Success:     pathFound,
+		Output:      output,
+		OutputText:  outputText,
+		TokensUsed:  estimateTokens(outputText),
+		TraceStep:   &traceStep,
+		Duration:    time.Since(start),
+		ResultCount: output.Length,
 	}
 	if !pathFound {
 		r.Error = fmt.Sprintf("no path found between '%s' and '%s'", p.From, p.To)
