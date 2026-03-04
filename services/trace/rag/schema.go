@@ -27,7 +27,7 @@ const CodeSymbolClassName = "CodeSymbol"
 // Description:
 //
 //	Defines the schema for storing code symbols in Weaviate for semantic search.
-//	Uses text2vec-transformers to vectorize the searchText field, which contains
+//	Uses text2vec-ollama to vectorize the searchText field, which contains
 //	a natural language description of the symbol (name, kind, package, signature).
 //	Other fields are indexed for filtering but not vectorized.
 //
@@ -47,7 +47,7 @@ func GetCodeSymbolSchema() *models.Class {
 	*skipVectorization = true
 
 	skipModule := map[string]interface{}{
-		"text2vec-transformers": map[string]interface{}{
+		"text2vec-ollama": map[string]interface{}{
 			"skip": true,
 		},
 	}
@@ -55,10 +55,11 @@ func GetCodeSymbolSchema() *models.Class {
 	return &models.Class{
 		Class:       CodeSymbolClassName,
 		Description: "Code symbols from AST graph for semantic entity resolution",
-		Vectorizer:  "text2vec-transformers",
+		Vectorizer:  "text2vec-ollama",
 		ModuleConfig: map[string]interface{}{
-			"text2vec-transformers": map[string]interface{}{
+			"text2vec-ollama": map[string]interface{}{
 				"vectorizeClassName": false,
+				"model":              "nomic-embed-text-v2-moe",
 			},
 		},
 		Properties: []*models.Property{
@@ -157,18 +158,34 @@ func GetCodeSymbolSchema() *models.Class {
 //
 // Thread Safety: Safe for concurrent use.
 func EnsureCodeSymbolSchema(ctx context.Context, client *weaviate.Client) error {
-	_, err := client.Schema().ClassGetter().WithClassName(CodeSymbolClassName).Do(ctx)
+	existing, err := client.Schema().ClassGetter().WithClassName(CodeSymbolClassName).Do(ctx)
 	if err == nil {
-		slog.Debug("CRS-25: CodeSymbol schema already exists")
-		return nil
+		// Class exists — verify the vectorizer matches what we need.
+		// If a previous run created the class with "none" or "text2vec-transformers",
+		// nearText won't work. Delete and recreate with the correct vectorizer.
+		expectedVectorizer := GetCodeSymbolSchema().Vectorizer
+		if existing.Vectorizer != expectedVectorizer {
+			slog.Warn("CRS-25: CodeSymbol schema has wrong vectorizer, recreating",
+				slog.String("current", existing.Vectorizer),
+				slog.String("expected", expectedVectorizer))
+			if delErr := client.Schema().ClassDeleter().WithClassName(CodeSymbolClassName).Do(ctx); delErr != nil {
+				return fmt.Errorf("deleting stale CodeSymbol schema: %w", delErr)
+			}
+		} else {
+			slog.Debug("CRS-25: CodeSymbol schema already exists",
+				slog.String("vectorizer", existing.Vectorizer))
+			return nil
+		}
 	}
 
 	schema := GetCodeSymbolSchema()
-	slog.Info("CRS-25: Creating CodeSymbol schema")
+	slog.Info("CRS-25: Creating CodeSymbol schema",
+		slog.String("vectorizer", schema.Vectorizer))
 	if err := client.Schema().ClassCreator().WithClass(schema).Do(ctx); err != nil {
 		return fmt.Errorf("creating CodeSymbol schema: %w", err)
 	}
 
-	slog.Info("CRS-25: CodeSymbol schema created")
+	slog.Info("CRS-25: CodeSymbol schema created",
+		slog.String("vectorizer", schema.Vectorizer))
 	return nil
 }

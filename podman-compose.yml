@@ -43,8 +43,12 @@ services:
     environment:
       AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
       PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
-      DEFAULT_VECTORIZER_MODULE: "none"
+      ENABLE_MODULES: "text2vec-ollama"
+      DEFAULT_VECTORIZER_MODULE: "text2vec-ollama"
       CLUSTER_HOSTNAME: "weaviate"
+      # CRS-25: text2vec-ollama uses Ollama's /api/embed endpoint for vectorization.
+      # host.containers.internal resolves to the host machine where Ollama runs.
+      OLLAMA_API_ENDPOINT: "http://host.containers.internal:11434"
     networks:
       - aleutian-network
     restart: unless-stopped

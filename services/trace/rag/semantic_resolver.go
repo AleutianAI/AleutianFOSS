@@ -37,7 +37,7 @@ const minSemanticDistance float32 = 0.6
 // SemanticResolver resolves query tokens against Weaviate's vector index.
 //
 // This is Layer 2 of the three-layer RAG resolution. It handles fuzzy/conceptual
-// matches like "rendering subsystem" → "pkg/render" using text2vec-transformers
+// matches like "rendering subsystem" → "pkg/render" using text2vec-ollama
 // embeddings. Only runs for tokens that the StructuralResolver couldn't resolve.
 //
 // Thread Safety: Safe for concurrent use after construction.

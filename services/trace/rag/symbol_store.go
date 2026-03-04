@@ -313,7 +313,7 @@ func (s *SymbolStore) HasGraphHash(ctx context.Context, graphHash string) (bool,
 // Description:
 //
 //	Combines the symbol's name, kind, package, and signature into a sentence
-//	that text2vec-transformers can vectorize meaningfully. Examples:
+//	that text2vec-ollama can vectorize meaningfully. Examples:
 //	  "function FindHotspots in package pkg/materials: func FindHotspots(ctx context.Context) ([]Hotspot, error)"
 //	  "struct Material in package pkg/materials"
 //	  "interface Renderer in package pkg/render"
