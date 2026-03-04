@@ -114,6 +114,12 @@ var (
 		Name: "crs_backup_retries_total",
 		Help: "Total backup retry attempts",
 	}, []string{"operation", "reason"})
+
+	// CRS-21: Checkpoint fallback counter.
+	checkpointFallbackTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "trace_crs_checkpoint_fallback_total",
+		Help: "Total times LoadBackup fell back to the previous generation checkpoint",
+	})
 )
 
 // -----------------------------------------------------------------------------
@@ -393,9 +399,21 @@ func (pm *PersistenceManager) BackupPath(projectHash string) string {
 	return filepath.Join(pm.ProjectDir(projectHash), "backups", "latest.backup.gz")
 }
 
+// PrevBackupPath returns the path to the previous generation backup.
+// CRS-21: Two-generation checkpoint rotation for crash safety.
+func (pm *PersistenceManager) PrevBackupPath(projectHash string) string {
+	return filepath.Join(pm.ProjectDir(projectHash), "backups", "latest.prev.backup.gz")
+}
+
 // MetadataPath returns the path to the metadata file.
 func (pm *PersistenceManager) MetadataPath(projectHash string) string {
 	return filepath.Join(pm.ProjectDir(projectHash), "metadata.json")
+}
+
+// PrevMetadataPath returns the path to the previous generation metadata.
+// CRS-21: Two-generation checkpoint rotation for crash safety.
+func (pm *PersistenceManager) PrevMetadataPath(projectHash string) string {
+	return filepath.Join(pm.ProjectDir(projectHash), "metadata.prev.json")
 }
 
 // LockPath returns the path to the lock file.
@@ -607,7 +625,20 @@ func (pm *PersistenceManager) saveBackupOnce(ctx context.Context, projectHash st
 		return nil, fmt.Errorf("close file: %w", err)
 	}
 
-	// Atomic rename
+	// CRS-21: Two-generation rotation. Rename current → prev before writing new.
+	// This preserves the previous checkpoint as a fallback if the process crashes
+	// between this rename and the final rename below.
+	prevPath := pm.PrevBackupPath(projectHash)
+	if _, statErr := os.Stat(backupPath); statErr == nil {
+		if renameErr := os.Rename(backupPath, prevPath); renameErr != nil {
+			// Log but don't fail — losing the prev backup is acceptable.
+			logger.Warn("CRS-21: failed to rotate current checkpoint to prev",
+				slog.String("error", renameErr.Error()),
+			)
+		}
+	}
+
+	// Atomic rename: tmp → current
 	if err := os.Rename(tmpPath, backupPath); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "rename failed")
@@ -758,16 +789,6 @@ func (pm *PersistenceManager) LoadBackup(ctx context.Context, projectHash string
 		slog.String("operation", "load_backup"),
 	)
 
-	// Check if backup exists
-	backupPath := pm.BackupPath(projectHash)
-	if _, err := os.Stat(backupPath); os.IsNotExist(err) {
-		span.SetAttributes(attribute.Bool("backup_exists", false))
-		backupOperationsTotal.WithLabelValues("load", "not_found").Inc()
-		return nil, ErrBackupNotFound
-	}
-
-	logger.Info("starting restore")
-
 	// Pause graph refresh during restore with panic-safe resume (P2 fix)
 	coordinatorPaused := false
 	if coordinator != nil {
@@ -803,26 +824,108 @@ func (pm *PersistenceManager) LoadBackup(ctx context.Context, projectHash string
 	}
 	defer pm.releaseLock(lockFile)
 
-	// Read and validate metadata
-	metadata, err := pm.readMetadata(projectHash)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "read metadata failed")
+	// Try current checkpoint first.
+	backupPath := pm.BackupPath(projectHash)
+	metadataPath := pm.MetadataPath(projectHash)
+	metadata, loadErr := pm.loadBackupFromPath(ctx, projectHash, backupPath, metadataPath, journal, logger, span)
+	if loadErr == nil {
+		// Current checkpoint loaded successfully.
+		duration := time.Since(start)
+		restoreDurationHistogram.WithLabelValues("success").Observe(duration.Seconds())
+		backupOperationsTotal.WithLabelValues("load", "success").Inc()
+		backupAgeGauge.WithLabelValues(projectHash).Set(metadata.Age().Seconds())
+		span.SetAttributes(
+			attribute.Int64("restored_generation", metadata.Generation),
+			attribute.Int64("restored_delta_count", metadata.DeltaCount),
+		)
+		logger.Info("restore completed",
+			slog.Duration("duration", duration),
+			slog.Int64("generation", metadata.Generation),
+			slog.Int64("delta_count", metadata.DeltaCount),
+			slog.Duration("backup_age", metadata.Age()),
+		)
+		return metadata, nil
+	}
+
+	// CRS-21: Current checkpoint failed. Try previous generation fallback.
+	prevBackupPath := pm.PrevBackupPath(projectHash)
+	prevMetadataPath := pm.PrevMetadataPath(projectHash)
+	if _, statErr := os.Stat(prevBackupPath); os.IsNotExist(statErr) {
+		// No previous checkpoint exists — return the original error.
 		backupOperationsTotal.WithLabelValues("load", "error").Inc()
+		return nil, loadErr
+	}
+
+	logger.Warn("CRS-PERSIST-02: Current checkpoint failed, falling back to previous",
+		slog.String("error", loadErr.Error()),
+	)
+
+	metadata, fallbackErr := pm.loadBackupFromPath(ctx, projectHash, prevBackupPath, prevMetadataPath, journal, logger, span)
+	if fallbackErr != nil {
+		// Both checkpoints failed — return both errors for diagnostics.
+		backupOperationsTotal.WithLabelValues("load", "error").Inc()
+		return nil, fmt.Errorf("current checkpoint: %w; previous checkpoint: %v", loadErr, fallbackErr)
+	}
+
+	// Fallback succeeded.
+	checkpointFallbackTotal.Inc()
+	duration := time.Since(start)
+	restoreDurationHistogram.WithLabelValues("fallback").Observe(duration.Seconds())
+	backupOperationsTotal.WithLabelValues("load", "fallback").Inc()
+	backupAgeGauge.WithLabelValues(projectHash).Set(metadata.Age().Seconds())
+	span.SetAttributes(
+		attribute.Int64("restored_generation", metadata.Generation),
+		attribute.Int64("restored_delta_count", metadata.DeltaCount),
+		attribute.Bool("fallback_used", true),
+	)
+	logger.Info("CRS-PERSIST-02: Fell back to previous checkpoint",
+		slog.Duration("duration", duration),
+		slog.Int64("generation", metadata.Generation),
+		slog.Int64("delta_count", metadata.DeltaCount),
+		slog.Duration("backup_age", metadata.Age()),
+	)
+
+	return metadata, nil
+}
+
+// loadBackupFromPath loads and validates a backup from a specific path.
+//
+// Description:
+//
+//	Core restore logic factored out of LoadBackup to support CRS-21
+//	two-generation checkpoint fallback. Reads backup file, validates
+//	metadata and SHA256 integrity, and restores journal state.
+//
+// Inputs:
+//
+//   - ctx: Context for cancellation and tracing.
+//   - projectHash: Project identifier for metadata validation.
+//   - backupPath: Path to the backup .gz file.
+//   - metadataPath: Path to the corresponding metadata .json file.
+//   - journal: BadgerDB journal to restore into.
+//   - logger: Logger with trace context.
+//   - span: OpenTelemetry span for tracing.
+//
+// Outputs:
+//
+//   - *BackupMetadata: Loaded metadata on success.
+//   - error: Non-nil if any step fails.
+//
+// Thread Safety: Caller must hold the shared lock.
+func (pm *PersistenceManager) loadBackupFromPath(ctx context.Context, projectHash string, backupPath string, metadataPath string, journal *BadgerJournal, logger *slog.Logger, span trace.Span) (*BackupMetadata, error) {
+	// Check if backup exists
+	if _, err := os.Stat(backupPath); os.IsNotExist(err) {
+		return nil, ErrBackupNotFound
+	}
+
+	// Read and validate metadata
+	metadata, err := pm.readMetadataFromPath(metadataPath)
+	if err != nil {
 		return nil, fmt.Errorf("read metadata: %w", err)
 	}
 
-	span.SetAttributes(
-		attribute.Int64("backup_age_seconds", int64(metadata.Age().Seconds())),
-		attribute.Int64("backup_generation", metadata.Generation),
-		attribute.String("backup_badger_version", metadata.BadgerVersion),
-	)
-
 	// Version compatibility check
 	if metadata.BadgerVersion != BadgerDBVersion {
-		span.RecordError(ErrBackupVersionMismatch)
-		span.SetStatus(codes.Error, "version mismatch")
-		backupOperationsTotal.WithLabelValues("load", "error").Inc()
 		return nil, fmt.Errorf("%w: backup=%s, current=%s",
 			ErrBackupVersionMismatch, metadata.BadgerVersion, BadgerDBVersion)
 	}
@@ -830,21 +933,16 @@ func (pm *PersistenceManager) LoadBackup(ctx context.Context, projectHash string
 	// Open backup file
 	file, err := os.Open(backupPath)
 	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "open backup failed")
-		backupOperationsTotal.WithLabelValues("load", "error").Inc()
 		return nil, fmt.Errorf("open backup: %w", err)
 	}
 	defer file.Close()
 
 	// Single-pass hash verification and restore (P3 optimization: O1)
-	// Use TeeReader to compute hash while reading for decompression
 	var reader io.Reader = file
 	var validateHash bool
 
 	hasher := sha256.New()
 	if pm.config.ValidateOnRestore {
-		logger.Debug("validating backup integrity (single-pass)")
 		reader = io.TeeReader(file, hasher)
 		validateHash = true
 	}
@@ -852,51 +950,24 @@ func (pm *PersistenceManager) LoadBackup(ctx context.Context, projectHash string
 	// Decompress
 	gzipReader, err := gzip.NewReader(reader)
 	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "create gzip reader failed")
-		backupOperationsTotal.WithLabelValues("load", "error").Inc()
 		return nil, fmt.Errorf("create gzip reader: %w", err)
 	}
 	defer gzipReader.Close()
 
 	// Perform restore
 	if err := journal.Restore(ctx, gzipReader); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "journal restore failed")
-		backupOperationsTotal.WithLabelValues("load", "error").Inc()
 		return nil, fmt.Errorf("journal restore: %w", err)
 	}
 
-	// Verify hash after restore completes (single-pass validation)
+	// Verify hash after restore completes
 	if validateHash {
 		actualHash := hex.EncodeToString(hasher.Sum(nil))
 		if actualHash != metadata.ContentHash {
-			span.RecordError(ErrBackupCorrupted)
-			span.SetStatus(codes.Error, "integrity check failed")
-			backupOperationsTotal.WithLabelValues("load", "error").Inc()
 			return nil, fmt.Errorf("%w: expected=%s, actual=%s",
 				ErrBackupCorrupted, metadata.ContentHash, actualHash)
 		}
-		logger.Debug("backup integrity verified")
+		logger.Debug("backup integrity verified", slog.String("path", backupPath))
 	}
-
-	// Update metrics
-	duration := time.Since(start)
-	restoreDurationHistogram.WithLabelValues("success").Observe(duration.Seconds())
-	backupOperationsTotal.WithLabelValues("load", "success").Inc()
-	backupAgeGauge.WithLabelValues(projectHash).Set(metadata.Age().Seconds())
-
-	span.SetAttributes(
-		attribute.Int64("restored_generation", metadata.Generation),
-		attribute.Int64("restored_delta_count", metadata.DeltaCount),
-	)
-
-	logger.Info("restore completed",
-		slog.Duration("duration", duration),
-		slog.Int64("generation", metadata.Generation),
-		slog.Int64("delta_count", metadata.DeltaCount),
-		slog.Duration("backup_age", metadata.Age()),
-	)
 
 	return metadata, nil
 }
@@ -1017,6 +1088,17 @@ func (pm *PersistenceManager) writeMetadata(projectHash string, metadata *Backup
 		return fmt.Errorf("marshal metadata: %w", err)
 	}
 
+	// CRS-21: Rotate current metadata → prev before writing new.
+	prevMetaPath := pm.PrevMetadataPath(projectHash)
+	if _, statErr := os.Stat(metaPath); statErr == nil {
+		if renameErr := os.Rename(metaPath, prevMetaPath); renameErr != nil {
+			// Log but don't fail — losing the prev metadata is acceptable.
+			pm.logger.Warn("CRS-21: failed to rotate metadata to prev",
+				slog.String("error", renameErr.Error()),
+			)
+		}
+	}
+
 	// Atomic write via temp file
 	tmpPath := metaPath + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0640); err != nil {
@@ -1036,8 +1118,12 @@ var ErrMetadataCorrupted = errors.New("metadata corrupted: hash mismatch")
 
 // readMetadata loads backup metadata from disk and validates its integrity.
 func (pm *PersistenceManager) readMetadata(projectHash string) (*BackupMetadata, error) {
-	metaPath := pm.MetadataPath(projectHash)
+	return pm.readMetadataFromPath(pm.MetadataPath(projectHash))
+}
 
+// readMetadataFromPath loads metadata from a specific file path.
+// CRS-21: Factored out of readMetadata to support loading prev metadata.
+func (pm *PersistenceManager) readMetadataFromPath(metaPath string) (*BackupMetadata, error) {
 	data, err := os.ReadFile(metaPath)
 	if err != nil {
 		return nil, fmt.Errorf("read file: %w", err)

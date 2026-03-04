@@ -143,6 +143,52 @@ func RecordParamExtractionTotal(model, status string) {
 }
 
 // =============================================================================
+// Speculative Extraction Metrics (CRS-14)
+// =============================================================================
+
+var (
+	// speculativeExtractionTotal counts speculative extraction outcomes.
+	// Labels: outcome (hit, hit_conversion_failed, mispredict_reextracted,
+	//         mispredict_regex_fallback, error)
+	speculativeExtractionTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "trace",
+		Subsystem: "param_extraction",
+		Name:      "speculative_total",
+		Help:      "Speculative parameter extraction outcomes",
+	}, []string{"outcome"})
+
+	// speculativeExtractionDuration measures the wall-clock time from speculative
+	// launch to outcome determination (includes channel wait + any re-extraction).
+	// Labels: outcome (same as counter)
+	speculativeExtractionDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "trace",
+		Subsystem: "param_extraction",
+		Name:      "speculative_duration_seconds",
+		Help:      "Speculative parameter extraction duration by outcome",
+		Buckets:   []float64{0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 2.0, 5.0},
+	}, []string{"outcome"})
+)
+
+// RecordSpeculativeExtraction records the outcome and duration of a speculative extraction.
+//
+// Description:
+//
+//	CRS-14: Tracks speculative extraction outcomes to determine hit/mispredict
+//	rates and latency impact for ROI analysis.
+//
+// Inputs:
+//
+//	outcome - "hit", "hit_conversion_failed", "mispredict_reextracted",
+//	          "mispredict_regex_fallback", or "error".
+//	durationSec - Wall-clock time from speculative launch to outcome.
+//
+// Thread Safety: Safe for concurrent use (Prometheus metrics are thread-safe).
+func RecordSpeculativeExtraction(outcome string, durationSec float64) {
+	speculativeExtractionTotal.WithLabelValues(outcome).Inc()
+	speculativeExtractionDuration.WithLabelValues(outcome).Observe(durationSec)
+}
+
+// =============================================================================
 // Metrics Recording Functions
 // =============================================================================
 

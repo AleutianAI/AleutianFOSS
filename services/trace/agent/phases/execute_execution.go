@@ -141,6 +141,14 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 		// Refresh graph if dirty files exist (before tool queries stale data)
 		p.maybeRefreshGraph(ctx, deps)
 
+		// CRS-19: Check graph staleness before tool dispatch.
+		// Runs once per session (cached for 60s). Logs warning/error if files changed.
+		var stalenessResult *graph.StalenessResult
+		if deps.StalenessChecker != nil {
+			sr := deps.StalenessChecker.Check()
+			stalenessResult = &sr
+		}
+
 		// Emit tool invocation event
 		p.emitToolInvocation(deps, &inv)
 
@@ -298,6 +306,18 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 			toolQuery := extractToolQuery(&inv)
 			if toolQuery != "" {
 				isRepetitive, similarity, similarQuery := p.checkSemanticRepetition(ctx, deps, inv.Tool, toolQuery)
+
+				// CRS-15: Record similarity to CRS for cross-session persistence.
+				if similarity > 0 && similarQuery != "" && deps.Session.HasCRS() {
+					currentKey := fmt.Sprintf("%s:%s", inv.Tool, toolQuery)
+					previousKey := fmt.Sprintf("%s:%s", inv.Tool, similarQuery)
+					if recErr := deps.Session.GetCRS().RecordSimilarity(ctx, currentKey, previousKey, 1.0-similarity); recErr != nil {
+						slog.Debug("CRS-15: Failed to record similarity",
+							slog.String("error", recErr.Error()),
+						)
+					}
+				}
+
 				if isRepetitive {
 					slog.Info("CB-30c: Blocking semantically repetitive tool call",
 						slog.String("session_id", deps.Session.ID),
@@ -436,6 +456,23 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 			// CRS-06: Emit EventToolExecuted to Coordinator for successful execution
 			p.emitCoordinatorEvent(ctx, deps, integration.EventToolExecuted, &inv, result, "", crs.ErrorCategoryNone)
 		}
+		// CRS-19: Attach staleness metadata to result and trace step.
+		if stalenessResult != nil && stalenessResult.IsStale {
+			if result != nil {
+				if result.TraceStep == nil {
+					result.TraceStep = &crs.TraceStep{
+						Metadata: make(map[string]string),
+					}
+				}
+				if result.TraceStep.Metadata == nil {
+					result.TraceStep.Metadata = make(map[string]string)
+				}
+				result.TraceStep.Metadata["graph_stale"] = "true"
+				result.TraceStep.Metadata["graph_stale_changed_files"] = fmt.Sprintf("%d", stalenessResult.ChangedFileCount)
+				result.TraceStep.Metadata["graph_stale_percent"] = fmt.Sprintf("%.1f", stalenessResult.PercentChanged*100)
+			}
+		}
+
 		p.recordTraceStep(deps, &inv, result, toolDuration, errMsg)
 
 		// GR-38 Issue 16: Track tokens for tool results.
@@ -1783,6 +1820,7 @@ func (p *ExecutePhase) extractToolParameters(
 		return tools.FindArticulationPointsParams{
 			Top:            top,
 			IncludeBridges: includeBridges,
+			Package:        extractPackageContextFromQuery(query),
 		}, nil
 
 	case "find_dominators":
@@ -2184,7 +2222,8 @@ func (p *ExecutePhase) extractToolParameters(
 			slog.Int("top", top),
 		)
 		return tools.FindWeightedCriticalityParams{
-			Top: top,
+			Top:     top,
+			Package: extractPackageContextFromQuery(query),
 		}, nil
 
 	case "find_module_api":
@@ -2661,6 +2700,7 @@ func convertMapToTypedParams(toolName string, params map[string]any) (tools.Type
 		return tools.FindArticulationPointsParams{
 			Top:            getIntParam(params, "top", 20),
 			IncludeBridges: getBoolParam(params, "include_bridges", true),
+			Package:        getStringParam(params, "package", ""),
 		}, nil
 
 	case "find_common_dependency":
@@ -2704,6 +2744,7 @@ func convertMapToTypedParams(toolName string, params map[string]any) (tools.Type
 			Top:          getIntParam(params, "top", 20),
 			Entry:        getStringParam(params, "entry", ""),
 			ShowQuadrant: getBoolParam(params, "show_quadrant", true),
+			Package:      getStringParam(params, "package", ""),
 		}, nil
 
 	case "find_module_api":
@@ -3296,6 +3337,27 @@ func clearScopeFromParams(toolName string, params tools.TypedParams) tools.Typed
 	case "find_communities":
 		if p, ok := params.(tools.FindCommunitiesParams); ok {
 			p.PackageFilter = ""
+			return p
+		}
+	// CRS-13: New scope-aware tools.
+	case "find_cycles":
+		if p, ok := params.(tools.FindCyclesParams); ok {
+			p.PackageFilter = ""
+			return p
+		}
+	case "find_symbol":
+		if p, ok := params.(tools.FindSymbolParams); ok {
+			p.Package = ""
+			return p
+		}
+	case "find_articulation_points":
+		if p, ok := params.(tools.FindArticulationPointsParams); ok {
+			p.Package = ""
+			return p
+		}
+	case "find_weighted_criticality":
+		if p, ok := params.(tools.FindWeightedCriticalityParams); ok {
+			p.Package = ""
 			return p
 		}
 	}

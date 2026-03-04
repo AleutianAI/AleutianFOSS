@@ -640,6 +640,10 @@ func (d *SimilarityDelta) Type() DeltaType {
 // Validate checks if this delta can be applied.
 func (d *SimilarityDelta) Validate(_ Snapshot) error {
 	for pair, dist := range d.Updates {
+		// CRS-15 Code Review Fix #5: Reject empty keys.
+		if pair[0] == "" || pair[1] == "" {
+			return fmt.Errorf("%w: similarity keys must not be empty", ErrDeltaValidation)
+		}
 		if dist < 0 {
 			return fmt.Errorf("%w: similarity distance cannot be negative: %s-%s", ErrDeltaValidation, pair[0], pair[1])
 		}

@@ -49,12 +49,14 @@ var coordinatorRegistry = struct {
 // persistenceRegistry tracks persistence components by session ID for cleanup.
 // GR-36: Prevent resource leaks by enabling session-based cleanup.
 var persistenceRegistry = struct {
-	mu       sync.RWMutex
-	managers map[string]*crs.PersistenceManager
-	journals map[string]*crs.BadgerJournal
+	mu          sync.RWMutex
+	managers    map[string]*crs.PersistenceManager
+	journals    map[string]*crs.BadgerJournal
+	projectKeys map[string]string // CRS-17: maps session ID -> checkpoint key (path hash)
 }{
-	managers: make(map[string]*crs.PersistenceManager),
-	journals: make(map[string]*crs.BadgerJournal),
+	managers:    make(map[string]*crs.PersistenceManager),
+	journals:    make(map[string]*crs.BadgerJournal),
+	projectKeys: make(map[string]string),
 }
 
 // journalsByProject tracks journals by project key (checkpoint key).
@@ -108,7 +110,9 @@ func registerCoordinator(sessionID string, coord *integration.Coordinator) {
 
 // registerPersistence stores persistence components for later cleanup.
 // GR-36: Called when session restore infrastructure is created.
-func registerPersistence(sessionID string, pm *crs.PersistenceManager, journal *crs.BadgerJournal) {
+// CRS-17: projectKey is the checkpoint key (path hash) used by SaveBackup for directory
+// addressing and metadata identity. Must not be empty when pm is non-nil.
+func registerPersistence(sessionID string, pm *crs.PersistenceManager, journal *crs.BadgerJournal, projectKey string) {
 	persistenceRegistry.mu.Lock()
 	defer persistenceRegistry.mu.Unlock()
 	if pm != nil {
@@ -116,6 +120,9 @@ func registerPersistence(sessionID string, pm *crs.PersistenceManager, journal *
 	}
 	if journal != nil {
 		persistenceRegistry.journals[sessionID] = journal
+	}
+	if projectKey != "" {
+		persistenceRegistry.projectKeys[sessionID] = projectKey
 	}
 }
 
@@ -145,6 +152,7 @@ func closeExistingJournalForProject(projectKey string) bool {
 		persistenceRegistry.mu.Lock()
 		if oldSessionID != "" {
 			delete(persistenceRegistry.journals, oldSessionID)
+			delete(persistenceRegistry.projectKeys, oldSessionID)
 		}
 		persistenceRegistry.mu.Unlock()
 
@@ -178,57 +186,84 @@ func cleanupCoordinator(sessionID string) {
 
 // cleanupPersistence removes and closes persistence components for a session.
 // GR-36: Called when session ends to save checkpoint and close resources.
+// cleanupPersistence saves a checkpoint and closes journal/manager for a session.
+//
+// Lock ordering: persistenceRegistry.mu → journalsByProject.mu
+// (must always acquire in this order to avoid deadlocks).
 func cleanupPersistence(sessionID string) {
-	persistenceRegistry.mu.Lock()
-	defer persistenceRegistry.mu.Unlock()
+	var projectKey string
 
-	// CRS-PERSIST-01: Save checkpoint before closing.
-	// This persists learned clauses and proof numbers for the next session.
-	pm := persistenceRegistry.managers[sessionID]
-	journal := persistenceRegistry.journals[sessionID]
-	if pm != nil && journal != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if _, err := pm.SaveBackup(ctx, sessionID, journal, nil); err != nil {
-			slog.Warn("CRS-PERSIST-01: Failed to save session checkpoint",
-				slog.String("session_id", sessionID),
-				slog.String("error", err.Error()),
-			)
-		} else {
-			slog.Info("CRS-PERSIST-01: Session checkpoint saved",
-				slog.String("session_id", sessionID),
-			)
-		}
-	}
+	// Phase 1: Under persistenceRegistry lock — save, close, and remove entries.
+	func() {
+		persistenceRegistry.mu.Lock()
+		defer persistenceRegistry.mu.Unlock()
 
-	// Close journal first (flushes pending writes)
-	if journal != nil {
-		if err := journal.Close(); err != nil {
-			slog.Warn("GR-36: Failed to close journal",
-				slog.String("session_id", sessionID),
-				slog.String("error", err.Error()),
-			)
-		} else {
-			slog.Debug("GR-36: Journal closed",
-				slog.String("session_id", sessionID),
-			)
+		// CRS-PERSIST-01: Save checkpoint before closing.
+		// CRS-17: Use projectKey (checkpoint key / path hash) instead of sessionID (UUID)
+		// so metadata.ProjectHash matches what TryRestore validates against.
+		pm := persistenceRegistry.managers[sessionID]
+		journal := persistenceRegistry.journals[sessionID]
+		projectKey = persistenceRegistry.projectKeys[sessionID]
+		if pm != nil && journal != nil && projectKey != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if _, err := pm.SaveBackup(ctx, projectKey, journal, nil); err != nil {
+				slog.Warn("CRS-PERSIST-01: Failed to save session checkpoint",
+					slog.String("session_id", sessionID),
+					slog.String("project_key", projectKey),
+					slog.String("error", err.Error()),
+				)
+			} else {
+				slog.Info("CRS-PERSIST-01: Session checkpoint saved",
+					slog.String("session_id", sessionID),
+					slog.String("project_key", projectKey),
+				)
+			}
 		}
-		delete(persistenceRegistry.journals, sessionID)
-	}
 
-	// Then close persistence manager
-	if pm != nil {
-		if err := pm.Close(); err != nil {
-			slog.Warn("GR-36: Failed to close persistence manager",
-				slog.String("session_id", sessionID),
-				slog.String("error", err.Error()),
-			)
-		} else {
-			slog.Debug("GR-36: Persistence manager closed",
-				slog.String("session_id", sessionID),
-			)
+		// Close journal first (flushes pending writes)
+		if journal != nil {
+			if err := journal.Close(); err != nil {
+				slog.Warn("GR-36: Failed to close journal",
+					slog.String("session_id", sessionID),
+					slog.String("error", err.Error()),
+				)
+			} else {
+				slog.Debug("GR-36: Journal closed",
+					slog.String("session_id", sessionID),
+				)
+			}
+			delete(persistenceRegistry.journals, sessionID)
 		}
-		delete(persistenceRegistry.managers, sessionID)
+
+		// Then close persistence manager
+		if pm != nil {
+			if err := pm.Close(); err != nil {
+				slog.Warn("GR-36: Failed to close persistence manager",
+					slog.String("session_id", sessionID),
+					slog.String("error", err.Error()),
+				)
+			} else {
+				slog.Debug("GR-36: Persistence manager closed",
+					slog.String("session_id", sessionID),
+				)
+			}
+			delete(persistenceRegistry.managers, sessionID)
+		}
+		delete(persistenceRegistry.projectKeys, sessionID)
+	}()
+
+	// Phase 2: Under journalsByProject lock — remove stale project entry.
+	// CRS-17 CR2: Without this cleanup, closeExistingJournalForProject would
+	// attempt to Close() the already-closed journal on next session start,
+	// risking a double-close panic.
+	if projectKey != "" {
+		journalsByProject.mu.Lock()
+		if existingSession, ok := journalsByProject.sessions[projectKey]; ok && existingSession == sessionID {
+			delete(journalsByProject.journals, projectKey)
+			delete(journalsByProject.sessions, projectKey)
+		}
+		journalsByProject.mu.Unlock()
 	}
 }
 
@@ -624,6 +659,18 @@ func (f *DefaultDependenciesFactory) Create(session *agent.Session, query string
 					}
 				}
 
+				// CRS-19: Create staleness checker from graph's recorded file mtimes.
+				if cached.Graph != nil && len(cached.Graph.FileMtimes) > 0 {
+					projectRoot := session.GetProjectRoot()
+					if projectRoot != "" {
+						deps.StalenessChecker = graph.NewStalenessChecker(projectRoot, cached.Graph.FileMtimes)
+						slog.Debug("CRS-19: Staleness checker enabled",
+							slog.String("session_id", session.ID),
+							slog.Int("tracked_files", len(cached.Graph.FileMtimes)),
+						)
+					}
+				}
+
 				// Create ToolRegistry if enabled
 				if f.enableTools && cached.Graph != nil && cached.Index != nil {
 					registry := tools.NewRegistry()
@@ -699,7 +746,7 @@ func (f *DefaultDependenciesFactory) Create(session *agent.Session, query string
 			if memErr == nil {
 				deps.BadgerJournal = memJournal
 				bridgeOpts = append(bridgeOpts, integration.WithJournal(memJournal))
-				registerPersistence(session.ID, nil, memJournal)
+				registerPersistence(session.ID, nil, memJournal, "")
 				slog.Info("CRS-WIRE-01: In-memory journal wired to Bridge",
 					slog.String("session_id", session.ID),
 				)
@@ -827,7 +874,7 @@ func (f *DefaultDependenciesFactory) trySessionRestore(
 	deps.BadgerJournal = journal
 
 	// Register for cleanup when session ends (both session-based and project-based)
-	registerPersistence(sessionID, pm, journal)
+	registerPersistence(sessionID, pm, journal, projectKey)
 	registerJournalForProject(projectKey, sessionID, journal)
 
 	// Create restorer and attempt restore

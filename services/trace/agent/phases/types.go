@@ -190,6 +190,11 @@ type Dependencies struct {
 	// IT-08b: Optional - nil when LLM parameter extraction is not enabled.
 	// When available, enhances regex-based extraction with semantic understanding.
 	ParamExtractor agent.ParamExtractor
+
+	// StalenessChecker detects if the code graph is stale relative to the working tree.
+	// CRS-19: Optional - if nil, staleness detection is disabled.
+	// When available, spot-checks file mtimes before graph tool dispatch.
+	StalenessChecker *graph.StalenessChecker
 }
 
 // GraphProvider initializes and provides access to the code graph.

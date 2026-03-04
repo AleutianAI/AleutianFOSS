@@ -330,3 +330,88 @@ func TestGraphToolsWithSubstantiveResults_ContainsFindSimilarCode(t *testing.T) 
 		}
 	}
 }
+
+// CRS-22 AC-2: Comprehensive audit of graphToolsWithSubstantiveResults.
+// Verifies ALL graph tool names are present (snake_case tool names + PascalCase analytics names).
+func TestCRS22_GraphToolMapCompleteness(t *testing.T) {
+	t.Run("all snake_case graph tools present", func(t *testing.T) {
+		// Complete list of snake_case graph tool names from cli/tools/
+		allGraphTools := []string{
+			// Core graph traversal
+			"find_callers",
+			"find_callees",
+			"find_implementations",
+			"find_references",
+			"find_symbol",
+			"find_path",
+			"get_call_chain",
+			// Graph analytics
+			"find_hotspots",
+			"find_important",
+			"find_weighted_criticality",
+			"find_dead_code",
+			"find_cycles",
+			"find_loops",
+			"find_communities",
+			"find_articulation_points",
+			"find_merge_points",
+			"find_dominators",
+			"find_control_dependencies",
+			"find_critical_path",
+			"find_common_dependency",
+			"find_extractable_regions",
+			"find_module_api",
+			"check_reducibility",
+			"find_similar_code",
+		}
+		for _, tool := range allGraphTools {
+			if !graphToolsWithSubstantiveResults[tool] {
+				t.Errorf("graphToolsWithSubstantiveResults missing snake_case tool %q", tool)
+			}
+		}
+	})
+
+	t.Run("all PascalCase analytics names present", func(t *testing.T) {
+		// PascalCase names emitted by *WithCRS analytics methods
+		analyticNames := []string{
+			"DetectCommunities",
+			"HotSpots",
+			"DeadCode",
+			"CyclicDependencies",
+			"ShortestPath",
+			"ArticulationPoints",
+			"DetectLoops",
+			"ComputeControlDependence",
+			"Dominators",
+			"PageRank",
+			"CheckReducibility",
+		}
+		for _, name := range analyticNames {
+			if !graphToolsWithSubstantiveResults[name] {
+				t.Errorf("graphToolsWithSubstantiveResults missing PascalCase analytics name %q", name)
+			}
+		}
+	})
+
+	t.Run("no non-graph tools present", func(t *testing.T) {
+		// These should NOT be in the map
+		nonGraphTools := []string{
+			"Grep",
+			"Read",
+			"Write",
+			"find_entry_points",
+			"trace_data_flow",
+			"trace_error_flow",
+			"list_packages",
+			"explore_package",
+			"graph_overview",
+			"summarize_file",
+			"find_config_usage",
+		}
+		for _, tool := range nonGraphTools {
+			if graphToolsWithSubstantiveResults[tool] {
+				t.Errorf("graphToolsWithSubstantiveResults should NOT contain non-graph tool %q", tool)
+			}
+		}
+	})
+}

@@ -249,23 +249,36 @@ func (t *findSymbolTool) Execute(ctx context.Context, params TypedParams) (*Resu
 		}
 	}
 
+	// CRS-13: Track scope metadata for scope relaxation.
+	var scopeApplied string
+	var scopePreCount int
+
 	// Apply filters
 	var filtered []*ast.Symbol
+
+	// First pass: apply kind filter only (pre-scope count).
+	var kindFiltered []*ast.Symbol
 	for _, sym := range matches {
 		if sym == nil {
 			continue
 		}
-
-		// Filter by kind
 		if p.Kind != "all" && !matchesSymbolKind(sym.Kind, p.Kind) {
 			continue
 		}
+		kindFiltered = append(kindFiltered, sym)
+	}
 
-		// Filter by package
-		if p.Package != "" && sym.Package != p.Package {
+	// Second pass: apply package scope filter.
+	if p.Package != "" {
+		scopeApplied = p.Package
+		scopePreCount = len(kindFiltered)
+	}
+	for _, sym := range kindFiltered {
+		// CRS-13: Use matchesPackageScope for boundary-aware cross-language matching
+		// instead of exact sym.Package comparison.
+		if p.Package != "" && !matchesPackageScope(sym, p.Package) {
 			continue
 		}
-
 		filtered = append(filtered, sym)
 	}
 
@@ -307,14 +320,16 @@ func (t *findSymbolTool) Execute(ctx context.Context, params TypedParams) (*Resu
 	}
 
 	return &Result{
-		Success:     true,
-		Output:      output,
-		OutputText:  outputText,
-		TokensUsed:  estimateTokens(outputText),
-		TraceStep:   &toolStep,
-		Duration:    duration,
-		ResultCount: output.MatchCount,
-		ProofDelta:  proofDelta,
+		Success:       true,
+		Output:        output,
+		OutputText:    outputText,
+		TokensUsed:    estimateTokens(outputText),
+		TraceStep:     &toolStep,
+		Duration:      duration,
+		ResultCount:   output.MatchCount,
+		ProofDelta:    proofDelta,
+		ScopeApplied:  scopeApplied,
+		PreScopeCount: scopePreCount,
 	}, nil
 }
 

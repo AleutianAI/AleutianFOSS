@@ -337,6 +337,10 @@ func (b *Builder) Build(ctx context.Context, results []*ast.ParseResult) (*Build
 
 	// Phase 3: Finalize
 	state.graph.Freeze()
+
+	// CRS-19: Record file modification times for staleness detection across sessions.
+	RecordFileMtimes(state.graph, b.options.ProjectRoot)
+
 	duration := time.Since(state.startTime)
 	state.result.Stats.DurationMilli = duration.Milliseconds()
 	state.result.Stats.DurationMicro = duration.Microseconds()

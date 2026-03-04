@@ -376,6 +376,45 @@ type CRS interface {
 	GarbageCollectClauses() int
 
 	// -------------------------------------------------------------------------
+	// Similarity Index Methods (CRS-15)
+	// -------------------------------------------------------------------------
+
+	// RecordSimilarity records a similarity pair between two queries.
+	//
+	// Description:
+	//
+	//   Records that two queries (identified by tool+query keys) are
+	//   semantically similar with the given distance score. This data
+	//   persists across sessions via the journal and is used for
+	//   cross-session semantic dedup.
+	//
+	// Inputs:
+	//   - ctx: Context for cancellation. Must not be nil.
+	//   - key1: First query key (e.g., "tool:query_hash"). Must not be empty.
+	//   - key2: Second query key. Must not be empty or equal to key1.
+	//   - distance: Similarity distance (0 = identical, higher = less similar).
+	//     Must be non-negative.
+	//
+	// Outputs:
+	//   - error: Non-nil if validation fails or context cancelled.
+	//
+	// Thread Safety: Safe for concurrent use.
+	RecordSimilarity(ctx context.Context, key1, key2 string, distance float64) error
+
+	// GetSimilarity returns the recorded similarity distance between two keys.
+	//
+	// Inputs:
+	//   - key1: First query key. Must not be empty.
+	//   - key2: Second query key. Must not be empty.
+	//
+	// Outputs:
+	//   - float64: The distance, or -1 if no similarity recorded.
+	//   - bool: True if a similarity record exists.
+	//
+	// Thread Safety: Safe for concurrent use.
+	GetSimilarity(key1, key2 string) (float64, bool)
+
+	// -------------------------------------------------------------------------
 	// Delta History Methods (GR-35)
 	// -------------------------------------------------------------------------
 
@@ -1346,6 +1385,14 @@ type Config struct {
 	// EnableTracing enables OpenTelemetry tracing.
 	// Default: true.
 	EnableTracing bool
+
+	// CircuitBreakerThresholds maps tool names to their per-tool circuit
+	// breaker thresholds. When a tool has been executed this many times in
+	// a session (and no proof data exists), the circuit breaker fires.
+	// Tools not in this map fall back to DefaultCircuitBreakerThreshold.
+	//
+	// CRS-16: Per-tool circuit breaker thresholds.
+	CircuitBreakerThresholds map[string]int
 }
 
 // DefaultConfig returns the default configuration.
@@ -1355,6 +1402,12 @@ func DefaultConfig() *Config {
 		SnapshotEpochLimit: 1000,
 		EnableMetrics:      true,
 		EnableTracing:      true,
+		CircuitBreakerThresholds: map[string]int{
+			// CRS-16: Tools that legitimately need multiple calls per session.
+			"find_callers": 4, // Multi-symbol queries (e.g., "who calls A, B, C?")
+			"find_callees": 4, // Same pattern as find_callers
+			"Grep":         5, // Iterative refinement is normal usage
+		},
 	}
 }
 
@@ -1362,6 +1415,12 @@ func DefaultConfig() *Config {
 func (c *Config) Validate() error {
 	if c.SnapshotEpochLimit < 0 {
 		return errors.New("snapshot epoch limit must be non-negative")
+	}
+	// CRS-16 Code Review Fix: Reject non-positive per-tool thresholds.
+	for tool, threshold := range c.CircuitBreakerThresholds {
+		if threshold <= 0 {
+			return fmt.Errorf("circuit breaker threshold for %q must be positive, got %d", tool, threshold)
+		}
 	}
 	return nil
 }
@@ -1910,7 +1969,7 @@ const MaxPropagationDepth = 100
 // Feb 13, 2026: Lowered from 5 to 2 based on integration test evidence.
 // Threshold=5 allowed too much wasteful exploration (Test 95: 5 identical calls).
 // Threshold=2 prevents tool loops while still allowing legitimate multi-call patterns.
-// If specific tools need >2 calls, implement per-tool thresholds in future work.
+// CRS-16: Per-tool overrides are configured via Config.CircuitBreakerThresholds.
 const DefaultCircuitBreakerThreshold = 2
 
 // -----------------------------------------------------------------------------

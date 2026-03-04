@@ -922,7 +922,11 @@ func (m *mockCRS) Metrics() []eval.MetricDefinition                   { return n
 func (m *mockCRS) AddClause(context.Context, *crs.Clause) error       { return nil }
 func (m *mockCRS) CheckDecisionAllowed(string, string) (bool, string) { return true, "" }
 func (m *mockCRS) GarbageCollectClauses() int                         { return 0 }
-func (m *mockCRS) SetSessionID(id string)                             { m.sessionID = id }
+func (m *mockCRS) RecordSimilarity(context.Context, string, string, float64) error {
+	return nil
+}
+func (m *mockCRS) GetSimilarity(string, string) (float64, bool) { return -1, false }
+func (m *mockCRS) SetSessionID(id string)                       { m.sessionID = id }
 func (m *mockCRS) ApplyWithSource(context.Context, crs.Delta, string, map[string]string) (crs.ApplyMetrics, error) {
 	return crs.ApplyMetrics{}, nil
 }

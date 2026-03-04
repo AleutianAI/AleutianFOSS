@@ -249,6 +249,11 @@ type Graph struct {
 	// BuiltAtMilli is the Unix timestamp in milliseconds when Freeze() was called.
 	// Zero if the graph has not been frozen.
 	BuiltAtMilli int64
+
+	// FileMtimes records file modification times (Unix seconds) at build time.
+	// CRS-19: Used for staleness detection across sessions. Populated by
+	// RecordFileMtimes() after Freeze(). Key is relative file path.
+	FileMtimes map[string]int64
 }
 
 // NewGraph creates a new empty graph for the given project root.

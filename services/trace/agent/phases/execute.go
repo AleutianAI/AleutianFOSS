@@ -389,6 +389,7 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 		err    error
 	}
 	llmCh := make(chan llmParamResult, 1)
+	speculativeStart := time.Now() // CRS-14: Track speculative extraction wall-clock time.
 
 	// CRS-25: Resolve query entities against the graph before param extraction.
 	// This runs synchronously (~0ms, O(1) lookups) and enriches the context
@@ -524,6 +525,19 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 		)
 		semanticSpan.End()
 
+		// CRS-15: Record similarity to CRS for cross-session persistence.
+		// CRS-15 Code Review Fix #3: deps.Query is intentionally used here —
+		// CheckSemanticStatus operates at user-query level, not tool-parameter level.
+		if similarity > 0 && similarCall != nil && deps.Session.HasCRS() {
+			currentKey := fmt.Sprintf("%s:%s", hardForcing.Tool, deps.Query)
+			previousKey := fmt.Sprintf("%s:%s", hardForcing.Tool, similarCall.RawQuery)
+			if recErr := deps.Session.GetCRS().RecordSimilarity(ctx, currentKey, previousKey, 1.0-similarity); recErr != nil {
+				slog.Debug("CRS-15: Failed to record similarity",
+					slog.String("error", recErr.Error()),
+				)
+			}
+		}
+
 		if status == "blocked" {
 			slog.Info("GR-38: Skipping hard force, semantically similar call already made",
 				slog.String("session_id", deps.Session.ID),
@@ -570,13 +584,17 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 		// The goroutine was launched BEFORE buildLLMRequest, so it has had ~570ms
 		// to complete on ministral-3:3b (~150ms typical). Result is ready.
 		llmResult := <-llmCh
+		speculativeDuration := time.Since(speculativeStart) // CRS-14
 		if llmResult.err == nil && llmResult.tool == hardForcing.Tool && llmResult.params != nil {
 			// Speculative hit: router confirmed our pre-filter prediction
 			converted, convErr := convertMapToTypedParams(hardForcing.Tool, llmResult.params)
 			if convErr == nil {
 				slog.Info("IT-08e: LLM param extraction succeeded (parallel, speculative hit)",
 					slog.String("tool", hardForcing.Tool),
+					slog.String("speculative_outcome", "hit"),
+					slog.Duration("speculative_duration", speculativeDuration),
 				)
+				routing.RecordSpeculativeExtraction("hit", speculativeDuration.Seconds())
 				// IT-Summary FIX-D: For find_path, preserve regex-extracted dot-notation
 				// names (Type.Method) when the LLM stripped them to bare names.
 				// The 3b model over-generalizes "strip package qualifiers" and removes
@@ -609,7 +627,9 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 				slog.Warn("IT-08e: LLM param conversion failed, using regex",
 					slog.String("tool", hardForcing.Tool),
 					slog.String("error", convErr.Error()),
+					slog.String("speculative_outcome", "hit_conversion_failed"),
 				)
+				routing.RecordSpeculativeExtraction("hit_conversion_failed", speculativeDuration.Seconds())
 			}
 		} else if llmResult.tool != "" && llmResult.tool != hardForcing.Tool {
 			// CRS-MISPREDICT-01: Re-extract params for the actual tool.
@@ -651,7 +671,10 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 								reExtracted = true
 								slog.Info("IT-08e: Re-extraction succeeded",
 									slog.String("tool", hardForcing.Tool),
+									slog.String("speculative_outcome", "mispredict_reextracted"),
+									slog.Duration("speculative_duration", speculativeDuration),
 								)
+								routing.RecordSpeculativeExtraction("mispredict_reextracted", speculativeDuration.Seconds())
 							}
 						}
 					}
@@ -660,12 +683,27 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 			if !reExtracted {
 				slog.Info("IT-08e: Re-extraction failed or unavailable, using regex params",
 					slog.String("tool", hardForcing.Tool),
+					slog.String("speculative_outcome", "mispredict_regex_fallback"),
+					slog.Duration("speculative_duration", speculativeDuration),
 				)
+				routing.RecordSpeculativeExtraction("mispredict_regex_fallback", speculativeDuration.Seconds())
 			}
 		} else if llmResult.err != nil {
 			slog.Debug("IT-08e: LLM param extraction unavailable, using regex",
 				slog.String("reason", llmResult.err.Error()),
+				slog.String("speculative_outcome", "error"),
+				slog.Duration("speculative_duration", speculativeDuration),
 			)
+			routing.RecordSpeculativeExtraction("error", speculativeDuration.Seconds())
+		} else {
+			// CRS-14 CR2 Fix H1: Catch-all for remaining cases (e.g., nil params
+			// with matching tool, empty tool with no error). Without this, the
+			// speculative extraction outcome is silently unrecorded.
+			slog.Debug("IT-08e: LLM param extraction returned empty result, using regex",
+				slog.String("speculative_outcome", "empty_result"),
+				slog.Duration("speculative_duration", speculativeDuration),
+			)
+			routing.RecordSpeculativeExtraction("empty_result", speculativeDuration.Seconds())
 		}
 
 		// IT-12: Conceptual symbol resolution for tools with symbol name params.
@@ -1687,6 +1725,17 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 	if selection.Tool != "answer" && deps.Session != nil && deps.Query != "" {
 		isRepetitive, similarity, similarQuery := p.checkSemanticRepetition(ctx, deps, selection.Tool, deps.Query)
 
+		// CRS-15: Record similarity to CRS for cross-session persistence.
+		if similarity > 0 && similarQuery != "" && deps.Session.HasCRS() {
+			currentKey := fmt.Sprintf("%s:%s", selection.Tool, deps.Query)
+			previousKey := fmt.Sprintf("%s:%s", selection.Tool, similarQuery)
+			if recErr := deps.Session.GetCRS().RecordSimilarity(ctx, currentKey, previousKey, 1.0-similarity); recErr != nil {
+				slog.Debug("CRS-15: Failed to record similarity",
+					slog.String("error", recErr.Error()),
+				)
+			}
+		}
+
 		if isRepetitive {
 			srReason := fmt.Sprintf("semantic repetition: query %.0f%% similar to previous '%s'",
 				similarity*100, truncateQuery(similarQuery, 30))
@@ -2319,6 +2368,34 @@ func (p *ExecutePhase) handleCompletion(ctx context.Context, deps *Dependencies,
 		deps.Session.SetCurrentContext(deps.Context)
 	}
 
+	// CRS-20: Synthesis quality gate — score how well the response reflects tool results.
+	// Observability only: does not block or retry. Must complete in < 100ms.
+	var qualityResult *SynthesisQualityResult
+	if deps.Context != nil && len(deps.Context.ToolResults) > 0 && responseContent != "" {
+		qr := scoreSynthesisQuality(responseContent, deps.Context.ToolResults)
+		qualityResult = &qr
+
+		// Record Prometheus metric.
+		synthesisQualityScore.Observe(qr.Score)
+
+		// Log quality warnings for low scores.
+		if qr.Score < 0.5 {
+			slog.Warn("SYNTH-QUALITY: Response may not reflect tool results",
+				slog.String("session_id", deps.Session.ID),
+				slog.Float64("score", qr.Score),
+				slog.String("reason", qr.Reason),
+				slog.Int("symbols_expected", qr.SymbolsExpected),
+				slog.Int("symbols_found", qr.SymbolsFound),
+			)
+		} else {
+			slog.Debug("CRS-20: Synthesis quality scored",
+				slog.String("session_id", deps.Session.ID),
+				slog.Float64("score", qr.Score),
+				slog.String("reason", qr.Reason),
+			)
+		}
+	}
+
 	// Emit step complete
 	p.emitStepComplete(deps, stepStart, stepNumber, 0)
 
@@ -2337,6 +2414,11 @@ func (p *ExecutePhase) handleCompletion(ctx context.Context, deps *Dependencies,
 		if groundingResult != nil {
 			completionStep.Metadata["grounded"] = fmt.Sprintf("%v", groundingResult.Grounded)
 			completionStep.Metadata["confidence"] = fmt.Sprintf("%.2f", groundingResult.Confidence)
+		}
+		// CRS-20: Include synthesis quality score in completion metadata.
+		if qualityResult != nil {
+			completionStep.Metadata["synthesis_quality_score"] = fmt.Sprintf("%.2f", qualityResult.Score)
+			completionStep.Metadata["synthesis_quality_reason"] = qualityResult.Reason
 		}
 		deps.Session.RecordTraceStep(completionStep)
 	}

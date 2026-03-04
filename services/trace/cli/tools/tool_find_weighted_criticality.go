@@ -48,6 +48,11 @@ type FindWeightedCriticalityParams struct {
 
 	// ShowQuadrant enables quadrant classification in output.
 	ShowQuadrant bool
+
+	// Package filters critical functions to those in a matching package/directory.
+	// CRS-13: Uses matchesPackageScope() for boundary-aware cross-language matching.
+	// Empty string means no filter (all critical functions returned).
+	Package string
 }
 
 // ToolName returns the tool name for TypedParams interface.
@@ -61,6 +66,9 @@ func (p FindWeightedCriticalityParams) ToMap() map[string]any {
 	}
 	if p.Entry != "" {
 		m["entry"] = p.Entry
+	}
+	if p.Package != "" {
+		m["package"] = p.Package
 	}
 	return m
 }
@@ -166,6 +174,12 @@ func (t *findWeightedCriticalityTool) Definition() ToolDefinition {
 				Type:        ParamTypeBool,
 				Description: "Show quadrant classification (default: true)",
 				Required:    false,
+			},
+			"package": {
+				Type:        ParamTypeString,
+				Description: "Filter critical functions to those in this package or directory (optional)",
+				Required:    false,
+				Default:     "",
 			},
 		},
 		Category:    CategoryExploration,
@@ -369,9 +383,49 @@ func (t *findWeightedCriticalityTool) Execute(ctx context.Context, params TypedP
 		return functions[i].Name < functions[j].Name
 	})
 
+	// CRS-13: Apply package scope filter before selecting top N.
+	var scopeApplied string
+	var scopePreCount int
+	if p.Package != "" && t.index != nil {
+		scopeApplied = p.Package
+		scopePreCount = len(functions)
+
+		var scopeFiltered []CriticalFunction
+		for _, fn := range functions {
+			sym, ok := t.index.GetByID(fn.ID)
+			if !ok || sym == nil {
+				continue
+			}
+			if matchesPackageScope(sym, p.Package) {
+				scopeFiltered = append(scopeFiltered, fn)
+			}
+		}
+
+		t.logger.Info("IT-07: find_weighted_criticality scope filter",
+			slog.String("package", p.Package),
+			slog.Int("before", scopePreCount),
+			slog.Int("after", len(scopeFiltered)),
+		)
+
+		functions = scopeFiltered
+	}
+
 	// Step 8: Select top N
 	if len(functions) > p.Top {
 		functions = functions[:p.Top]
+	}
+
+	// CRS-13 CR2: Recompute QuadrantSummary from the final function set (after
+	// scope filtering + top-N truncation). Without this, the summary reflects
+	// global counts that don't match the displayed functions.
+	quadrantCounts = map[string]int{
+		"CRITICAL":          0,
+		"HIDDEN_GATEKEEPER": 0,
+		"HUB":               0,
+		"LEAF":              0,
+	}
+	for _, fn := range functions {
+		quadrantCounts[fn.Quadrant]++
 	}
 
 	// Step 9: Compute summary statistics
@@ -440,12 +494,15 @@ func (t *findWeightedCriticalityTool) Execute(ctx context.Context, params TypedP
 		Build()
 
 	return &Result{
-		Success:    true,
-		Output:     output,
-		OutputText: outputText,
-		TokensUsed: estimateTokens(outputText),
-		TraceStep:  &finalTrace,
-		Duration:   time.Since(start),
+		Success:       true,
+		Output:        output,
+		OutputText:    outputText,
+		TokensUsed:    estimateTokens(outputText),
+		TraceStep:     &finalTrace,
+		Duration:      time.Since(start),
+		ResultCount:   len(functions),
+		ScopeApplied:  scopeApplied,
+		PreScopeCount: scopePreCount,
 	}, nil
 }
 
@@ -479,6 +536,13 @@ func (t *findWeightedCriticalityTool) parseParams(params map[string]any) (FindWe
 	// Extract show_quadrant
 	if showRaw, ok := params["show_quadrant"].(bool); ok {
 		p.ShowQuadrant = showRaw
+	}
+
+	// CRS-13: Extract package (optional)
+	if pkgRaw, ok := params["package"]; ok {
+		if pkg, ok := pkgRaw.(string); ok {
+			p.Package = strings.TrimSpace(pkg)
+		}
 	}
 
 	return p, nil
