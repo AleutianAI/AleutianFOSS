@@ -256,6 +256,8 @@ func (t *findDeadCodeTool) Execute(ctx context.Context, params TypedParams) (*Re
 	var filtered []graph.DeadCodeNode
 
 	// Phase 1: Filter by package scope (boundary-aware, cross-language)
+	var scopeApplied string
+	var scopePreCount int
 	var pkgScoped []graph.DeadCodeNode
 	for _, dc := range deadCode {
 		if dc.Node == nil || dc.Node.Symbol == nil {
@@ -270,12 +272,16 @@ func (t *findDeadCodeTool) Execute(ctx context.Context, params TypedParams) (*Re
 	// answer. Do NOT fall back to global results — that gives wrong-scope data.
 	// FIX-B previously fell back here, but the real fix is upstream in
 	// extractPackageContextFromQuery() sending valid scope names.
-	if p.Package != "" && len(pkgScoped) == 0 {
-		t.logger.Info("CR-11: package filter returned 0 results, returning empty (no fallback)",
-			slog.String("tool", "find_dead_code"),
-			slog.String("package_filter", p.Package),
-			slog.Int("raw_count", len(deadCode)),
-		)
+	if p.Package != "" {
+		scopeApplied = p.Package
+		scopePreCount = len(deadCode)
+		if len(pkgScoped) == 0 {
+			t.logger.Info("CR-11: package filter returned 0 results, returning empty (no fallback)",
+				slog.String("tool", "find_dead_code"),
+				slog.String("package_filter", p.Package),
+				slog.Int("raw_count", len(deadCode)),
+			)
+		}
 	}
 
 	// Phase 2: Filter by exported status
@@ -371,13 +377,15 @@ func (t *findDeadCodeTool) Execute(ctx context.Context, params TypedParams) (*Re
 	outputText := t.formatText(filtered, len(deadCode))
 
 	return &Result{
-		Success:     true,
-		Output:      output,
-		OutputText:  outputText,
-		TokensUsed:  estimateTokens(outputText),
-		TraceStep:   &traceStep,
-		Duration:    time.Since(start),
-		ResultCount: output.DeadCodeCount,
+		Success:       true,
+		Output:        output,
+		OutputText:    outputText,
+		TokensUsed:    estimateTokens(outputText),
+		TraceStep:     &traceStep,
+		Duration:      time.Since(start),
+		ResultCount:   output.DeadCodeCount,
+		ScopeApplied:  scopeApplied,
+		PreScopeCount: scopePreCount,
 	}, nil
 }
 

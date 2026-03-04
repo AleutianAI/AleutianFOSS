@@ -316,6 +316,8 @@ func (t *findCommunitiesTool) Execute(ctx context.Context, params TypedParams) (
 	traceStep.Metadata["min_size"] = fmt.Sprintf("%d", p.MinSize)
 
 	// Filter communities by min_size (already done in Leiden, but double-check)
+	var scopeApplied string
+	var scopePreCount int
 	var filtered []graph.Community
 	for _, comm := range result.Communities {
 		if len(comm.Nodes) >= p.MinSize {
@@ -337,6 +339,8 @@ func (t *findCommunitiesTool) Execute(ctx context.Context, params TypedParams) (
 	// subset and re-apply MinSize, so only genuinely scoped communities survive.
 	if p.PackageFilter != "" {
 		filterLower := strings.ToLower(p.PackageFilter)
+		scopeApplied = p.PackageFilter
+		scopePreCount = len(filtered)
 		nodesBefore := 0
 		for _, comm := range filtered {
 			nodesBefore += len(comm.Nodes)
@@ -430,13 +434,15 @@ func (t *findCommunitiesTool) Execute(ctx context.Context, params TypedParams) (
 
 	hasResults := len(filtered) > 0
 	r := &Result{
-		Success:     hasResults,
-		Output:      output,
-		OutputText:  outputText,
-		TokensUsed:  estimateTokens(outputText),
-		TraceStep:   &traceStep,
-		Duration:    time.Since(start),
-		ResultCount: output.CommunityCount,
+		Success:       hasResults,
+		Output:        output,
+		OutputText:    outputText,
+		TokensUsed:    estimateTokens(outputText),
+		TraceStep:     &traceStep,
+		Duration:      time.Since(start),
+		ResultCount:   output.CommunityCount,
+		ScopeApplied:  scopeApplied,
+		PreScopeCount: scopePreCount,
 	}
 	if !hasResults {
 		r.Error = fmt.Sprintf("Leiden found %d communities but 0 survived filtering (MinSize=%d, PackageFilter='%s')",

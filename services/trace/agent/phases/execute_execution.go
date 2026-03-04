@@ -2912,20 +2912,190 @@ func (p *ExecutePhase) executeToolDirectlyWithFallback(
 		p.generateToolClauses(ctx, deps, inv, result, errMsg)
 	}
 
+	// CRS-PROOF-01: Update proof numbers based on tool outcome.
+	if result != nil && deps.Session.HasCRS() {
+		crsInstance := deps.Session.GetCRS()
+		if crsInstance != nil {
+			if result.ResultCount > 0 {
+				// Success: tool returned results — easier to prove
+				proofNodeID := fmt.Sprintf("session:%s:tool:%s", deps.Session.ID, toolName)
+				if proofErr := crsInstance.UpdateProofNumber(ctx, crs.ProofUpdate{
+					NodeID: proofNodeID,
+					Type:   crs.ProofUpdateTypeDecrement,
+					Delta:  1,
+					Reason: "tool_success_with_results",
+					Source: crs.SignalSourceHard,
+				}); proofErr != nil {
+					slog.Warn("CRS-PROOF-01: failed to decrement proof number",
+						slog.String("tool", toolName),
+						slog.String("error", proofErr.Error()),
+					)
+				}
+				deps.Session.RecordTraceStep(crs.NewTraceStepBuilder().
+					WithAction("crs_proof_update").
+					WithTool(toolName).
+					WithMetadata("direction", "decrement").
+					WithMetadata("reason", "tool_success_with_results").
+					Build())
+			} else if result.ResultCount == 0 && result.ScopeApplied != "" {
+				// Scoped empty: scope is hard to prove
+				scopeNodeID := fmt.Sprintf("session:%s:tool:%s+scope:%s", deps.Session.ID, toolName, result.ScopeApplied)
+				if proofErr := crsInstance.UpdateProofNumber(ctx, crs.ProofUpdate{
+					NodeID: scopeNodeID,
+					Type:   crs.ProofUpdateTypeIncrement,
+					Delta:  1,
+					Reason: fmt.Sprintf("scoped_empty:scope=%s,pre_scope=%d", result.ScopeApplied, result.PreScopeCount),
+					Source: crs.SignalSourceHard,
+				}); proofErr != nil {
+					slog.Warn("CRS-PROOF-01: failed to increment proof number for scoped empty",
+						slog.String("tool", toolName),
+						slog.String("scope", result.ScopeApplied),
+						slog.String("error", proofErr.Error()),
+					)
+				}
+				deps.Session.RecordTraceStep(crs.NewTraceStepBuilder().
+					WithAction("crs_proof_update").
+					WithTool(toolName).
+					WithMetadata("direction", "increment").
+					WithMetadata("scope", result.ScopeApplied).
+					WithMetadata("pre_scope_count", fmt.Sprintf("%d", result.PreScopeCount)).
+					Build())
+			}
+		}
+	}
+
+	// CRS-SCOPE-01: Scope relaxation when scoped query returns empty.
+	// If the tool returned 0 results with a scope filter, but had results
+	// before filtering, retry once with the scope removed.
+	if result != nil && result.Success && result.ResultCount == 0 &&
+		result.ScopeApplied != "" && result.PreScopeCount > 0 {
+
+		relaxationKey := fmt.Sprintf("scope_relaxed_%s", toolName)
+		if !deps.Session.HasFlag(relaxationKey) {
+			deps.Session.SetFlag(relaxationKey)
+
+			// Record CRS reasoning step
+			deps.Session.RecordTraceStep(crs.NewTraceStepBuilder().
+				WithAction("crs_scope_relaxation").
+				WithTool(toolName).
+				WithMetadata("scope", result.ScopeApplied).
+				WithMetadata("pre_scope_count", fmt.Sprintf("%d", result.PreScopeCount)).
+				WithMetadata("reason", "scoped_query_empty_retrying_global").
+				Build())
+
+			// Generate CDCL clause: (tool:X ∧ ¬scope:Y) — this scope is empty for this tool
+			if deps.Session.HasCRS() {
+				crsInstance := deps.Session.GetCRS()
+				if crsInstance != nil {
+					scopeClause := &crs.Clause{
+						ID: fmt.Sprintf("scope_empty_%s_%s_%d", toolName, result.ScopeApplied, time.Now().UnixMilli()),
+						Literals: []crs.Literal{
+							{Variable: fmt.Sprintf("tool:%s", toolName), Negated: false},
+							{Variable: fmt.Sprintf("scope:%s", result.ScopeApplied), Negated: true},
+						},
+						Source:      crs.SignalSourceHard,
+						FailureType: crs.FailureTypeInvalidOutput,
+						SessionID:   deps.Session.ID,
+						LearnedAt:   time.Now().UnixMilli(),
+					}
+					if addErr := crsInstance.AddClause(ctx, scopeClause); addErr != nil {
+						slog.Warn("CRS-SCOPE-01: failed to add scope clause",
+							slog.String("tool", toolName),
+							slog.String("scope", result.ScopeApplied),
+							slog.String("error", addErr.Error()),
+						)
+					} else {
+						deps.Session.RecordTraceStep(crs.NewTraceStepBuilder().
+							WithAction("crs_scope_clause").
+							WithTool(toolName).
+							WithMetadata("clause_id", scopeClause.ID).
+							WithMetadata("scope", result.ScopeApplied).
+							Build())
+					}
+				}
+			}
+
+			// Save scoped (empty) result to context BEFORE re-executing
+			// so synthesis sees both the empty and populated results.
+			if deps.ContextManager != nil && deps.Context != nil {
+				if updated, updateErr := deps.ContextManager.Update(ctx, deps.Context, result); updateErr == nil {
+					deps.Context = updated
+					deps.Session.SetCurrentContext(updated)
+				}
+			}
+
+			// Re-execute with empty scope
+			slog.Info("CRS-SCOPE-01: Scope relaxation — retrying with empty scope",
+				slog.String("session_id", deps.Session.ID),
+				slog.String("tool", toolName),
+				slog.String("original_scope", result.ScopeApplied),
+				slog.Int("pre_scope_count", result.PreScopeCount),
+			)
+			relaxedParams := clearScopeFromParams(toolName, params)
+			relaxedResult, relaxedErr := tool.Execute(ctx, relaxedParams)
+			if relaxedErr == nil && relaxedResult != nil {
+				result = relaxedResult
+				err = relaxedErr
+
+				// Record proof decrement for successful relaxation
+				if result.ResultCount > 0 && deps.Session.HasCRS() {
+					crsInstance := deps.Session.GetCRS()
+					if crsInstance != nil {
+						proofNodeID := fmt.Sprintf("session:%s:tool:%s", deps.Session.ID, toolName)
+						_ = crsInstance.UpdateProofNumber(ctx, crs.ProofUpdate{
+							NodeID: proofNodeID,
+							Type:   crs.ProofUpdateTypeDecrement,
+							Delta:  1,
+							Reason: "scope_relaxation_success",
+							Source: crs.SignalSourceHard,
+						})
+						deps.Session.RecordTraceStep(crs.NewTraceStepBuilder().
+							WithAction("crs_proof_update").
+							WithTool(toolName).
+							WithMetadata("direction", "decrement").
+							WithMetadata("reason", "scope_relaxation_success").
+							Build())
+					}
+				}
+			}
+		}
+	}
+
 	// GR-59 Rev 4: Set session flag when forced graph tool completes successfully.
-	// Graph results are authoritative whether positive ("Found 3 implementations")
-	// or zero ("Symbol 'X' not found"). Both are definitive answers — the graph
-	// analyzed every source file. The LLM must synthesize from these results,
-	// not spiral into Grep/Glob loops trying to verify or search independently.
+	// CRS-GR59-01: Now CRS-aware — defer synthesis when scoped result is empty
+	// and scope relaxation hasn't been exhausted yet.
 	if graphToolsWithSubstantiveResults[toolName] &&
 		result != nil && len(result.OutputText) > 0 {
-		deps.Session.SetGraphToolHadSubstantiveResults(true)
-		slog.Info("GR-59 Rev 4: Forced graph tool completed — will force synthesis",
-			slog.String("session_id", deps.Session.ID),
-			slog.String("tool", toolName),
-			slog.Int("output_len", len(result.OutputText)),
-			slog.Bool("has_positive_results", hasSubstantiveGraphResult(result.OutputText)),
-		)
+		hasPositiveResults := result.ResultCount > 0
+		crsExhausted := result.ScopeApplied == "" ||
+			deps.Session.HasFlag(fmt.Sprintf("scope_relaxed_%s", toolName))
+
+		if hasPositiveResults || crsExhausted {
+			deps.Session.SetGraphToolHadSubstantiveResults(true)
+			slog.Info("GR-59 Rev 4: Forced graph tool completed — will force synthesis",
+				slog.String("session_id", deps.Session.ID),
+				slog.String("tool", toolName),
+				slog.Int("output_len", len(result.OutputText)),
+				slog.Bool("has_positive_results", hasPositiveResults),
+			)
+			deps.Session.RecordTraceStep(crs.NewTraceStepBuilder().
+				WithAction("crs_synthesis_gate").
+				WithTool(toolName).
+				WithMetadata("reason", "authorized").
+				WithMetadata("has_positive_results", fmt.Sprintf("%t", hasPositiveResults)).
+				Build())
+		} else {
+			slog.Info("CRS-GR59-01: Empty scoped result, deferring synthesis for relaxation",
+				slog.String("tool", toolName),
+				slog.String("scope", result.ScopeApplied),
+			)
+			deps.Session.RecordTraceStep(crs.NewTraceStepBuilder().
+				WithAction("crs_synthesis_gate").
+				WithTool(toolName).
+				WithMetadata("reason", "deferred_for_scope_relaxation").
+				WithMetadata("scope", result.ScopeApplied).
+				Build())
+		}
 	}
 
 	// CB-30c: Track tokens for tool output.
@@ -3084,4 +3254,50 @@ func (p *ExecutePhase) markToolDisproven(ctx context.Context, deps *Dependencies
 			slog.Int("affected_nodes", affected),
 		)
 	}
+}
+
+// clearScopeFromParams removes the package/scope filter from tool parameters
+// for scope relaxation retry.
+//
+// Description:
+//
+//	CRS-SCOPE-01: When a scoped tool query returns 0 results but pre-scope
+//	results exist, the scope relaxation loop retries with an empty scope.
+//	This helper creates a copy of the params with the scope field cleared.
+//
+// Inputs:
+//
+//	toolName - The tool being re-executed.
+//	params - The original typed parameters.
+//
+// Outputs:
+//
+//	TypedParams with the scope field cleared, or the original params unchanged
+//	if the tool is not recognized.
+//
+// Thread Safety: Safe — creates new value copies, does not mutate input.
+func clearScopeFromParams(toolName string, params tools.TypedParams) tools.TypedParams {
+	switch toolName {
+	case "find_hotspots":
+		if p, ok := params.(tools.FindHotspotsParams); ok {
+			p.Package = ""
+			return p
+		}
+	case "find_important":
+		if p, ok := params.(tools.FindImportantParams); ok {
+			p.Package = ""
+			return p
+		}
+	case "find_dead_code":
+		if p, ok := params.(tools.FindDeadCodeParams); ok {
+			p.Package = ""
+			return p
+		}
+	case "find_communities":
+		if p, ok := params.(tools.FindCommunitiesParams); ok {
+			p.PackageFilter = ""
+			return p
+		}
+	}
+	return params
 }

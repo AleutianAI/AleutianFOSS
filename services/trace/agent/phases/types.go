@@ -36,6 +36,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/rag"
 )
 
 // Phase defines the interface for agent phases.
@@ -177,6 +178,13 @@ type Dependencies struct {
 	// Required for symbol resolution in parameter extraction (CB-31d).
 	// Optional - if nil, parameter extraction falls back to raw symbol names.
 	SymbolIndex *index.SymbolIndex
+
+	// RAGResolver resolves query tokens against the code graph before param extraction.
+	// CRS-25: Optional - if nil, param extraction runs without entity grounding.
+	// When available, resolves entity names (packages, symbols) from the graph
+	// and injects them into the extraction context for the LLM.
+	// Accepts StructuralResolver (Layer 1 only) or CombinedResolver (Layers 1+2).
+	RAGResolver rag.Resolver
 
 	// ParamExtractor uses a fast LLM to extract tool parameters from queries.
 	// IT-08b: Optional - nil when LLM parameter extraction is not enabled.

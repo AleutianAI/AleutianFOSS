@@ -82,8 +82,12 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/routing"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/safety"
 	traceconfig "github.com/AleutianAI/AleutianFOSS/services/trace/config"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/rag"
 	badgerstore "github.com/AleutianAI/AleutianFOSS/services/trace/storage/badger"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/telemetry"
+	traceweaviate "github.com/AleutianAI/AleutianFOSS/services/trace/weaviate"
 	"github.com/gin-gonic/gin"
+	weaviateclient "github.com/weaviate/weaviate-go-client/v5/weaviate"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -188,9 +192,26 @@ func main() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
+	// Initialize OpenTelemetry tracing and metrics.
+	// Reads OTEL_EXPORTER_OTLP_ENDPOINT from environment (set by stack start).
+	// AllowDegraded=true ensures the server starts even if Jaeger is unreachable.
+	telemetryCfg := telemetry.DefaultConfig()
+	telemetryCfg.ServiceName = "aleutian-trace"
+	telemetryCfg.AllowDegraded = true
+	telemetryShutdown, telemetryErr := telemetry.Init(context.Background(), telemetryCfg)
+	if telemetryErr != nil {
+		slog.Warn("Telemetry init failed, running without OTel export",
+			slog.String("error", telemetryErr.Error()))
+	} else {
+		slog.Info("Telemetry initialized",
+			slog.String("service", telemetryCfg.ServiceName),
+			slog.String("exporter", telemetryCfg.TraceExporter),
+			slog.String("endpoint", telemetryCfg.OTLPEndpoint))
+	}
+
 	// I-3: Set up W3C TraceContext propagator for distributed tracing.
-	// This enables trace context to flow from incoming HTTP headers through
-	// all handlers and middleware, including WarmupGuardMiddleware.
+	// telemetry.Init() sets this too, but we set it here as a fallback
+	// in case telemetry init failed (AllowDegraded).
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{},
 		propagation.Baggage{},
@@ -202,6 +223,43 @@ func main() {
 
 	// Create handlers
 	handlers := trace.NewHandlers(svc)
+
+	// CRS-25/26: Connect to Weaviate if available.
+	// When running with `aleutian stack start`, Weaviate is on port 12212.
+	// If WEAVIATE_SERVICE_URL is not set, trace runs without Weaviate (zero regression).
+	// CR-5: The native client and dataSpace are shared with setupAgentLoop to avoid
+	// creating a duplicate ResilientClient for the same Weaviate URL.
+	var weaviateNativeClient *weaviateclient.Client
+	var weaviateDataSpace string
+	if weaviateURL := os.Getenv("WEAVIATE_SERVICE_URL"); weaviateURL != "" {
+		wvCfg := traceweaviate.DefaultClientConfig()
+		wvCfg.URL = weaviateURL
+		wvCfg.AllowStartDegraded = true
+
+		wvClient, err := traceweaviate.NewResilientClient(wvCfg)
+		if err != nil {
+			slog.Warn("Weaviate unavailable, running without",
+				slog.String("url", weaviateURL),
+				slog.String("error", err.Error()))
+		} else {
+			weaviateDataSpace = os.Getenv("WEAVIATE_DATA_SPACE")
+			if weaviateDataSpace == "" {
+				weaviateDataSpace = "default"
+			}
+			weaviateNativeClient = wvClient.Client()
+			handlers = handlers.WithWeaviate(weaviateNativeClient).WithMemory(weaviateDataSpace)
+
+			// CRS-25: Ensure CodeSymbol schema exists for semantic resolution.
+			if schemaErr := rag.EnsureCodeSymbolSchema(context.Background(), weaviateNativeClient); schemaErr != nil {
+				slog.Warn("CRS-25: Failed to ensure CodeSymbol schema",
+					slog.String("error", schemaErr.Error()))
+			}
+
+			slog.Info("Weaviate connected",
+				slog.String("url", weaviateURL),
+				slog.String("data_space", weaviateDataSpace))
+		}
+	}
 
 	// Setup router
 	router := gin.New()
@@ -249,7 +307,7 @@ func main() {
 	}
 
 	// Setup agent loop and register routes
-	agentEnabled := setupAgentLoop(v1, svc, *withContext, *withTools, routingStore)
+	agentEnabled := setupAgentLoop(v1, svc, *withContext, *withTools, routingStore, weaviateNativeClient, weaviateDataSpace)
 
 	// Print startup banner
 	printBanner(*port, agentEnabled)
@@ -261,6 +319,13 @@ func main() {
 	go func() {
 		<-quit
 		slog.Info("Shutting down Aleutian Trace server")
+		if telemetryShutdown != nil {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer shutdownCancel()
+			if err := telemetryShutdown(shutdownCtx); err != nil {
+				slog.Warn("Telemetry shutdown error", slog.String("error", err.Error()))
+			}
+		}
 		if routingDB != nil {
 			if err := routingDB.Close(); err != nil {
 				slog.Warn("Failed to close routing cache BadgerDB", slog.String("error", err.Error()))
@@ -283,8 +348,12 @@ func main() {
 // routingStore is the optional BadgerDB cache for tool embedding vectors.
 // Pass nil to disable persistence (e.g. when routing cache directory is unavailable).
 //
+// wvClient and wvDataSpace are the Weaviate connection from main() for CRS-25 semantic RAG.
+// CR-5: Shared from main() to avoid creating a duplicate ResilientClient.
+// Pass nil/empty to disable Weaviate integration.
+//
 // Returns true if the agent is fully enabled with LLM support.
-func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTools bool, routingStore routing.RouterCacheStore) bool {
+func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTools bool, routingStore routing.RouterCacheStore, wvClient *weaviateclient.Client, wvDataSpace string) bool {
 	// CB-60: Load per-role provider configuration from environment variables.
 	// Falls back to Ollama with existing env vars for backward compatibility.
 	mainModelFallback := os.Getenv("OLLAMA_MODEL")
@@ -501,6 +570,25 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTo
 		trace.WithCoordinatorEnabled(true),
 		trace.WithSessionRestoreEnabled(true),
 	)
+
+	// CRS-25: Wire Weaviate into deps factory for semantic RAG resolution.
+	// CR-5: Reuse the Weaviate client created in main() instead of creating a duplicate.
+	if wvClient != nil && wvDataSpace != "" {
+		depsFactory = trace.NewDependenciesFactory(
+			trace.WithLLMClient(llmClient),
+			trace.WithGraphProvider(graphProvider),
+			trace.WithEventEmitter(eventEmitter),
+			trace.WithSafetyGate(safetyGate),
+			trace.WithService(svc),
+			trace.WithContextEnabled(withContext),
+			trace.WithToolsEnabled(withTools),
+			trace.WithCoordinatorEnabled(true),
+			trace.WithSessionRestoreEnabled(true),
+			trace.WithWeaviateClient(wvClient, wvDataSpace),
+		)
+		slog.Info("CRS-25: Weaviate wired into deps factory",
+			slog.String("data_space", wvDataSpace))
+	}
 
 	if withContext {
 		slog.Info("ContextManager ENABLED (code context will be assembled)")

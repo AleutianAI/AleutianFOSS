@@ -387,6 +387,11 @@ type Session struct {
 	// GR-59 Rev 4: Direct flag eliminates fragile metadata round-trip through
 	// session trace steps which proved unreliable across Revs 2-3.
 	graphToolHadSubstantiveResults bool
+
+	// flags stores per-session boolean flags for CRS decision tracking.
+	// CRS-SCOPE-01: Used to prevent infinite scope relaxation retries
+	// (e.g., "scope_relaxed_find_hotspots" ensures at most one relaxation per tool).
+	flags map[string]bool
 }
 
 // SafetyViolation represents a safety-blocked operation for CDCL learning.
@@ -1489,6 +1494,56 @@ func (s *Session) GetTraceSteps() []crs.TraceStep {
 	}
 
 	return recorder.GetSteps()
+}
+
+// -----------------------------------------------------------------------------
+// Session Flags (CRS-SCOPE-01)
+// -----------------------------------------------------------------------------
+
+// HasFlag checks whether a per-session boolean flag has been set.
+//
+// Description:
+//
+//	Used by CRS scope relaxation to check if a tool has already been relaxed
+//	in this session, preventing infinite retry loops.
+//
+// Inputs:
+//
+//	key - The flag name (e.g., "scope_relaxed_find_hotspots").
+//
+// Outputs:
+//
+//	bool - True if the flag has been set via SetFlag.
+//
+// Thread Safety: Safe for concurrent use.
+func (s *Session) HasFlag(key string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.flags == nil {
+		return false
+	}
+	return s.flags[key]
+}
+
+// SetFlag sets a per-session boolean flag.
+//
+// Description:
+//
+//	Used by CRS scope relaxation to mark that a tool has been relaxed,
+//	ensuring at most one relaxation retry per tool per session.
+//
+// Inputs:
+//
+//	key - The flag name (e.g., "scope_relaxed_find_hotspots").
+//
+// Thread Safety: Safe for concurrent use.
+func (s *Session) SetFlag(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.flags == nil {
+		s.flags = make(map[string]bool)
+	}
+	s.flags[key] = true
 }
 
 // -----------------------------------------------------------------------------

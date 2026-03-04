@@ -12,10 +12,13 @@ package trace
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	agentcontext "github.com/AleutianAI/AleutianFOSS/services/trace/agent/context"
@@ -30,6 +33,8 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools/file"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/rag"
+	"github.com/weaviate/weaviate-go-client/v5/weaviate"
 )
 
 // coordinatorRegistry tracks coordinators by session ID for cleanup.
@@ -62,6 +67,36 @@ var journalsByProject = struct {
 }{
 	journals: make(map[string]*crs.BadgerJournal),
 	sessions: make(map[string]string),
+}
+
+// computeGraphContentHash builds a content-aware hash from the graph ID and graph statistics.
+//
+// Description:
+//
+//	graphID alone is sha256(projectRoot) — stable per project path, not per content.
+//	This function combines graphID with node count, edge count, and build timestamp
+//	to produce a hash that changes when the graph is rebuilt with different content.
+//
+// Inputs:
+//
+//	graphID - The project-level graph identifier.
+//	cached - The cached graph containing statistics. Must not be nil.
+//
+// Outputs:
+//
+//	string - Hex-encoded SHA-256 hash incorporating graph content metadata.
+//
+// Thread Safety: Safe for concurrent use (read-only on cached).
+func computeGraphContentHash(graphID string, cached *CachedGraph) string {
+	nodeCount := 0
+	edgeCount := 0
+	if cached.Graph != nil {
+		nodeCount = cached.Graph.NodeCount()
+		edgeCount = cached.Graph.EdgeCount()
+	}
+	composite := fmt.Sprintf("%s:n%d:e%d:t%d", graphID, nodeCount, edgeCount, cached.BuiltAtMilli)
+	hash := sha256.Sum256([]byte(composite))
+	return fmt.Sprintf("%x", hash)
 }
 
 // registerCoordinator stores a coordinator for later cleanup.
@@ -147,8 +182,27 @@ func cleanupPersistence(sessionID string) {
 	persistenceRegistry.mu.Lock()
 	defer persistenceRegistry.mu.Unlock()
 
+	// CRS-PERSIST-01: Save checkpoint before closing.
+	// This persists learned clauses and proof numbers for the next session.
+	pm := persistenceRegistry.managers[sessionID]
+	journal := persistenceRegistry.journals[sessionID]
+	if pm != nil && journal != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := pm.SaveBackup(ctx, sessionID, journal, nil); err != nil {
+			slog.Warn("CRS-PERSIST-01: Failed to save session checkpoint",
+				slog.String("session_id", sessionID),
+				slog.String("error", err.Error()),
+			)
+		} else {
+			slog.Info("CRS-PERSIST-01: Session checkpoint saved",
+				slog.String("session_id", sessionID),
+			)
+		}
+	}
+
 	// Close journal first (flushes pending writes)
-	if journal, ok := persistenceRegistry.journals[sessionID]; ok {
+	if journal != nil {
 		if err := journal.Close(); err != nil {
 			slog.Warn("GR-36: Failed to close journal",
 				slog.String("session_id", sessionID),
@@ -163,7 +217,7 @@ func cleanupPersistence(sessionID string) {
 	}
 
 	// Then close persistence manager
-	if pm, ok := persistenceRegistry.managers[sessionID]; ok {
+	if pm != nil {
 		if err := pm.Close(); err != nil {
 			slog.Warn("GR-36: Failed to close persistence manager",
 				slog.String("session_id", sessionID),
@@ -222,6 +276,13 @@ type DefaultDependenciesFactory struct {
 	// persistenceBaseDir is the base directory for CRS persistence
 	// GR-36: Defaults to ~/.aleutian/crs if not set
 	persistenceBaseDir string
+
+	// weaviateClient is the Weaviate client for semantic resolution.
+	// CRS-25: Optional - if nil, RAG uses structural-only resolution.
+	weaviateClient *weaviate.Client
+
+	// weaviateDataSpace is the project isolation key for Weaviate.
+	weaviateDataSpace string
 }
 
 // DependenciesFactoryOption configures a DefaultDependenciesFactory.
@@ -387,6 +448,24 @@ func WithPersistenceBaseDir(dir string) DependenciesFactoryOption {
 	}
 }
 
+// WithWeaviateClient sets the Weaviate client for semantic RAG resolution.
+//
+// Description:
+//
+//	CRS-25: When set, the factory creates a CombinedResolver (structural + semantic)
+//	instead of a StructuralResolver-only. The dataSpace is used for project isolation.
+//
+// Inputs:
+//
+//	client - Weaviate client. May be nil (degrades to structural-only).
+//	dataSpace - Project isolation key.
+func WithWeaviateClient(client *weaviate.Client, dataSpace string) DependenciesFactoryOption {
+	return func(f *DefaultDependenciesFactory) {
+		f.weaviateClient = client
+		f.weaviateDataSpace = dataSpace
+	}
+}
+
 // Create implements agent.DependenciesFactory.
 //
 // Description:
@@ -471,6 +550,77 @@ func (f *DefaultDependenciesFactory) Create(session *agent.Session, query string
 						slog.Debug("CB-31d: Symbol resolution enabled",
 							slog.String("session_id", session.ID),
 						)
+
+						// CRS-25: Create RAG resolver for entity grounding.
+						// Layer 1 (structural) always available. Layer 2 (semantic) when Weaviate connected.
+						structural := rag.NewStructuralResolver(cached.Index)
+						if f.weaviateClient != nil {
+							semantic, sErr := rag.NewSemanticResolver(f.weaviateClient, f.weaviateDataSpace)
+							if sErr != nil {
+								slog.Warn("CRS-25: Semantic resolver init failed, using structural-only",
+									slog.String("error", sErr.Error()),
+								)
+								deps.RAGResolver = structural
+							} else {
+								deps.RAGResolver = rag.NewCombinedResolver(structural, semantic)
+								slog.Debug("CRS-25: Combined RAG resolver enabled (structural + semantic)",
+									slog.String("session_id", session.ID),
+									slog.Int("packages", len(structural.PackageNames())),
+								)
+
+								// CRS-25: Index symbols into Weaviate if not already indexed.
+								// Uses graphHash to skip if the graph hasn't changed (~5ms check).
+								go func() {
+									// CR-6: Recover from panics to prevent crashing the server.
+									defer func() {
+										if r := recover(); r != nil {
+											slog.Error("CRS-25: Panic in symbol indexing goroutine",
+												slog.Any("panic", r),
+											)
+										}
+									}()
+									indexCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+									defer cancel()
+									store, storeErr := rag.NewSymbolStore(f.weaviateClient, f.weaviateDataSpace)
+									if storeErr != nil {
+										slog.Warn("CRS-25: Failed to create symbol store", slog.String("error", storeErr.Error()))
+										return
+									}
+									// CR-2: Build a content-aware hash from graphID + graph stats.
+									// graphID alone is sha256(projectRoot) — stable per path, not per content.
+									// Including node/edge counts and build time ensures re-indexing when the graph changes.
+									graphHash := computeGraphContentHash(graphID, cached)
+									hasHash, hashErr := store.HasGraphHash(indexCtx, graphHash)
+									if hashErr != nil {
+										slog.Warn("CRS-25: Failed to check graph hash", slog.String("error", hashErr.Error()))
+										return
+									}
+									if hasHash {
+										slog.Debug("CRS-25: Symbols already indexed for this graph", slog.String("graph_hash", graphHash))
+										return
+									}
+									// Delete stale symbols and re-index.
+									if delErr := store.DeleteAll(indexCtx); delErr != nil {
+										slog.Warn("CRS-25: Failed to delete stale symbols", slog.String("error", delErr.Error()))
+									}
+									count, idxErr := store.IndexSymbols(indexCtx, cached.Index, graphHash)
+									if idxErr != nil {
+										slog.Warn("CRS-25: Symbol indexing failed", slog.String("error", idxErr.Error()))
+									} else {
+										slog.Info("CRS-25: Symbols indexed into Weaviate",
+											slog.Int("count", count),
+											slog.String("graph_hash", graphHash),
+										)
+									}
+								}()
+							}
+						} else {
+							deps.RAGResolver = structural
+							slog.Debug("CRS-25: Structural RAG resolver enabled (no Weaviate)",
+								slog.String("session_id", session.ID),
+								slog.Int("packages", len(structural.PackageNames())),
+							)
+						}
 					}
 				}
 

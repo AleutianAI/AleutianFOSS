@@ -355,6 +355,8 @@ func (t *findHotspotsTool) Execute(ctx context.Context, params TypedParams) (*Re
 	//   match real paths are an upstream problem (extractPackageContextFromQuery),
 	//   not a tool-layer problem. Falling back silently gives wrong-scope data.
 	packageFilterApplied := false
+	var scopeApplied string
+	var scopePreCount int
 	if p.Package != "" {
 		var pkgFiltered []graph.HotspotNode
 		for _, hs := range filtered {
@@ -366,15 +368,18 @@ func (t *findHotspotsTool) Execute(ctx context.Context, params TypedParams) (*Re
 			}
 		}
 
+		preScopeCount := len(filtered)
 		t.logger.Info("IT-07: find_hotspots package filter applied",
 			slog.String("package", p.Package),
-			slog.Int("before", len(filtered)),
+			slog.Int("before", preScopeCount),
 			slog.Int("after", len(pkgFiltered)),
 		)
 		// CR-11: Unconditionally apply filter. Empty result = "no hotspots
 		// found in that scope." Do NOT fall back to global results.
 		filtered = pkgFiltered
 		packageFilterApplied = true
+		scopeApplied = p.Package
+		scopePreCount = preScopeCount
 	}
 	_ = packageFilterApplied // Used for future scope-aware output
 
@@ -469,13 +474,15 @@ func (t *findHotspotsTool) Execute(ctx context.Context, params TypedParams) (*Re
 	outputText := t.formatText(filtered, p.Package, p.SortBy)
 
 	return &Result{
-		Success:     true,
-		Output:      output,
-		OutputText:  outputText,
-		TokensUsed:  estimateTokens(outputText),
-		TraceStep:   &traceStep,
-		Duration:    time.Since(start),
-		ResultCount: output.HotspotCount,
+		Success:       true,
+		Output:        output,
+		OutputText:    outputText,
+		TokensUsed:    estimateTokens(outputText),
+		TraceStep:     &traceStep,
+		Duration:      time.Since(start),
+		ResultCount:   output.HotspotCount,
+		ScopeApplied:  scopeApplied,
+		PreScopeCount: scopePreCount,
 	}, nil
 }
 

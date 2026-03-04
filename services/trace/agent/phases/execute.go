@@ -28,6 +28,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/routing"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/config"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/rag"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -389,6 +390,18 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 	}
 	llmCh := make(chan llmParamResult, 1)
 
+	// CRS-25: Resolve query entities against the graph before param extraction.
+	// This runs synchronously (~0ms, O(1) lookups) and enriches the context
+	// so the extraction model receives grounded entity names.
+	// Hoisted here so both speculative extraction and re-extraction paths can use it.
+	extractCtx := ctx
+	if deps.RAGResolver != nil {
+		ec := deps.RAGResolver.Resolve(ctx, deps.Query)
+		if len(ec.ResolvedEntities) > 0 {
+			extractCtx = rag.WithExtractionContext(ctx, ec)
+		}
+	}
+
 	var speculativeTool string
 	if deps.ParamExtractor != nil && deps.ParamExtractor.IsEnabled() && p.prefilter != nil {
 		var pfToolDefs []tools.ToolDefinition
@@ -427,8 +440,9 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 					return
 				}
 				// No regex hint — LLM extracts from scratch (parallel, no bias)
+				// CRS-25: extractCtx carries resolved entities for the prompt.
 				result, err := deps.ParamExtractor.ExtractParams(
-					ctx, deps.Query, tool, schemas, map[string]any{},
+					extractCtx, deps.Query, tool, schemas, map[string]any{},
 				)
 				llmCh <- llmParamResult{result, tool, err}
 			}(speculativeTool)
@@ -598,11 +612,56 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 				)
 			}
 		} else if llmResult.tool != "" && llmResult.tool != hardForcing.Tool {
-			// Mispredict: router picked a different tool than pre-filter top
-			slog.Info("IT-08e: Speculative mispredict, discarding LLM params",
+			// CRS-MISPREDICT-01: Re-extract params for the actual tool.
+			// The speculative LLM extracted params for the wrong tool. Instead of
+			// discarding and falling back to crude regex params, re-extract using
+			// the param extractor for the correct tool.
+			slog.Info("IT-08e: Speculative mispredict, attempting re-extraction",
 				slog.String("speculated", llmResult.tool),
 				slog.String("actual", hardForcing.Tool),
 			)
+			deps.Session.RecordTraceStep(crs.NewTraceStepBuilder().
+				WithAction("crs_mispredict_recovery").
+				WithTool(hardForcing.Tool).
+				WithMetadata("speculated", llmResult.tool).
+				WithMetadata("actual", hardForcing.Tool).
+				Build())
+
+			var reExtracted bool
+			if deps.ParamExtractor != nil && deps.ParamExtractor.IsEnabled() {
+				var actualToolDef *tools.ToolDefinition
+				for i := range toolDefs {
+					if toolDefs[i].Name == hardForcing.Tool {
+						actualToolDef = &toolDefs[i]
+						break
+					}
+				}
+				if actualToolDef != nil {
+					schemas := buildParamSchemas(actualToolDef)
+					if len(schemas) > 0 {
+						// CRS-25: Use extractCtx so re-extraction also gets resolved entities.
+						reResult, reErr := deps.ParamExtractor.ExtractParams(
+							extractCtx, deps.Query, hardForcing.Tool, schemas, map[string]any{},
+						)
+						if reErr == nil && reResult != nil {
+							converted, convErr := convertMapToTypedParams(hardForcing.Tool, reResult)
+							if convErr == nil {
+								params = converted
+								paramErr = nil
+								reExtracted = true
+								slog.Info("IT-08e: Re-extraction succeeded",
+									slog.String("tool", hardForcing.Tool),
+								)
+							}
+						}
+					}
+				}
+			}
+			if !reExtracted {
+				slog.Info("IT-08e: Re-extraction failed or unavailable, using regex params",
+					slog.String("tool", hardForcing.Tool),
+				)
+			}
 		} else if llmResult.err != nil {
 			slog.Debug("IT-08e: LLM param extraction unavailable, using regex",
 				slog.String("reason", llmResult.err.Error()),
@@ -869,12 +928,10 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 				}
 
 				// GR-59 Rev 5: For graph tools, force synthesis immediately.
-				// Graph tools return authoritative results (positive or negative).
-				// Returning StateExecute lets the LLM spiral into Grep/Glob loops
-				// trying to verify graph results, which wastes steps and triggers
-				// circuit breakers. Force the LLM to synthesize from the graph
-				// result directly — no further tool calls needed.
-				if graphToolsWithSubstantiveResults[hardForcing.Tool] {
+				// CRS-GR59-01: Now CRS-aware — only force synthesis when results
+				// are positive or CRS has exhausted scope relaxation.
+				if graphToolsWithSubstantiveResults[hardForcing.Tool] &&
+					deps.Session.GraphToolHadSubstantiveResults() {
 					slog.Info("GR-59 Rev 5: Graph tool completed — forcing immediate synthesis",
 						slog.String("session_id", deps.Session.ID),
 						slog.String("tool", hardForcing.Tool),

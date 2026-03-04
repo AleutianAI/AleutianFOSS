@@ -113,7 +113,9 @@ forced_mappings:
       - "inherits from"
       - "subclass"
       - "child class"
-      - "class hierarchy"
+      # IT-R3-S2: Removed "class hierarchy" — ambiguous as scope qualifier
+      # ("hotspots in the class hierarchy"). Router handles this via embeddings
+      # + encyclopedia boost. Genuine hierarchy queries match "extends"/"inherits"/"subclass".
       - "concrete types that"
       - "types that implement"
     tool: find_implementations
@@ -273,6 +275,13 @@ routing_encyclopedia:
       - "mock implementation"
       - "stub implementation"
       - "test double"
+      # IT-R3-S2: Suppress boost when query's primary intent is an analytics tool.
+      # "class hierarchy" as a scope qualifier should not boost find_implementations.
+      - "hotspot"
+      - "important"
+      - "dead code"
+      - "pagerank"
+      - "cycles"
     reason: "Class inheritance/interface implementation query"
 
   # IT-12 Rev 4: "call chain from X to Y" is a two-endpoint query → find_path.
