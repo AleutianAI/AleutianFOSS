@@ -847,6 +847,10 @@ type DefaultStackManager struct {
 	// config is the global Aleutian configuration (Phase 0).
 	config *config.AleutianConfig
 
+	// stackDir is the stack directory path used for compose operations.
+	// Used to set TRACE_PROJECTS_DIR for the trace container volume mount.
+	stackDir string
+
 	// output is where status messages are written.
 	// Default: os.Stdout
 	output io.Writer
@@ -875,6 +879,7 @@ type DefaultStackManager struct {
 //   - profile: ProfileResolver for hardware-based config (required)
 //   - diagnostics: DiagnosticsCollector for error info (required)
 //   - cfg: AleutianConfig global configuration (required)
+//   - stackDir: stack directory path for TRACE_PROJECTS_DIR (required)
 //
 // # Outputs
 //
@@ -886,7 +891,7 @@ type DefaultStackManager struct {
 //	// Full dependencies
 //	mgr, err := NewDefaultStackManager(
 //	    infra, secrets, cache, compose, health,
-//	    models, profile, diagnostics, config.Global,
+//	    models, profile, diagnostics, config.Global, stackDir,
 //	)
 //	if err != nil {
 //	    return fmt.Errorf("failed to create stack manager: %w", err)
@@ -896,7 +901,7 @@ type DefaultStackManager struct {
 //	mgr, err := NewDefaultStackManager(
 //	    infra, secrets, cache, compose, health,
 //	    nil, // models = nil is allowed
-//	    profile, diagnostics, config.Global,
+//	    profile, diagnostics, config.Global, stackDir,
 //	)
 //
 // # Limitations
@@ -919,6 +924,7 @@ func NewDefaultStackManager(
 	profile ProfileResolver,
 	diagnostics diagnostics.DiagnosticsCollector,
 	cfg *config.AleutianConfig,
+	stackDir string,
 ) (*DefaultStackManager, error) {
 	// Validate required dependencies
 	if infraMgr == nil {
@@ -957,6 +963,7 @@ func NewDefaultStackManager(
 		profile:     profile,
 		diagnostics: diagnostics,
 		config:      cfg,
+		stackDir:    stackDir,
 		output:      os.Stdout,
 	}, nil
 }
@@ -1517,6 +1524,14 @@ func (s *DefaultStackManager) resolveEnvironment(ctx context.Context, opts Start
 
 	// Add additional environment variables
 	env["ALEUTIAN_MODELS_CACHE"] = cachePath
+
+	// Set TRACE_PROJECTS_DIR for the trace container volume mount.
+	// Mounts the stack directory at /projects inside the container,
+	// enabling graph initialization and file-based tools.
+	// Users can override via TRACE_PROJECTS_DIR env var.
+	if os.Getenv("TRACE_PROJECTS_DIR") == "" {
+		env["TRACE_PROJECTS_DIR"] = s.stackDir
+	}
 
 	if opts.BackendOverride != "" {
 		env["MODEL_BACKEND_TYPE"] = opts.BackendOverride

@@ -388,6 +388,7 @@ func newTestStackManagerWithMocks() (*DefaultStackManager, *stackTestMocks) {
 		mocks.profile,
 		mocks.diagnostics,
 		cfg,
+		"/tmp/test-stack",
 	)
 	if err != nil {
 		panic(fmt.Sprintf("failed to create test manager: %v", err))
@@ -784,6 +785,7 @@ func TestNewDefaultStackManager_NilDependency(t *testing.T) {
 					newTestProfileResolver(),
 					newTestDiagnosticsCollector(),
 					cfg,
+					"/tmp/test-stack",
 				)
 			},
 		},
@@ -801,6 +803,7 @@ func TestNewDefaultStackManager_NilDependency(t *testing.T) {
 					newTestProfileResolver(),
 					newTestDiagnosticsCollector(),
 					cfg,
+					"/tmp/test-stack",
 				)
 			},
 		},
@@ -818,6 +821,7 @@ func TestNewDefaultStackManager_NilDependency(t *testing.T) {
 					newTestProfileResolver(),
 					newTestDiagnosticsCollector(),
 					nil, // config
+					"/tmp/test-stack",
 				)
 			},
 		},
@@ -852,6 +856,7 @@ func TestNewDefaultStackManager_NilModelsAllowed(t *testing.T) {
 		newTestProfileResolver(),
 		newTestDiagnosticsCollector(),
 		cfg,
+		"/tmp/test-stack",
 	)
 
 	if err != nil {
@@ -860,6 +865,38 @@ func TestNewDefaultStackManager_NilModelsAllowed(t *testing.T) {
 	if mgr == nil {
 		t.Fatal("expected non-nil manager")
 	}
+}
+
+func TestResolveEnvironment_SetsTraceProjectsDir(t *testing.T) {
+	t.Run("sets TRACE_PROJECTS_DIR from stackDir", func(t *testing.T) {
+		t.Setenv("TRACE_PROJECTS_DIR", "")
+		mgr, _ := newTestStackManagerWithMocks()
+		mgr.stackDir = "/test/projects"
+		ctx := context.Background()
+
+		env, err := mgr.resolveEnvironment(ctx, StartOptions{}, "/tmp/cache")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if env["TRACE_PROJECTS_DIR"] != "/test/projects" {
+			t.Errorf("expected TRACE_PROJECTS_DIR=%q, got %q", "/test/projects", env["TRACE_PROJECTS_DIR"])
+		}
+	})
+
+	t.Run("respects existing TRACE_PROJECTS_DIR env var", func(t *testing.T) {
+		t.Setenv("TRACE_PROJECTS_DIR", "/override/path")
+		mgr, _ := newTestStackManagerWithMocks()
+		mgr.stackDir = "/test/projects"
+		ctx := context.Background()
+
+		env, err := mgr.resolveEnvironment(ctx, StartOptions{}, "/tmp/cache")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if _, ok := env["TRACE_PROJECTS_DIR"]; ok {
+			t.Error("TRACE_PROJECTS_DIR should not be set in env map when env var is already set")
+		}
+	})
 }
 
 func TestDefaultStackManager_Logs_InvalidServiceName(t *testing.T) {

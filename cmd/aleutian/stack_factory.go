@@ -177,6 +177,7 @@ func (f *DefaultStackFactory) CreateStackManager(cfg *config.AleutianConfig, sta
 		profileMgr,
 		diagnosticsCollector,
 		cfg,
+		stackDir,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create stack manager: %w", err)

@@ -487,6 +487,60 @@ func TestProjectInit(t *testing.T) {
 	})
 }
 
+func TestInitWithPathTranslation(t *testing.T) {
+	t.Run("init translates project_root and preserves extra fields", func(t *testing.T) {
+		traceServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/trace/init" {
+				t.Errorf("unexpected path: %s", r.URL.Path)
+				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+
+			var body map[string]interface{}
+			json.NewDecoder(r.Body).Decode(&body)
+
+			if body["project_root"] != "/projects/AleutianFOSS" {
+				t.Errorf("expected translated project_root=/projects/AleutianFOSS, got %s", body["project_root"])
+			}
+			// Verify extra fields are preserved through decode-re-encode.
+			langs, ok := body["languages"]
+			if !ok {
+				t.Error("expected languages field to be preserved")
+			} else {
+				langSlice := langs.([]interface{})
+				if len(langSlice) != 2 || langSlice[0] != "go" || langSlice[1] != "python" {
+					t.Errorf("expected languages=[go,python], got %v", langs)
+				}
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"status": "initialized"})
+		}))
+		defer traceServer.Close()
+
+		proxy := NewProxyServer(ProxyConfig{
+			ListenAddr:      ":0",
+			TraceURL:        traceServer.URL,
+			Timeout:         30 * time.Second,
+			HostPrefix:      "/Users/jin/GolandProjects",
+			ContainerPrefix: "/projects",
+		})
+		mux := http.NewServeMux()
+		proxy.RegisterRoutes(mux)
+
+		reqBody := `{"project_root": "/Users/jin/GolandProjects/AleutianFOSS", "languages": ["go", "python"]}`
+		req := httptest.NewRequest(http.MethodPost, "/init", strings.NewReader(reqBody))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+
+		mux.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
 func TestStreaming(t *testing.T) {
 	t.Run("stream=true returns SSE format with buffered response", func(t *testing.T) {
 		traceServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -832,6 +886,19 @@ func TestTranslatePath(t *testing.T) {
 		expected := "/projects"
 		if got != expected {
 			t.Errorf("expected %s, got %s", expected, got)
+		}
+	})
+
+	t.Run("overlapping prefix not on directory boundary passthrough", func(t *testing.T) {
+		proxy := NewProxyServer(ProxyConfig{
+			ListenAddr:      ":0",
+			Timeout:         30 * time.Second,
+			HostPrefix:      "/Users/jin/GolandProjects",
+			ContainerPrefix: "/projects",
+		})
+		got := proxy.translatePath("/Users/jin/GolandProjectsEvil/malicious")
+		if got != "/Users/jin/GolandProjectsEvil/malicious" {
+			t.Errorf("expected passthrough for non-boundary prefix overlap, got %s", got)
 		}
 	})
 

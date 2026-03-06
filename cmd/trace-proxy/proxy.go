@@ -922,12 +922,20 @@ func (p *ProxyServer) CleanupExpiredSessions() {
 }
 
 // initRequest is the concrete request body for POST /init.
-// Using a concrete type instead of map[string]any per project standards.
+// Mirrors services/trace.InitRequest fields to avoid silent data loss during
+// decode-translate-re-encode. Using a concrete type instead of map[string]any
+// per project standards.
 //
 // Thread Safety: Not safe for concurrent use.
 type initRequest struct {
 	// ProjectRoot is the absolute path to the project root directory.
 	ProjectRoot string `json:"project_root"`
+
+	// Languages is the list of languages to parse. Default: ["go"].
+	Languages []string `json:"languages,omitempty"`
+
+	// ExcludePatterns is a list of glob patterns to exclude.
+	ExcludePatterns []string `json:"exclude_patterns,omitempty"`
 }
 
 // translatePath rewrites a host filesystem path to its container-side equivalent.
@@ -955,7 +963,12 @@ func (p *ProxyServer) translatePath(hostPath string) string {
 	if !strings.HasPrefix(hostPath, p.config.HostPrefix) {
 		return hostPath
 	}
-	remainder := strings.TrimPrefix(hostPath, p.config.HostPrefix)
+	// Ensure the prefix match is on a directory boundary to prevent
+	// false matches: "/foo/bar" must not match "/foo/barbaz".
+	remainder := hostPath[len(p.config.HostPrefix):]
+	if remainder != "" && remainder[0] != '/' {
+		return hostPath
+	}
 	return p.config.ContainerPrefix + remainder
 }
 
