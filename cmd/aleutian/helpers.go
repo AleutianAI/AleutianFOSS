@@ -33,11 +33,14 @@ import (
 	"time"
 )
 
-// Constants for default connection settings
+// Constants for default connection settings.
+// Ports must match podman-compose.yml port mappings.
 const (
 	DefaultOrchestratorPort = 12210
 	DefaultOrchestratorHost = "localhost"
-	DefaultTracePort        = 8080
+	DefaultTracePort        = 12217
+	DefaultJaegerPort       = 12214 // maps to 16686 inside container (podman-compose.yml)
+	DefaultGrafanaPort      = 12216 // maps to 3000 inside container (podman-compose.observability.yml)
 )
 
 // getTraceBaseURL returns the address for the Aleutian Trace server.

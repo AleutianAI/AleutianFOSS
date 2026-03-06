@@ -1653,6 +1653,7 @@ func (s *DefaultStackManager) startContainers(ctx context.Context, opts StartOpt
 	if spinErr != nil {
 		if composeErr != nil {
 			s.collectDiagnostics(ctx, "compose", composeErr)
+			s.checkRegistryAuthHint(result, composeErr)
 			return fmt.Errorf("%w: %v", ErrComposeUpFailed, composeErr)
 		}
 		return spinErr
@@ -1700,12 +1701,99 @@ func (s *DefaultStackManager) logComposeWarnings(result *compose.ComposeResult) 
 		return
 	}
 
-	// Skip progress indicators
-	if strings.Contains(stderr, "Pulling") {
+	// Always check for registry auth errors, even in pull output
+	s.checkRegistryAuthHint(result, nil)
+
+	// Skip progress indicators (but only if no auth errors were found)
+	if strings.Contains(stderr, "Pulling") && !isRegistryAuthError(stderr) {
 		return
 	}
 
 	if _, err := fmt.Fprintf(s.output, "  Compose output: %s\n", stderr); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
+}
+
+// registryAuthPatterns contains stderr substrings that indicate registry
+// authentication failures. Checked case-insensitively.
+var registryAuthPatterns = []string{
+	"unauthorized",
+	"authentication required",
+	"denied: access forbidden",
+	"403 forbidden",
+	"401",
+	"not authenticated",
+	"access denied",
+	"login required",
+	"credential",
+	"unauthenticated",
+}
+
+// isRegistryAuthError checks if stderr output contains registry authentication errors.
+//
+// Description:
+//
+//	Scans output for common patterns from Docker/Podman registry auth failures
+//	including GCR, Docker Hub, and generic OCI registries.
+//
+// Inputs:
+//
+//   - output: stderr or error string to check
+//
+// Outputs:
+//
+//   - bool: true if output contains an auth-related error pattern
+//
+// Thread Safety: This function is safe for concurrent use (stateless).
+func isRegistryAuthError(output string) bool {
+	lower := strings.ToLower(output)
+	for _, pattern := range registryAuthPatterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkRegistryAuthHint checks compose result and error for registry auth failures
+// and prints actionable guidance.
+//
+// Description:
+//
+//	Examines compose stderr and error message for patterns indicating expired
+//	or missing registry credentials. When detected, prints hints for Docker Hub,
+//	Google Container Registry, and other common registries.
+//
+// Inputs:
+//
+//   - result: Compose result (may be nil)
+//   - composeErr: Error from compose up (may be nil)
+//
+// Outputs:
+//
+//   - None (writes hints to s.output)
+//
+// Thread Safety: This function is safe for concurrent use.
+func (s *DefaultStackManager) checkRegistryAuthHint(result *compose.ComposeResult, composeErr error) {
+	var combined string
+	if result != nil {
+		combined = result.Stderr
+	}
+	if composeErr != nil {
+		combined += " " + composeErr.Error()
+	}
+
+	if !isRegistryAuthError(combined) {
+		return
+	}
+
+	hint := "\n  Registry authentication failed during image pull.\n" +
+		"  Common fixes:\n" +
+		"    - Google Container Registry:  gcloud auth login && gcloud auth configure-docker\n" +
+		"    - Docker Hub:                 podman login docker.io\n" +
+		"    - Generic registry:           podman login <registry-url>\n"
+
+	if _, err := fmt.Fprintf(s.output, "%s\n", hint); err != nil {
 		slog.Warn("failed to write output", "error", err)
 	}
 }

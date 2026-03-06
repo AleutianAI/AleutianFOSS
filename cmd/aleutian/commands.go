@@ -413,6 +413,7 @@ func init() {
 	rootCmd.AddCommand(traceCmd)
 	traceCmd.Flags().StringVar(&tracePath, "path", "", "Path to the project/repo to analyze (default: current directory)")
 	traceCmd.Flags().BoolVarP(&traceInteractive, "interactive", "i", false, "Stay in a conversational loop after each answer")
+	traceCmd.Flags().BoolVar(&traceHealth, "health", false, "Show deep health status of the trace system")
 
 	// weaviate administration commands
 	rootCmd.AddCommand(weaviateCmd)

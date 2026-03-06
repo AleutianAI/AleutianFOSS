@@ -881,7 +881,7 @@ func (s *Service) parseProjectToResults(ctx context.Context, projectRoot string,
 			return ErrProjectTooLarge
 		}
 
-		if len(files)+1 > s.config.MaxProjectFiles {
+		if len(files) >= s.config.MaxProjectFiles {
 			return ErrProjectTooLarge
 		}
 
@@ -890,10 +890,11 @@ func (s *Service) parseProjectToResults(ctx context.Context, projectRoot string,
 	})
 
 	if err != nil && err != ErrProjectTooLarge {
-		return nil, nil, fmt.Errorf("walking project: %w", err)
+		// CR-23-2: Return stats even on walk failure so callers see partial progress.
+		return nil, result, fmt.Errorf("walking project: %w", err)
 	}
 	if err == ErrProjectTooLarge {
-		return nil, nil, err
+		return nil, result, err
 	}
 
 	if len(files) == 0 {
@@ -916,9 +917,14 @@ func (s *Service) parseProjectToResults(ctx context.Context, projectRoot string,
 	entries := make([]parseEntry, len(files))
 
 	var wg sync.WaitGroup
-	work := make(chan int, len(files))
+	// CR-23-1: Small buffer (2x workers) avoids allocating a 10K-element channel
+	// for large repos. Workers pull indexes as fast as they can parse.
+	work := make(chan int, numWorkers*2)
 
-	// Start workers
+	// Start workers.
+	// Safety: each worker writes to entries[idx] at its own unique index.
+	// parseFileToResult is documented as "Thread Safety: Safe for concurrent use
+	// (reads only)" — no shared mutable state between calls.
 	for w := 0; w < numWorkers; w++ {
 		wg.Add(1)
 		go func() {
@@ -943,13 +949,10 @@ func (s *Service) parseProjectToResults(ctx context.Context, projectRoot string,
 	// Wait for all workers to finish
 	wg.Wait()
 
-	// Check context after parallel phase
-	if ctx.Err() != nil {
-		return nil, nil, ctx.Err()
-	}
-
 	// --- Phase 3: Collect results (sequential) ---
 	// Preserves walk order for deterministic graph construction.
+	// CR-23-2: Collect whatever was successfully parsed even if context was
+	// cancelled mid-flight — partial results are better than no results.
 	parseResults := make([]*ast.ParseResult, 0, len(files))
 	for i, entry := range entries {
 		if entry.err != nil {
@@ -966,6 +969,12 @@ func (s *Service) parseProjectToResults(ctx context.Context, projectRoot string,
 		slog.Int("parsed", result.FilesParsed),
 		slog.Int("errors", len(result.Errors)),
 	)
+
+	// CR-23-2: Return partial results alongside context error so callers can
+	// use whatever was parsed before cancellation.
+	if ctx.Err() != nil {
+		return parseResults, result, fmt.Errorf("parsing interrupted: %w", ctx.Err())
+	}
 
 	return parseResults, result, nil
 }
@@ -1336,6 +1345,333 @@ func (s *Service) FindImplementations(ctx context.Context, graphID, interfaceNam
 	}
 
 	return implementations, nil
+}
+
+// FindCallees returns all functions called by the given function.
+//
+// Description:
+//
+//	Searches the graph for all functions that the named function calls.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation
+//	graphID - ID of the graph to query
+//	functionName - Name of the function to find callees for
+//	limit - Maximum number of results (0 = default)
+//
+// Outputs:
+//
+//	[]*SymbolInfo - List of callee symbols
+//	error - Non-nil if graph not found
+func (s *Service) FindCallees(ctx context.Context, graphID, functionName string, limit int) ([]*SymbolInfo, error) {
+	cached, err := s.GetGraph(graphID)
+	if err != nil {
+		return nil, err
+	}
+
+	if limit <= 0 {
+		limit = 50
+	}
+
+	results, err := cached.Graph.FindCalleesByName(ctx, functionName, graph.WithLimit(limit))
+	if err != nil {
+		return nil, err
+	}
+
+	var callees []*SymbolInfo
+	for _, queryResult := range results {
+		for _, sym := range queryResult.Symbols {
+			callees = append(callees, SymbolInfoFromAST(sym))
+		}
+	}
+
+	return callees, nil
+}
+
+// FindReferences returns all locations that reference the given symbol.
+//
+// Description:
+//
+//	Resolves the symbol name to node IDs and finds all reference locations.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation
+//	graphID - ID of the graph to query
+//	symbolName - Name of the symbol to find references for
+//	limit - Maximum number of results (0 = default)
+//
+// Outputs:
+//
+//	[]ReferenceInfo - List of reference locations
+//	error - Non-nil if graph not found
+func (s *Service) FindReferences(ctx context.Context, graphID, symbolName string, limit int) ([]ReferenceInfo, error) {
+	cached, err := s.GetGraph(graphID)
+	if err != nil {
+		return nil, err
+	}
+
+	if limit <= 0 {
+		limit = 50
+	}
+
+	matches := cached.Graph.GetNodesByName(symbolName)
+	var refs []ReferenceInfo
+	seen := make(map[string]bool)
+
+	for _, node := range matches {
+		locations, err := cached.Graph.FindReferencesByID(ctx, node.ID, graph.WithLimit(limit-len(refs)))
+		if err != nil {
+			slog.Debug("FindReferences: error querying references for node",
+				slog.String("node_id", node.ID),
+				slog.String("error", err.Error()),
+			)
+			continue
+		}
+		for _, loc := range locations {
+			key := fmt.Sprintf("%s:%d:%d", loc.FilePath, loc.StartLine, loc.StartCol)
+			if !seen[key] && len(refs) < limit {
+				seen[key] = true
+				refs = append(refs, ReferenceInfo{
+					FilePath: loc.FilePath,
+					Line:     loc.StartLine,
+					Column:   loc.StartCol,
+				})
+			}
+		}
+		if len(refs) >= limit {
+			break
+		}
+	}
+
+	return refs, nil
+}
+
+// GetCallChain returns the shortest path between two functions.
+//
+// Description:
+//
+//	Resolves both function names to node IDs and finds the shortest path.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation
+//	graphID - ID of the graph to query
+//	from - Source function name
+//	to - Target function name
+//
+// Outputs:
+//
+//	[]*SymbolInfo - Symbols along the path
+//	int - Path length (-1 if no path)
+//	error - Non-nil if graph not found or names unresolved
+func (s *Service) GetCallChain(ctx context.Context, graphID, from, to string) ([]*SymbolInfo, int, error) {
+	cached, err := s.GetGraph(graphID)
+	if err != nil {
+		return nil, -1, err
+	}
+
+	fromNodes := cached.Graph.GetNodesByName(from)
+	if len(fromNodes) == 0 {
+		return nil, -1, fmt.Errorf("source function not found: %s", from)
+	}
+
+	toNodes := cached.Graph.GetNodesByName(to)
+	if len(toNodes) == 0 {
+		return nil, -1, fmt.Errorf("target function not found: %s", to)
+	}
+
+	// Try all combinations, return shortest
+	var bestPath []*SymbolInfo
+	bestLength := -1
+
+	for _, fromNode := range fromNodes {
+		for _, toNode := range toNodes {
+			pathResult, err := cached.Graph.ShortestPath(ctx, fromNode.ID, toNode.ID)
+			if err != nil {
+				continue
+			}
+			if pathResult.Length >= 0 && (bestLength < 0 || pathResult.Length < bestLength) {
+				bestLength = pathResult.Length
+				bestPath = make([]*SymbolInfo, 0, len(pathResult.Path))
+				for _, nodeID := range pathResult.Path {
+					node, ok := cached.Graph.GetNode(nodeID)
+					if ok && node.Symbol != nil {
+						bestPath = append(bestPath, SymbolInfoFromAST(node.Symbol))
+					}
+				}
+			}
+		}
+	}
+
+	return bestPath, bestLength, nil
+}
+
+// FindHotspots returns the most-connected nodes in the graph.
+//
+// Description:
+//
+//	Creates a hierarchical graph and analytics instance, then computes hotspots.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation
+//	graphID - ID of the graph to query
+//	limit - Maximum number of results (0 = default 10)
+//
+// Outputs:
+//
+//	[]graph.HotspotNode - Hotspot results sorted by connectivity score
+//	error - Non-nil if graph not found or analytics fails
+func (s *Service) FindHotspots(ctx context.Context, graphID string, limit int) ([]graph.HotspotNode, error) {
+	cached, err := s.GetGraph(graphID)
+	if err != nil {
+		return nil, err
+	}
+
+	if limit <= 0 {
+		limit = 10
+	}
+
+	hg, err := graph.WrapGraph(cached.Graph)
+	if err != nil {
+		return nil, fmt.Errorf("wrapping graph: %w", err)
+	}
+
+	analytics := graph.NewGraphAnalytics(hg)
+	return analytics.HotSpots(limit), nil
+}
+
+// FindCycles returns cyclic dependencies in the graph.
+//
+// Description:
+//
+//	Creates a hierarchical graph and analytics instance, then finds cycles.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation
+//	graphID - ID of the graph to query
+//
+// Outputs:
+//
+//	[]graph.CyclicDependency - Cycles found via Tarjan's SCC algorithm
+//	error - Non-nil if graph not found or analytics fails
+func (s *Service) FindCycles(ctx context.Context, graphID string) ([]graph.CyclicDependency, error) {
+	cached, err := s.GetGraph(graphID)
+	if err != nil {
+		return nil, err
+	}
+
+	hg, err := graph.WrapGraph(cached.Graph)
+	if err != nil {
+		return nil, fmt.Errorf("wrapping graph: %w", err)
+	}
+
+	analytics := graph.NewGraphAnalytics(hg)
+	return analytics.CyclicDependencies(), nil
+}
+
+// FindImportant returns the most important nodes by PageRank.
+//
+// Description:
+//
+//	Creates a hierarchical graph and analytics instance, then computes PageRank.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation
+//	graphID - ID of the graph to query
+//	limit - Maximum number of results (0 = default 10)
+//
+// Outputs:
+//
+//	[]graph.PageRankNode - Top-k nodes sorted by PageRank score descending
+//	error - Non-nil if graph not found or analytics fails
+func (s *Service) FindImportant(ctx context.Context, graphID string, limit int) ([]graph.PageRankNode, error) {
+	cached, err := s.GetGraph(graphID)
+	if err != nil {
+		return nil, err
+	}
+
+	if limit <= 0 {
+		limit = 10
+	}
+
+	hg, err := graph.WrapGraph(cached.Graph)
+	if err != nil {
+		return nil, fmt.Errorf("wrapping graph: %w", err)
+	}
+
+	analytics := graph.NewGraphAnalytics(hg)
+	return analytics.PageRankTop(ctx, limit, nil), nil
+}
+
+// FindCommunities detects code communities in the graph.
+//
+// Description:
+//
+//	Creates a hierarchical graph and analytics instance, then detects communities.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation
+//	graphID - ID of the graph to query
+//
+// Outputs:
+//
+//	*graph.CommunityResult - Leiden community detection results
+//	error - Non-nil if graph not found or analytics fails
+func (s *Service) FindCommunities(ctx context.Context, graphID string) (*graph.CommunityResult, error) {
+	cached, err := s.GetGraph(graphID)
+	if err != nil {
+		return nil, err
+	}
+
+	hg, err := graph.WrapGraph(cached.Graph)
+	if err != nil {
+		return nil, fmt.Errorf("wrapping graph: %w", err)
+	}
+
+	analytics := graph.NewGraphAnalytics(hg)
+	result, err := analytics.DetectCommunities(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("detecting communities: %w", err)
+	}
+	return result, nil
+}
+
+// FindPath returns the shortest path between two functions using graph analytics.
+//
+// Description:
+//
+//	Resolves both function names and finds the shortest path.
+//	Uses the same underlying ShortestPath as GetCallChain but wrapped in AgenticResponse.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation
+//	graphID - ID of the graph to query
+//	from - Source function name
+//	to - Target function name
+//
+// Outputs:
+//
+//	*CallChainResponse - Path result with symbols and length
+//	error - Non-nil if graph not found or names unresolved
+func (s *Service) FindPath(ctx context.Context, graphID, from, to string) (*CallChainResponse, error) {
+	path, length, err := s.GetCallChain(ctx, graphID, from, to)
+	if err != nil {
+		return nil, err
+	}
+
+	return &CallChainResponse{
+		From:   from,
+		To:     to,
+		Path:   path,
+		Length: length,
+	}, nil
 }
 
 // GetSymbol retrieves a symbol by its ID.

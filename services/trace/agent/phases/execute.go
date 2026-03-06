@@ -1289,7 +1289,9 @@ Provide your answer now:`
 
 	// GR-44 Rev 2: Router enforcement - if router is configured, it MUST be used.
 	// No silent fallback to classifier allowed.
-	if sessionExists && deps.Session.Config.ToolRouterEnabled {
+	// Exception: In degraded mode (no tools available), the router has nothing to
+	// route — skip enforcement so the LLM can answer without tools.
+	if sessionExists && deps.Session.Config.ToolRouterEnabled && hasTools {
 		if !routerUsed {
 			// Router was configured but not used - this is a fatal error
 			router := deps.Session.GetToolRouter()

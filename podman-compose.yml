@@ -18,6 +18,7 @@
 #   12214 - Jaeger UI
 #   12215 - Prometheus
 #   12216 - Grafana
+#   12217 - Trace Server
 #
 # Network:
 #   Creates "aleutian-shared" network for cross-project connectivity.
@@ -137,6 +138,38 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:12210/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  # === Trace Server ===
+  # AST-powered code intelligence with LLM agent capabilities
+  trace:
+    build:
+      context: .
+      dockerfile: ./services/trace/Dockerfile
+    container_name: aleutian-trace
+    ports:
+      - "12217:12217"
+    environment:
+      PORT: 12217
+      WEAVIATE_SERVICE_URL: http://weaviate:8080
+      OTEL_EXPORTER_OTLP_ENDPOINT: jaeger:4317
+      OLLAMA_BASE_URL: http://host.containers.internal:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-gpt-oss}
+      TRACE_ALLOWED_ROOTS: /projects
+    volumes:
+      - ${TRACE_PROJECTS_DIR:-.}:/projects:ro
+    networks:
+      - aleutian-network
+    restart: unless-stopped
+    depends_on:
+      weaviate:
+        condition: service_healthy
+      jaeger:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:12217/v1/trace/health"]
       interval: 10s
       timeout: 5s
       retries: 20

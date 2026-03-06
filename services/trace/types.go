@@ -133,6 +133,129 @@ type ImplementationsResponse struct {
 	Implementations []*SymbolInfo `json:"implementations"`
 }
 
+// CalleesRequest is the query params for GET /v1/trace/callees.
+type CalleesRequest struct {
+	// GraphID is the graph to query. Required.
+	GraphID string `form:"graph_id" binding:"required"`
+
+	// Function is the function name to find callees for. Required.
+	Function string `form:"function" binding:"required"`
+
+	// Limit is the maximum number of results. Default: 50.
+	Limit int `form:"limit"`
+}
+
+// CalleesResponse is the response for GET /v1/trace/callees.
+type CalleesResponse struct {
+	// Function is the function name that was searched.
+	Function string `json:"function"`
+
+	// Callees is the list of symbols that the function calls.
+	Callees []*SymbolInfo `json:"callees"`
+}
+
+// CallChainRequest is the query params for GET /v1/trace/call-chain.
+type CallChainRequest struct {
+	// GraphID is the graph to query. Required.
+	GraphID string `form:"graph_id" binding:"required"`
+
+	// From is the source function name. Required.
+	From string `form:"from" binding:"required"`
+
+	// To is the target function name. Required.
+	To string `form:"to" binding:"required"`
+}
+
+// CallChainResponse is the response for GET /v1/trace/call-chain.
+type CallChainResponse struct {
+	// From is the source function name.
+	From string `json:"from"`
+
+	// To is the target function name.
+	To string `json:"to"`
+
+	// Path is the list of symbols in the shortest path.
+	Path []*SymbolInfo `json:"path"`
+
+	// Length is the number of hops in the path (-1 if no path found).
+	Length int `json:"length"`
+}
+
+// ReferencesRequest is the query params for GET /v1/trace/references.
+type ReferencesRequest struct {
+	// GraphID is the graph to query. Required.
+	GraphID string `form:"graph_id" binding:"required"`
+
+	// Symbol is the symbol name to find references for. Required.
+	Symbol string `form:"symbol" binding:"required"`
+
+	// Limit is the maximum number of results. Default: 50.
+	Limit int `form:"limit"`
+}
+
+// ReferenceInfo represents a single reference location.
+type ReferenceInfo struct {
+	// FilePath is the path to the file containing the reference.
+	FilePath string `json:"file_path"`
+
+	// Line is the 1-indexed line number.
+	Line int `json:"line"`
+
+	// Column is the 0-indexed column number.
+	Column int `json:"column"`
+}
+
+// ReferencesResponse is the response for GET /v1/trace/references.
+type ReferencesResponse struct {
+	// Symbol is the symbol name that was searched.
+	Symbol string `json:"symbol"`
+
+	// References is the list of reference locations.
+	References []ReferenceInfo `json:"references"`
+}
+
+// FindHotspotsRequest is the request body for POST /v1/trace/analytics/hotspots.
+type FindHotspotsRequest struct {
+	// GraphID is the graph to query. Required.
+	GraphID string `json:"graph_id" binding:"required"`
+
+	// Limit is the maximum number of results. Default: 10.
+	Limit int `json:"limit"`
+}
+
+// FindCyclesRequest is the request body for POST /v1/trace/analytics/cycles.
+type FindCyclesRequest struct {
+	// GraphID is the graph to query. Required.
+	GraphID string `json:"graph_id" binding:"required"`
+}
+
+// FindImportantRequest is the request body for POST /v1/trace/analytics/important.
+type FindImportantRequest struct {
+	// GraphID is the graph to query. Required.
+	GraphID string `json:"graph_id" binding:"required"`
+
+	// Limit is the maximum number of results. Default: 10.
+	Limit int `json:"limit"`
+}
+
+// FindCommunitiesRequest is the request body for POST /v1/trace/analytics/communities.
+type FindCommunitiesRequest struct {
+	// GraphID is the graph to query. Required.
+	GraphID string `json:"graph_id" binding:"required"`
+}
+
+// FindPathRequest is the request body for POST /v1/trace/analytics/path.
+type FindPathRequest struct {
+	// GraphID is the graph to query. Required.
+	GraphID string `json:"graph_id" binding:"required"`
+
+	// From is the source function name. Required.
+	From string `json:"from" binding:"required"`
+
+	// To is the target function name. Required.
+	To string `json:"to" binding:"required"`
+}
+
 // SymbolRequest is the query params for GET /v1/trace/symbol/:id.
 type SymbolRequest struct {
 	// GraphID is the graph to query. Required.

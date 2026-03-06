@@ -1013,6 +1013,112 @@ func TestDefaultStackManager_Destroy_PanicRecovery(t *testing.T) {
 }
 
 // =============================================================================
+// Registry Auth Detection Tests
+// =============================================================================
+
+func TestIsRegistryAuthError(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{"unauthorized", "Error: unauthorized: access denied", true},
+		{"401 status", "HTTP 401: not authorized", true},
+		{"authentication required", "Error: authentication required for gcr.io", true},
+		{"denied access", "denied: access forbidden", true},
+		{"login required", "Error: login required", true},
+		{"unauthenticated", "error: unauthenticated: invalid token", true},
+		{"credential error", "credential helper failed", true},
+		{"403 forbidden", "Error response: 403 Forbidden", true},
+		{"normal pull", "Pulling image docker.io/library/redis:latest", false},
+		{"build error", "container build failed: syntax error", false},
+		{"empty string", "", false},
+		{"network error", "dial tcp: connection refused", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isRegistryAuthError(tt.output)
+			if got != tt.want {
+				t.Errorf("isRegistryAuthError(%q) = %v, want %v", tt.output, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCheckRegistryAuthHint_PrintsHint(t *testing.T) {
+	mgr, _ := newTestStackManagerWithMocks()
+	var buf bytes.Buffer
+	mgr.SetOutput(&buf)
+
+	result := &compose.ComposeResult{
+		Stderr: "Error: unauthorized: access to gcr.io/my-project/image denied",
+	}
+	mgr.checkRegistryAuthHint(result, nil)
+
+	output := buf.String()
+	if !strings.Contains(output, "Registry authentication failed") {
+		t.Error("expected auth failure message in output")
+	}
+	if !strings.Contains(output, "gcloud auth login") {
+		t.Error("expected gcloud hint in output")
+	}
+	if !strings.Contains(output, "podman login") {
+		t.Error("expected podman login hint in output")
+	}
+}
+
+func TestCheckRegistryAuthHint_NoHintForNormalErrors(t *testing.T) {
+	mgr, _ := newTestStackManagerWithMocks()
+	var buf bytes.Buffer
+	mgr.SetOutput(&buf)
+
+	result := &compose.ComposeResult{
+		Stderr: "Error: network timeout pulling image",
+	}
+	mgr.checkRegistryAuthHint(result, nil)
+
+	if buf.Len() > 0 {
+		t.Errorf("expected no output for non-auth error, got: %s", buf.String())
+	}
+}
+
+func TestCheckRegistryAuthHint_DetectsInError(t *testing.T) {
+	mgr, _ := newTestStackManagerWithMocks()
+	var buf bytes.Buffer
+	mgr.SetOutput(&buf)
+
+	mgr.checkRegistryAuthHint(nil, errors.New("401 Unauthorized"))
+
+	if !strings.Contains(buf.String(), "Registry authentication failed") {
+		t.Error("expected auth failure message when error contains auth pattern")
+	}
+}
+
+func TestStart_ComposeAuthFailure_ShowsHint(t *testing.T) {
+	mgr, mocks := newTestStackManagerWithMocks()
+	var buf bytes.Buffer
+	mgr.SetOutput(&buf)
+	ctx := context.Background()
+
+	mocks.compose.upFunc = func(ctx context.Context, opts compose.UpOptions) (*compose.ComposeResult, error) {
+		return &compose.ComposeResult{
+			Stderr: "Error: unauthorized: authentication required for gcr.io/my-project/image",
+		}, errors.New("compose up failed: unauthorized")
+	}
+
+	err := mgr.Start(ctx, StartOptions{})
+	if err == nil {
+		t.Fatal("Start() should have returned error")
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "gcloud auth login") {
+		t.Errorf("expected gcloud auth hint in output, got: %s", output)
+	}
+}
+
+// =============================================================================
 // Compile-time Interface Compliance
 // =============================================================================
 

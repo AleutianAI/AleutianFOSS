@@ -36,6 +36,7 @@ import (
 var (
 	tracePath        string
 	traceInteractive bool
+	traceHealth      bool
 )
 
 // ... Structs remain the same ...
@@ -206,6 +207,11 @@ func runChatCommand(cmd *cobra.Command, args []string) {
 }
 
 func runTraceCommand(_ *cobra.Command, args []string) {
+	if traceHealth {
+		runTraceHealthCheck()
+		return
+	}
+
 	// Resolve project root from --path flag or current directory.
 	projectRoot, err := os.Getwd()
 	if err != nil {

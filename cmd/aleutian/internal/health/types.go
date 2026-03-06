@@ -581,6 +581,17 @@ func DefaultServiceDefinitions() []ServiceDefinition {
 		},
 		{
 			ID:            GenerateID(),
+			Name:          "Trace",
+			URL:           "http://localhost:12217/v1/trace/health",
+			ContainerName: "aleutian-trace",
+			CheckType:     HealthCheckHTTP,
+			Critical:      false,
+			Version:       HealthCheckVersion,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		},
+		{
+			ID:            GenerateID(),
 			Name:          "Weaviate",
 			URL:           "http://localhost:12212/v1/.well-known/ready",
 			ContainerName: "aleutian-weaviate",

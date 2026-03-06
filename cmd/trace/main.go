@@ -40,18 +40,18 @@
 // Example requests:
 //
 //	# Health check
-//	curl http://localhost:8080/v1/trace/health
+//	curl http://localhost:12217/v1/trace/health
 //
 //	# Get all available tools
-//	curl http://localhost:8080/v1/trace/tools | jq
+//	curl http://localhost:12217/v1/trace/tools | jq
 //
 //	# Initialize a code graph
-//	curl -X POST http://localhost:8080/v1/trace/init \
+//	curl -X POST http://localhost:12217/v1/trace/init \
 //	  -H "Content-Type: application/json" \
 //	  -d '{"project_root": "/path/to/project"}'
 //
 //	# Run agent query (requires Ollama)
-//	curl -X POST http://localhost:8080/v1/trace/agent/run \
+//	curl -X POST http://localhost:12217/v1/trace/agent/run \
 //	  -H "Content-Type: application/json" \
 //	  -d '{"project_root": "/path/to/project", "query": "What are the main entry points?"}'
 package main
@@ -66,6 +66,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -179,10 +180,18 @@ func WarmupGuardMiddleware() gin.HandlerFunc {
 }
 
 func main() {
-	port := flag.Int("port", 8080, "Port to listen on")
+	port := flag.Int("port", 12217, "Port to listen on")
 	debug := flag.Bool("debug", false, "Enable debug mode")
 	withContext := flag.Bool("with-context", false, "Enable ContextManager for code context assembly")
 	withTools := flag.Bool("with-tools", false, "Enable tool registry for agentic exploration")
+
+	// PORT env var override (matches orchestrator pattern for container deployments).
+	if envPort := os.Getenv("PORT"); envPort != "" {
+		if p, err := strconv.Atoi(envPort); err == nil {
+			*port = p
+		}
+	}
+
 	flag.Parse()
 
 	// Set Gin mode
@@ -219,6 +228,22 @@ func main() {
 
 	// Create service with default config
 	cfg := trace.DefaultServiceConfig()
+
+	// Wire allowed roots from environment for container path security.
+	// TRACE_ALLOWED_ROOTS is a comma-separated list of path prefixes that the
+	// trace server is permitted to access. Set by podman-compose.yml to restrict
+	// container filesystem access to mounted volumes only.
+	if allowedRoots := os.Getenv("TRACE_ALLOWED_ROOTS"); allowedRoots != "" {
+		for _, root := range strings.Split(allowedRoots, ",") {
+			trimmed := strings.TrimSpace(root)
+			if trimmed != "" {
+				cfg.AllowedRoots = append(cfg.AllowedRoots, trimmed)
+			}
+		}
+		slog.Info("Allowed roots configured",
+			slog.Any("roots", cfg.AllowedRoots))
+	}
+
 	svc := trace.NewService(cfg)
 
 	// Create handlers
