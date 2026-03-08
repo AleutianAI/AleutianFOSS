@@ -41,6 +41,9 @@ const (
 
 	// CategoryFile includes tools for file operations.
 	CategoryFile ToolCategory = "file"
+
+	// CategorySemantic includes tools for vector/semantic search.
+	CategorySemantic ToolCategory = "semantic"
 )
 
 // String returns the string representation of the category.

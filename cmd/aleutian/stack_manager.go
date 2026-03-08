@@ -1647,6 +1647,16 @@ func (s *DefaultStackManager) startContainers(ctx context.Context, opts StartOpt
 		slog.Warn("failed to write output", "error", err)
 	}
 
+	removed, err := s.compose.RemoveExitedContainers(ctx)
+	if err != nil {
+		slog.Debug("Failed to remove exited containers", "error", err)
+	}
+	if removed > 0 {
+		if _, err := fmt.Fprintf(s.output, "  Removed %d exited container(s)\n", removed); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
+	}
+
 	upOpts := compose.UpOptions{
 		ForceBuild: opts.ForceBuild,
 		Env:        env,
@@ -1855,6 +1865,14 @@ func (s *DefaultStackManager) waitForHealthy(ctx context.Context, opts StartOpti
 	// Use forecast mode-aware service definitions
 	// When using sapheneia mode, Ollama is non-critical
 	services := health.ServiceDefinitionsForMode(opts.ForecastMode)
+
+	// When --service is specified, only check health for targeted services.
+	// Without this filter, exited containers from previous sessions cause
+	// health check timeouts even though the targeted service started fine.
+	if len(opts.Services) > 0 {
+		services = s.filterServiceDefinitions(services, opts.Services)
+	}
+
 	waitOpts := health.DefaultWaitOptions()
 
 	// Extended timeout when models may still be loading
@@ -1910,6 +1928,47 @@ func (s *DefaultStackManager) waitForHealthy(ctx context.Context, opts StartOpti
 //   - result is non-nil
 func (s *DefaultStackManager) getFailedServiceNames(result *health.WaitResult) []string {
 	return result.FailedCritical
+}
+
+// filterServiceDefinitions returns only the service definitions matching the
+// given compose service names.
+//
+// # Description
+//
+// Filters service definitions by matching compose service names against
+// container names. The container name prefix (e.g., "aleutian-") is prepended
+// to each service name for matching. Services with no container name (e.g.,
+// host-level Ollama) are excluded when filtering.
+//
+// # Inputs
+//
+//   - defs: Full list of service definitions
+//   - serviceNames: Compose service names to keep (e.g., ["trace", "weaviate"])
+//
+// # Outputs
+//
+//   - []health.ServiceDefinition: Filtered definitions matching the requested services
+//
+// # Limitations
+//
+//   - Assumes container names follow the pattern "<prefix><service_name>"
+//
+// # Assumptions
+//
+//   - serviceNames is non-empty (caller checks)
+func (s *DefaultStackManager) filterServiceDefinitions(defs []health.ServiceDefinition, serviceNames []string) []health.ServiceDefinition {
+	wanted := make(map[string]bool, len(serviceNames))
+	for _, name := range serviceNames {
+		wanted["aleutian-"+name] = true
+	}
+
+	var filtered []health.ServiceDefinition
+	for _, def := range defs {
+		if def.ContainerName != "" && wanted[def.ContainerName] {
+			filtered = append(filtered, def)
+		}
+	}
+	return filtered
 }
 
 // collectDiagnostics gathers diagnostic information after an error.

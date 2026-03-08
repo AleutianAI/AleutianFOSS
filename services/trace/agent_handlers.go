@@ -11,9 +11,14 @@
 package trace
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
+	"encoding/gob"
 	"errors"
 	"fmt"
+	"hash/crc32"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -27,6 +32,9 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/routing"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
 	"github.com/gin-gonic/gin"
+	"github.com/nats-io/nats.go"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 // AgentHandlers contains the HTTP handlers for the Trace agent.
@@ -38,10 +46,47 @@ type AgentHandlers struct {
 	modelManager    *llm.MultiModelManager
 	providerFactory *providers.ProviderFactory
 	roleConfig      *providers.RoleConfig
+	// natsClient provides NATS access for CRS SSE streaming.
+	// CRS-27: Optional. If nil, SSE streaming endpoint returns 503.
+	natsClient NATSSSEProvider
 }
+
+// NATSSSEProvider provides NATS subscription capability for SSE streaming.
+// CRS-27: Interface to decouple from concrete nats storage client.
+type NATSSSEProvider interface {
+	IsConnected() bool
+	JetStream() nats.JetStreamContext
+}
+
+// CRS-27a: Prometheus metrics for SSE CRS streaming.
+var (
+	sseConnectionsActive = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "crs_sse_connections_active",
+		Help: "Currently active SSE connections for CRS delta streaming",
+	})
+
+	sseEventsSentTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "crs_sse_events_sent_total",
+		Help: "Total SSE events sent by event type",
+	}, []string{"event_type"})
+
+	sseConnectionDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "crs_sse_connection_duration_seconds",
+		Help:    "Duration of SSE connections in seconds",
+		Buckets: []float64{1, 5, 10, 30, 60, 120, 300, 600, 1800, 3600},
+	})
+)
 
 // AgentHandlersOption is a functional option for NewAgentHandlers.
 type AgentHandlersOption func(*AgentHandlers)
+
+// WithNATSSSE injects a NATS client for CRS SSE streaming into AgentHandlers.
+// CRS-27: Enables the GET /:id/crs/stream SSE endpoint.
+func WithNATSSSE(client NATSSSEProvider) AgentHandlersOption {
+	return func(h *AgentHandlers) {
+		h.natsClient = client
+	}
+}
 
 // WithProviderFactory injects a shared ProviderFactory into AgentHandlers.
 //
@@ -1612,4 +1657,153 @@ func convertCRSExport(export *crs.CRSExport) *CRSExportResponse {
 	}
 
 	return response
+}
+
+// HandleCRSStream handles GET /v1/trace/agent/:id/crs/stream.
+//
+// Description:
+//
+//	Server-Sent Events endpoint for live CRS delta streaming. Subscribes
+//	to NATS JetStream for new deltas on the specified session and streams
+//	them to the client as SSE events. Includes heartbeats every 15 seconds.
+//
+// Inputs:
+//
+//   - id (path param): The agent session ID.
+//
+// Outputs:
+//
+//   - SSE stream with "delta" events and periodic "heartbeat" events.
+//   - 503 if NATS is unavailable.
+//   - 404 if session not found.
+//
+// Thread Safety: Safe for concurrent use.
+func (h *AgentHandlers) HandleCRSStream(c *gin.Context) {
+	sessionID := c.Param("id")
+	if sessionID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "session ID is required"})
+		return
+	}
+
+	if h.natsClient == nil || !h.natsClient.IsConnected() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "NATS not available"})
+		return
+	}
+
+	// Verify session exists
+	if h.loop != nil {
+		_, err := h.loop.GetSession(sessionID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "session not found"})
+			return
+		}
+	}
+
+	// Set SSE headers
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+
+	js := h.natsClient.JetStream()
+	subject := fmt.Sprintf("crs.%s.delta", sessionID)
+
+	// Subscribe with DeliverNew to only get new deltas
+	sub, err := js.SubscribeSync(subject, nats.DeliverNew())
+	if err != nil {
+		slog.Error("CRS-27: Failed to subscribe for SSE stream",
+			slog.String("session_id", sessionID),
+			slog.String("error", err.Error()),
+		)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to subscribe to delta stream"})
+		return
+	}
+	defer sub.Unsubscribe()
+
+	ctx := c.Request.Context()
+	heartbeatTicker := time.NewTicker(15 * time.Second)
+	defer heartbeatTicker.Stop()
+
+	// CRS-27a: Track SSE connection metrics
+	connStart := time.Now()
+	sseConnectionsActive.Inc()
+	defer func() {
+		sseConnectionsActive.Dec()
+		sseConnectionDuration.Observe(time.Since(connStart).Seconds())
+	}()
+
+	// Stream events
+	c.Stream(func(w io.Writer) bool {
+		select {
+		case <-ctx.Done():
+			return false
+
+		case <-heartbeatTicker.C:
+			c.SSEvent("heartbeat", gin.H{
+				"ts": time.Now().UnixMilli(),
+			})
+			sseEventsSentTotal.WithLabelValues("heartbeat").Inc()
+			return true
+
+		default:
+			msg, err := sub.NextMsg(1 * time.Second)
+			if err != nil {
+				if errors.Is(err, nats.ErrTimeout) {
+					return true // No message, continue waiting
+				}
+				slog.Warn("CRS-27: Error receiving SSE message",
+					slog.String("session_id", sessionID),
+					slog.String("error", err.Error()),
+				)
+				return false
+			}
+
+			// Decode the delta
+			delta, decErr := decodeDeltaEntry(msg.Data)
+			if decErr != nil {
+				slog.Warn("CRS-27: Failed to decode delta for SSE",
+					slog.String("session_id", sessionID),
+					slog.String("error", decErr.Error()),
+				)
+				return true // Skip corrupted, continue
+			}
+
+			// Get metadata for sequence number
+			meta, _ := msg.Metadata()
+			var seqNum uint64
+			if meta != nil {
+				seqNum = meta.Sequence.Stream
+			}
+
+			streamDelta := crs.DeltaToStreamDelta(delta, seqNum, time.Now().UnixMilli())
+			c.SSEvent("delta", streamDelta)
+			sseEventsSentTotal.WithLabelValues("delta").Inc()
+			return true
+		}
+	})
+}
+
+// decodeDeltaEntry decodes a [CRC32][gob] encoded delta for SSE.
+func decodeDeltaEntry(data []byte) (crs.Delta, error) {
+	if len(data) < 5 {
+		return nil, fmt.Errorf("entry too short: %d bytes", len(data))
+	}
+
+	storedCRC := binary.BigEndian.Uint32(data[:4])
+	gobData := data[4:]
+	computedCRC := crc32.ChecksumIEEE(gobData)
+
+	if storedCRC != computedCRC {
+		return nil, fmt.Errorf("CRC mismatch: stored=%08x computed=%08x", storedCRC, computedCRC)
+	}
+
+	crs.RegisterDeltaTypesForSSE()
+
+	var delta crs.Delta
+	dec := gob.NewDecoder(bytes.NewReader(gobData))
+	if err := dec.Decode(&delta); err != nil {
+		return nil, fmt.Errorf("gob decode: %w", err)
+	}
+
+	return delta, nil
 }

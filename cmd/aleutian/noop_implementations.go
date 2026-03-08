@@ -156,6 +156,11 @@ func (n *NoOpComposeExecutor) Status(ctx context.Context) (*compose.ComposeStatu
 	return &compose.ComposeStatus{Services: []compose.ServiceStatus{}}, nil
 }
 
+// RemoveExitedContainers returns zero removed.
+func (n *NoOpComposeExecutor) RemoveExitedContainers(ctx context.Context) (int, error) {
+	return 0, nil
+}
+
 // ForceCleanup returns empty result.
 func (n *NoOpComposeExecutor) ForceCleanup(ctx context.Context) (*compose.CleanupResult, error) {
 	return &compose.CleanupResult{}, nil

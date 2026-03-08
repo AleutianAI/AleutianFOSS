@@ -624,6 +624,17 @@ func DefaultServiceDefinitions() []ServiceDefinition {
 		},
 		{
 			ID:            GenerateID(),
+			Name:          "NATS",
+			URL:           "http://localhost:8222/healthz",
+			ContainerName: "aleutian-nats",
+			CheckType:     HealthCheckHTTP,
+			Critical:      false, // CRS degrades gracefully without NATS
+			Version:       HealthCheckVersion,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		},
+		{
+			ID:            GenerateID(),
 			Name:          "Data Fetcher",
 			URL:           "http://localhost:12001/health",
 			ContainerName: "aleutian-data-fetcher",

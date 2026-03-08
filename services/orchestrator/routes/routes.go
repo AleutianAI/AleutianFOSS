@@ -93,6 +93,7 @@ func SetupRoutes(router *gin.Engine, client *weaviate.Client, globalLLMClient ll
 		v1.POST("/trading/signal", handlers.HandleTradingSignal())
 		v1.POST("/models/pull", handlers.HandleModelPull())
 		v1.POST("/agent/step", handlers.HandleAgentStep(policyEngine))
+		v1.POST("/embed", handlers.HandleEmbed())
 
 		// Vector DB-dependent routes (requires Weaviate client)
 		if client != nil {

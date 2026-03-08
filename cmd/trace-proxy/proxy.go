@@ -20,6 +20,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -901,6 +902,84 @@ func (p *ProxyServer) recordCompletion(
 	)
 }
 
+// AutoInit sends a POST /v1/trace/init request to the trace server to trigger
+// graph construction and eager symbol indexing for the given project root.
+//
+// Description:
+//
+//	CRS-26l: Called on proxy startup so the code graph is built and symbols
+//	are indexed before any user query arrives. The trace server's HandleInit
+//	triggers symbol indexing via the SymbolIndexingCoordinator.
+//
+// Inputs:
+//
+//	projectRoot - The host-side project root path. Translated via path translation
+//	              if configured.
+//
+// Outputs:
+//
+//	error - Non-nil if the init request failed.
+//
+// Thread Safety: Safe for concurrent use.
+func (p *ProxyServer) AutoInit(projectRoot string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	ctx, span := proxyTracer.Start(ctx, "proxy.AutoInit")
+	defer span.End()
+
+	translated := p.translatePath(projectRoot)
+	span.SetAttributes(
+		attribute.String("project_root", translated),
+	)
+
+	payload := initRequest{
+		ProjectRoot: translated,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshaling auto-init request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		p.config.TraceURL+"/v1/trace/init", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("creating auto-init request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("auto-init request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("auto-init returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	// Decode response for logging.
+	var initResp struct {
+		GraphID          string `json:"graph_id"`
+		FilesParsed      int    `json:"files_parsed"`
+		SymbolsExtracted int    `json:"symbols_extracted"`
+	}
+	if decErr := json.NewDecoder(resp.Body).Decode(&initResp); decErr != nil {
+		slog.Warn("CRS-26l: Auto-init succeeded but couldn't decode response",
+			slog.String("error", decErr.Error()))
+		return nil
+	}
+
+	slog.Info("CRS-26l: Auto-init completed",
+		slog.String("graph_id", initResp.GraphID),
+		slog.Int("files_parsed", initResp.FilesParsed),
+		slog.Int("symbols_extracted", initResp.SymbolsExtracted),
+	)
+
+	return nil
+}
+
 // CleanupExpiredSessions removes sessions that haven't been used within the
 // TTL period.
 //
@@ -1122,4 +1201,160 @@ type statusWriter struct {
 func (sw *statusWriter) WriteHeader(code int) {
 	sw.status = code
 	sw.ResponseWriter.WriteHeader(code)
+}
+
+// indexingStatusResponse mirrors trace.IndexingStatusResponse to avoid importing
+// the trace service package (the proxy communicates via HTTP).
+//
+// Thread Safety: Not safe for concurrent use.
+type indexingStatusResponse struct {
+	InProgress       bool   `json:"in_progress"`
+	Phase            string `json:"phase"`
+	SymbolsTotal     int    `json:"symbols_total"`
+	BatchesCompleted int    `json:"batches_completed"`
+	BatchesTotal     int    `json:"batches_total"`
+	SymbolsIndexed   int    `json:"symbols_indexed"`
+	Error            string `json:"error,omitempty"`
+}
+
+// spinnerFrames are the braille spinner animation frames.
+var spinnerFrames = []rune{'⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'}
+
+// WatchIndexingProgress polls the trace server's indexing status endpoint
+// and renders live progress to stderr.
+//
+// Description:
+//
+//	Polls GET /v1/trace/indexing/status every 2 seconds and prints a
+//	single-line progress update using carriage return overwrite. Stops
+//	when indexing completes or after 20 minutes.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation.
+//
+// Thread Safety: Safe for concurrent use.
+func (p *ProxyServer) WatchIndexingProgress(ctx context.Context) {
+	pollCtx, cancel := context.WithTimeout(ctx, 20*time.Minute)
+	defer cancel()
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	frame := 0
+	pollClient := &http.Client{Timeout: 5 * time.Second}
+
+	for {
+		select {
+		case <-pollCtx.Done():
+			return
+		case <-ticker.C:
+			status, err := p.fetchIndexingStatus(pollCtx, pollClient)
+			if err != nil {
+				// Server might not have the endpoint yet — silently skip.
+				continue
+			}
+
+			spinner := string(spinnerFrames[frame%len(spinnerFrames)])
+			frame++
+
+			switch {
+			case status.Phase == "idle" || status.Phase == "disabled" || status.Phase == "":
+				// Not started yet, keep polling.
+				continue
+			case status.Phase == "collecting":
+				fmt.Fprintf(os.Stderr, "\r\033[K%s Indexing symbols: collecting %s symbols...",
+					spinner, formatNumber(status.SymbolsTotal))
+			case status.Phase == "embedding":
+				fmt.Fprintf(os.Stderr, "\r\033[K%s Indexing symbols: embedding %s symbols...",
+					spinner, formatNumber(status.SymbolsTotal))
+			case status.Phase == "inserting":
+				pct := 0
+				if status.BatchesTotal > 0 {
+					pct = status.BatchesCompleted * 100 / status.BatchesTotal
+				}
+				fmt.Fprintf(os.Stderr, "\r\033[K%s Indexing symbols: inserting batch %d/%d (%d%%)...",
+					spinner, status.BatchesCompleted, status.BatchesTotal, pct)
+			case status.Phase == "complete":
+				if status.Error != "" {
+					fmt.Fprintf(os.Stderr, "\r\033[K✗ Symbol indexing failed: %s\n", status.Error)
+				} else {
+					fmt.Fprintf(os.Stderr, "\r\033[K✓ Symbol indexing complete: %s symbols indexed\n",
+						formatNumber(status.SymbolsIndexed))
+				}
+				return
+			}
+
+			if !status.InProgress && status.Phase != "" {
+				// Indexing finished (possibly between polls).
+				if status.Error != "" {
+					fmt.Fprintf(os.Stderr, "\r\033[K✗ Symbol indexing failed: %s\n", status.Error)
+				} else {
+					fmt.Fprintf(os.Stderr, "\r\033[K✓ Symbol indexing complete: %s symbols indexed\n",
+						formatNumber(status.SymbolsIndexed))
+				}
+				return
+			}
+		}
+	}
+}
+
+// fetchIndexingStatus calls GET /v1/trace/indexing/status on the trace server.
+//
+// Inputs:
+//
+//	ctx    - Context for cancellation.
+//	client - HTTP client to use.
+//
+// Outputs:
+//
+//	*indexingStatusResponse - The parsed response.
+//	error - Non-nil if the request failed.
+func (p *ProxyServer) fetchIndexingStatus(ctx context.Context, client *http.Client) (*indexingStatusResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		p.config.TraceURL+"/v1/trace/indexing/status", nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating indexing status request: %w", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetching indexing status: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("indexing status returned %d", resp.StatusCode)
+	}
+
+	var status indexingStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		return nil, fmt.Errorf("decoding indexing status: %w", err)
+	}
+
+	return &status, nil
+}
+
+// formatNumber formats an integer with comma separators for readability.
+//
+// Inputs:
+//
+//	n - The number to format.
+//
+// Outputs:
+//
+//	string - The formatted number (e.g., "51,231").
+func formatNumber(n int) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	s := fmt.Sprintf("%d", n)
+	var result []byte
+	for i, c := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			result = append(result, ',')
+		}
+		result = append(result, byte(c))
+	}
+	return string(result)
 }

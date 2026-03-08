@@ -953,6 +953,30 @@ func callOllamaEmbed(embedURL string, model string, chunks []string) ([][]float3
 		Model: model,
 		Input: prefixedChunks,
 	}
+	return callOllamaEmbedInternal(embedURL, reqBody)
+}
+
+// callOllamaEmbedInternal sends a pre-built OllamaEmbedRequest to the Ollama
+// /api/embed endpoint and returns the resulting embedding vectors.
+//
+// Description:
+//
+//	Shared implementation used by both callOllamaEmbed (document ingestion)
+//	and callOllamaEmbedRaw (HandleEmbed endpoint). The caller is responsible
+//	for prefixing inputs before calling this function.
+//
+// Inputs:
+//
+//	embedURL - The Ollama /api/embed endpoint URL.
+//	reqBody - The embed request with model and input texts.
+//
+// Outputs:
+//
+//	[][]float32 - One embedding vector per input.
+//	error - Non-nil if the HTTP call or JSON parsing fails.
+//
+// Thread Safety: Safe for concurrent use.
+func callOllamaEmbedInternal(embedURL string, reqBody OllamaEmbedRequest) ([][]float32, error) {
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal ollama embed request: %w", err)

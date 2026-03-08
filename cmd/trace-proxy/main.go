@@ -27,7 +27,7 @@
 //	  --listen-addr string   Listen address (default: ":12218")
 //	  --trace-url string     Trace server URL (default: ALEUTIAN_TRACE_URL env or http://localhost:12217)
 //	  --ollama-url string    Ollama URL for /v1/models (default: OLLAMA_URL env or http://localhost:11434)
-//	  --project-root string  Default project root (optional, can be set per-request via X-Project-Root header)
+//	  --project-root string  Default project root (default: current directory, can be set per-request via X-Project-Root header)
 //	  --timeout duration     Agent run timeout (default: 5m)
 //
 // Example:
@@ -92,14 +92,36 @@ func main() {
 	resolvedTraceURL := resolveURL(*traceURL, "ALEUTIAN_TRACE_URL", bridge.DefaultTraceURL)
 	resolvedOllamaURL := resolveURL(*ollamaURL, "OLLAMA_URL", "http://localhost:11434")
 
+	// Default project root to current working directory if not set.
+	resolvedProjectRoot := *projectRoot
+	if resolvedProjectRoot == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			resolvedProjectRoot = cwd
+			slog.Info("Defaulting project root to current directory",
+				slog.String("project_root", cwd))
+		}
+	}
+
 	resolvedHostPrefix := resolveURL(*hostPrefix, "TRACE_HOST_PREFIX", "")
 	resolvedContainerPrefix := resolveURL(*containerPrefix, "TRACE_CONTAINER_PREFIX", "")
+
+	// Auto-derive path translation when project root is set but prefixes
+	// are not explicitly configured. The container always mounts projects
+	// at /projects (from the compose volume mount), so we can infer both
+	// sides of the translation automatically.
+	if resolvedProjectRoot != "" && resolvedHostPrefix == "" && resolvedContainerPrefix == "" {
+		resolvedHostPrefix = resolvedProjectRoot
+		resolvedContainerPrefix = "/projects"
+		slog.Info("Auto-derived path translation from project root",
+			slog.String("host_prefix", resolvedHostPrefix),
+			slog.String("container_prefix", resolvedContainerPrefix))
+	}
 
 	config := ProxyConfig{
 		ListenAddr:      *listenAddr,
 		TraceURL:        resolvedTraceURL,
 		OllamaURL:       resolvedOllamaURL,
-		ProjectRoot:     *projectRoot,
+		ProjectRoot:     resolvedProjectRoot,
 		Timeout:         *timeout,
 		HostPrefix:      resolvedHostPrefix,
 		ContainerPrefix: resolvedContainerPrefix,
@@ -139,6 +161,23 @@ func main() {
 			slog.Error("Server shutdown error", slog.String("error", err.Error()))
 		}
 	}()
+
+	// CRS-26l: Auto-init on startup so graph is built and symbols are indexed
+	// before any user query arrives. Brief delay allows the trace server to
+	// finish starting if launched concurrently via stack start.
+	if config.ProjectRoot != "" {
+		go func() {
+			time.Sleep(2 * time.Second)
+			if err := proxy.AutoInit(config.ProjectRoot); err != nil {
+				slog.Warn("CRS-26l: Auto-init failed, will init on first request",
+					slog.String("project_root", config.ProjectRoot),
+					slog.String("error", err.Error()))
+			} else {
+				slog.Info("CRS-26l: Auto-init completed, symbol indexing triggered in background")
+				proxy.WatchIndexingProgress(ctx)
+			}
+		}()
+	}
 
 	slog.Info("Starting Aleutian Trace proxy",
 		slog.String("version", version),

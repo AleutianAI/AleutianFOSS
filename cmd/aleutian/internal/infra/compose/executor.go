@@ -279,6 +279,34 @@ type ComposeExecutor interface {
 	//   - Includes all containers (running, stopped, exited) for debugging
 	Status(ctx context.Context) (*ComposeStatus, error)
 
+	// RemoveExitedContainers removes containers in exited/stopped state.
+	//
+	// # Description
+	//
+	// Removes only containers matching the configured name prefix that are in
+	// exited state. Running containers are not affected. This is used before
+	// starting containers to clean up stale containers from previous sessions
+	// that would otherwise cause health check timeouts.
+	//
+	// # Inputs
+	//
+	//   - ctx: Context for cancellation and timeout
+	//
+	// # Outputs
+	//
+	//   - int: Number of containers removed
+	//   - error: Non-nil if the removal command fails
+	//
+	// # Limitations
+	//
+	//   - Only removes containers matching the configured name prefix
+	//   - Does not remove running containers
+	//
+	// # Assumptions
+	//
+	//   - Podman daemon is accessible
+	RemoveExitedContainers(ctx context.Context) (int, error)
+
 	// ForceCleanup removes all Aleutian containers regardless of compose state.
 	//
 	// # Description
@@ -1151,6 +1179,47 @@ func (e *DefaultComposeExecutor) Status(ctx context.Context) (*ComposeStatus, er
 	}
 
 	return e.parseContainerStatus(output.Stdout)
+}
+
+// RemoveExitedContainers removes containers in exited state matching the name prefix.
+//
+// # Description
+//
+// Runs `podman rm` with filters for the configured container name prefix and
+// exited status. Only affects stopped/exited containers — running containers
+// are untouched. Returns the count of containers actually removed.
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation and timeout
+//
+// # Outputs
+//
+//   - int: Number of containers removed
+//   - error: Non-nil if the podman command fails
+//
+// # Limitations
+//
+//   - Only removes containers matching the configured name prefix
+//   - Does not remove running containers
+//
+// # Assumptions
+//
+//   - Podman daemon is accessible
+func (e *DefaultComposeExecutor) RemoveExitedContainers(ctx context.Context) (int, error) {
+	args := []string{
+		"rm",
+		"--filter", fmt.Sprintf("name=%s", e.config.ContainerNamePrefix),
+		"--filter", "status=exited",
+	}
+
+	output, err := e.runPodman(ctx, args, 30*time.Second)
+	if err != nil {
+		return 0, fmt.Errorf("removing exited containers: %w", err)
+	}
+
+	removed := e.parseLines(output.Stdout)
+	return len(removed), nil
 }
 
 // ForceCleanup removes all Aleutian containers regardless of compose state.
@@ -2548,14 +2617,15 @@ func (e *DefaultComposeExecutor) validateEnvVars(env map[string]string) error {
 //	result, _ := mock.Up(ctx, UpOptions{})
 //	assert.Equal(t, 1, len(mock.UpCalls))
 type MockComposeExecutor struct {
-	UpFunc              func(context.Context, UpOptions) (*ComposeResult, error)
-	DownFunc            func(context.Context, DownOptions) (*ComposeResult, error)
-	StopFunc            func(context.Context, StopOptions) (*StopResult, error)
-	LogsFunc            func(context.Context, LogsOptions, io.Writer) error
-	StatusFunc          func(context.Context) (*ComposeStatus, error)
-	ForceCleanupFunc    func(context.Context) (*CleanupResult, error)
-	ExecFunc            func(context.Context, ExecOptions) (*ExecResult, error)
-	GetComposeFilesFunc func() []string
+	UpFunc                     func(context.Context, UpOptions) (*ComposeResult, error)
+	DownFunc                   func(context.Context, DownOptions) (*ComposeResult, error)
+	StopFunc                   func(context.Context, StopOptions) (*StopResult, error)
+	LogsFunc                   func(context.Context, LogsOptions, io.Writer) error
+	StatusFunc                 func(context.Context) (*ComposeStatus, error)
+	ForceCleanupFunc           func(context.Context) (*CleanupResult, error)
+	RemoveExitedContainersFunc func(context.Context) (int, error)
+	ExecFunc                   func(context.Context, ExecOptions) (*ExecResult, error)
+	GetComposeFilesFunc        func() []string
 
 	UpCalls      []UpOptions
 	DownCalls    []DownOptions
@@ -2626,6 +2696,14 @@ func (m *MockComposeExecutor) ForceCleanup(ctx context.Context) (*CleanupResult,
 		return m.ForceCleanupFunc(ctx)
 	}
 	return &CleanupResult{}, nil
+}
+
+// RemoveExitedContainers implements ComposeExecutor.
+func (m *MockComposeExecutor) RemoveExitedContainers(ctx context.Context) (int, error) {
+	if m.RemoveExitedContainersFunc != nil {
+		return m.RemoveExitedContainersFunc(ctx)
+	}
+	return 0, nil
 }
 
 // Exec implements ComposeExecutor.

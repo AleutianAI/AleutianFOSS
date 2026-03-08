@@ -463,7 +463,7 @@ type BackupOptions struct {
 //	log.Info("backup created", "size", meta.CompressedSize)
 //
 // Thread Safety: Safe for concurrent use. Uses file locking for safety.
-func (pm *PersistenceManager) SaveBackup(ctx context.Context, projectHash string, journal *BadgerJournal, opts *BackupOptions) (*BackupMetadata, error) {
+func (pm *PersistenceManager) SaveBackup(ctx context.Context, projectHash string, journal Journal, opts *BackupOptions) (*BackupMetadata, error) {
 	if ctx == nil {
 		return nil, ErrNilContext
 	}
@@ -518,7 +518,7 @@ func (pm *PersistenceManager) SaveBackup(ctx context.Context, projectHash string
 }
 
 // saveBackupOnce performs a single backup attempt.
-func (pm *PersistenceManager) saveBackupOnce(ctx context.Context, projectHash string, journal *BadgerJournal, opts *BackupOptions, attempt int) (*BackupMetadata, error) {
+func (pm *PersistenceManager) saveBackupOnce(ctx context.Context, projectHash string, journal Journal, opts *BackupOptions, attempt int) (*BackupMetadata, error) {
 	start := time.Now()
 	ctx, span := persistenceTracer.Start(ctx, "crs.Persistence.SaveBackup",
 		trace.WithAttributes(
@@ -742,7 +742,7 @@ func (pm *PersistenceManager) saveBackupOnce(ctx context.Context, projectHash st
 //	}
 //
 // Thread Safety: Safe for concurrent use. Uses file locking.
-func (pm *PersistenceManager) LoadBackup(ctx context.Context, projectHash string, journal *BadgerJournal) (*BackupMetadata, error) {
+func (pm *PersistenceManager) LoadBackup(ctx context.Context, projectHash string, journal Journal) (*BackupMetadata, error) {
 	if ctx == nil {
 		return nil, ErrNilContext
 	}
@@ -912,7 +912,7 @@ func (pm *PersistenceManager) LoadBackup(ctx context.Context, projectHash string
 //   - error: Non-nil if any step fails.
 //
 // Thread Safety: Caller must hold the shared lock.
-func (pm *PersistenceManager) loadBackupFromPath(ctx context.Context, projectHash string, backupPath string, metadataPath string, journal *BadgerJournal, logger *slog.Logger, span trace.Span) (*BackupMetadata, error) {
+func (pm *PersistenceManager) loadBackupFromPath(ctx context.Context, projectHash string, backupPath string, metadataPath string, journal Journal, logger *slog.Logger, span trace.Span) (*BackupMetadata, error) {
 	// Check if backup exists
 	if _, err := os.Stat(backupPath); os.IsNotExist(err) {
 		return nil, ErrBackupNotFound

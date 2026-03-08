@@ -44,12 +44,9 @@ services:
     environment:
       AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
       PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
-      ENABLE_MODULES: "text2vec-ollama"
-      DEFAULT_VECTORIZER_MODULE: "text2vec-ollama"
       CLUSTER_HOSTNAME: "weaviate"
-      # CRS-25: text2vec-ollama uses Ollama's /api/embed endpoint for vectorization.
-      # host.containers.internal resolves to the host machine where Ollama runs.
-      OLLAMA_API_ENDPOINT: "http://host.containers.internal:11434"
+      # CRS-26h: No vectorizer modules needed. All classes use vectorizer "none"
+      # with pre-computed vectors supplied at insert time via the orchestrator.
     networks:
       - aleutian-network
     restart: unless-stopped
@@ -154,25 +151,53 @@ services:
     environment:
       PORT: 12217
       WEAVIATE_SERVICE_URL: http://weaviate:8080
+      # CRS-26g/i: RAG symbol + query embeddings route through orchestrator /v1/embed
+      ORCHESTRATOR_URL: http://orchestrator:12210
+      # Tool routing embeddings (routing/embedder.go) call Ollama directly
+      EMBEDDING_SERVICE_URL: http://host.containers.internal:11434/api/embed
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text-v2-moe}
       OTEL_EXPORTER_OTLP_ENDPOINT: jaeger:4317
       OLLAMA_BASE_URL: http://host.containers.internal:11434
       OLLAMA_MODEL: ${OLLAMA_MODEL:-gpt-oss}
       TRACE_ALLOWED_ROOTS: /projects
+      NATS_URL: nats://nats:4222
     volumes:
       - ${TRACE_PROJECTS_DIR:-.}:/projects:ro
     networks:
       - aleutian-network
     restart: unless-stopped
     depends_on:
-      weaviate:
+      orchestrator:
         condition: service_healthy
       jaeger:
+        condition: service_healthy
+      nats:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:12217/v1/trace/health"]
       interval: 10s
       timeout: 5s
       retries: 20
+
+  # === NATS JetStream ===
+  # CRS-27: NATS for CRS delta streaming and state persistence
+  nats:
+    image: nats:2.10-alpine
+    container_name: aleutian-nats
+    ports:
+      - "4222:4222"    # Client connections
+      - "8222:8222"    # HTTP monitoring
+    command: ["--jetstream", "--store_dir=/data", "--http_port=8222"]
+    volumes:
+      - nats_data:/data
+    networks:
+      - aleutian-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # === Observability (Minimal) ===
   # Jaeger for distributed tracing
@@ -197,6 +222,7 @@ services:
 volumes:
   weaviate_data: {}
   models_cache: {}
+  nats_data: {}
 
 networks:
   aleutian-network:

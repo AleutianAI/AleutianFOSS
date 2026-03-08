@@ -20,11 +20,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/weaviate/weaviate-go-client/v5/weaviate"
+
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/explore"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/rag"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -122,6 +125,34 @@ func RegisterExploreTools(registry *Registry, g *graph.Graph, idx *index.SymbolI
 
 	// find_path uses Graph directly (doesn't need HierarchicalGraph)
 	registry.Register(NewFindPathTool(g, idx))
+}
+
+// RegisterSemanticTools registers CRS-26m semantic search tools with the registry.
+//
+// Description:
+//
+//	Registers tools for vector-based semantic code search. These tools require
+//	Weaviate for vector storage and an EmbedClient for query embedding.
+//	Gracefully degrades if dependencies are nil.
+//
+// Inputs:
+//
+//	registry - The tool registry.
+//	wvClient - Weaviate client for vector search.
+//	dataSpace - Project isolation key for Weaviate.
+//	embedClient - Embedding client for query vectorization.
+//	idx - Symbol index for O(1) lookups.
+//
+// Thread Safety: Safe for concurrent use after construction.
+func RegisterSemanticTools(
+	registry *Registry,
+	wvClient *weaviate.Client,
+	dataSpace string,
+	embedClient *rag.EmbedClient,
+	idx *index.SymbolIndex,
+) {
+	registry.Register(NewSemanticSearchTool(wvClient, dataSpace, embedClient))
+	registry.Register(NewFindSimilarSymbolsTool(wvClient, dataSpace, embedClient, idx))
 }
 
 // ============================================================================
@@ -1682,6 +1713,84 @@ func StaticToolDefinitions() []ToolDefinition {
 			Requires:    []string{"graph_initialized"},
 			SideEffects: false,
 			Timeout:     5 * time.Second,
+		},
+		// CRS-26m: Semantic search tools (vector similarity over Weaviate CodeSymbol collection)
+		{
+			Name: "semantic_search",
+			Description: "Search code symbols by meaning or concept using vector similarity. " +
+				"Use when the user asks for code related to a concept rather than an exact name. " +
+				"Examples: 'find code related to authentication', 'search for error handling patterns'. " +
+				"Returns ranked results with similarity scores.",
+			Parameters: map[string]ParamDef{
+				"query": {
+					Type:        ParamTypeString,
+					Description: "Natural language search query describing the code concept to find",
+					Required:    true,
+				},
+				"limit": {
+					Type:        ParamTypeInt,
+					Description: "Maximum number of results to return (default 10, max 50)",
+					Required:    false,
+					Default:     10,
+				},
+				"min_score": {
+					Type:        ParamTypeFloat,
+					Description: "Minimum similarity score threshold (0.0-1.0, default 0.5)",
+					Required:    false,
+					Default:     0.5,
+				},
+			},
+			Category:    CategorySemantic,
+			Priority:    70,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     10 * time.Second,
+			WhenToUse: WhenToUse{
+				Keywords: []string{
+					"semantic search", "similar to", "related to",
+					"conceptually similar", "vector search", "meaning",
+					"semantically", "find code about", "code related to",
+				},
+				UseWhen: "User asks for code by concept or meaning rather than exact name. " +
+					"Examples: 'find code related to authentication', 'search for symbols similar to error handling'.",
+				AvoidWhen: "User asks for exact symbol names — use find_symbol instead. " +
+					"User asks about callers, callees, or call chains — use graph query tools. " +
+					"User asks about file contents — use Grep or Read instead.",
+			},
+		},
+		{
+			Name: "find_similar_symbols",
+			Description: "Find symbols with similar purpose or behavior to a given symbol. " +
+				"Use when the user has a specific symbol and wants to find related functions/methods. " +
+				"Examples: 'find symbols similar to parseConfig', 'what functions are like validateInput?'",
+			Parameters: map[string]ParamDef{
+				"symbol_name": {
+					Type:        ParamTypeString,
+					Description: "Name of the symbol to find similar ones for (e.g., 'parseConfig', 'validateInput')",
+					Required:    true,
+				},
+				"limit": {
+					Type:        ParamTypeInt,
+					Description: "Maximum number of similar symbols to return (default 10, max 50)",
+					Required:    false,
+					Default:     10,
+				},
+			},
+			Category:    CategorySemantic,
+			Priority:    65,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     10 * time.Second,
+			WhenToUse: WhenToUse{
+				Keywords: []string{
+					"similar symbols", "symbols like", "resembles",
+					"similar to function", "related functions", "similar methods",
+				},
+				UseWhen: "User has a specific symbol name and wants to find other symbols with " +
+					"similar purpose or behavior. Examples: 'find symbols similar to parseConfig'.",
+				AvoidWhen: "User wants callers or callees — use graph query tools. " +
+					"User wants implementations or subclasses — use find_implementations.",
+			},
 		},
 	}
 }

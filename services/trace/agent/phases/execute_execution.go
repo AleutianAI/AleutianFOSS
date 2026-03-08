@@ -1313,6 +1313,23 @@ func (p *ExecutePhase) maybeRefreshGraph(ctx context.Context, deps *Dependencies
 		slog.Duration("duration", result.Duration),
 	)
 
+	// CRS-25b: Refresh Weaviate symbols for changed files.
+	if deps.SymbolStore != nil && deps.SymbolIndex != nil {
+		for _, file := range dirtyFiles {
+			if err := deps.SymbolStore.DeleteByFile(ctx, file); err != nil {
+				slog.Warn("CRS-25b: Failed to delete symbols for file",
+					slog.String("file", file), slog.String("error", err.Error()))
+			}
+		}
+		count, indexErr := deps.SymbolStore.IndexFileSymbols(ctx, deps.SymbolIndex, dirtyFiles, "")
+		if indexErr != nil {
+			slog.Warn("CRS-25b: Failed to re-index symbols", slog.String("error", indexErr.Error()))
+		} else if count > 0 {
+			slog.Info("CRS-25b: Symbols refreshed in Weaviate",
+				slog.Int("count", count), slog.Int("files", len(dirtyFiles)))
+		}
+	}
+
 	// GR-29: Invalidate CRS caches after successful refresh
 	p.invalidateGraphCaches(ctx, deps, result)
 

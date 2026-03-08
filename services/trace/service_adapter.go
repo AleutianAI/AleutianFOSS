@@ -50,7 +50,16 @@ func NewServiceAdapter(service *Service) *ServiceAdapter {
 	return &ServiceAdapter{
 		service:   service,
 		languages: []string{"go", "python", "javascript", "typescript"},
-		excludes:  []string{"vendor", "vendor/*", "*_test.go", "node_modules", "node_modules/*"},
+		excludes: []string{
+			"vendor", "vendor/*",
+			"*_test.go",
+			"node_modules", "node_modules/*",
+			".venv", ".venv/*",
+			".git", ".git/*",
+			"__pycache__", "__pycache__/*",
+			"models_cache", "models_cache/*",
+			".tox", ".tox/*",
+		},
 	}
 }
 

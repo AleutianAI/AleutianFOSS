@@ -27,9 +27,9 @@ const CodeSymbolClassName = "CodeSymbol"
 // Description:
 //
 //	Defines the schema for storing code symbols in Weaviate for semantic search.
-//	Uses text2vec-ollama to vectorize the searchText field, which contains
-//	a natural language description of the symbol (name, kind, package, signature).
-//	Other fields are indexed for filtering but not vectorized.
+//	CRS-26h: Uses vectorizer "none" — vectors are pre-computed by the orchestrator's
+//	/v1/embed endpoint and supplied at insert time. This avoids the container
+//	networking issue where Weaviate cannot reach Ollama on the host.
 //
 // Outputs:
 //
@@ -43,25 +43,10 @@ func GetCodeSymbolSchema() *models.Class {
 	indexSearchable := new(bool)
 	*indexSearchable = true
 
-	skipVectorization := new(bool)
-	*skipVectorization = true
-
-	skipModule := map[string]interface{}{
-		"text2vec-ollama": map[string]interface{}{
-			"skip": true,
-		},
-	}
-
 	return &models.Class{
 		Class:       CodeSymbolClassName,
 		Description: "Code symbols from AST graph for semantic entity resolution",
-		Vectorizer:  "text2vec-ollama",
-		ModuleConfig: map[string]interface{}{
-			"text2vec-ollama": map[string]interface{}{
-				"vectorizeClassName": false,
-				"model":              "nomic-embed-text-v2-moe",
-			},
-		},
+		Vectorizer:  "none",
 		Properties: []*models.Property{
 			{
 				Name:            "symbolId",
@@ -69,7 +54,6 @@ func GetCodeSymbolSchema() *models.Class {
 				Description:     "Unique symbol ID from the AST graph",
 				IndexFilterable: indexFilterable,
 				Tokenization:    "field",
-				ModuleConfig:    skipModule,
 			},
 			{
 				Name:            "searchText",
@@ -77,7 +61,6 @@ func GetCodeSymbolSchema() *models.Class {
 				Description:     "Natural language description for semantic search",
 				IndexSearchable: indexSearchable,
 				Tokenization:    "word",
-				// searchText IS vectorized — this is the main search field.
 			},
 			{
 				Name:            "name",
@@ -86,7 +69,6 @@ func GetCodeSymbolSchema() *models.Class {
 				IndexFilterable: indexFilterable,
 				IndexSearchable: indexSearchable,
 				Tokenization:    "word",
-				ModuleConfig:    skipModule,
 			},
 			{
 				Name:            "kind",
@@ -94,7 +76,6 @@ func GetCodeSymbolSchema() *models.Class {
 				Description:     "Symbol kind: function, method, struct, interface, etc.",
 				IndexFilterable: indexFilterable,
 				Tokenization:    "field",
-				ModuleConfig:    skipModule,
 			},
 			{
 				Name:            "packagePath",
@@ -103,7 +84,6 @@ func GetCodeSymbolSchema() *models.Class {
 				IndexFilterable: indexFilterable,
 				IndexSearchable: indexSearchable,
 				Tokenization:    "word",
-				ModuleConfig:    skipModule,
 			},
 			{
 				Name:            "filePath",
@@ -111,14 +91,12 @@ func GetCodeSymbolSchema() *models.Class {
 				Description:     "Source file path",
 				IndexFilterable: indexFilterable,
 				Tokenization:    "field",
-				ModuleConfig:    skipModule,
 			},
 			{
 				Name:            "exported",
 				DataType:        []string{"boolean"},
 				Description:     "Whether the symbol is exported",
 				IndexFilterable: indexFilterable,
-				ModuleConfig:    skipModule,
 			},
 			{
 				Name:            "dataSpace",
@@ -126,7 +104,6 @@ func GetCodeSymbolSchema() *models.Class {
 				Description:     "Project isolation key",
 				IndexFilterable: indexFilterable,
 				Tokenization:    "field",
-				ModuleConfig:    skipModule,
 			},
 			{
 				Name:            "graphHash",
@@ -134,7 +111,6 @@ func GetCodeSymbolSchema() *models.Class {
 				Description:     "Hash of the graph state when this symbol was indexed",
 				IndexFilterable: indexFilterable,
 				Tokenization:    "field",
-				ModuleConfig:    skipModule,
 			},
 		},
 	}
@@ -161,31 +137,31 @@ func EnsureCodeSymbolSchema(ctx context.Context, client *weaviate.Client) error 
 	existing, err := client.Schema().ClassGetter().WithClassName(CodeSymbolClassName).Do(ctx)
 	if err == nil {
 		// Class exists — verify the vectorizer matches what we need.
-		// If a previous run created the class with "none" or "text2vec-transformers",
-		// nearText won't work. Delete and recreate with the correct vectorizer.
+		// If a previous run created the class with a different vectorizer (e.g., "text2vec-ollama"),
+		// nearVector queries won't work correctly. Delete and recreate with the correct vectorizer.
 		expectedVectorizer := GetCodeSymbolSchema().Vectorizer
 		if existing.Vectorizer != expectedVectorizer {
-			slog.Warn("CRS-25: CodeSymbol schema has wrong vectorizer, recreating",
+			slog.Warn("CRS-26h: CodeSymbol schema has wrong vectorizer, recreating",
 				slog.String("current", existing.Vectorizer),
 				slog.String("expected", expectedVectorizer))
 			if delErr := client.Schema().ClassDeleter().WithClassName(CodeSymbolClassName).Do(ctx); delErr != nil {
 				return fmt.Errorf("deleting stale CodeSymbol schema: %w", delErr)
 			}
 		} else {
-			slog.Debug("CRS-25: CodeSymbol schema already exists",
+			slog.Debug("CRS-26h: CodeSymbol schema already exists",
 				slog.String("vectorizer", existing.Vectorizer))
 			return nil
 		}
 	}
 
 	schema := GetCodeSymbolSchema()
-	slog.Info("CRS-25: Creating CodeSymbol schema",
+	slog.Info("CRS-26h: Creating CodeSymbol schema",
 		slog.String("vectorizer", schema.Vectorizer))
 	if err := client.Schema().ClassCreator().WithClass(schema).Do(ctx); err != nil {
 		return fmt.Errorf("creating CodeSymbol schema: %w", err)
 	}
 
-	slog.Info("CRS-25: CodeSymbol schema created",
+	slog.Info("CRS-26h: CodeSymbol schema created",
 		slog.String("vectorizer", schema.Vectorizer))
 	return nil
 }

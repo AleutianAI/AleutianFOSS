@@ -220,23 +220,50 @@ func (e *ParamExtractor) ExtractParams(
 	// Build the prompt
 	systemPrompt := e.buildSystemPrompt(toolName, paramSchemas, regexHint)
 
-	// CRS-25: Append resolved entities from RAG to the user prompt.
-	// This grounds the extraction model with confirmed entity names from the graph.
+	// CRS-25/CRS-26e: Append resolved entities from RAG to the user prompt.
+	// Entities are separated into confidence tiers so the model treats
+	// high-confidence matches as facts and low-confidence ones as suggestions.
 	userPrompt := fmt.Sprintf("User query: %s", query)
 	if ec := rag.ExtractionContextFromCtx(ctx); ec != nil && len(ec.ResolvedEntities) > 0 {
 		var sb strings.Builder
 		sb.WriteString(userPrompt)
-		sb.WriteString("\n\nResolved entities from code graph:\n")
+
+		// CRS-26e: Separate high-confidence (>= 0.6) from low-confidence (< 0.6).
+		var highConf, lowConf []rag.ResolvedEntity
 		for _, re := range ec.ResolvedEntities {
-			sb.WriteString(fmt.Sprintf("  %q → %s %q (confidence: %.2f)\n",
-				re.Raw, re.Kind, re.Resolved, re.Confidence))
+			if re.Confidence >= 0.6 {
+				highConf = append(highConf, re)
+			} else {
+				lowConf = append(lowConf, re)
+			}
+		}
+
+		if len(highConf) > 0 {
+			sb.WriteString("\n\nConfirmed entities from code graph (USE THESE):\n")
+			for _, re := range highConf {
+				sb.WriteString(fmt.Sprintf("  %q → %s %q (confidence: %.2f)\n",
+					re.Raw, re.Kind, re.Resolved, re.Confidence))
+			}
+		}
+		if len(lowConf) > 0 {
+			sb.WriteString("\nSuggested entities (VERIFY before using):\n")
+			for _, re := range lowConf {
+				sb.WriteString(fmt.Sprintf("  %q → possibly %s %q (confidence: %.2f)\n",
+					re.Raw, re.Kind, re.Resolved, re.Confidence))
+			}
 		}
 		if len(ec.PackageNames) > 0 {
-			sb.WriteString(fmt.Sprintf("Available packages: %s\n",
+			sb.WriteString(fmt.Sprintf("\nAvailable packages: %s\n",
 				strings.Join(ec.PackageNames, ", ")))
+			sb.WriteString("IMPORTANT: Only use package names from this list. Do not invent package names.\n")
 		}
+
 		userPrompt = sb.String()
-		span.SetAttributes(attribute.Int("rag.resolved_entities", len(ec.ResolvedEntities)))
+		span.SetAttributes(
+			attribute.Int("rag.resolved_entities", len(ec.ResolvedEntities)),
+			attribute.Int("rag.high_confidence", len(highConf)),
+			attribute.Int("rag.low_confidence", len(lowConf)),
+		)
 	}
 
 	messages := []datatypes.Message{
@@ -428,6 +455,21 @@ makes errors — ignore it if it contradicts the query):
 	}
 
 	sb.WriteString(`
+## Entity Grounding (CRS-25/26e)
+
+When "Confirmed entities from code graph" are provided in the user message:
+- Use the confirmed entity values directly. They come from the actual codebase graph.
+- For package parameters, copy the confirmed package name exactly.
+- Do not invent alternative package names.
+
+When "Suggested entities" are provided:
+- These are low-confidence matches. Verify against the Available Packages list.
+- If a suggestion doesn't match any available package, ignore it.
+
+When "Available packages" are provided:
+- Only extract package names that appear in this list.
+- If the query mentions a term that doesn't match any available package, leave the package field empty.
+
 Respond with ONLY a JSON object containing the parameter values.
 Do not include any explanation or markdown formatting.
 `)

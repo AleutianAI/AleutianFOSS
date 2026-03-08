@@ -18,6 +18,38 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
 )
 
+// IndexingStatusResponse is the response for GET /v1/trace/indexing/status.
+//
+// Description:
+//
+//	Reports the current state of background symbol indexing into Weaviate.
+//	Polled by the trace-proxy to render live progress in the terminal.
+//
+// Thread Safety: Not safe for concurrent use (returned as a snapshot).
+type IndexingStatusResponse struct {
+	// InProgress is true while indexing is running.
+	InProgress bool `json:"in_progress"`
+
+	// Phase is the current indexing phase: "idle", "collecting", "embedding",
+	// "inserting", or "complete".
+	Phase string `json:"phase"`
+
+	// SymbolsTotal is the total number of symbols to index.
+	SymbolsTotal int `json:"symbols_total"`
+
+	// BatchesCompleted is the number of Weaviate insert batches completed.
+	BatchesCompleted int `json:"batches_completed"`
+
+	// BatchesTotal is the total number of Weaviate insert batches.
+	BatchesTotal int `json:"batches_total"`
+
+	// SymbolsIndexed is the number of symbols successfully indexed so far.
+	SymbolsIndexed int `json:"symbols_indexed"`
+
+	// Error contains the error message if indexing failed.
+	Error string `json:"error,omitempty"`
+}
+
 // InitRequest is the request body for POST /v1/trace/init.
 type InitRequest struct {
 	// ProjectRoot is the absolute path to the project root directory.
@@ -341,6 +373,10 @@ type ReadyResponse struct {
 
 	// WeaviateOK is true if Weaviate connection is healthy.
 	WeaviateOK bool `json:"weaviate_ok"`
+
+	// NATSOK is true if NATS connection is healthy.
+	// CRS-27: Added for NATS JetStream observability.
+	NATSOK bool `json:"nats_ok"`
 }
 
 // ErrorResponse is the standard error response format.

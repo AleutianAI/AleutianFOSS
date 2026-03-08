@@ -663,7 +663,7 @@ func (c *crsImpl) Restore(ctx context.Context, cp Checkpoint) error {
 //   - error: Non-nil on failure.
 //
 // Thread Safety: Safe for concurrent use.
-func (c *crsImpl) SaveCheckpointToDisk(ctx context.Context, pm *PersistenceManager, projectHash string, journal *BadgerJournal) (*BackupMetadata, error) {
+func (c *crsImpl) SaveCheckpointToDisk(ctx context.Context, pm *PersistenceManager, projectHash string, journal Journal) (*BackupMetadata, error) {
 	if ctx == nil {
 		return nil, ErrNilContext
 	}
@@ -775,7 +775,7 @@ func (c *crsImpl) SaveCheckpointToDisk(ctx context.Context, pm *PersistenceManag
 //   - error: Non-nil on failure (not on missing backup).
 //
 // Thread Safety: Safe for concurrent use.
-func (c *crsImpl) LoadCheckpointFromDisk(ctx context.Context, pm *PersistenceManager, projectHash string, journal *BadgerJournal) (*BackupMetadata, error) {
+func (c *crsImpl) LoadCheckpointFromDisk(ctx context.Context, pm *PersistenceManager, projectHash string, journal Journal) (*BackupMetadata, error) {
 	if ctx == nil {
 		return nil, ErrNilContext
 	}

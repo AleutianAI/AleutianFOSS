@@ -13,6 +13,7 @@ package phases
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/events"
@@ -137,6 +138,10 @@ func (p *InitPhase) initializeGraph(ctx context.Context, deps *Dependencies) (st
 //	agent.AgentState - DEGRADED.
 //	error - Always nil (degraded mode is not an error).
 func (p *InitPhase) handleDegradedMode(deps *Dependencies, reason string) (agent.AgentState, error) {
+	slog.Warn("Entering degraded mode",
+		slog.String("session_id", deps.Session.ID),
+		slog.String("reason", reason),
+	)
 	p.emitStateTransition(deps, agent.StateInit, agent.StateDegraded, reason)
 
 	return agent.StateDegraded, nil
@@ -156,6 +161,10 @@ func (p *InitPhase) handleDegradedMode(deps *Dependencies, reason string) (agent
 func (p *InitPhase) handleGraphInitError(deps *Dependencies, err error) (agent.AgentState, error) {
 	// For most graph init errors, enter degraded mode rather than failing
 	// The agent can still function with limited capabilities
+	slog.Warn("Graph initialization failed, entering degraded mode",
+		slog.String("session_id", deps.Session.ID),
+		slog.String("error", err.Error()),
+	)
 	p.emitError(deps, err, true)
 	p.emitStateTransition(deps, agent.StateInit, agent.StateDegraded, "graph initialization failed")
 

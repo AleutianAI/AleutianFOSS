@@ -13,6 +13,7 @@ package graph
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -6523,5 +6524,254 @@ func TestBuilder_TSGenericTypeParams_TypeReferences(t *testing.T) {
 	}
 	if !foundUser {
 		t.Error("T-2: expected REFERENCES edge from foo to User")
+	}
+}
+
+// =============================================================================
+// CRS-26n: Qualified Call Resolution Tests
+// =============================================================================
+
+func TestMatchesGoImportPath(t *testing.T) {
+	tests := []struct {
+		name       string
+		filePath   string
+		importPath string
+		want       bool
+	}{
+		{
+			name:       "domain import matches suffix",
+			filePath:   "services/trace/service.go",
+			importPath: "github.com/AleutianAI/AleutianFOSS/services/trace",
+			want:       true,
+		},
+		{
+			name:       "stdlib does not match unrelated file",
+			filePath:   "services/trace/service.go",
+			importPath: "log/slog",
+			want:       false,
+		},
+		{
+			name:       "short path matches directory",
+			filePath:   "slog/handler.go",
+			importPath: "log/slog",
+			want:       true,
+		},
+		{
+			name:       "no match for different directory",
+			filePath:   "cmd/main.go",
+			importPath: "github.com/AleutianAI/AleutianFOSS/services/trace",
+			want:       false,
+		},
+		{
+			name:       "exact directory match",
+			filePath:   "trace/handler.go",
+			importPath: "github.com/AleutianAI/AleutianFOSS/trace",
+			want:       true,
+		},
+		{
+			name:       "single segment stdlib",
+			filePath:   "fmt/print.go",
+			importPath: "fmt",
+			want:       true,
+		},
+		{
+			name:       "single segment no match",
+			filePath:   "os/file.go",
+			importPath: "fmt",
+			want:       false,
+		},
+		{
+			name:       "nested internal package",
+			filePath:   "internal/pkg/thing.go",
+			importPath: "github.com/AleutianAI/AleutianFOSS/internal/pkg",
+			want:       true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := matchesGoImportPath(tt.filePath, tt.importPath)
+			if got != tt.want {
+				t.Errorf("matchesGoImportPath(%q, %q) = %v, want %v",
+					tt.filePath, tt.importPath, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveViaPackageImport(t *testing.T) {
+	ctx := context.Background()
+
+	// File A (main.go): imports "log/slog" and "github.com/.../internal/pkg",
+	// has function with calls to slog.Info(), pkg.NewThing(), variable.Info()
+	mainFunc := testSymbolWithCalls("main", ast.SymbolKindFunction, "main.go", 10, []ast.CallSite{
+		{
+			Target:   "Info",
+			Receiver: "slog",
+			IsMethod: true,
+			Location: ast.Location{FilePath: "main.go", StartLine: 12},
+		},
+		{
+			Target:   "NewThing",
+			Receiver: "pkg",
+			IsMethod: true,
+			Location: ast.Location{FilePath: "main.go", StartLine: 13},
+		},
+		{
+			Target:   "Info",
+			Receiver: "variable",
+			IsMethod: true,
+			Location: ast.Location{FilePath: "main.go", StartLine: 14},
+		},
+	})
+	mainFunc.Package = "main"
+
+	mainResult := testParseResult("main.go", []*ast.Symbol{mainFunc}, []ast.Import{
+		{Path: "log/slog"},
+		{Path: "github.com/AleutianAI/AleutianFOSS/internal/pkg"},
+	})
+	mainResult.Package = "main"
+
+	// File B (internal/pkg/thing.go): has NewThing function
+	newThingSym := testSymbol("NewThing", ast.SymbolKindFunction, "internal/pkg/thing.go", 5)
+	newThingSym.Package = "pkg"
+
+	pkgResult := testParseResult("internal/pkg/thing.go", []*ast.Symbol{newThingSym}, nil)
+	pkgResult.Package = "pkg"
+
+	// File C (other/info.go): has Info method — should NOT be targeted by slog.Info()
+	infoSym := testSymbol("Info", ast.SymbolKindMethod, "other/info.go", 5)
+	infoSym.Package = "other"
+
+	otherResult := testParseResult("other/info.go", []*ast.Symbol{infoSym}, nil)
+	otherResult.Package = "other"
+
+	builder := NewBuilder()
+	buildResult, err := builder.Build(ctx, []*ast.ParseResult{mainResult, pkgResult, otherResult})
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	g := buildResult.Graph
+
+	// Get the main function node's outgoing edges
+	mainNode, ok := g.GetNode(mainFunc.ID)
+	if !ok {
+		t.Fatalf("main function node not found in graph")
+	}
+	edges := mainNode.Outgoing
+
+	t.Run("slog.Info resolves to external placeholder", func(t *testing.T) {
+		// CRS-26n: slog.Info() should resolve to an external:log/slog:Info placeholder,
+		// NOT to the Info method in other/info.go. The edge to infoSym may exist
+		// from the variable.Info() call (which correctly falls through to 3c).
+		foundSlogPlaceholder := false
+		for _, edge := range edges {
+			if edge.ToID == "external:log/slog:Info" {
+				foundSlogPlaceholder = true
+				break
+			}
+		}
+		if !foundSlogPlaceholder {
+			edgeIDs := make([]string, 0, len(edges))
+			for _, e := range edges {
+				edgeIDs = append(edgeIDs, e.ToID)
+			}
+			t.Errorf("slog.Info() should resolve to external:log/slog:Info placeholder, got edges: %v", edgeIDs)
+		}
+	})
+
+	t.Run("pkg.NewThing resolves to internal symbol", func(t *testing.T) {
+		found := false
+		for _, edge := range edges {
+			if edge.ToID == newThingSym.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			edgeIDs := make([]string, 0, len(edges))
+			for _, e := range edges {
+				edgeIDs = append(edgeIDs, e.ToID)
+			}
+			t.Errorf("pkg.NewThing() should resolve to internal/pkg/thing.go:NewThing, got edges: %v", edgeIDs)
+		}
+	})
+
+	t.Run("variable.Info falls through to 3b/3c", func(t *testing.T) {
+		// variable.Info() should NOT match any import (no "variable" import),
+		// so it falls through to strategy 3b/3c which may resolve to infoSym.
+		// Just verify it did NOT get an external placeholder.
+		for _, edge := range edges {
+			targetNode, targetOK := g.GetNode(edge.ToID)
+			if targetOK && targetNode.Symbol.Name == "Info" && targetNode.Symbol.Kind == ast.SymbolKindExternal {
+				// Check this is from slog, not from variable
+				if strings.Contains(edge.ToID, "slog") || strings.Contains(edge.ToID, "log/slog") {
+					continue // This is the slog placeholder, not the variable one
+				}
+				t.Errorf("variable.Info() should NOT create an external placeholder — receiver 'variable' is not an import")
+			}
+		}
+	})
+}
+
+func TestInferPackageFromCall_GoReceiver(t *testing.T) {
+	imports := []ast.Import{
+		{Path: "log/slog"},
+		{Path: "fmt"},
+		{Path: "github.com/AleutianAI/AleutianFOSS/services/trace", Alias: "trace"},
+		{Path: "os", Alias: "."},     // dot import — should be skipped
+		{Path: "unsafe", Alias: "_"}, // blank import — should be skipped
+	}
+
+	tests := []struct {
+		name    string
+		call    ast.CallSite
+		wantPkg string
+	}{
+		{
+			name:    "slog receiver matches import",
+			call:    ast.CallSite{Target: "Info", Receiver: "slog", IsMethod: true},
+			wantPkg: "log/slog",
+		},
+		{
+			name:    "fmt receiver matches import",
+			call:    ast.CallSite{Target: "Errorf", Receiver: "fmt", IsMethod: true},
+			wantPkg: "fmt",
+		},
+		{
+			name:    "aliased import matches",
+			call:    ast.CallSite{Target: "NewService", Receiver: "trace", IsMethod: true},
+			wantPkg: "github.com/AleutianAI/AleutianFOSS/services/trace",
+		},
+		{
+			name:    "non-import receiver falls through",
+			call:    ast.CallSite{Target: "Info", Receiver: "logger", IsMethod: true},
+			wantPkg: "", // "logger" is not an import
+		},
+		{
+			name:    "dot import receiver not matched",
+			call:    ast.CallSite{Target: "Getenv", Receiver: "os", IsMethod: true},
+			wantPkg: "", // dot import skipped, "os" not matched as local name
+		},
+		{
+			name:    "non-method call with dot prefix uses Strategy 2",
+			call:    ast.CallSite{Target: "slog.Info", Receiver: "", IsMethod: false},
+			wantPkg: "log/slog", // Matched via Strategy 2 dot-prefix
+		},
+		{
+			name:    "non-method call bare name no match",
+			call:    ast.CallSite{Target: "DoWork", Receiver: "", IsMethod: false},
+			wantPkg: "", // No dot prefix and no import name match
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := inferPackageFromCall(tt.call, imports)
+			if got != tt.wantPkg {
+				t.Errorf("inferPackageFromCall(%+v) = %q, want %q", tt.call, got, tt.wantPkg)
+			}
+		})
 	}
 }

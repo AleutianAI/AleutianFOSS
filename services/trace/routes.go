@@ -153,6 +153,9 @@ func RegisterRoutes(rg *gin.RouterGroup, handlers *Handlers) {
 		trace.POST("/memories/:id/validate", handlers.HandleValidateMemory)
 		trace.POST("/memories/:id/contradict", handlers.HandleContradictMemory)
 
+		// Indexing status (polled by trace-proxy for progress feedback)
+		trace.GET("/indexing/status", handlers.HandleIndexingStatus)
+
 		// Health checks
 		trace.GET("/health", handlers.HandleHealth)
 		trace.GET("/ready", handlers.HandleReady)
@@ -300,6 +303,9 @@ func RegisterAgentRoutesWithMiddleware(rg *gin.RouterGroup, handlers *AgentHandl
 		// CRS Export API (CB-29-2)
 		agent.GET("/:id/reasoning", handlers.HandleGetReasoningTrace)
 		agent.GET("/:id/crs", handlers.HandleGetCRSExport)
+
+		// CRS-27: Live CRS decision streaming via Server-Sent Events
+		agent.GET("/:id/crs/stream", handlers.HandleCRSStream)
 
 		// Debug endpoints (GR-Phase1 Issue 5, Issue 5b)
 		debug := agent.Group("/debug")

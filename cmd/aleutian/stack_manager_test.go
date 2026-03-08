@@ -253,6 +253,10 @@ func (m *testComposeExecutor) Status(ctx context.Context) (*compose.ComposeStatu
 	return &compose.ComposeStatus{Running: 3}, nil
 }
 
+func (m *testComposeExecutor) RemoveExitedContainers(ctx context.Context) (int, error) {
+	return 0, nil
+}
+
 func (m *testComposeExecutor) ForceCleanup(ctx context.Context) (*compose.CleanupResult, error) {
 	if m.forceCleanupFunc != nil {
 		return m.forceCleanupFunc(ctx)

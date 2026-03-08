@@ -85,6 +85,7 @@ import (
 	traceconfig "github.com/AleutianAI/AleutianFOSS/services/trace/config"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/rag"
 	badgerstore "github.com/AleutianAI/AleutianFOSS/services/trace/storage/badger"
+	natsStorage "github.com/AleutianAI/AleutianFOSS/services/trace/storage/nats"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/telemetry"
 	traceweaviate "github.com/AleutianAI/AleutianFOSS/services/trace/weaviate"
 	"github.com/gin-gonic/gin"
@@ -286,6 +287,29 @@ func main() {
 		}
 	}
 
+	// CRS-27: Connect to NATS JetStream for CRS delta streaming.
+	var natsClient *natsStorage.Client
+	natsURL := os.Getenv("NATS_URL")
+	if natsURL == "" {
+		natsURL = "nats://localhost:4222"
+	}
+	natsClient, natsErr := natsStorage.NewClient(natsStorage.Config{
+		URL:        natsURL,
+		StreamName: "CRS_DELTAS",
+		Logger:     slog.Default(),
+	})
+	if natsErr != nil {
+		slog.Warn("CRS-27: NATS unavailable, CRS streaming disabled",
+			slog.String("url", natsURL),
+			slog.String("error", natsErr.Error()),
+		)
+	} else {
+		handlers = handlers.WithNATS(natsClient)
+		slog.Info("CRS-27: NATS connected",
+			slog.String("url", natsURL),
+		)
+	}
+
 	// Setup router
 	router := gin.New()
 	router.Use(gin.Recovery())
@@ -332,7 +356,12 @@ func main() {
 	}
 
 	// Setup agent loop and register routes
-	agentEnabled := setupAgentLoop(v1, svc, *withContext, *withTools, routingStore, weaviateNativeClient, weaviateDataSpace)
+	agentEnabled, indexingCoord := setupAgentLoop(v1, svc, *withContext, *withTools, routingStore, weaviateNativeClient, weaviateDataSpace, natsClient)
+
+	// CRS-26l: Wire indexing coordinator to handlers for eager indexing at init time.
+	if indexingCoord != nil {
+		handlers = handlers.WithIndexingCoordinator(indexingCoord)
+	}
 
 	// Print startup banner
 	printBanner(*port, agentEnabled)
@@ -349,6 +378,11 @@ func main() {
 			defer shutdownCancel()
 			if err := telemetryShutdown(shutdownCtx); err != nil {
 				slog.Warn("Telemetry shutdown error", slog.String("error", err.Error()))
+			}
+		}
+		if natsClient != nil {
+			if err := natsClient.Close(); err != nil {
+				slog.Warn("CRS-27: NATS shutdown error", slog.String("error", err.Error()))
 			}
 		}
 		if routingDB != nil {
@@ -377,8 +411,12 @@ func main() {
 // CR-5: Shared from main() to avoid creating a duplicate ResilientClient.
 // Pass nil/empty to disable Weaviate integration.
 //
-// Returns true if the agent is fully enabled with LLM support.
-func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTools bool, routingStore routing.RouterCacheStore, wvClient *weaviateclient.Client, wvDataSpace string) bool {
+// Returns true if the agent is fully enabled with LLM support, and the
+// SymbolIndexingCoordinator if Weaviate + embeddings are configured (CRS-26l).
+func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTools bool, routingStore routing.RouterCacheStore, wvClient *weaviateclient.Client, wvDataSpace string, natsClient *natsStorage.Client) (bool, *trace.SymbolIndexingCoordinator) {
+	// CRS-26l: Coordinator returned to caller for handlers wiring.
+	var indexingCoord *trace.SymbolIndexingCoordinator
+
 	// CB-60: Load per-role provider configuration from environment variables.
 	// Falls back to Ollama with existing env vars for backward compatibility.
 	mainModelFallback := os.Getenv("OLLAMA_MODEL")
@@ -393,7 +431,7 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTo
 		agentLoop := agent.NewDefaultAgentLoop()
 		agentHandlers := trace.NewAgentHandlers(agentLoop, svc)
 		trace.RegisterAgentRoutesWithMiddleware(v1, agentHandlers, nil)
-		return false
+		return false, nil
 	}
 
 	// CB-60b: Create provider factory. For Ollama roles, create the shared model manager.
@@ -441,7 +479,7 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTo
 		agentLoop := agent.NewDefaultAgentLoop()
 		agentHandlers := trace.NewAgentHandlers(agentLoop, svc)
 		trace.RegisterAgentRoutesWithMiddleware(v1, agentHandlers, nil)
-		return false
+		return false, nil
 	}
 
 	model := roleConfig.Main.Model
@@ -584,7 +622,7 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTo
 
 	// Create dependencies factory
 	// GR-39: Enable Coordinator and Session Restore for CRS persistence
-	depsFactory := trace.NewDependenciesFactory(
+	baseFactoryOpts := []trace.DependenciesFactoryOption{
 		trace.WithLLMClient(llmClient),
 		trace.WithGraphProvider(graphProvider),
 		trace.WithEventEmitter(eventEmitter),
@@ -594,12 +632,22 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTo
 		trace.WithToolsEnabled(withTools),
 		trace.WithCoordinatorEnabled(true),
 		trace.WithSessionRestoreEnabled(true),
-	)
+	}
+
+	// CRS-27: Wire NATS JetStream into deps factory for CRS delta persistence.
+	if natsClient != nil && natsClient.IsConnected() {
+		baseFactoryOpts = append(baseFactoryOpts,
+			trace.WithNATSJetStream(natsClient.JetStream(), "CRS_DELTAS"),
+		)
+		slog.Info("CRS-27: NATS JetStream wired into deps factory")
+	}
+
+	depsFactory := trace.NewDependenciesFactory(baseFactoryOpts...)
 
 	// CRS-25: Wire Weaviate into deps factory for semantic RAG resolution.
 	// CR-5: Reuse the Weaviate client created in main() instead of creating a duplicate.
 	if wvClient != nil && wvDataSpace != "" {
-		depsFactory = trace.NewDependenciesFactory(
+		factoryOpts := []trace.DependenciesFactoryOption{
 			trace.WithLLMClient(llmClient),
 			trace.WithGraphProvider(graphProvider),
 			trace.WithEventEmitter(eventEmitter),
@@ -610,8 +658,45 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTo
 			trace.WithCoordinatorEnabled(true),
 			trace.WithSessionRestoreEnabled(true),
 			trace.WithWeaviateClient(wvClient, wvDataSpace),
-		)
-		slog.Info("CRS-25: Weaviate wired into deps factory",
+		}
+
+		// CRS-27: Include NATS JetStream in Weaviate-augmented factory too.
+		if natsClient != nil && natsClient.IsConnected() {
+			factoryOpts = append(factoryOpts,
+				trace.WithNATSJetStream(natsClient.JetStream(), "CRS_DELTAS"),
+			)
+		}
+
+		// CRS-26i: Create EmbedClient for pre-computed vector insertion and nearVector queries.
+		// Routes embedding requests through the orchestrator, which can reach Ollama on the host.
+		orchestratorURL := os.Getenv("ORCHESTRATOR_URL")
+		embeddingModel := os.Getenv("EMBEDDING_MODEL")
+		if orchestratorURL != "" {
+			embedClient, embedErr := rag.NewEmbedClient(orchestratorURL, embeddingModel)
+			if embedErr != nil {
+				slog.Warn("CRS-26i: Failed to create embed client, semantic search will not have vectors",
+					slog.String("error", embedErr.Error()),
+				)
+			} else {
+				factoryOpts = append(factoryOpts, trace.WithEmbedClient(embedClient))
+				slog.Info("CRS-26i: Embed client wired (orchestrator-centric embedding)",
+					slog.String("orchestrator_url", orchestratorURL),
+					slog.String("model", embeddingModel),
+				)
+
+				// CRS-26l: Create shared indexing coordinator for eager symbol indexing.
+				// Wired into both the deps factory (session-time trigger) and returned
+				// for handlers (init-time trigger via HandleInit).
+				indexingCoord = trace.NewSymbolIndexingCoordinator(wvClient, wvDataSpace, embedClient)
+				factoryOpts = append(factoryOpts, trace.WithIndexingCoordinator(indexingCoord))
+				slog.Info("CRS-26l: Symbol indexing coordinator created")
+			}
+		} else {
+			slog.Warn("CRS-26i: ORCHESTRATOR_URL not set, semantic search will run without pre-computed vectors")
+		}
+
+		depsFactory = trace.NewDependenciesFactory(factoryOpts...)
+		slog.Info("CRS-26j: Weaviate + embedding wired into deps factory",
 			slog.String("data_space", wvDataSpace))
 	}
 
@@ -627,16 +712,20 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTo
 		agent.WithPhaseRegistry(registry),
 		agent.WithDependenciesFactory(depsFactory),
 	)
-	agentHandlers := trace.NewAgentHandlers(agentLoop, svc,
+	agentOpts := []trace.AgentHandlersOption{
 		trace.WithProviderFactory(factory),
 		trace.WithModelManager(ollamaModelManager),
 		trace.WithRoleConfig(roleConfig),
-	)
+	}
+	if natsClient != nil {
+		agentOpts = append(agentOpts, trace.WithNATSSSE(natsClient))
+	}
+	agentHandlers := trace.NewAgentHandlers(agentLoop, svc, agentOpts...)
 
 	// S-1: Apply warmup guard middleware to agent routes.
 	// This returns 503 Service Unavailable for agent requests during model warmup.
 	trace.RegisterAgentRoutesWithMiddleware(v1, agentHandlers, WarmupGuardMiddleware())
-	return true
+	return true, indexingCoord
 }
 
 func printBanner(port int, agentEnabled bool) {

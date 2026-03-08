@@ -359,3 +359,149 @@ func TestHandlers_HandleGetGraphStats_GraphNotFound(t *testing.T) {
 		t.Errorf("expected code 'GRAPH_NOT_FOUND', got %q", errResp.Code)
 	}
 }
+
+// TestHandlers_HandleIndexingStatus_NoCoordinator verifies the handler returns
+// "disabled" phase when no indexing coordinator is configured.
+func TestHandlers_HandleIndexingStatus_NoCoordinator(t *testing.T) {
+	t.Run("returns disabled when no coordinator", func(t *testing.T) {
+		svc := NewService(DefaultServiceConfig())
+		router := setupTestRouter(svc)
+
+		req, _ := http.NewRequest("GET", "/v1/trace/indexing/status", nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+		}
+
+		var resp IndexingStatusResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to unmarshal response: %v", err)
+		}
+
+		if resp.Phase != "disabled" {
+			t.Errorf("expected Phase='disabled', got %q", resp.Phase)
+		}
+		if resp.InProgress {
+			t.Error("expected InProgress=false")
+		}
+	})
+}
+
+// TestHandlers_HandleIndexingStatus_WithCoordinator verifies the handler returns
+// the coordinator's progress state.
+func TestHandlers_HandleIndexingStatus_WithCoordinator(t *testing.T) {
+	t.Run("returns idle state from coordinator", func(t *testing.T) {
+		svc := NewService(DefaultServiceConfig())
+		handlers := NewHandlers(svc)
+
+		coord := NewSymbolIndexingCoordinator(nil, "test", nil)
+		handlers.WithIndexingCoordinator(coord)
+
+		router := gin.New()
+		v1 := router.Group("/v1")
+		RegisterRoutes(v1, handlers)
+
+		req, _ := http.NewRequest("GET", "/v1/trace/indexing/status", nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+		}
+
+		var resp IndexingStatusResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to unmarshal response: %v", err)
+		}
+
+		if resp.InProgress {
+			t.Error("expected InProgress=false for idle coordinator")
+		}
+	})
+
+	t.Run("returns in-progress state from coordinator", func(t *testing.T) {
+		svc := NewService(DefaultServiceConfig())
+		handlers := NewHandlers(svc)
+
+		coord := NewSymbolIndexingCoordinator(nil, "test", nil)
+		coord.mu.Lock()
+		coord.progress = IndexingStatusResponse{
+			InProgress:       true,
+			Phase:            "embedding",
+			SymbolsTotal:     42000,
+			BatchesCompleted: 0,
+			BatchesTotal:     1,
+		}
+		coord.mu.Unlock()
+
+		handlers.WithIndexingCoordinator(coord)
+
+		router := gin.New()
+		v1 := router.Group("/v1")
+		RegisterRoutes(v1, handlers)
+
+		req, _ := http.NewRequest("GET", "/v1/trace/indexing/status", nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Errorf("expected status %d, got %d", http.StatusOK, w.Code)
+		}
+
+		var resp IndexingStatusResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to unmarshal response: %v", err)
+		}
+
+		if !resp.InProgress {
+			t.Error("expected InProgress=true")
+		}
+		if resp.Phase != "embedding" {
+			t.Errorf("expected Phase='embedding', got %q", resp.Phase)
+		}
+		if resp.SymbolsTotal != 42000 {
+			t.Errorf("expected SymbolsTotal=42000, got %d", resp.SymbolsTotal)
+		}
+	})
+
+	t.Run("returns complete state with error", func(t *testing.T) {
+		svc := NewService(DefaultServiceConfig())
+		handlers := NewHandlers(svc)
+
+		coord := NewSymbolIndexingCoordinator(nil, "test", nil)
+		coord.mu.Lock()
+		coord.progress = IndexingStatusResponse{
+			InProgress: false,
+			Phase:      "complete",
+			Error:      "weaviate connection refused",
+		}
+		coord.mu.Unlock()
+
+		handlers.WithIndexingCoordinator(coord)
+
+		router := gin.New()
+		v1 := router.Group("/v1")
+		RegisterRoutes(v1, handlers)
+
+		req, _ := http.NewRequest("GET", "/v1/trace/indexing/status", nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+
+		var resp IndexingStatusResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to unmarshal response: %v", err)
+		}
+
+		if resp.InProgress {
+			t.Error("expected InProgress=false")
+		}
+		if resp.Phase != "complete" {
+			t.Errorf("expected Phase='complete', got %q", resp.Phase)
+		}
+		if resp.Error != "weaviate connection refused" {
+			t.Errorf("expected Error='weaviate connection refused', got %q", resp.Error)
+		}
+	})
+}

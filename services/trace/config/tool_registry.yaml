@@ -940,6 +940,41 @@ tools:
       - graph_initialized
 
   # =============================================================================
+  # SEMANTIC SEARCH TOOLS (CRS-26m)
+  # =============================================================================
+  - name: semantic_search
+    keywords:
+      - semantic search
+      - similar to
+      - related to
+      - conceptually similar
+      - vector search
+      - meaning
+      - semantically
+    use_when: "User asks for code by concept or meaning rather than exact name. Examples: 'find code related to authentication', 'search for symbols similar to error handling', 'what code deals with graph traversal?'"
+    avoid_when: >
+      NEVER use semantic_search when the user asks for exact symbol names — use find_symbol instead.
+      NEVER use when asking about callers, callees, or call chains — use graph query tools.
+      NEVER use when asking about file contents — use Grep or Read instead.
+    requires:
+      - graph_initialized
+
+  - name: find_similar_symbols
+    keywords:
+      - similar symbols
+      - symbols like
+      - resembles
+      - similar to function
+      - related functions
+      - similar methods
+    use_when: "User has a specific symbol name and wants to find other symbols with similar purpose or behavior. Examples: 'find symbols similar to parseConfig', 'what functions are like validateInput?'"
+    avoid_when: >
+      NEVER use find_similar_symbols when user wants callers or callees — use graph query tools.
+      NEVER use when user wants implementations or subclasses — use find_implementations.
+    requires:
+      - graph_initialized
+
+  # =============================================================================
   # SPECIAL TOOLS
   # =============================================================================
   - name: answer

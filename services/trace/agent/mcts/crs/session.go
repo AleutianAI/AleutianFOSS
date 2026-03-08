@@ -539,7 +539,7 @@ func NewSessionRestorer(pm *PersistenceManager, config *SessionRestorerConfig) (
 // Inputs:
 //   - ctx: Context for cancellation and tracing. Must not be nil.
 //   - crsi: The CRS instance to restore into. Must not be nil.
-//   - journal: The BadgerJournal for replay. Must not be nil.
+//   - journal: The Journal for replay. Must not be nil.
 //   - sessionID: Session identifier for checkpoint lookup. Must not be nil.
 //
 // Outputs:
@@ -560,7 +560,7 @@ func NewSessionRestorer(pm *PersistenceManager, config *SessionRestorerConfig) (
 func (r *SessionRestorer) TryRestore(
 	ctx context.Context,
 	crsi CRS,
-	journal *BadgerJournal,
+	journal Journal,
 	sessionID *SessionIdentifier,
 ) (*RestoreResult, error) {
 	// GR-36 Code Review Fix: S5 - Input validation
@@ -664,7 +664,7 @@ retryLoop:
 func (r *SessionRestorer) tryRestoreOnce(
 	ctx context.Context,
 	crsi CRS,
-	journal *BadgerJournal,
+	journal Journal,
 	sessionID *SessionIdentifier,
 	logger *slog.Logger,
 	span trace.Span,

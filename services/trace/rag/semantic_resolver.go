@@ -27,7 +27,7 @@ import (
 // availabilityTTL is how long a cached IsAvailable result is valid.
 const availabilityTTL = 30 * time.Second
 
-// maxSemanticResults is the number of Weaviate nearText results to fetch per query token.
+// maxSemanticResults is the number of Weaviate nearVector results to fetch per query token.
 const maxSemanticResults = 5
 
 // minSemanticDistance is the maximum distance (lower = more similar) to accept.
@@ -37,13 +37,16 @@ const minSemanticDistance float32 = 0.6
 // SemanticResolver resolves query tokens against Weaviate's vector index.
 //
 // This is Layer 2 of the three-layer RAG resolution. It handles fuzzy/conceptual
-// matches like "rendering subsystem" → "pkg/render" using text2vec-ollama
-// embeddings. Only runs for tokens that the StructuralResolver couldn't resolve.
+// matches like "rendering subsystem" → "pkg/render" using pre-computed embeddings.
+// CRS-26j: Uses nearVector queries with vectors from the orchestrator's /v1/embed
+// endpoint, replacing the previous nearText approach that required Weaviate to
+// reach Ollama directly (broken in containers).
 //
 // Thread Safety: Safe for concurrent use after construction.
 type SemanticResolver struct {
 	client    *weaviate.Client
 	dataSpace string
+	embedder  *EmbedClient
 
 	// availableCache caches the result of IsAvailable to avoid per-query network calls.
 	// Uses atomic int64 for the timestamp and int32 for the result (0=unavailable, 1=available).
@@ -51,33 +54,38 @@ type SemanticResolver struct {
 	availableCached   atomic.Int32
 }
 
-// NewSemanticResolver creates a resolver backed by Weaviate nearText search.
+// NewSemanticResolver creates a resolver backed by Weaviate nearVector search.
 //
 // Inputs:
 //
 //	client - Weaviate client. Must not be nil.
 //	dataSpace - Project isolation key. Must not be empty.
+//	embedder - Embedding client for query vectorization. Must not be nil.
 //
 // Outputs:
 //
 //	*SemanticResolver - Ready to resolve queries.
-//	error - Non-nil if client is nil or dataSpace is empty.
+//	error - Non-nil if client is nil, dataSpace is empty, or embedder is nil.
 //
 // Thread Safety: Safe for concurrent use after construction.
-func NewSemanticResolver(client *weaviate.Client, dataSpace string) (*SemanticResolver, error) {
+func NewSemanticResolver(client *weaviate.Client, dataSpace string, embedder *EmbedClient) (*SemanticResolver, error) {
 	if client == nil {
 		return nil, errors.New("client must not be nil")
 	}
 	if dataSpace == "" {
 		return nil, errors.New("dataSpace must not be empty")
 	}
+	if embedder == nil {
+		return nil, errors.New("embedder must not be nil")
+	}
 	return &SemanticResolver{
 		client:    client,
 		dataSpace: dataSpace,
+		embedder:  embedder,
 	}, nil
 }
 
-// Resolve runs nearText search for unresolved tokens and returns additional entities.
+// Resolve runs nearVector search for unresolved tokens and returns additional entities.
 //
 // Description:
 //
@@ -140,19 +148,29 @@ func (r *SemanticResolver) Resolve(ctx context.Context, unresolvedTokens []strin
 			break
 		}
 
-		nearText := r.client.GraphQL().NearTextArgBuilder().
-			WithConcepts([]string{token}).
+		// CRS-26j: Embed the query token via orchestrator, then use nearVector.
+		queryVec, err := r.embedder.EmbedQuery(ctx, token)
+		if err != nil {
+			slog.Warn("CRS-26j: Failed to embed query token",
+				slog.String("token", token),
+				slog.String("error", err.Error()),
+			)
+			continue
+		}
+
+		nearVector := r.client.GraphQL().NearVectorArgBuilder().
+			WithVector(queryVec).
 			WithDistance(minSemanticDistance)
 
 		result, err := r.client.GraphQL().Get().
 			WithClassName(CodeSymbolClassName).
 			WithFields(fields...).
 			WithWhere(where).
-			WithNearText(nearText).
+			WithNearVector(nearVector).
 			WithLimit(maxSemanticResults).
 			Do(ctx)
 		if err != nil {
-			slog.Warn("CRS-25: Semantic search failed for token",
+			slog.Warn("CRS-26j: Semantic search failed for token",
 				slog.String("token", token),
 				slog.String("error", err.Error()),
 			)
@@ -161,7 +179,7 @@ func (r *SemanticResolver) Resolve(ctx context.Context, unresolvedTokens []strin
 
 		if result.Errors != nil && len(result.Errors) > 0 {
 			for _, e := range result.Errors {
-				slog.Warn("CRS-25: Semantic search GraphQL error",
+				slog.Warn("CRS-26j: Semantic search GraphQL error",
 					slog.String("token", token),
 					slog.String("error", e.Message),
 				)
@@ -175,7 +193,7 @@ func (r *SemanticResolver) Resolve(ctx context.Context, unresolvedTokens []strin
 
 	span.SetAttributes(attribute.Int("rag.semantic_resolved", len(resolved)))
 	if len(resolved) > 0 {
-		slog.Info("CRS-25: Semantic resolution",
+		slog.Info("CRS-26j: Semantic resolution",
 			slog.Int("tokens", len(unresolvedTokens)),
 			slog.Int("resolved", len(resolved)),
 		)

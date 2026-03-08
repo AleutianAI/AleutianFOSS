@@ -35,11 +35,32 @@ type Handlers struct {
 	memoryRetriever  *memory.MemoryRetriever
 	lifecycleManager *memory.LifecycleManager
 	dataSpace        string
+	// indexingCoord triggers eager symbol indexing after graph init.
+	// CRS-26l: When set, HandleInit triggers indexing immediately after
+	// a successful graph build, removing the 2-3 minute first-query penalty.
+	indexingCoord *SymbolIndexingCoordinator
+	// natsClient is the NATS JetStream client for CRS delta streaming.
+	// CRS-27: Optional. If nil, NATS-related features are disabled.
+	natsClient NATSHealthChecker
+}
+
+// NATSHealthChecker is the interface for NATS health checking.
+// CRS-27: Decoupled from concrete nats.Client to avoid import cycle.
+type NATSHealthChecker interface {
+	IsConnected() bool
+	HealthCheck() error
 }
 
 // NewHandlers creates handlers for the given service.
 func NewHandlers(svc *Service) *Handlers {
 	return &Handlers{svc: svc}
+}
+
+// WithNATS sets the NATS client for CRS delta streaming and health checks.
+// CRS-27: Optional. If nil, NATS-related features are disabled.
+func (h *Handlers) WithNATS(client NATSHealthChecker) *Handlers {
+	h.natsClient = client
+	return h
 }
 
 // WithWeaviate sets the Weaviate client for library seeding and memory.
@@ -94,6 +115,25 @@ func (h *Handlers) WithMemory(dataSpace string) *Handlers {
 		}
 		h.lifecycleManager = lifecycle
 	}
+	return h
+}
+
+// WithIndexingCoordinator sets the symbol indexing coordinator for eager indexing.
+//
+// Description:
+//
+//	CRS-26l: When set, HandleInit triggers symbol indexing immediately after
+//	a successful graph build, so symbols are ready before any user query.
+//
+// Inputs:
+//
+//	coord - The indexing coordinator. May be nil (no eager indexing).
+//
+// Outputs:
+//
+//	*Handlers - The handlers for method chaining.
+func (h *Handlers) WithIndexingCoordinator(coord *SymbolIndexingCoordinator) *Handlers {
+	h.indexingCoord = coord
 	return h
 }
 
@@ -164,6 +204,17 @@ func (h *Handlers) HandleInit(c *gin.Context) {
 		"files_parsed", resp.FilesParsed,
 		"symbols_extracted", resp.SymbolsExtracted,
 		"parse_time_ms", resp.ParseTimeMs)
+
+	// CRS-26l: Trigger eager symbol indexing immediately after graph init.
+	// This removes the 2-3 minute first-query penalty — symbols are indexed
+	// in the background before any user query arrives.
+	if h.indexingCoord != nil {
+		if cached, err := h.svc.GetGraph(resp.GraphID); err == nil {
+			h.indexingCoord.TriggerIndexing(resp.GraphID, cached)
+			logger.Info("CRS-26l: Eager symbol indexing triggered",
+				"graph_id", resp.GraphID)
+		}
+	}
 
 	c.JSON(http.StatusOK, resp)
 }
@@ -432,6 +483,26 @@ func (h *Handlers) HandleImplementations(c *gin.Context) {
 	})
 }
 
+// HandleIndexingStatus handles GET /v1/trace/indexing/status.
+//
+// Description:
+//
+//	Returns the current state of background symbol indexing into Weaviate.
+//	Polled by the trace-proxy to render live progress in the terminal.
+//
+// Response:
+//
+//	200 OK: IndexingStatusResponse
+//
+// Thread Safety: Safe for concurrent use.
+func (h *Handlers) HandleIndexingStatus(c *gin.Context) {
+	if h.indexingCoord == nil {
+		c.JSON(http.StatusOK, IndexingStatusResponse{Phase: "disabled"})
+		return
+	}
+	c.JSON(http.StatusOK, h.indexingCoord.GetProgress())
+}
+
 // HandleHealth handles GET /v1/trace/health.
 //
 // Description:
@@ -467,6 +538,7 @@ func (h *Handlers) HandleReady(c *gin.Context) {
 		Ready:      warmupComplete,
 		GraphCount: h.svc.GraphCount(),
 		WeaviateOK: h.weaviate != nil,
+		NATSOK:     h.natsClient != nil && h.natsClient.IsConnected(),
 	}
 
 	if !warmupComplete {
