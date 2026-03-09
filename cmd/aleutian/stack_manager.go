@@ -1734,7 +1734,25 @@ func (s *DefaultStackManager) logComposeWarnings(result *compose.ComposeResult) 
 		return
 	}
 
-	if _, err := fmt.Fprintf(s.output, "  Compose output: %s\n", stderr); err != nil {
+	// Filter out transient "no container" errors that occur when health checks
+	// run before images finish building during --build. These are expected noise.
+	var filtered []string
+	for _, line := range strings.Split(stderr, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if strings.Contains(trimmed, "no container with name or ID") ||
+			strings.Contains(trimmed, "no container with ID or name") {
+			continue
+		}
+		filtered = append(filtered, trimmed)
+	}
+	if len(filtered) == 0 {
+		return
+	}
+
+	if _, err := fmt.Fprintf(s.output, "  Compose output: %s\n", strings.Join(filtered, "\n")); err != nil {
 		slog.Warn("failed to write output", "error", err)
 	}
 }
@@ -1878,6 +1896,12 @@ func (s *DefaultStackManager) waitForHealthy(ctx context.Context, opts StartOpti
 	// Extended timeout when models may still be loading
 	if !opts.SkipModelCheck && s.models != nil {
 		waitOpts.Timeout = 180 * time.Second
+	}
+
+	// Extended timeout when images are being rebuilt (Go compilation takes minutes).
+	// --build always takes the longest, so this overrides model loading timeout.
+	if opts.ForceBuild {
+		waitOpts.Timeout = 300 * time.Second
 	}
 
 	result, err := s.health.WaitForServices(ctx, services, waitOpts)

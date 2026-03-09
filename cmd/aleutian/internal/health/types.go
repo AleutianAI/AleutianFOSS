@@ -624,6 +624,17 @@ func DefaultServiceDefinitions() []ServiceDefinition {
 		},
 		{
 			ID:            GenerateID(),
+			Name:          "Trace Proxy",
+			URL:           "http://localhost:12218/health",
+			ContainerName: "aleutian-trace-proxy",
+			CheckType:     HealthCheckHTTP,
+			Critical:      false,
+			Version:       HealthCheckVersion,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		},
+		{
+			ID:            GenerateID(),
 			Name:          "NATS",
 			URL:           "http://localhost:8222/healthz",
 			ContainerName: "aleutian-nats",

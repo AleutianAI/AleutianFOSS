@@ -19,6 +19,7 @@
 #   12215 - Prometheus
 #   12216 - Grafana
 #   12217 - Trace Server
+#   12218 - Trace Proxy (OpenAI-compatible API)
 #
 # Network:
 #   Creates "aleutian-shared" network for cross-project connectivity.
@@ -178,6 +179,39 @@ services:
       interval: 10s
       timeout: 5s
       retries: 20
+
+  # === Trace Proxy ===
+  # OpenAI-compatible API proxy — speaks /v1/chat/completions
+  # Connects OpenWebUI, Continue, aider, curl to the trace agent
+  trace-proxy:
+    build:
+      context: .
+      dockerfile: services/trace/Dockerfile
+    container_name: aleutian-trace-proxy
+    ports:
+      - "12218:12218"
+    environment:
+      ALEUTIAN_TRACE_URL: http://trace:12217
+      OLLAMA_URL: http://host.containers.internal:11434
+      TRACE_CONTAINER_PREFIX: /projects
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
+    volumes:
+      - ${TRACE_PROJECTS_DIR:-.}:/projects:ro,Z
+    command: ["/app/trace-proxy", "--project-root", "/projects"]
+    depends_on:
+      trace:
+        condition: service_healthy
+    extra_hosts:
+      - "host.containers.internal:host-gateway"
+    networks:
+      - aleutian-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:12218/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   # === NATS JetStream ===
   # CRS-27: NATS for CRS delta streaming and state persistence
