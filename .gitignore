@@ -3504,3 +3504,38 @@ claude.md
 /scripts/test_langs/test_projects/go/orchestrator/.idea/dictionaries/project.xml
 /scripts/test_langs/test_projects/go/orchestrator/.idea/inspectionProfiles/Project_Default.xml
 /scripts/test_langs/test_projects/go/orchestrator/.idea/vcs.xml
+
+# Build artifacts
+cmd/aleutian/aleutian
+trace-mcp
+trace-proxy
+
+# Internal scripts and test docs (not for distribution)
+scripts/test_answers_reference_*.md
+scripts/test_crs_integration.sh.bak*
+scripts/test_crs_integration.sh.backup*
+scripts/articles/
+scripts/sapheneia/
+scripts/benchmarks/
+scripts/INTERACTIVE_RUNNER.md
+scripts/README_DOCX_CONVERSION.md
+scripts/benchmark_crs_advantage.sh
+scripts/compare_to_gold_standard.sh
+scripts/convert_articles_to_docx.sh
+scripts/deployment_smoke_test.sh
+scripts/parse_trace_logs.sh
+scripts/run_single_test.sh
+scripts/run_tool_tests.sh
+scripts/test_crs_interactive.sh
+scripts/test_full_integration.sh
+scripts/test_trace_agent.sh
+scripts/test_trace_agent_remote.sh
+scripts/trace_test_suite.sh
+services/policy_engine/test_docs/
+services/rag_engine/docs/
+
+# Debug artifacts
+chain_debug.json
+routing_cache_dump
+test_langs.backup
+*.backup

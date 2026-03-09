@@ -1,0 +1,111 @@
+# Copyright (C) 2025 Aleutian AI (jinterlante@aleutian.ai)
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# See the LICENSE.txt file for the full license text.
+
+# Aleutian Observability Stack (Podman Compatible)
+#
+# Usage:
+#   podman-compose -f deploy/docker-compose.observability.yml up -d
+#
+# Access:
+#   - Grafana:    http://localhost:3000 (admin/admin)
+#   - Prometheus: http://localhost:9091/graph
+#   - Jaeger UI:  http://localhost:16686
+#
+# Your application should:
+#   - Export traces to localhost:4317 (OTLP gRPC)
+#   - Expose /metrics on port 9090 (Prometheus scrapes this)
+#
+# Note: Uses host network mode for Prometheus to scrape host metrics.
+
+version: '3.8'
+
+services:
+  # Jaeger - Distributed Tracing
+  # Receives OTLP traces on port 4317 (gRPC) and 4318 (HTTP)
+  jaeger:
+    image: docker.io/jaegertracing/all-in-one:1.53
+    container_name: aleutian-jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "4317:4317"     # OTLP gRPC receiver
+      - "4318:4318"     # OTLP HTTP receiver
+    networks:
+      - aleutian-observability
+
+  # Prometheus - Metrics
+  # Scrapes metrics from your application on host.containers.internal:9090
+  prometheus:
+    image: docker.io/prom/prometheus:v2.49.1
+    container_name: aleutian-prometheus
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro,Z
+      - prometheus-data:/prometheus:Z
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    ports:
+      - "9091:9090"     # Prometheus UI (9091 to avoid conflict with app metrics)
+    extra_hosts:
+      - "host.containers.internal:host-gateway"
+    networks:
+      - aleutian-observability
+
+  # Grafana - Visualization
+  # Pre-configured with Prometheus and Jaeger datasources
+  grafana:
+    image: docker.io/grafana/grafana:10.3.1
+    container_name: aleutian-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro,Z
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro,Z
+      - grafana-data:/var/lib/grafana:Z
+    ports:
+      - "3000:3000"     # Grafana UI
+    depends_on:
+      - prometheus
+      - jaeger
+    networks:
+      - aleutian-observability
+
+  # NATS Prometheus Exporter - JetStream Metrics
+  # CRS-27a: Exports NATS server + JetStream metrics for Prometheus scraping.
+  # Reaches NATS via host port 8222 (exposed by podman-compose.yml).
+  nats-exporter:
+    image: docker.io/natsio/prometheus-nats-exporter:latest
+    container_name: aleutian-nats-exporter
+    command:
+      - "-connz"
+      - "-routez"
+      - "-subz"
+      - "-varz"
+      - "-jsz=all"
+      - "http://host.containers.internal:8222"
+    ports:
+      - "7777:7777"
+    extra_hosts:
+      - "host.containers.internal:host-gateway"
+    networks:
+      - aleutian-observability
+
+networks:
+  aleutian-observability:
+    driver: bridge
+
+volumes:
+  prometheus-data:
+  grafana-data:
