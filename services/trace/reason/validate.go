@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/golang"
@@ -40,6 +41,7 @@ import (
 //	ChangeValidator is safe for concurrent use.
 type ChangeValidator struct {
 	index *index.SymbolIndex
+	crs   CRSRecorder
 
 	mu     sync.RWMutex
 	goLang *sitter.Language
@@ -63,7 +65,13 @@ type ChangeValidator struct {
 func NewChangeValidator(idx *index.SymbolIndex) *ChangeValidator {
 	return &ChangeValidator{
 		index: idx,
+		crs:   &NopCRSRecorder{},
 	}
+}
+
+// SetCRS configures CRS recording for this validator.
+func (v *ChangeValidator) SetCRS(recorder CRSRecorder) {
+	v.crs = recorder
 }
 
 // ChangeValidation is the result of validating a change.
@@ -168,6 +176,11 @@ func (v *ChangeValidator) ValidateChange(
 	if ctx == nil {
 		return nil, ErrInvalidInput
 	}
+
+	start := time.Now()
+	ctx, span := startValidateSpan(ctx, filePath)
+	defer span.End()
+
 	if err := ctx.Err(); err != nil {
 		return nil, ErrContextCanceled
 	}
@@ -222,6 +235,15 @@ func (v *ChangeValidator) ValidateChange(
 
 	// Calculate confidence
 	result.Confidence = v.calculateValidationConfidence(result)
+
+	dur := time.Since(start)
+	setValidateSpanResult(span, result.SyntaxValid, len(result.Errors), nil)
+	recordValidateMetrics(ctx, dur, nil)
+	resultCount := 1 // validation produces a single result
+	if !result.SyntaxValid {
+		resultCount = 0
+	}
+	v.crs.RecordToolStep(ctx, "validate_change", resultCount, dur, nil)
 
 	return result, nil
 }

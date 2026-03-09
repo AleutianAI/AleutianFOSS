@@ -20,12 +20,21 @@ import (
 	"strings"
 	"time"
 
+	"github.com/weaviate/weaviate-go-client/v5/weaviate"
+
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/explore"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/rag"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// Package-level tracer for adapter tools.
+var adaptersTracer = otel.Tracer("tools.adapters")
 
 // RegisterExploreTools registers all CB-20 explore tools with the registry.
 //
@@ -118,6 +127,34 @@ func RegisterExploreTools(registry *Registry, g *graph.Graph, idx *index.SymbolI
 	registry.Register(NewFindPathTool(g, idx))
 }
 
+// RegisterSemanticTools registers CRS-26m semantic search tools with the registry.
+//
+// Description:
+//
+//	Registers tools for vector-based semantic code search. These tools require
+//	Weaviate for vector storage and an EmbedClient for query embedding.
+//	Gracefully degrades if dependencies are nil.
+//
+// Inputs:
+//
+//	registry - The tool registry.
+//	wvClient - Weaviate client for vector search.
+//	dataSpace - Project isolation key for Weaviate.
+//	embedClient - Embedding client for query vectorization.
+//	idx - Symbol index for O(1) lookups.
+//
+// Thread Safety: Safe for concurrent use after construction.
+func RegisterSemanticTools(
+	registry *Registry,
+	wvClient *weaviate.Client,
+	dataSpace string,
+	embedClient *rag.EmbedClient,
+	idx *index.SymbolIndex,
+) {
+	registry.Register(NewSemanticSearchTool(wvClient, dataSpace, embedClient))
+	registry.Register(NewFindSimilarSymbolsTool(wvClient, dataSpace, embedClient, idx))
+}
+
 // ============================================================================
 // find_entry_points Tool
 // ============================================================================
@@ -181,6 +218,10 @@ func (t *findEntryPointsTool) Definition() ToolDefinition {
 }
 
 func (t *findEntryPointsTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	ctx, span := adaptersTracer.Start(ctx, "findEntryPointsTool.Execute",
+		trace.WithAttributes(attribute.String("tool", "find_entry_points")))
+	defer span.End()
+
 	m := params.ToMap()
 	opts := explore.DefaultEntryPointOptions()
 
@@ -207,10 +248,11 @@ func (t *findEntryPointsTool) Execute(ctx context.Context, params TypedParams) (
 
 	output, _ := json.Marshal(result)
 	return &Result{
-		Success:    true,
-		Output:     result,
-		OutputText: string(output),
-		TokensUsed: estimateTokens(string(output)),
+		Success:     true,
+		Output:      result,
+		OutputText:  string(output),
+		TokensUsed:  estimateTokens(string(output)),
+		ResultCount: result.TotalFound,
 	}, nil
 }
 
@@ -264,6 +306,10 @@ func (t *traceDataFlowTool) Definition() ToolDefinition {
 }
 
 func (t *traceDataFlowTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	ctx, span := adaptersTracer.Start(ctx, "traceDataFlowTool.Execute",
+		trace.WithAttributes(attribute.String("tool", "trace_data_flow")))
+	defer span.End()
+
 	m := params.ToMap()
 	symbolID, ok := m["symbol_id"].(string)
 	if !ok || symbolID == "" {
@@ -282,10 +328,11 @@ func (t *traceDataFlowTool) Execute(ctx context.Context, params TypedParams) (*R
 
 	output, _ := json.Marshal(result)
 	return &Result{
-		Success:    true,
-		Output:     result,
-		OutputText: string(output),
-		TokensUsed: estimateTokens(string(output)),
+		Success:     true,
+		Output:      result,
+		OutputText:  string(output),
+		TokensUsed:  estimateTokens(string(output)),
+		ResultCount: len(result.Sources) + len(result.Transforms) + len(result.Sinks),
 	}, nil
 }
 
@@ -339,6 +386,10 @@ func (t *traceErrorFlowTool) Definition() ToolDefinition {
 }
 
 func (t *traceErrorFlowTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	ctx, span := adaptersTracer.Start(ctx, "traceErrorFlowTool.Execute",
+		trace.WithAttributes(attribute.String("tool", "trace_error_flow")))
+	defer span.End()
+
 	m := params.ToMap()
 	symbolID, ok := m["symbol_id"].(string)
 	if !ok || symbolID == "" {
@@ -357,10 +408,11 @@ func (t *traceErrorFlowTool) Execute(ctx context.Context, params TypedParams) (*
 
 	output, _ := json.Marshal(result)
 	return &Result{
-		Success:    true,
-		Output:     result,
-		OutputText: string(output),
-		TokensUsed: estimateTokens(string(output)),
+		Success:     true,
+		Output:      result,
+		OutputText:  string(output),
+		TokensUsed:  estimateTokens(string(output)),
+		ResultCount: len(result.Origins) + len(result.Handlers) + len(result.Escapes),
 	}, nil
 }
 
@@ -416,6 +468,10 @@ func (t *buildMinimalContextTool) Definition() ToolDefinition {
 }
 
 func (t *buildMinimalContextTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	ctx, span := adaptersTracer.Start(ctx, "buildMinimalContextTool.Execute",
+		trace.WithAttributes(attribute.String("tool", "build_minimal_context")))
+	defer span.End()
+
 	m := params.ToMap()
 	symbolID, ok := m["symbol_id"].(string)
 	if !ok || symbolID == "" {
@@ -478,10 +534,11 @@ func (t *buildMinimalContextTool) Execute(ctx context.Context, params TypedParam
 
 	output, _ := json.Marshal(result)
 	return &Result{
-		Success:    true,
-		Output:     result,
-		OutputText: string(output),
-		TokensUsed: estimateTokens(string(output)),
+		Success:     true,
+		Output:      result,
+		OutputText:  string(output),
+		TokensUsed:  estimateTokens(string(output)),
+		ResultCount: len(result.Types) + len(result.Interfaces) + len(result.KeyCallees),
 	}, nil
 }
 
@@ -541,6 +598,10 @@ func (t *findSimilarCodeTool) Definition() ToolDefinition {
 }
 
 func (t *findSimilarCodeTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	ctx, span := adaptersTracer.Start(ctx, "findSimilarCodeTool.Execute",
+		trace.WithAttributes(attribute.String("tool", "find_similar_code")))
+	defer span.End()
+
 	m := params.ToMap()
 	symbolID, ok := m["symbol_id"].(string)
 	if !ok || symbolID == "" {
@@ -579,10 +640,11 @@ func (t *findSimilarCodeTool) Execute(ctx context.Context, params TypedParams) (
 
 	output, _ := json.Marshal(result)
 	return &Result{
-		Success:    true,
-		Output:     result,
-		OutputText: string(output),
-		TokensUsed: estimateTokens(string(output)),
+		Success:     true,
+		Output:      result,
+		OutputText:  string(output),
+		TokensUsed:  estimateTokens(string(output)),
+		ResultCount: len(result.Results),
 	}, nil
 }
 
@@ -630,6 +692,10 @@ func (t *summarizeFileTool) Definition() ToolDefinition {
 }
 
 func (t *summarizeFileTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	ctx, span := adaptersTracer.Start(ctx, "summarizeFileTool.Execute",
+		trace.WithAttributes(attribute.String("tool", "summarize_file")))
+	defer span.End()
+
 	m := params.ToMap()
 	filePath, ok := m["file_path"].(string)
 	if !ok || filePath == "" {
@@ -643,10 +709,11 @@ func (t *summarizeFileTool) Execute(ctx context.Context, params TypedParams) (*R
 
 	output, _ := json.Marshal(result)
 	return &Result{
-		Success:    true,
-		Output:     result,
-		OutputText: string(output),
-		TokensUsed: estimateTokens(string(output)),
+		Success:     true,
+		Output:      result,
+		OutputText:  string(output),
+		TokensUsed:  estimateTokens(string(output)),
+		ResultCount: len(result.Types) + len(result.Functions),
 	}, nil
 }
 
@@ -694,6 +761,10 @@ func (t *findConfigUsageTool) Definition() ToolDefinition {
 }
 
 func (t *findConfigUsageTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	ctx, span := adaptersTracer.Start(ctx, "findConfigUsageTool.Execute",
+		trace.WithAttributes(attribute.String("tool", "find_config_usage")))
+	defer span.End()
+
 	m := params.ToMap()
 	configKey, _ := m["config_key"].(string)
 
@@ -714,10 +785,11 @@ func (t *findConfigUsageTool) Execute(ctx context.Context, params TypedParams) (
 
 	output, _ := json.Marshal(result)
 	return &Result{
-		Success:    true,
-		Output:     result,
-		OutputText: string(output),
-		TokensUsed: estimateTokens(string(output)),
+		Success:     true,
+		Output:      result,
+		OutputText:  string(output),
+		TokensUsed:  estimateTokens(string(output)),
+		ResultCount: len(result.UsedIn),
 	}, nil
 }
 
@@ -833,6 +905,10 @@ type ListPackagesResult struct {
 }
 
 func (t *listPackagesTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	ctx, span := adaptersTracer.Start(ctx, "listPackagesTool.Execute",
+		trace.WithAttributes(attribute.String("tool", "list_packages")))
+	defer span.End()
+
 	m := params.ToMap()
 	start := time.Now()
 
@@ -961,12 +1037,13 @@ func (t *listPackagesTool) Execute(ctx context.Context, params TypedParams) (*Re
 
 	output, _ := json.Marshal(result)
 	return &Result{
-		Success:    true,
-		Output:     result,
-		OutputText: string(output),
-		TokensUsed: estimateTokens(string(output)),
-		Duration:   duration,
-		TraceStep:  &traceStep,
+		Success:     true,
+		Output:      result,
+		OutputText:  string(output),
+		TokensUsed:  estimateTokens(string(output)),
+		Duration:    duration,
+		TraceStep:   &traceStep,
+		ResultCount: result.TotalCount,
 		Metadata: map[string]any{
 			"level":           "package",
 			"packages_found":  result.TotalCount,
@@ -1636,6 +1713,84 @@ func StaticToolDefinitions() []ToolDefinition {
 			Requires:    []string{"graph_initialized"},
 			SideEffects: false,
 			Timeout:     5 * time.Second,
+		},
+		// CRS-26m: Semantic search tools (vector similarity over Weaviate CodeSymbol collection)
+		{
+			Name: "semantic_search",
+			Description: "Search code symbols by meaning or concept using vector similarity. " +
+				"Use when the user asks for code related to a concept rather than an exact name. " +
+				"Examples: 'find code related to authentication', 'search for error handling patterns'. " +
+				"Returns ranked results with similarity scores.",
+			Parameters: map[string]ParamDef{
+				"query": {
+					Type:        ParamTypeString,
+					Description: "Natural language search query describing the code concept to find",
+					Required:    true,
+				},
+				"limit": {
+					Type:        ParamTypeInt,
+					Description: "Maximum number of results to return (default 10, max 50)",
+					Required:    false,
+					Default:     10,
+				},
+				"min_score": {
+					Type:        ParamTypeFloat,
+					Description: "Minimum similarity score threshold (0.0-1.0, default 0.5)",
+					Required:    false,
+					Default:     0.5,
+				},
+			},
+			Category:    CategorySemantic,
+			Priority:    70,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     10 * time.Second,
+			WhenToUse: WhenToUse{
+				Keywords: []string{
+					"semantic search", "similar to", "related to",
+					"conceptually similar", "vector search", "meaning",
+					"semantically", "find code about", "code related to",
+				},
+				UseWhen: "User asks for code by concept or meaning rather than exact name. " +
+					"Examples: 'find code related to authentication', 'search for symbols similar to error handling'.",
+				AvoidWhen: "User asks for exact symbol names — use find_symbol instead. " +
+					"User asks about callers, callees, or call chains — use graph query tools. " +
+					"User asks about file contents — use Grep or Read instead.",
+			},
+		},
+		{
+			Name: "find_similar_symbols",
+			Description: "Find symbols with similar purpose or behavior to a given symbol. " +
+				"Use when the user has a specific symbol and wants to find related functions/methods. " +
+				"Examples: 'find symbols similar to parseConfig', 'what functions are like validateInput?'",
+			Parameters: map[string]ParamDef{
+				"symbol_name": {
+					Type:        ParamTypeString,
+					Description: "Name of the symbol to find similar ones for (e.g., 'parseConfig', 'validateInput')",
+					Required:    true,
+				},
+				"limit": {
+					Type:        ParamTypeInt,
+					Description: "Maximum number of similar symbols to return (default 10, max 50)",
+					Required:    false,
+					Default:     10,
+				},
+			},
+			Category:    CategorySemantic,
+			Priority:    65,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     10 * time.Second,
+			WhenToUse: WhenToUse{
+				Keywords: []string{
+					"similar symbols", "symbols like", "resembles",
+					"similar to function", "related functions", "similar methods",
+				},
+				UseWhen: "User has a specific symbol name and wants to find other symbols with " +
+					"similar purpose or behavior. Examples: 'find symbols similar to parseConfig'.",
+				AvoidWhen: "User wants callers or callees — use graph query tools. " +
+					"User wants implementations or subclasses — use find_implementations.",
+			},
 		},
 	}
 }

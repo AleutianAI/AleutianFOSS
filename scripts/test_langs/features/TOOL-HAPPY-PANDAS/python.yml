@@ -102,13 +102,17 @@ tests:
     name: pandas_get_call_chain
     category: TOOL_HAPPY_PATH
     description: >
-      get_call_chain tool against Pandas. From read_csv to DataFrame construction.
+      get_call_chain tool against Pandas. Target: _refine_defaults_read downstream.
+      Rewritten from conceptual "read_csv to DataFrame construction" — read_csv
+      calls _refine_defaults_read (22 outgoing edges) which has a rich internal
+      call chain through validation helpers.
     query: |
-      Show the call chain from read_csv to DataFrame construction
+      Show the call chain from _refine_defaults_read
     expected_state: COMPLETE
     reference_answer: |
-      read_csv -> TextFileReader.__init__ -> _engine.read -> _make_parser_function ->
-      TextParser.read -> DataFrame.__init__ with parsed column data.
+      _refine_defaults_read (readers.py) calls check_dtype_backend for dtype
+      validation, accesses and sets multiple default parameters via __getitem__
+      and __setitem__, and handles the various CSV parsing options.
     validations:
       - type: graph_tool_used
 
@@ -787,16 +791,21 @@ tests:
   # -- Additional find_path tests (52-53) -- expected_state: COMPLETE --
 
   - id: 6152
-    name: pandas_find_path_b
+    name: pandas_get_call_chain_b
     category: TOOL_HAPPY_PATH
     description: >
-      find_path tool against Pandas (test B). Between read_excel and DataFrame.
+      get_call_chain tool against Pandas (test B). Target: _clean_na_values downstream.
+      Rewritten from _read (ambiguous — exists in both parsers/readers.py and io/html.py).
+      _clean_na_values (parsers/readers.py:2079) is unique and has multiple outgoing edges:
+      _stringify_na_values, _floatify_na_values, is_list_like, plus dict/list branching.
     query: |
-      Find the shortest path between read_excel and DataFrame construction
+      Show the call chain from _clean_na_values
     expected_state: COMPLETE
     reference_answer: |
-      read_excel -> ExcelFile.parse -> _parse_excel -> DataFrame.__init__
-      with the parsed sheet data arranged into columns and index.
+      _clean_na_values (readers.py) handles NA value normalization for CSV parsing.
+      It calls is_list_like to check input types, _stringify_na_values to convert
+      values to string representations, and _floatify_na_values to create float
+      versions of NA values. Dict inputs are iterated with per-column NA value sets.
     validations:
       - type: graph_tool_used
 

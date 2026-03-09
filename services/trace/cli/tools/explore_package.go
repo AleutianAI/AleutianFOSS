@@ -25,6 +25,8 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ============================================================================
@@ -148,6 +150,10 @@ type SymbolSummary struct {
 }
 
 func (t *explorePackageTool) Execute(ctx context.Context, params TypedParams) (*Result, error) {
+	ctx, span := adaptersTracer.Start(ctx, "explorePackageTool.Execute",
+		trace.WithAttributes(attribute.String("tool", "explore_package")))
+	defer span.End()
+
 	m := params.ToMap()
 	// Validate inputs
 	if ctx == nil {
@@ -380,12 +386,13 @@ func (t *explorePackageTool) Execute(ctx context.Context, params TypedParams) (*
 	output, _ := json.Marshal(result)
 
 	return &Result{
-		Success:    true,
-		Output:     result,
-		OutputText: t.formatAsText(result),
-		TokensUsed: estimateTokens(string(output)),
-		Duration:   duration,
-		TraceStep:  &traceStep,
+		Success:     true,
+		Output:      result,
+		OutputText:  t.formatAsText(result),
+		TokensUsed:  estimateTokens(string(output)),
+		Duration:    duration,
+		TraceStep:   &traceStep,
+		ResultCount: result.TotalSymbols,
 		Metadata: map[string]any{
 			"level":           "package",
 			"navigation_tool": true,

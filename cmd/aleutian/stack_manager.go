@@ -847,6 +847,10 @@ type DefaultStackManager struct {
 	// config is the global Aleutian configuration (Phase 0).
 	config *config.AleutianConfig
 
+	// stackDir is the stack directory path used for compose operations.
+	// Used to set TRACE_PROJECTS_DIR for the trace container volume mount.
+	stackDir string
+
 	// output is where status messages are written.
 	// Default: os.Stdout
 	output io.Writer
@@ -875,6 +879,7 @@ type DefaultStackManager struct {
 //   - profile: ProfileResolver for hardware-based config (required)
 //   - diagnostics: DiagnosticsCollector for error info (required)
 //   - cfg: AleutianConfig global configuration (required)
+//   - stackDir: stack directory path for TRACE_PROJECTS_DIR (required)
 //
 // # Outputs
 //
@@ -886,7 +891,7 @@ type DefaultStackManager struct {
 //	// Full dependencies
 //	mgr, err := NewDefaultStackManager(
 //	    infra, secrets, cache, compose, health,
-//	    models, profile, diagnostics, config.Global,
+//	    models, profile, diagnostics, config.Global, stackDir,
 //	)
 //	if err != nil {
 //	    return fmt.Errorf("failed to create stack manager: %w", err)
@@ -896,7 +901,7 @@ type DefaultStackManager struct {
 //	mgr, err := NewDefaultStackManager(
 //	    infra, secrets, cache, compose, health,
 //	    nil, // models = nil is allowed
-//	    profile, diagnostics, config.Global,
+//	    profile, diagnostics, config.Global, stackDir,
 //	)
 //
 // # Limitations
@@ -919,6 +924,7 @@ func NewDefaultStackManager(
 	profile ProfileResolver,
 	diagnostics diagnostics.DiagnosticsCollector,
 	cfg *config.AleutianConfig,
+	stackDir string,
 ) (*DefaultStackManager, error) {
 	// Validate required dependencies
 	if infraMgr == nil {
@@ -957,6 +963,7 @@ func NewDefaultStackManager(
 		profile:     profile,
 		diagnostics: diagnostics,
 		config:      cfg,
+		stackDir:    stackDir,
 		output:      os.Stdout,
 	}, nil
 }
@@ -1518,6 +1525,14 @@ func (s *DefaultStackManager) resolveEnvironment(ctx context.Context, opts Start
 	// Add additional environment variables
 	env["ALEUTIAN_MODELS_CACHE"] = cachePath
 
+	// Set TRACE_PROJECTS_DIR for the trace container volume mount.
+	// Mounts the stack directory at /projects inside the container,
+	// enabling graph initialization and file-based tools.
+	// Users can override via TRACE_PROJECTS_DIR env var.
+	if os.Getenv("TRACE_PROJECTS_DIR") == "" {
+		env["TRACE_PROJECTS_DIR"] = s.stackDir
+	}
+
 	if opts.BackendOverride != "" {
 		env["MODEL_BACKEND_TYPE"] = opts.BackendOverride
 	}
@@ -1632,6 +1647,16 @@ func (s *DefaultStackManager) startContainers(ctx context.Context, opts StartOpt
 		slog.Warn("failed to write output", "error", err)
 	}
 
+	removed, err := s.compose.RemoveExitedContainers(ctx)
+	if err != nil {
+		slog.Debug("Failed to remove exited containers", "error", err)
+	}
+	if removed > 0 {
+		if _, err := fmt.Fprintf(s.output, "  Removed %d exited container(s)\n", removed); err != nil {
+			slog.Warn("failed to write output", "error", err)
+		}
+	}
+
 	upOpts := compose.UpOptions{
 		ForceBuild: opts.ForceBuild,
 		Env:        env,
@@ -1653,6 +1678,7 @@ func (s *DefaultStackManager) startContainers(ctx context.Context, opts StartOpt
 	if spinErr != nil {
 		if composeErr != nil {
 			s.collectDiagnostics(ctx, "compose", composeErr)
+			s.checkRegistryAuthHint(result, composeErr)
 			return fmt.Errorf("%w: %v", ErrComposeUpFailed, composeErr)
 		}
 		return spinErr
@@ -1700,12 +1726,117 @@ func (s *DefaultStackManager) logComposeWarnings(result *compose.ComposeResult) 
 		return
 	}
 
-	// Skip progress indicators
-	if strings.Contains(stderr, "Pulling") {
+	// Always check for registry auth errors, even in pull output
+	s.checkRegistryAuthHint(result, nil)
+
+	// Skip progress indicators (but only if no auth errors were found)
+	if strings.Contains(stderr, "Pulling") && !isRegistryAuthError(stderr) {
 		return
 	}
 
-	if _, err := fmt.Fprintf(s.output, "  Compose output: %s\n", stderr); err != nil {
+	// Filter out transient "no container" errors that occur when health checks
+	// run before images finish building during --build. These are expected noise.
+	var filtered []string
+	for _, line := range strings.Split(stderr, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if strings.Contains(trimmed, "no container with name or ID") ||
+			strings.Contains(trimmed, "no container with ID or name") {
+			continue
+		}
+		filtered = append(filtered, trimmed)
+	}
+	if len(filtered) == 0 {
+		return
+	}
+
+	if _, err := fmt.Fprintf(s.output, "  Compose output: %s\n", strings.Join(filtered, "\n")); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
+}
+
+// registryAuthPatterns contains stderr substrings that indicate registry
+// authentication failures. Checked case-insensitively.
+var registryAuthPatterns = []string{
+	"unauthorized",
+	"authentication required",
+	"denied: access forbidden",
+	"403 forbidden",
+	"401",
+	"not authenticated",
+	"access denied",
+	"login required",
+	"credential",
+	"unauthenticated",
+}
+
+// isRegistryAuthError checks if stderr output contains registry authentication errors.
+//
+// Description:
+//
+//	Scans output for common patterns from Docker/Podman registry auth failures
+//	including GCR, Docker Hub, and generic OCI registries.
+//
+// Inputs:
+//
+//   - output: stderr or error string to check
+//
+// Outputs:
+//
+//   - bool: true if output contains an auth-related error pattern
+//
+// Thread Safety: This function is safe for concurrent use (stateless).
+func isRegistryAuthError(output string) bool {
+	lower := strings.ToLower(output)
+	for _, pattern := range registryAuthPatterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkRegistryAuthHint checks compose result and error for registry auth failures
+// and prints actionable guidance.
+//
+// Description:
+//
+//	Examines compose stderr and error message for patterns indicating expired
+//	or missing registry credentials. When detected, prints hints for Docker Hub,
+//	Google Container Registry, and other common registries.
+//
+// Inputs:
+//
+//   - result: Compose result (may be nil)
+//   - composeErr: Error from compose up (may be nil)
+//
+// Outputs:
+//
+//   - None (writes hints to s.output)
+//
+// Thread Safety: This function is safe for concurrent use.
+func (s *DefaultStackManager) checkRegistryAuthHint(result *compose.ComposeResult, composeErr error) {
+	var combined string
+	if result != nil {
+		combined = result.Stderr
+	}
+	if composeErr != nil {
+		combined += " " + composeErr.Error()
+	}
+
+	if !isRegistryAuthError(combined) {
+		return
+	}
+
+	hint := "\n  Registry authentication failed during image pull.\n" +
+		"  Common fixes:\n" +
+		"    - Google Container Registry:  gcloud auth login && gcloud auth configure-docker\n" +
+		"    - Docker Hub:                 podman login docker.io\n" +
+		"    - Generic registry:           podman login <registry-url>\n"
+
+	if _, err := fmt.Fprintf(s.output, "%s\n", hint); err != nil {
 		slog.Warn("failed to write output", "error", err)
 	}
 }
@@ -1752,11 +1883,25 @@ func (s *DefaultStackManager) waitForHealthy(ctx context.Context, opts StartOpti
 	// Use forecast mode-aware service definitions
 	// When using sapheneia mode, Ollama is non-critical
 	services := health.ServiceDefinitionsForMode(opts.ForecastMode)
+
+	// When --service is specified, only check health for targeted services.
+	// Without this filter, exited containers from previous sessions cause
+	// health check timeouts even though the targeted service started fine.
+	if len(opts.Services) > 0 {
+		services = s.filterServiceDefinitions(services, opts.Services)
+	}
+
 	waitOpts := health.DefaultWaitOptions()
 
 	// Extended timeout when models may still be loading
 	if !opts.SkipModelCheck && s.models != nil {
 		waitOpts.Timeout = 180 * time.Second
+	}
+
+	// Extended timeout when images are being rebuilt (Go compilation takes minutes).
+	// --build always takes the longest, so this overrides model loading timeout.
+	if opts.ForceBuild {
+		waitOpts.Timeout = 300 * time.Second
 	}
 
 	result, err := s.health.WaitForServices(ctx, services, waitOpts)
@@ -1807,6 +1952,47 @@ func (s *DefaultStackManager) waitForHealthy(ctx context.Context, opts StartOpti
 //   - result is non-nil
 func (s *DefaultStackManager) getFailedServiceNames(result *health.WaitResult) []string {
 	return result.FailedCritical
+}
+
+// filterServiceDefinitions returns only the service definitions matching the
+// given compose service names.
+//
+// # Description
+//
+// Filters service definitions by matching compose service names against
+// container names. The container name prefix (e.g., "aleutian-") is prepended
+// to each service name for matching. Services with no container name (e.g.,
+// host-level Ollama) are excluded when filtering.
+//
+// # Inputs
+//
+//   - defs: Full list of service definitions
+//   - serviceNames: Compose service names to keep (e.g., ["trace", "weaviate"])
+//
+// # Outputs
+//
+//   - []health.ServiceDefinition: Filtered definitions matching the requested services
+//
+// # Limitations
+//
+//   - Assumes container names follow the pattern "<prefix><service_name>"
+//
+// # Assumptions
+//
+//   - serviceNames is non-empty (caller checks)
+func (s *DefaultStackManager) filterServiceDefinitions(defs []health.ServiceDefinition, serviceNames []string) []health.ServiceDefinition {
+	wanted := make(map[string]bool, len(serviceNames))
+	for _, name := range serviceNames {
+		wanted["aleutian-"+name] = true
+	}
+
+	var filtered []health.ServiceDefinition
+	for _, def := range defs {
+		if def.ContainerName != "" && wanted[def.ContainerName] {
+			filtered = append(filtered, def)
+		}
+	}
+	return filtered
 }
 
 // collectDiagnostics gathers diagnostic information after an error.

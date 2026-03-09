@@ -40,18 +40,18 @@
 // Example requests:
 //
 //	# Health check
-//	curl http://localhost:8080/v1/trace/health
+//	curl http://localhost:12217/v1/trace/health
 //
 //	# Get all available tools
-//	curl http://localhost:8080/v1/trace/tools | jq
+//	curl http://localhost:12217/v1/trace/tools | jq
 //
 //	# Initialize a code graph
-//	curl -X POST http://localhost:8080/v1/trace/init \
+//	curl -X POST http://localhost:12217/v1/trace/init \
 //	  -H "Content-Type: application/json" \
 //	  -d '{"project_root": "/path/to/project"}'
 //
 //	# Run agent query (requires Ollama)
-//	curl -X POST http://localhost:8080/v1/trace/agent/run \
+//	curl -X POST http://localhost:12217/v1/trace/agent/run \
 //	  -H "Content-Type: application/json" \
 //	  -d '{"project_root": "/path/to/project", "query": "What are the main entry points?"}'
 package main
@@ -66,6 +66,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -82,8 +83,13 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/routing"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/safety"
 	traceconfig "github.com/AleutianAI/AleutianFOSS/services/trace/config"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/rag"
 	badgerstore "github.com/AleutianAI/AleutianFOSS/services/trace/storage/badger"
+	natsStorage "github.com/AleutianAI/AleutianFOSS/services/trace/storage/nats"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/telemetry"
+	traceweaviate "github.com/AleutianAI/AleutianFOSS/services/trace/weaviate"
 	"github.com/gin-gonic/gin"
+	weaviateclient "github.com/weaviate/weaviate-go-client/v5/weaviate"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -175,10 +181,18 @@ func WarmupGuardMiddleware() gin.HandlerFunc {
 }
 
 func main() {
-	port := flag.Int("port", 8080, "Port to listen on")
+	port := flag.Int("port", 12217, "Port to listen on")
 	debug := flag.Bool("debug", false, "Enable debug mode")
 	withContext := flag.Bool("with-context", false, "Enable ContextManager for code context assembly")
 	withTools := flag.Bool("with-tools", false, "Enable tool registry for agentic exploration")
+
+	// PORT env var override (matches orchestrator pattern for container deployments).
+	if envPort := os.Getenv("PORT"); envPort != "" {
+		if p, err := strconv.Atoi(envPort); err == nil {
+			*port = p
+		}
+	}
+
 	flag.Parse()
 
 	// Set Gin mode
@@ -188,9 +202,26 @@ func main() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
+	// Initialize OpenTelemetry tracing and metrics.
+	// Reads OTEL_EXPORTER_OTLP_ENDPOINT from environment (set by stack start).
+	// AllowDegraded=true ensures the server starts even if Jaeger is unreachable.
+	telemetryCfg := telemetry.DefaultConfig()
+	telemetryCfg.ServiceName = "aleutian-trace"
+	telemetryCfg.AllowDegraded = true
+	telemetryShutdown, telemetryErr := telemetry.Init(context.Background(), telemetryCfg)
+	if telemetryErr != nil {
+		slog.Warn("Telemetry init failed, running without OTel export",
+			slog.String("error", telemetryErr.Error()))
+	} else {
+		slog.Info("Telemetry initialized",
+			slog.String("service", telemetryCfg.ServiceName),
+			slog.String("exporter", telemetryCfg.TraceExporter),
+			slog.String("endpoint", telemetryCfg.OTLPEndpoint))
+	}
+
 	// I-3: Set up W3C TraceContext propagator for distributed tracing.
-	// This enables trace context to flow from incoming HTTP headers through
-	// all handlers and middleware, including WarmupGuardMiddleware.
+	// telemetry.Init() sets this too, but we set it here as a fallback
+	// in case telemetry init failed (AllowDegraded).
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{},
 		propagation.Baggage{},
@@ -198,10 +229,86 @@ func main() {
 
 	// Create service with default config
 	cfg := trace.DefaultServiceConfig()
+
+	// Wire allowed roots from environment for container path security.
+	// TRACE_ALLOWED_ROOTS is a comma-separated list of path prefixes that the
+	// trace server is permitted to access. Set by podman-compose.yml to restrict
+	// container filesystem access to mounted volumes only.
+	if allowedRoots := os.Getenv("TRACE_ALLOWED_ROOTS"); allowedRoots != "" {
+		for _, root := range strings.Split(allowedRoots, ",") {
+			trimmed := strings.TrimSpace(root)
+			if trimmed != "" {
+				cfg.AllowedRoots = append(cfg.AllowedRoots, trimmed)
+			}
+		}
+		slog.Info("Allowed roots configured",
+			slog.Any("roots", cfg.AllowedRoots))
+	}
+
 	svc := trace.NewService(cfg)
 
 	// Create handlers
 	handlers := trace.NewHandlers(svc)
+
+	// CRS-25/26: Connect to Weaviate if available.
+	// When running with `aleutian stack start`, Weaviate is on port 12212.
+	// If WEAVIATE_SERVICE_URL is not set, trace runs without Weaviate (zero regression).
+	// CR-5: The native client and dataSpace are shared with setupAgentLoop to avoid
+	// creating a duplicate ResilientClient for the same Weaviate URL.
+	var weaviateNativeClient *weaviateclient.Client
+	var weaviateDataSpace string
+	if weaviateURL := os.Getenv("WEAVIATE_SERVICE_URL"); weaviateURL != "" {
+		wvCfg := traceweaviate.DefaultClientConfig()
+		wvCfg.URL = weaviateURL
+		wvCfg.AllowStartDegraded = true
+
+		wvClient, err := traceweaviate.NewResilientClient(wvCfg)
+		if err != nil {
+			slog.Warn("Weaviate unavailable, running without",
+				slog.String("url", weaviateURL),
+				slog.String("error", err.Error()))
+		} else {
+			weaviateDataSpace = os.Getenv("WEAVIATE_DATA_SPACE")
+			if weaviateDataSpace == "" {
+				weaviateDataSpace = "default"
+			}
+			weaviateNativeClient = wvClient.Client()
+			handlers = handlers.WithWeaviate(weaviateNativeClient).WithMemory(weaviateDataSpace)
+
+			// CRS-25: Ensure CodeSymbol schema exists for semantic resolution.
+			if schemaErr := rag.EnsureCodeSymbolSchema(context.Background(), weaviateNativeClient); schemaErr != nil {
+				slog.Warn("CRS-25: Failed to ensure CodeSymbol schema",
+					slog.String("error", schemaErr.Error()))
+			}
+
+			slog.Info("Weaviate connected",
+				slog.String("url", weaviateURL),
+				slog.String("data_space", weaviateDataSpace))
+		}
+	}
+
+	// CRS-27: Connect to NATS JetStream for CRS delta streaming.
+	var natsClient *natsStorage.Client
+	natsURL := os.Getenv("NATS_URL")
+	if natsURL == "" {
+		natsURL = "nats://localhost:4222"
+	}
+	natsClient, natsErr := natsStorage.NewClient(natsStorage.Config{
+		URL:        natsURL,
+		StreamName: "CRS_DELTAS",
+		Logger:     slog.Default(),
+	})
+	if natsErr != nil {
+		slog.Warn("CRS-27: NATS unavailable, CRS streaming disabled",
+			slog.String("url", natsURL),
+			slog.String("error", natsErr.Error()),
+		)
+	} else {
+		handlers = handlers.WithNATS(natsClient)
+		slog.Info("CRS-27: NATS connected",
+			slog.String("url", natsURL),
+		)
+	}
 
 	// Setup router
 	router := gin.New()
@@ -249,7 +356,12 @@ func main() {
 	}
 
 	// Setup agent loop and register routes
-	agentEnabled := setupAgentLoop(v1, svc, *withContext, *withTools, routingStore)
+	agentEnabled, indexingCoord := setupAgentLoop(v1, svc, *withContext, *withTools, routingStore, weaviateNativeClient, weaviateDataSpace, natsClient)
+
+	// CRS-26l: Wire indexing coordinator to handlers for eager indexing at init time.
+	if indexingCoord != nil {
+		handlers = handlers.WithIndexingCoordinator(indexingCoord)
+	}
 
 	// Print startup banner
 	printBanner(*port, agentEnabled)
@@ -261,6 +373,18 @@ func main() {
 	go func() {
 		<-quit
 		slog.Info("Shutting down Aleutian Trace server")
+		if telemetryShutdown != nil {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer shutdownCancel()
+			if err := telemetryShutdown(shutdownCtx); err != nil {
+				slog.Warn("Telemetry shutdown error", slog.String("error", err.Error()))
+			}
+		}
+		if natsClient != nil {
+			if err := natsClient.Close(); err != nil {
+				slog.Warn("CRS-27: NATS shutdown error", slog.String("error", err.Error()))
+			}
+		}
 		if routingDB != nil {
 			if err := routingDB.Close(); err != nil {
 				slog.Warn("Failed to close routing cache BadgerDB", slog.String("error", err.Error()))
@@ -283,8 +407,16 @@ func main() {
 // routingStore is the optional BadgerDB cache for tool embedding vectors.
 // Pass nil to disable persistence (e.g. when routing cache directory is unavailable).
 //
-// Returns true if the agent is fully enabled with LLM support.
-func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTools bool, routingStore routing.RouterCacheStore) bool {
+// wvClient and wvDataSpace are the Weaviate connection from main() for CRS-25 semantic RAG.
+// CR-5: Shared from main() to avoid creating a duplicate ResilientClient.
+// Pass nil/empty to disable Weaviate integration.
+//
+// Returns true if the agent is fully enabled with LLM support, and the
+// SymbolIndexingCoordinator if Weaviate + embeddings are configured (CRS-26l).
+func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTools bool, routingStore routing.RouterCacheStore, wvClient *weaviateclient.Client, wvDataSpace string, natsClient *natsStorage.Client) (bool, *trace.SymbolIndexingCoordinator) {
+	// CRS-26l: Coordinator returned to caller for handlers wiring.
+	var indexingCoord *trace.SymbolIndexingCoordinator
+
 	// CB-60: Load per-role provider configuration from environment variables.
 	// Falls back to Ollama with existing env vars for backward compatibility.
 	mainModelFallback := os.Getenv("OLLAMA_MODEL")
@@ -299,7 +431,7 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTo
 		agentLoop := agent.NewDefaultAgentLoop()
 		agentHandlers := trace.NewAgentHandlers(agentLoop, svc)
 		trace.RegisterAgentRoutesWithMiddleware(v1, agentHandlers, nil)
-		return false
+		return false, nil
 	}
 
 	// CB-60b: Create provider factory. For Ollama roles, create the shared model manager.
@@ -347,7 +479,7 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTo
 		agentLoop := agent.NewDefaultAgentLoop()
 		agentHandlers := trace.NewAgentHandlers(agentLoop, svc)
 		trace.RegisterAgentRoutesWithMiddleware(v1, agentHandlers, nil)
-		return false
+		return false, nil
 	}
 
 	model := roleConfig.Main.Model
@@ -490,7 +622,7 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTo
 
 	// Create dependencies factory
 	// GR-39: Enable Coordinator and Session Restore for CRS persistence
-	depsFactory := trace.NewDependenciesFactory(
+	baseFactoryOpts := []trace.DependenciesFactoryOption{
 		trace.WithLLMClient(llmClient),
 		trace.WithGraphProvider(graphProvider),
 		trace.WithEventEmitter(eventEmitter),
@@ -500,7 +632,73 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTo
 		trace.WithToolsEnabled(withTools),
 		trace.WithCoordinatorEnabled(true),
 		trace.WithSessionRestoreEnabled(true),
-	)
+	}
+
+	// CRS-27: Wire NATS JetStream into deps factory for CRS delta persistence.
+	if natsClient != nil && natsClient.IsConnected() {
+		baseFactoryOpts = append(baseFactoryOpts,
+			trace.WithNATSJetStream(natsClient.JetStream(), "CRS_DELTAS"),
+		)
+		slog.Info("CRS-27: NATS JetStream wired into deps factory")
+	}
+
+	depsFactory := trace.NewDependenciesFactory(baseFactoryOpts...)
+
+	// CRS-25: Wire Weaviate into deps factory for semantic RAG resolution.
+	// CR-5: Reuse the Weaviate client created in main() instead of creating a duplicate.
+	if wvClient != nil && wvDataSpace != "" {
+		factoryOpts := []trace.DependenciesFactoryOption{
+			trace.WithLLMClient(llmClient),
+			trace.WithGraphProvider(graphProvider),
+			trace.WithEventEmitter(eventEmitter),
+			trace.WithSafetyGate(safetyGate),
+			trace.WithService(svc),
+			trace.WithContextEnabled(withContext),
+			trace.WithToolsEnabled(withTools),
+			trace.WithCoordinatorEnabled(true),
+			trace.WithSessionRestoreEnabled(true),
+			trace.WithWeaviateClient(wvClient, wvDataSpace),
+		}
+
+		// CRS-27: Include NATS JetStream in Weaviate-augmented factory too.
+		if natsClient != nil && natsClient.IsConnected() {
+			factoryOpts = append(factoryOpts,
+				trace.WithNATSJetStream(natsClient.JetStream(), "CRS_DELTAS"),
+			)
+		}
+
+		// CRS-26i: Create EmbedClient for pre-computed vector insertion and nearVector queries.
+		// Routes embedding requests through the orchestrator, which can reach Ollama on the host.
+		orchestratorURL := os.Getenv("ORCHESTRATOR_URL")
+		embeddingModel := os.Getenv("EMBEDDING_MODEL")
+		if orchestratorURL != "" {
+			embedClient, embedErr := rag.NewEmbedClient(orchestratorURL, embeddingModel)
+			if embedErr != nil {
+				slog.Warn("CRS-26i: Failed to create embed client, semantic search will not have vectors",
+					slog.String("error", embedErr.Error()),
+				)
+			} else {
+				factoryOpts = append(factoryOpts, trace.WithEmbedClient(embedClient))
+				slog.Info("CRS-26i: Embed client wired (orchestrator-centric embedding)",
+					slog.String("orchestrator_url", orchestratorURL),
+					slog.String("model", embeddingModel),
+				)
+
+				// CRS-26l: Create shared indexing coordinator for eager symbol indexing.
+				// Wired into both the deps factory (session-time trigger) and returned
+				// for handlers (init-time trigger via HandleInit).
+				indexingCoord = trace.NewSymbolIndexingCoordinator(wvClient, wvDataSpace, embedClient)
+				factoryOpts = append(factoryOpts, trace.WithIndexingCoordinator(indexingCoord))
+				slog.Info("CRS-26l: Symbol indexing coordinator created")
+			}
+		} else {
+			slog.Warn("CRS-26i: ORCHESTRATOR_URL not set, semantic search will run without pre-computed vectors")
+		}
+
+		depsFactory = trace.NewDependenciesFactory(factoryOpts...)
+		slog.Info("CRS-26j: Weaviate + embedding wired into deps factory",
+			slog.String("data_space", wvDataSpace))
+	}
 
 	if withContext {
 		slog.Info("ContextManager ENABLED (code context will be assembled)")
@@ -514,16 +712,20 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTo
 		agent.WithPhaseRegistry(registry),
 		agent.WithDependenciesFactory(depsFactory),
 	)
-	agentHandlers := trace.NewAgentHandlers(agentLoop, svc,
+	agentOpts := []trace.AgentHandlersOption{
 		trace.WithProviderFactory(factory),
 		trace.WithModelManager(ollamaModelManager),
 		trace.WithRoleConfig(roleConfig),
-	)
+	}
+	if natsClient != nil {
+		agentOpts = append(agentOpts, trace.WithNATSSSE(natsClient))
+	}
+	agentHandlers := trace.NewAgentHandlers(agentLoop, svc, agentOpts...)
 
 	// S-1: Apply warmup guard middleware to agent routes.
 	// This returns 503 Service Unavailable for agent requests during model warmup.
 	trace.RegisterAgentRoutesWithMiddleware(v1, agentHandlers, WarmupGuardMiddleware())
-	return true
+	return true, indexingCoord
 }
 
 func printBanner(port int, agentEnabled bool) {

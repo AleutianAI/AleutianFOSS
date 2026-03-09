@@ -1,0 +1,87 @@
+# CRS-26d: Semantic RAG Resolution Tests
+# These tests validate that Layer 2 (Weaviate nearVector) produces meaningful
+# semantic matches for conceptual queries where structural matching (Layer 1) misses.
+#
+# Prerequisites:
+#   - Weaviate running with vectorizer "none" (CRS-26h)
+#   - CodeSymbol class populated with pre-computed vectors (CRS-26i)
+#   - Orchestrator running with /v1/embed endpoint (CRS-26g)
+#
+# Run with: ./test_crs_integration.sh --feature SEMANTIC-RAG
+
+metadata:
+  feature: SEMANTIC-RAG
+  language: go
+  project: hugo
+  project_root: ~/projects/crs_test_codebases/go/hugo
+  description: >
+    Validates semantic resolution (Layer 2) for conceptual queries where
+    structural matching (Layer 1) should miss. Requires Weaviate with
+    indexed symbols. These tests specifically exercise the CRS-25 RAG
+    pipeline to ensure vector search returns relevant code entities.
+
+tests:
+  - id: 9201
+    name: fuzzy_package_match
+    category: SEMANTIC_RAG
+    description: >
+      Fuzzy package resolution via semantic search. The query uses the
+      conceptual term "rendering module" which should semantically match
+      an actual package name in the codebase via Weaviate nearVector.
+    query: "Find hotspots in the rendering module"
+    expected_state: COMPLETE
+    reference_answer: |
+      The agent should resolve "rendering module" to an actual package
+      and run find_hotspots with the resolved package name.
+    validations:
+      - type: agent_completed
+
+  - id: 9202
+    name: conceptual_function_match
+    category: SEMANTIC_RAG
+    description: >
+      Conceptual function match. "HTTP requests" should resolve to
+      handler/router functions via semantic similarity in Weaviate.
+    query: "What handles HTTP requests in this codebase?"
+    expected_state: COMPLETE
+    reference_answer: |
+      The agent should identify HTTP handler functions using semantic
+      resolution to find relevant symbols.
+    validations:
+      - type: agent_completed
+
+  - id: 9203
+    name: authentication_semantic
+    category: SEMANTIC_RAG
+    description: >
+      Semantic symbol match for authentication-related logic. Tests that
+      "authentication" conceptually matches auth-related functions even
+      if the exact term doesn't appear in symbol names.
+    query: "Find callers of the authentication logic"
+    expected_state: COMPLETE
+    validations:
+      - type: graph_tool_used
+
+  - id: 9204
+    name: database_layer_fuzzy
+    category: SEMANTIC_RAG
+    description: >
+      Fuzzy scope resolution for abstract concept "database layer".
+      Should resolve to storage/db-related packages via semantic search.
+    query: "Dead code in the database layer"
+    expected_state: COMPLETE
+    validations:
+      - type: agent_completed
+
+  - id: 9205
+    name: graceful_degradation_no_weaviate
+    category: SEMANTIC_RAG
+    description: >
+      Agent should complete successfully even when Weaviate is unavailable.
+      Tests the graceful degradation path — structural-only resolution.
+      Note: test runner should stop Weaviate before this test if possible.
+    query: "Find callers of the main function"
+    expected_state: COMPLETE
+    validations:
+      - type: agent_completed
+      - type: fast_execution

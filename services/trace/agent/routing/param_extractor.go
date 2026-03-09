@@ -21,6 +21,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/providers"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/rag"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 )
@@ -218,7 +219,52 @@ func (e *ParamExtractor) ExtractParams(
 
 	// Build the prompt
 	systemPrompt := e.buildSystemPrompt(toolName, paramSchemas, regexHint)
+
+	// CRS-25/CRS-26e: Append resolved entities from RAG to the user prompt.
+	// Entities are separated into confidence tiers so the model treats
+	// high-confidence matches as facts and low-confidence ones as suggestions.
 	userPrompt := fmt.Sprintf("User query: %s", query)
+	if ec := rag.ExtractionContextFromCtx(ctx); ec != nil && len(ec.ResolvedEntities) > 0 {
+		var sb strings.Builder
+		sb.WriteString(userPrompt)
+
+		// CRS-26e: Separate high-confidence (>= 0.6) from low-confidence (< 0.6).
+		var highConf, lowConf []rag.ResolvedEntity
+		for _, re := range ec.ResolvedEntities {
+			if re.Confidence >= 0.6 {
+				highConf = append(highConf, re)
+			} else {
+				lowConf = append(lowConf, re)
+			}
+		}
+
+		if len(highConf) > 0 {
+			sb.WriteString("\n\nConfirmed entities from code graph (USE THESE):\n")
+			for _, re := range highConf {
+				sb.WriteString(fmt.Sprintf("  %q → %s %q (confidence: %.2f)\n",
+					re.Raw, re.Kind, re.Resolved, re.Confidence))
+			}
+		}
+		if len(lowConf) > 0 {
+			sb.WriteString("\nSuggested entities (VERIFY before using):\n")
+			for _, re := range lowConf {
+				sb.WriteString(fmt.Sprintf("  %q → possibly %s %q (confidence: %.2f)\n",
+					re.Raw, re.Kind, re.Resolved, re.Confidence))
+			}
+		}
+		if len(ec.PackageNames) > 0 {
+			sb.WriteString(fmt.Sprintf("\nAvailable packages: %s\n",
+				strings.Join(ec.PackageNames, ", ")))
+			sb.WriteString("IMPORTANT: Only use package names from this list. Do not invent package names.\n")
+		}
+
+		userPrompt = sb.String()
+		span.SetAttributes(
+			attribute.Int("rag.resolved_entities", len(ec.ResolvedEntities)),
+			attribute.Int("rag.high_confidence", len(highConf)),
+			attribute.Int("rag.low_confidence", len(lowConf)),
+		)
+	}
 
 	messages := []datatypes.Message{
 		{Role: "system", Content: systemPrompt},
@@ -300,34 +346,44 @@ for the selected tool. Pay attention to hierarchical scoping:
 - "Find dead code in Flask" -> package is "" (Flask is the project, not a package)
 
 CONCEPTUAL vs LITERAL scope names:
-- LITERAL package/directory names: "table", "hugolib", "io", "plots", "microservices"
-  -> Set package to the literal name (it matches a real directory or Go package)
-- CONCEPTUAL descriptions: "write path", "rendering pipeline", "materials subsystem",
-  "Node class hierarchy", "groupby module" (when module = conceptual, not a directory)
-  -> Set package to "" (empty). These are DESCRIPTIONS, not literal paths.
-  A conceptual description with no matching directory will silently return empty results.
-- RULE: If the scope name contains spaces or is an abstract concept, set package to ""
+- LITERAL package/directory names: "table", "hugolib", "io", "plots", "materials",
+  "engine", "core", "common", "helpers", "wrappers", "sessions", "testing"
+  -> Set package to the literal name. Tools match against BOTH Package metadata
+  AND file paths, so literal directory names work for ALL languages.
+- CONCEPTUAL descriptions that do NOT map to a single directory:
+  "write path", "read path", "transaction layer"
+  -> Set package to "" (empty). These are abstract concepts with no matching directory.
+- RULE: If a SINGLE word clearly names a directory/module, use it as the package value.
+  If the scope name contains spaces or is an abstract concept, set package to "".
 
-SINGLE-WORD CONCEPTUAL TRAPS — these look like package names but are NOT:
-- "write path" -> package="" (conceptual, no "write" package exists)
+SINGLE-WORD SCOPE NAMES — these ARE valid package values (directory names):
+- "materials" -> package="materials" (matches Materials/ directory in file paths)
+- "engine" -> package="engine" (matches Engine/ directory or engine.ts file stem)
+- "core" -> package="core" (matches core/ or packages/core/ in file paths)
+- "common" -> package="common" (matches common/ or packages/common/)
+- "helpers" -> package="helpers" (matches helpers/ or helpers.py)
+- "rendering" -> package="rendering" (matches rendering/ directory if it exists)
+
+MULTI-WORD SCOPE NAMES — these are conceptual, set package to "":
+- "write path" -> package="" (conceptual, no single directory)
 - "read path" -> package="" (conceptual)
 - "transaction layer" -> package="" (conceptual)
-- "rendering pipeline" -> package="" (conceptual)
-- "materials subsystem" -> package="" (conceptual)
-- When in doubt about a SINGLE word like "materials", "rendering", "engine", "core":
-  these CAN be directories but may NOT match the Package metadata field.
-  Set package="" — empty is safe (returns global), a wrong literal silently returns zero.
+- RULE: When in doubt about a SINGLE word, prefer setting it as the package value.
+  The tool's path-based filtering will match if a directory exists, or return
+  fewer results if no match — which is better than returning unscoped global results.
 
 LANGUAGE-SPECIFIC PACKAGE RULES:
 - Go projects (gin, hugo, badger): Symbols have real Package metadata.
   Literal directory names ("table", "hugolib", "tpl") work as package filters.
-- JS/TS projects (babylonjs, express, nestjs, plottable): Symbols have Package="".
-  Package filters ALWAYS return empty for JS/TS. For subsystem scoping in JS/TS,
-  set package to "" (empty) and let the tool use path-based filtering from context.
-- Python projects (flask, pandas): Symbols have Package="".
-  Same rule as JS/TS — use package="" for all Python scope queries.
-- RULE: For JS/TS/Python projects, ALWAYS set package to "" (empty string).
-  Only Go projects support non-empty package filters.
+- JS/TS projects (babylonjs, express, nestjs, plottable): Symbols lack Package
+  metadata, BUT tools now support path-based scope filtering via file paths.
+  Single-word directory names ("materials", "engine", "core") WILL match file
+  paths and produce scoped results. Use them when they appear in the query.
+- Python projects (flask, pandas): Same as JS/TS — tools support path-based
+  scope filtering. Use literal module names ("helpers", "sessions", "testing").
+- RULE: For ALL languages, set package to the literal directory/module name
+  when one is clearly present in the query. Only set package="" when no
+  specific directory is named or the scope is an abstract concept.
 
 "from X to Y" pattern — CRITICAL EXTRACTION ORDER (for get_call_chain AND find_path):
 - The word IMMEDIATELY AFTER "from" is the START symbol (X)
@@ -399,6 +455,21 @@ makes errors — ignore it if it contradicts the query):
 	}
 
 	sb.WriteString(`
+## Entity Grounding (CRS-25/26e)
+
+When "Confirmed entities from code graph" are provided in the user message:
+- Use the confirmed entity values directly. They come from the actual codebase graph.
+- For package parameters, copy the confirmed package name exactly.
+- Do not invent alternative package names.
+
+When "Suggested entities" are provided:
+- These are low-confidence matches. Verify against the Available Packages list.
+- If a suggestion doesn't match any available package, ignore it.
+
+When "Available packages" are provided:
+- Only extract package names that appear in this list.
+- If the query mentions a term that doesn't match any available package, leave the package field empty.
+
 Respond with ONLY a JSON object containing the parameter values.
 Do not include any explanation or markdown formatting.
 `)
@@ -453,6 +524,8 @@ func (e *ParamExtractor) parseResponse(response string) (map[string]any, error) 
 //   - ctx: Context for cancellation/timeout. Must not be nil.
 //   - query: The user's natural language query.
 //   - candidates: Symbol candidates found by keyword search of the index.
+//   - tier0Count: Number of tier0 (best match) candidates at the start of the list.
+//   - tier1Count: Number of tier1 (partial match) candidates after tier0.
 //
 // # Outputs
 //
@@ -467,6 +540,8 @@ func (e *ParamExtractor) ResolveConceptualSymbol(
 	ctx context.Context,
 	query string,
 	candidates []agent.SymbolCandidate,
+	tier0Count, tier1Count int,
+	sourceContext string,
 ) (string, error) {
 	if !e.config.Enabled {
 		return "", fmt.Errorf("conceptual resolution disabled: extractor not enabled")
@@ -509,40 +584,93 @@ Rules:
 - Return ONLY the symbol name, nothing else
 
 `)
-	sb.WriteString("Available symbols:\n")
-	cap := len(candidates)
-	if cap > 50 {
-		cap = 50
+	// D3: Add tier preference instruction when tier0 candidates exist.
+	if tier0Count > 0 {
+		sb.WriteString("IMPORTANT: Prefer ★★★ BEST MATCH candidates — they contain BOTH the domain noun AND a concept synonym from the query.\n\n")
 	}
+
+	// D3: Cap reduced from 50 to 20 (prune already limits the list).
+	symbolCap := len(candidates)
+	if symbolCap > 20 {
+		symbolCap = 20
+	}
+
 	// IT-12 Rev 4: Show edge counts when available to help the LLM pick
 	// high-connectivity symbols (better starting points for path/chain queries).
 	hasEdgeInfo := false
-	for i := 0; i < cap; i++ {
+	for i := 0; i < symbolCap; i++ {
 		if candidates[i].OutEdges > 0 || candidates[i].InEdges > 0 {
 			hasEdgeInfo = true
 			break
 		}
 	}
-	for i := 0; i < cap; i++ {
-		c := candidates[i]
+
+	// D3c: Add source context to prompt when resolving find_path to-side.
+	if sourceContext != "" {
+		sb.WriteString(fmt.Sprintf("Source function: %s\nPick the DESTINATION symbol that this function would call into:\n\n", sourceContext))
+	}
+
+	// D3 / D3c: Group candidates by tier with star markers.
+	// D3c: Show receiver type for methods (e.g., "validate (method on Context)").
+	formatCandidate := func(c agent.SymbolCandidate) string {
+		kind := c.Kind
+		if c.Receiver != "" && (c.Kind == "method" || c.Kind == "property") {
+			kind = fmt.Sprintf("method on %s", c.Receiver)
+		}
 		if hasEdgeInfo {
-			sb.WriteString(fmt.Sprintf("  - %s (%s) in %s:%d [%d calls out, %d calls in]\n",
-				c.Name, c.Kind, c.FilePath, c.Line, c.OutEdges, c.InEdges))
-		} else {
-			sb.WriteString(fmt.Sprintf("  - %s (%s) in %s:%d\n", c.Name, c.Kind, c.FilePath, c.Line))
+			return fmt.Sprintf("  - %s (%s) in %s:%d [%d calls out, %d calls in]",
+				c.Name, kind, c.FilePath, c.Line, c.OutEdges, c.InEdges)
+		}
+		return fmt.Sprintf("  - %s (%s) in %s:%d", c.Name, kind, c.FilePath, c.Line)
+	}
+
+	if tier0Count > 0 || tier1Count > 0 {
+		// D3: Grouped prompt with tier markers
+		idx := 0
+		if tier0Count > 0 {
+			sb.WriteString("★★★ BEST MATCH (domain noun + concept synonym):\n")
+			for i := 0; i < tier0Count && idx < symbolCap; i++ {
+				sb.WriteString(formatCandidate(candidates[idx]) + "\n")
+				idx++
+			}
+		}
+		if tier1Count > 0 {
+			sb.WriteString("★★ PARTIAL MATCH (domain noun or concept synonym):\n")
+			for i := 0; i < tier1Count && idx < symbolCap; i++ {
+				sb.WriteString(formatCandidate(candidates[idx]) + "\n")
+				idx++
+			}
+		}
+		if idx < symbolCap {
+			sb.WriteString("★ OTHER:\n")
+			for idx < symbolCap {
+				sb.WriteString(formatCandidate(candidates[idx]) + "\n")
+				idx++
+			}
+		}
+	} else {
+		// No tier info — flat list
+		sb.WriteString("Available symbols:\n")
+		for i := 0; i < symbolCap; i++ {
+			sb.WriteString(formatCandidate(candidates[i]) + "\n")
 		}
 	}
 
 	// IT-12 Rev 5c: Log the candidate list as presented to the LLM for debugging.
-	// Exact tier counts are logged by the caller in resolveConceptualName().
 	var candidatePreview strings.Builder
-	for i := 0; i < cap && i < 15; i++ {
+	previewCap := symbolCap
+	if previewCap > 15 {
+		previewCap = 15
+	}
+	for i := 0; i < previewCap; i++ {
 		c := candidates[i]
 		candidatePreview.WriteString(fmt.Sprintf("[%d] %s (%s, %d out, %d in) ", i+1, c.Name, c.Kind, c.OutEdges, c.InEdges))
 	}
 	e.logger.Info("IT-12: candidates presented to LLM",
 		slog.Int("total_candidates", len(candidates)),
-		slog.Int("shown_to_llm", cap),
+		slog.Int("shown_to_llm", symbolCap),
+		slog.Int("tier0_count", tier0Count),
+		slog.Int("tier1_count", tier1Count),
 		slog.String("top_15", candidatePreview.String()),
 	)
 

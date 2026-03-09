@@ -77,4 +77,23 @@ var (
 		Name: "trace_symbol_cache_misses_total",
 		Help: "Total symbol cache misses",
 	})
+
+	// CRS-20: Synthesis Quality Gate Metrics
+
+	// synthesisQualityScore tracks synthesis response quality scores.
+	//
+	// Buckets: 0.0 to 1.0 in 0.1 increments.
+	// Score meaning:
+	//   1.0: Response references specific symbols from results
+	//   0.5: Response mentions general findings but no specific symbols
+	//   0.0: Response contradicts or ignores tool results
+	//
+	// Use: Monitor whether small models are producing responses that
+	// reflect tool results. Low scores indicate the model ignored or
+	// misrepresented the data.
+	synthesisQualityScore = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "trace_synthesis_quality_score",
+		Help:    "Synthesis response quality score (0.0-1.0) measuring how well the response reflects tool results",
+		Buckets: []float64{0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0},
+	})
 )

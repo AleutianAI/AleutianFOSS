@@ -26,9 +26,12 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	"os/exec"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	cbcontext "github.com/AleutianAI/AleutianFOSS/services/trace/context"
@@ -253,6 +256,11 @@ func (s *Service) Init(ctx context.Context, projectRoot string, languages, exclu
 	}
 	s.mu.RUnlock()
 
+	// CRS-18: Try incremental refresh from prior snapshot.
+	if incrResp, incrErr := s.tryIncrementalRefresh(ctx, projectRoot, graphID, languages, excludes); incrErr == nil && incrResp != nil {
+		return incrResp, nil
+	}
+
 	// Create index
 	idx := index.NewSymbolIndex()
 
@@ -388,6 +396,9 @@ func (s *Service) Init(ctx context.Context, projectRoot string, languages, exclu
 	s.evictIfNeeded()
 	s.mu.Unlock()
 
+	// CRS-18: Save graph snapshot for future incremental refresh.
+	s.saveGraphSnapshot(ctx, g)
+
 	return &InitResponse{
 		GraphID:          graphID,
 		IsRefresh:        isRefresh,
@@ -400,11 +411,391 @@ func (s *Service) Init(ctx context.Context, projectRoot string, languages, exclu
 	}, nil
 }
 
+// saveGraphSnapshot saves a graph snapshot via the SnapshotManager if configured.
+//
+// Description:
+//
+//	Non-blocking: logs and returns on error. Does not affect the Init response.
+//
+// Thread Safety: Safe for concurrent use (SnapshotManager handles concurrency).
+func (s *Service) saveGraphSnapshot(ctx context.Context, g *graph.Graph) {
+	if s.snapshotMgr == nil || g == nil {
+		return
+	}
+	saveCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	meta, err := s.snapshotMgr.Save(saveCtx, g, "")
+	if err != nil {
+		slog.Warn("CRS-18: Failed to save graph snapshot",
+			slog.String("project_root", g.ProjectRoot),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+	slog.Info("CRS-18: Graph snapshot saved",
+		slog.String("snapshot_id", meta.SnapshotID),
+		slog.String("project_root", g.ProjectRoot),
+		slog.Int("nodes", meta.NodeCount),
+		slog.Int("edges", meta.EdgeCount),
+	)
+}
+
+// tryIncrementalRefresh attempts to load a prior graph snapshot and apply
+// incremental changes. Returns nil, nil if incremental refresh is not possible
+// (no snapshot, too many changes, errors).
+//
+// Description:
+//
+//	CRS-18: Checks for a prior snapshot, detects changed files, and if the
+//	change ratio is <= 30%, performs an incremental refresh instead of a full
+//	rebuild. Falls back gracefully on any error.
+//
+// Inputs:
+//   - ctx: Context for cancellation. Must not be nil.
+//   - projectRoot: Absolute path to project root.
+//   - graphID: The graph ID for caching.
+//   - languages: Language filters for parsing.
+//   - excludes: Exclude patterns for parsing.
+//
+// Outputs:
+//   - *InitResponse: The init response if incremental refresh succeeded.
+//   - error: Non-nil only on context cancellation.
+//
+// Thread Safety: Safe for concurrent use.
+func (s *Service) tryIncrementalRefresh(
+	ctx context.Context,
+	projectRoot, graphID string,
+	languages, excludes []string,
+) (*InitResponse, error) {
+	if s.snapshotMgr == nil {
+		return nil, nil
+	}
+
+	start := time.Now()
+
+	// Compute project hash for snapshot lookup (same as snapshot.go:hashString)
+	h := sha256.Sum256([]byte(projectRoot))
+	projectHash := hex.EncodeToString(h[:])[:16]
+
+	// Try to load the latest snapshot
+	baseGraph, snapMeta, err := s.snapshotMgr.LoadLatest(ctx, projectHash)
+	if err != nil {
+		slog.Debug("CRS-18: No prior snapshot found",
+			slog.String("project_root", projectRoot),
+			slog.String("error", err.Error()),
+		)
+		return nil, nil
+	}
+
+	// Detect changed files since snapshot
+	snapshotTime := time.UnixMilli(snapMeta.CreatedAtMilli)
+	changedFiles, err := findChangedSourceFiles(ctx, projectRoot, snapshotTime, languages, excludes)
+	if err != nil {
+		slog.Debug("CRS-18: Failed to detect changed files, falling back to full build",
+			slog.String("error", err.Error()),
+		)
+		return nil, nil
+	}
+
+	// CRS-18 CR2 Fix M6: Detect deleted files by checking which graph files
+	// no longer exist on disk. findChangedViaGit uses --diff-filter=ACMRT
+	// (excludes D), and findChangedViaMtime walks existing files only.
+	// Without this, deleted file nodes persist as phantom entries.
+	changedSet := make(map[string]struct{}, len(changedFiles))
+	for _, f := range changedFiles {
+		changedSet[f] = struct{}{}
+	}
+	if len(baseGraph.FileMtimes) > 0 {
+		for relPath := range baseGraph.FileMtimes {
+			if _, already := changedSet[relPath]; already {
+				continue
+			}
+			absPath := filepath.Join(projectRoot, relPath)
+			if _, statErr := os.Stat(absPath); statErr != nil {
+				changedFiles = append(changedFiles, relPath)
+				changedSet[relPath] = struct{}{}
+			}
+		}
+	}
+
+	// Check change ratio threshold
+	totalFiles := baseGraph.NodeCount() // Approximate: nodes ~ files * symbols/file
+	// Use the number of unique files in the graph for a better estimate
+	fileCount := countUniqueFiles(baseGraph)
+	if fileCount > 0 {
+		totalFiles = fileCount
+	}
+
+	if !graph.ShouldDoIncrementalUpdate(len(changedFiles), totalFiles) {
+		slog.Info("CRS-18: Too many changed files, falling back to full build",
+			slog.Int("changed", len(changedFiles)),
+			slog.Int("total", totalFiles),
+			slog.Float64("ratio", float64(len(changedFiles))/float64(totalFiles)),
+		)
+		return nil, nil
+	}
+
+	if len(changedFiles) == 0 {
+		slog.Info("CRS-18: No files changed since snapshot, reusing as-is",
+			slog.String("snapshot_id", snapMeta.SnapshotID),
+			slog.Int("nodes", baseGraph.NodeCount()),
+			slog.Int("edges", baseGraph.EdgeCount()),
+		)
+		return s.cacheAndReturn(ctx, baseGraph, projectRoot, graphID, start, 0, nil)
+	}
+
+	// Parse only the changed files
+	var changedResults []*ast.ParseResult
+	for _, relPath := range changedFiles {
+		absPath := filepath.Join(projectRoot, relPath)
+		// Check if file still exists (might have been deleted)
+		if _, statErr := os.Stat(absPath); statErr != nil {
+			continue
+		}
+		// Check language filter
+		ext := filepath.Ext(relPath)
+		if !s.isLanguageFile(ext, languages) {
+			continue
+		}
+		pr, parseErr := s.parseFileToResult(ctx, absPath, relPath)
+		if parseErr != nil {
+			slog.Debug("CRS-18: Failed to parse changed file, skipping",
+				slog.String("file", relPath),
+				slog.String("error", parseErr.Error()),
+			)
+			continue
+		}
+		changedResults = append(changedResults, pr)
+	}
+
+	// Run incremental refresh
+	incrResult, err := graph.IncrementalRefresh(ctx, baseGraph, changedFiles, changedResults)
+	if err != nil {
+		slog.Warn("CRS-18: Incremental refresh failed, falling back to full build",
+			slog.String("error", err.Error()),
+		)
+		return nil, nil
+	}
+
+	slog.Info("CRS-18: Incremental refresh succeeded",
+		slog.Int("changed_files", len(changedFiles)),
+		slog.Int("nodes_removed", incrResult.NodesRemoved),
+		slog.Int("nodes_added", incrResult.NodesAdded),
+		slog.Int64("duration_ms", incrResult.DurationMilli),
+	)
+
+	return s.cacheAndReturn(ctx, incrResult.Graph, projectRoot, graphID, start, len(changedFiles), nil)
+}
+
+// cacheAndReturn builds the CachedGraph, caches it, saves a snapshot, and returns InitResponse.
+func (s *Service) cacheAndReturn(
+	ctx context.Context,
+	g *graph.Graph,
+	projectRoot, graphID string,
+	start time.Time,
+	filesParsed int,
+	errs []string,
+) (*InitResponse, error) {
+	idx := index.NewSymbolIndex()
+
+	// Populate index from graph nodes
+	for _, node := range g.Nodes() {
+		if node.Symbol != nil {
+			if addErr := idx.Add(node.Symbol); addErr != nil {
+				slog.Debug("CRS-18: Failed to add symbol to index",
+					slog.String("symbol_id", node.Symbol.ID),
+					slog.String("error", addErr.Error()),
+				)
+			}
+		}
+	}
+
+	assembler := cbcontext.NewAssembler(g, idx)
+	if s.libDocProvider != nil {
+		assembler = assembler.WithLibraryDocProvider(s.libDocProvider)
+	}
+
+	builtAtMilli := time.Now().UnixMilli()
+	var adapter *graph.CRSGraphAdapter
+	hg, err := graph.WrapGraph(g)
+	if err == nil {
+		adapter, _ = graph.NewCRSGraphAdapter(hg, idx, 1, builtAtMilli, nil)
+	}
+
+	cached := &CachedGraph{
+		Graph:        g,
+		Index:        idx,
+		Assembler:    assembler,
+		Adapter:      adapter,
+		BuiltAtMilli: builtAtMilli,
+		ProjectRoot:  projectRoot,
+	}
+	if s.config.GraphTTL > 0 {
+		cached.ExpiresAtMilli = time.Now().Add(s.config.GraphTTL).UnixMilli()
+	}
+
+	s.mu.Lock()
+	s.graphs[graphID] = cached
+	s.evictIfNeeded()
+	s.mu.Unlock()
+
+	// Save updated snapshot
+	s.saveGraphSnapshot(ctx, g)
+
+	return &InitResponse{
+		GraphID:          graphID,
+		IsRefresh:        filesParsed > 0,
+		FilesParsed:      filesParsed,
+		SymbolsExtracted: idx.Stats().TotalSymbols,
+		EdgesBuilt:       g.EdgeCount(),
+		ParseTimeMs:      time.Since(start).Milliseconds(),
+		Errors:           errs,
+	}, nil
+}
+
+// findChangedSourceFiles detects files changed since a given time,
+// filtering to only source files matching the language and exclude filters.
+func findChangedSourceFiles(
+	ctx context.Context,
+	projectRoot string,
+	since time.Time,
+	languages, excludes []string,
+) ([]string, error) {
+	// Try git diff first (fast, reliable)
+	files, err := findChangedViaGit(ctx, projectRoot, since)
+	if err != nil {
+		// Fallback to mtime comparison
+		files, err = findChangedViaMtime(ctx, projectRoot, since)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Filter to source files matching language extensions
+	var filtered []string
+	extMap := buildLanguageExtMap(languages)
+	for _, f := range files {
+		// Skip excluded patterns
+		excluded := false
+		for _, pat := range excludes {
+			if matched, _ := filepath.Match(pat, f); matched {
+				excluded = true
+				break
+			}
+			if matched, _ := filepath.Match(pat, filepath.Base(f)); matched {
+				excluded = true
+				break
+			}
+		}
+		if excluded {
+			continue
+		}
+		ext := filepath.Ext(f)
+		if _, ok := extMap[ext]; ok {
+			filtered = append(filtered, f)
+		}
+	}
+
+	return filtered, nil
+}
+
+// findChangedViaGit uses git to find changed files.
+func findChangedViaGit(ctx context.Context, projectRoot string, since time.Time) ([]string, error) {
+	sinceStr := since.Format("2006-01-02T15:04:05")
+	cmd := exec.CommandContext(ctx, "git", "diff", "--name-only", "--diff-filter=ACMRT",
+		fmt.Sprintf("@{%s}", sinceStr))
+	cmd.Dir = projectRoot
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git diff: %w", err)
+	}
+	trimmed := strings.TrimSpace(string(output))
+	if trimmed == "" {
+		return nil, nil
+	}
+	return strings.Split(trimmed, "\n"), nil
+}
+
+// findChangedViaMtime uses file modification times to find changed files.
+func findChangedViaMtime(ctx context.Context, projectRoot string, since time.Time) ([]string, error) {
+	var files []string
+	sinceUnix := since.Unix()
+	err := filepath.Walk(projectRoot, func(path string, info os.FileInfo, err error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			base := filepath.Base(path)
+			if strings.HasPrefix(base, ".") && base != "." {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if info.ModTime().Unix() > sinceUnix {
+			relPath, relErr := filepath.Rel(projectRoot, path)
+			if relErr != nil {
+				return nil
+			}
+			files = append(files, relPath)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("walk: %w", err)
+	}
+	return files, nil
+}
+
+// countUniqueFiles counts unique file paths in the graph.
+func countUniqueFiles(g *graph.Graph) int {
+	files := make(map[string]struct{})
+	for _, node := range g.Nodes() {
+		if node.Symbol != nil && node.Symbol.FilePath != "" {
+			files[node.Symbol.FilePath] = struct{}{}
+		}
+	}
+	return len(files)
+}
+
+// buildLanguageExtMap creates a set of file extensions for the given languages.
+func buildLanguageExtMap(languages []string) map[string]struct{} {
+	extMap := make(map[string]struct{})
+	for _, lang := range languages {
+		switch lang {
+		case "go":
+			extMap[".go"] = struct{}{}
+		case "python":
+			extMap[".py"] = struct{}{}
+		case "javascript":
+			extMap[".js"] = struct{}{}
+			extMap[".jsx"] = struct{}{}
+			extMap[".mjs"] = struct{}{}
+		case "typescript":
+			extMap[".ts"] = struct{}{}
+			extMap[".tsx"] = struct{}{}
+		case "java":
+			extMap[".java"] = struct{}{}
+		case "rust":
+			extMap[".rs"] = struct{}{}
+		}
+	}
+	return extMap
+}
+
 // parseResult holds intermediate parsing results.
 type parseResult struct {
 	FilesParsed      int
 	SymbolsExtracted int
 	Errors           []string
+}
+
+// fileEntry holds a file discovered during directory walk, pending parsing.
+type fileEntry struct {
+	absPath string
+	relPath string
 }
 
 // parseProjectToResults parses project files and returns ParseResults for builder.
@@ -413,6 +804,9 @@ type parseResult struct {
 //
 //	GR-41c: Changed to return []*ast.ParseResult for use with graph.Builder
 //	to ensure proper edge extraction (imports, calls, implements, etc.).
+//	CRS-23: Parallelized file parsing using a bounded goroutine pool.
+//	Phase 1 (sequential): Walk directory to collect file paths and enforce limits.
+//	Phase 2 (parallel): Parse files concurrently using runtime.NumCPU() workers.
 //
 // Inputs:
 //   - ctx: Context for cancellation
@@ -421,17 +815,19 @@ type parseResult struct {
 //   - excludes: Exclusion patterns
 //
 // Outputs:
-//   - []*ast.ParseResult: Parse results for all files
+//   - []*ast.ParseResult: Parse results for all files, in walk order
 //   - *parseResult: Stats (FilesParsed, Errors)
 //   - error: Non-nil on fatal errors
+//
+// Thread Safety: Safe for concurrent use. Each file is parsed independently.
 func (s *Service) parseProjectToResults(ctx context.Context, projectRoot string, languages, excludes []string) ([]*ast.ParseResult, *parseResult, error) {
 	result := &parseResult{
 		Errors: make([]string, 0),
 	}
-	var parseResults []*ast.ParseResult
 
-	// Walk the project directory
-	fileCount := 0
+	// --- Phase 1: Collect file paths (sequential) ---
+	// Walk the directory tree, enforce size/count limits, collect parseable files.
+	var files []fileEntry
 	var totalSize int64
 
 	err := filepath.WalkDir(projectRoot, func(path string, d os.DirEntry, err error) error {
@@ -485,28 +881,99 @@ func (s *Service) parseProjectToResults(ctx context.Context, projectRoot string,
 			return ErrProjectTooLarge
 		}
 
-		fileCount++
-		if fileCount > s.config.MaxProjectFiles {
+		if len(files) >= s.config.MaxProjectFiles {
 			return ErrProjectTooLarge
 		}
 
-		// Parse file
-		pr, parseErr := s.parseFileToResult(ctx, path, relPath)
-		if parseErr != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", relPath, parseErr))
-		} else {
-			parseResults = append(parseResults, pr)
-			result.FilesParsed++
-		}
-
+		files = append(files, fileEntry{absPath: path, relPath: relPath})
 		return nil
 	})
 
 	if err != nil && err != ErrProjectTooLarge {
-		return nil, nil, fmt.Errorf("walking project: %w", err)
+		// CR-23-2: Return stats even on walk failure so callers see partial progress.
+		return nil, result, fmt.Errorf("walking project: %w", err)
 	}
 	if err == ErrProjectTooLarge {
-		return nil, nil, err
+		return nil, result, err
+	}
+
+	if len(files) == 0 {
+		return nil, result, nil
+	}
+
+	// --- Phase 2: Parse files in parallel ---
+	// Each file is parsed independently by a bounded worker pool.
+	// Results are stored in a pre-allocated slice indexed by walk order
+	// to ensure deterministic output regardless of goroutine scheduling.
+	numWorkers := runtime.NumCPU()
+	if numWorkers > len(files) {
+		numWorkers = len(files)
+	}
+
+	type parseEntry struct {
+		result *ast.ParseResult
+		err    error
+	}
+	entries := make([]parseEntry, len(files))
+
+	var wg sync.WaitGroup
+	// CR-23-1: Small buffer (2x workers) avoids allocating a 10K-element channel
+	// for large repos. Workers pull indexes as fast as they can parse.
+	work := make(chan int, numWorkers*2)
+
+	// Start workers.
+	// Safety: each worker writes to entries[idx] at its own unique index.
+	// parseFileToResult is documented as "Thread Safety: Safe for concurrent use
+	// (reads only)" — no shared mutable state between calls.
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range work {
+				if ctx.Err() != nil {
+					return
+				}
+				f := files[idx]
+				pr, parseErr := s.parseFileToResult(ctx, f.absPath, f.relPath)
+				entries[idx] = parseEntry{result: pr, err: parseErr}
+			}
+		}()
+	}
+
+	// Send work
+	for i := range files {
+		work <- i
+	}
+	close(work)
+
+	// Wait for all workers to finish
+	wg.Wait()
+
+	// --- Phase 3: Collect results (sequential) ---
+	// Preserves walk order for deterministic graph construction.
+	// CR-23-2: Collect whatever was successfully parsed even if context was
+	// cancelled mid-flight — partial results are better than no results.
+	parseResults := make([]*ast.ParseResult, 0, len(files))
+	for i, entry := range entries {
+		if entry.err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", files[i].relPath, entry.err))
+		} else if entry.result != nil {
+			parseResults = append(parseResults, entry.result)
+			result.FilesParsed++
+		}
+	}
+
+	slog.Info("CRS-23: Parallel file parsing complete",
+		slog.Int("files", len(files)),
+		slog.Int("workers", numWorkers),
+		slog.Int("parsed", result.FilesParsed),
+		slog.Int("errors", len(result.Errors)),
+	)
+
+	// CR-23-2: Return partial results alongside context error so callers can
+	// use whatever was parsed before cancellation.
+	if ctx.Err() != nil {
+		return parseResults, result, fmt.Errorf("parsing interrupted: %w", ctx.Err())
 	}
 
 	return parseResults, result, nil
@@ -878,6 +1345,333 @@ func (s *Service) FindImplementations(ctx context.Context, graphID, interfaceNam
 	}
 
 	return implementations, nil
+}
+
+// FindCallees returns all functions called by the given function.
+//
+// Description:
+//
+//	Searches the graph for all functions that the named function calls.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation
+//	graphID - ID of the graph to query
+//	functionName - Name of the function to find callees for
+//	limit - Maximum number of results (0 = default)
+//
+// Outputs:
+//
+//	[]*SymbolInfo - List of callee symbols
+//	error - Non-nil if graph not found
+func (s *Service) FindCallees(ctx context.Context, graphID, functionName string, limit int) ([]*SymbolInfo, error) {
+	cached, err := s.GetGraph(graphID)
+	if err != nil {
+		return nil, err
+	}
+
+	if limit <= 0 {
+		limit = 50
+	}
+
+	results, err := cached.Graph.FindCalleesByName(ctx, functionName, graph.WithLimit(limit))
+	if err != nil {
+		return nil, err
+	}
+
+	var callees []*SymbolInfo
+	for _, queryResult := range results {
+		for _, sym := range queryResult.Symbols {
+			callees = append(callees, SymbolInfoFromAST(sym))
+		}
+	}
+
+	return callees, nil
+}
+
+// FindReferences returns all locations that reference the given symbol.
+//
+// Description:
+//
+//	Resolves the symbol name to node IDs and finds all reference locations.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation
+//	graphID - ID of the graph to query
+//	symbolName - Name of the symbol to find references for
+//	limit - Maximum number of results (0 = default)
+//
+// Outputs:
+//
+//	[]ReferenceInfo - List of reference locations
+//	error - Non-nil if graph not found
+func (s *Service) FindReferences(ctx context.Context, graphID, symbolName string, limit int) ([]ReferenceInfo, error) {
+	cached, err := s.GetGraph(graphID)
+	if err != nil {
+		return nil, err
+	}
+
+	if limit <= 0 {
+		limit = 50
+	}
+
+	matches := cached.Graph.GetNodesByName(symbolName)
+	var refs []ReferenceInfo
+	seen := make(map[string]bool)
+
+	for _, node := range matches {
+		locations, err := cached.Graph.FindReferencesByID(ctx, node.ID, graph.WithLimit(limit-len(refs)))
+		if err != nil {
+			slog.Debug("FindReferences: error querying references for node",
+				slog.String("node_id", node.ID),
+				slog.String("error", err.Error()),
+			)
+			continue
+		}
+		for _, loc := range locations {
+			key := fmt.Sprintf("%s:%d:%d", loc.FilePath, loc.StartLine, loc.StartCol)
+			if !seen[key] && len(refs) < limit {
+				seen[key] = true
+				refs = append(refs, ReferenceInfo{
+					FilePath: loc.FilePath,
+					Line:     loc.StartLine,
+					Column:   loc.StartCol,
+				})
+			}
+		}
+		if len(refs) >= limit {
+			break
+		}
+	}
+
+	return refs, nil
+}
+
+// GetCallChain returns the shortest path between two functions.
+//
+// Description:
+//
+//	Resolves both function names to node IDs and finds the shortest path.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation
+//	graphID - ID of the graph to query
+//	from - Source function name
+//	to - Target function name
+//
+// Outputs:
+//
+//	[]*SymbolInfo - Symbols along the path
+//	int - Path length (-1 if no path)
+//	error - Non-nil if graph not found or names unresolved
+func (s *Service) GetCallChain(ctx context.Context, graphID, from, to string) ([]*SymbolInfo, int, error) {
+	cached, err := s.GetGraph(graphID)
+	if err != nil {
+		return nil, -1, err
+	}
+
+	fromNodes := cached.Graph.GetNodesByName(from)
+	if len(fromNodes) == 0 {
+		return nil, -1, fmt.Errorf("source function not found: %s", from)
+	}
+
+	toNodes := cached.Graph.GetNodesByName(to)
+	if len(toNodes) == 0 {
+		return nil, -1, fmt.Errorf("target function not found: %s", to)
+	}
+
+	// Try all combinations, return shortest
+	var bestPath []*SymbolInfo
+	bestLength := -1
+
+	for _, fromNode := range fromNodes {
+		for _, toNode := range toNodes {
+			pathResult, err := cached.Graph.ShortestPath(ctx, fromNode.ID, toNode.ID)
+			if err != nil {
+				continue
+			}
+			if pathResult.Length >= 0 && (bestLength < 0 || pathResult.Length < bestLength) {
+				bestLength = pathResult.Length
+				bestPath = make([]*SymbolInfo, 0, len(pathResult.Path))
+				for _, nodeID := range pathResult.Path {
+					node, ok := cached.Graph.GetNode(nodeID)
+					if ok && node.Symbol != nil {
+						bestPath = append(bestPath, SymbolInfoFromAST(node.Symbol))
+					}
+				}
+			}
+		}
+	}
+
+	return bestPath, bestLength, nil
+}
+
+// FindHotspots returns the most-connected nodes in the graph.
+//
+// Description:
+//
+//	Creates a hierarchical graph and analytics instance, then computes hotspots.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation
+//	graphID - ID of the graph to query
+//	limit - Maximum number of results (0 = default 10)
+//
+// Outputs:
+//
+//	[]graph.HotspotNode - Hotspot results sorted by connectivity score
+//	error - Non-nil if graph not found or analytics fails
+func (s *Service) FindHotspots(ctx context.Context, graphID string, limit int) ([]graph.HotspotNode, error) {
+	cached, err := s.GetGraph(graphID)
+	if err != nil {
+		return nil, err
+	}
+
+	if limit <= 0 {
+		limit = 10
+	}
+
+	hg, err := graph.WrapGraph(cached.Graph)
+	if err != nil {
+		return nil, fmt.Errorf("wrapping graph: %w", err)
+	}
+
+	analytics := graph.NewGraphAnalytics(hg)
+	return analytics.HotSpots(limit), nil
+}
+
+// FindCycles returns cyclic dependencies in the graph.
+//
+// Description:
+//
+//	Creates a hierarchical graph and analytics instance, then finds cycles.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation
+//	graphID - ID of the graph to query
+//
+// Outputs:
+//
+//	[]graph.CyclicDependency - Cycles found via Tarjan's SCC algorithm
+//	error - Non-nil if graph not found or analytics fails
+func (s *Service) FindCycles(ctx context.Context, graphID string) ([]graph.CyclicDependency, error) {
+	cached, err := s.GetGraph(graphID)
+	if err != nil {
+		return nil, err
+	}
+
+	hg, err := graph.WrapGraph(cached.Graph)
+	if err != nil {
+		return nil, fmt.Errorf("wrapping graph: %w", err)
+	}
+
+	analytics := graph.NewGraphAnalytics(hg)
+	return analytics.CyclicDependencies(), nil
+}
+
+// FindImportant returns the most important nodes by PageRank.
+//
+// Description:
+//
+//	Creates a hierarchical graph and analytics instance, then computes PageRank.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation
+//	graphID - ID of the graph to query
+//	limit - Maximum number of results (0 = default 10)
+//
+// Outputs:
+//
+//	[]graph.PageRankNode - Top-k nodes sorted by PageRank score descending
+//	error - Non-nil if graph not found or analytics fails
+func (s *Service) FindImportant(ctx context.Context, graphID string, limit int) ([]graph.PageRankNode, error) {
+	cached, err := s.GetGraph(graphID)
+	if err != nil {
+		return nil, err
+	}
+
+	if limit <= 0 {
+		limit = 10
+	}
+
+	hg, err := graph.WrapGraph(cached.Graph)
+	if err != nil {
+		return nil, fmt.Errorf("wrapping graph: %w", err)
+	}
+
+	analytics := graph.NewGraphAnalytics(hg)
+	return analytics.PageRankTop(ctx, limit, nil), nil
+}
+
+// FindCommunities detects code communities in the graph.
+//
+// Description:
+//
+//	Creates a hierarchical graph and analytics instance, then detects communities.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation
+//	graphID - ID of the graph to query
+//
+// Outputs:
+//
+//	*graph.CommunityResult - Leiden community detection results
+//	error - Non-nil if graph not found or analytics fails
+func (s *Service) FindCommunities(ctx context.Context, graphID string) (*graph.CommunityResult, error) {
+	cached, err := s.GetGraph(graphID)
+	if err != nil {
+		return nil, err
+	}
+
+	hg, err := graph.WrapGraph(cached.Graph)
+	if err != nil {
+		return nil, fmt.Errorf("wrapping graph: %w", err)
+	}
+
+	analytics := graph.NewGraphAnalytics(hg)
+	result, err := analytics.DetectCommunities(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("detecting communities: %w", err)
+	}
+	return result, nil
+}
+
+// FindPath returns the shortest path between two functions using graph analytics.
+//
+// Description:
+//
+//	Resolves both function names and finds the shortest path.
+//	Uses the same underlying ShortestPath as GetCallChain but wrapped in AgenticResponse.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation
+//	graphID - ID of the graph to query
+//	from - Source function name
+//	to - Target function name
+//
+// Outputs:
+//
+//	*CallChainResponse - Path result with symbols and length
+//	error - Non-nil if graph not found or names unresolved
+func (s *Service) FindPath(ctx context.Context, graphID, from, to string) (*CallChainResponse, error) {
+	path, length, err := s.GetCallChain(ctx, graphID, from, to)
+	if err != nil {
+		return nil, err
+	}
+
+	return &CallChainResponse{
+		From:   from,
+		To:     to,
+		Path:   path,
+		Length: length,
+	}, nil
 }
 
 // GetSymbol retrieves a symbol by its ID.

@@ -650,6 +650,11 @@ func (m *Manager) Update(ctx context.Context, current *agent.AssembledContext, r
 	}
 
 	// Add tool result to history
+	// IT_CRS_03 AC-3: Extract tool name from TraceStep for pass-through decisions.
+	toolName := ""
+	if result.TraceStep != nil {
+		toolName = result.TraceStep.Tool
+	}
 	agentResult := agent.ToolResult{
 		InvocationID: uuid.NewString(),
 		Success:      result.Success,
@@ -659,6 +664,8 @@ func (m *Manager) Update(ctx context.Context, current *agent.AssembledContext, r
 		TokensUsed:   estimateTokens(outputText), // Recalculate based on truncated output
 		Cached:       result.Cached,
 		Truncated:    truncated,
+		Tool:         toolName,          // IT_CRS_03 AC-3
+		ProofDelta:   result.ProofDelta, // IT_CRS_03 AC-8
 	}
 	updated.ToolResults = append(updated.ToolResults, agentResult)
 	updated.TotalTokens += agentResult.TokensUsed

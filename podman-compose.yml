@@ -18,6 +18,8 @@
 #   12214 - Jaeger UI
 #   12215 - Prometheus
 #   12216 - Grafana
+#   12217 - Trace Server
+#   12218 - Trace Proxy (OpenAI-compatible API)
 #
 # Network:
 #   Creates "aleutian-shared" network for cross-project connectivity.
@@ -43,8 +45,9 @@ services:
     environment:
       AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
       PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
-      DEFAULT_VECTORIZER_MODULE: "none"
       CLUSTER_HOSTNAME: "weaviate"
+      # CRS-26h: No vectorizer modules needed. All classes use vectorizer "none"
+      # with pre-computed vectors supplied at insert time via the orchestrator.
     networks:
       - aleutian-network
     restart: unless-stopped
@@ -137,6 +140,99 @@ services:
       timeout: 5s
       retries: 20
 
+  # === Trace Server ===
+  # AST-powered code intelligence with LLM agent capabilities
+  trace:
+    build:
+      context: .
+      dockerfile: ./services/trace/Dockerfile
+    container_name: aleutian-trace
+    ports:
+      - "12217:12217"
+    environment:
+      PORT: 12217
+      WEAVIATE_SERVICE_URL: http://weaviate:8080
+      # CRS-26g/i: RAG symbol + query embeddings route through orchestrator /v1/embed
+      ORCHESTRATOR_URL: http://orchestrator:12210
+      # Tool routing embeddings (routing/embedder.go) call Ollama directly
+      EMBEDDING_SERVICE_URL: http://host.containers.internal:11434/api/embed
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text-v2-moe}
+      OTEL_EXPORTER_OTLP_ENDPOINT: jaeger:4317
+      OLLAMA_BASE_URL: http://host.containers.internal:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-gpt-oss}
+      TRACE_ALLOWED_ROOTS: /projects
+      NATS_URL: nats://nats:4222
+    volumes:
+      - ${TRACE_PROJECTS_DIR:-.}:/projects:ro
+    networks:
+      - aleutian-network
+    restart: unless-stopped
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+      jaeger:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:12217/v1/trace/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  # === Trace Proxy ===
+  # OpenAI-compatible API proxy — speaks /v1/chat/completions
+  # Connects OpenWebUI, Continue, aider, curl to the trace agent
+  trace-proxy:
+    build:
+      context: .
+      dockerfile: services/trace/Dockerfile
+    container_name: aleutian-trace-proxy
+    ports:
+      - "12218:12218"
+    environment:
+      ALEUTIAN_TRACE_URL: http://trace:12217
+      OLLAMA_URL: http://host.containers.internal:11434
+      TRACE_CONTAINER_PREFIX: /projects
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
+    volumes:
+      - ${TRACE_PROJECTS_DIR:-.}:/projects:ro,Z
+    command: ["/app/trace-proxy", "--project-root", "/projects"]
+    depends_on:
+      trace:
+        condition: service_healthy
+    extra_hosts:
+      - "host.containers.internal:host-gateway"
+    networks:
+      - aleutian-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:12218/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # === NATS JetStream ===
+  # CRS-27: NATS for CRS delta streaming and state persistence
+  nats:
+    image: nats:2.10-alpine
+    container_name: aleutian-nats
+    ports:
+      - "4222:4222"    # Client connections
+      - "8222:8222"    # HTTP monitoring
+    command: ["--jetstream", "--store_dir=/data", "--http_port=8222"]
+    volumes:
+      - nats_data:/data
+    networks:
+      - aleutian-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   # === Observability (Minimal) ===
   # Jaeger for distributed tracing
   jaeger:
@@ -160,6 +256,7 @@ services:
 volumes:
   weaviate_data: {}
   models_cache: {}
+  nats_data: {}
 
 networks:
   aleutian-network:

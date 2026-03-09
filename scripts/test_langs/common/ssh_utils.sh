@@ -153,9 +153,17 @@ check_remote_ollama() {
 start_trace_server() {
     echo -e "${YELLOW}Starting trace server on remote...${NC}"
 
-    # Kill any existing trace server
+    # Kill any existing trace server and wait for port 8080 to free.
     ssh_cmd "pkill -f 'bin/trace'" 2>/dev/null || true
-    sleep 1
+    local port_wait=0
+    while ssh_cmd "ss -tlnp | grep -q ':8080 '" 2>/dev/null && [ $port_wait -lt 10 ]; do
+        sleep 1
+        ((port_wait++))
+    done
+    if [ $port_wait -ge 10 ]; then
+        ssh_cmd "pkill -9 -f 'bin/trace'" 2>/dev/null || true
+        sleep 1
+    fi
 
     # GR-40: Wipe stale graph cache to force rebuild with latest code
     # This ensures new features (like interface detection) are picked up

@@ -25,6 +25,14 @@ scrape_configs:
           service: 'code_buddy'
           environment: 'development'
 
+  # CRS-27a: NATS JetStream metrics via nats-exporter
+  - job_name: 'nats'
+    static_configs:
+      - targets: ['nats-exporter:7777']
+        labels:
+          service: 'nats'
+          environment: 'development'
+
   # Prometheus self-monitoring
   - job_name: 'prometheus'
     static_configs:

@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 )
@@ -48,6 +49,7 @@ const (
 type CircularDepFinder struct {
 	graph         *graph.Graph
 	projectModule string
+	crs           CRSRecorder
 	packageGraph  *PackageGraph
 	mu            sync.RWMutex
 	built         bool
@@ -72,8 +74,14 @@ func NewCircularDepFinder(g *graph.Graph, projectModule string) *CircularDepFind
 	return &CircularDepFinder{
 		graph:         g,
 		projectModule: projectModule,
+		crs:           &NopCRSRecorder{},
 		built:         false,
 	}
+}
+
+// SetCRS configures CRS recording for this finder.
+func (c *CircularDepFinder) SetCRS(recorder CRSRecorder) {
+	c.crs = recorder
 }
 
 // BuildPackageGraph builds the package-level dependency graph.
@@ -139,16 +147,30 @@ func (c *CircularDepFinder) FindCircularDeps(
 		return nil, ErrInvalidInput
 	}
 
+	start := time.Now()
+	ctx, span := startCircularDepsSpan(ctx, scope, depType)
+	defer span.End()
+
+	var result []CircularDep
+	var err error
+
 	switch depType {
 	case CircularDepPackage:
-		return c.findPackageCircularDeps(ctx, scope)
+		result, err = c.findPackageCircularDeps(ctx, scope)
 	case CircularDepTypeLevel:
-		return c.findTypeCircularDeps(ctx, scope)
+		result, err = c.findTypeCircularDeps(ctx, scope)
 	case CircularDepFunction:
-		return c.findFunctionCircularDeps(ctx, scope)
+		result, err = c.findFunctionCircularDeps(ctx, scope)
 	default:
-		return nil, fmt.Errorf("unknown circular dependency type: %s", depType)
+		err = fmt.Errorf("unknown circular dependency type: %s", depType)
 	}
+
+	dur := time.Since(start)
+	setCircularDepsSpanResult(span, len(result), err)
+	recordCircularDepsMetrics(ctx, dur, len(result), err)
+	c.crs.RecordToolStep(ctx, "find_circular_deps", len(result), dur, err)
+
+	return result, err
 }
 
 // findPackageCircularDeps finds package-level circular dependencies.

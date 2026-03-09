@@ -13,16 +13,24 @@ package patterns
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
-	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
+)
+
+// Package-level compiled regexes for smell detection.
+var (
+	reErrorSwallowEmpty   = regexp.MustCompile(`if\s+err\s*!=\s*nil\s*{\s*}`)
+	reErrorSwallowComment = regexp.MustCompile(`if\s+err\s*!=\s*nil\s*{\s*//.*\s*}`)
+	reErrorSwallowIgnore  = regexp.MustCompile(`_\s*=\s*\w+\(`)
+	reMagicNumber         = regexp.MustCompile(`\b(\d{3,})\b`)
+	reEmptyInterface      = regexp.MustCompile(`interface\s*{\s*}`)
+	reAnyKeyword          = regexp.MustCompile(`\bany\b`)
 )
 
 // SmellOptions configures code smell detection.
@@ -32,6 +40,10 @@ type SmellOptions struct {
 
 	// MinSeverity filters results by minimum severity.
 	MinSeverity Severity
+
+	// ContextLines controls how many lines of surrounding code to include
+	// in the Code field of each CodeSmell result (0 = no code context).
+	ContextLines int
 
 	// IncludeTests includes test files in analysis.
 	IncludeTests bool
@@ -62,29 +74,55 @@ func DefaultSmellOptions() SmellOptions {
 //
 // This type is safe for concurrent use.
 type SmellFinder struct {
-	graph       *graph.Graph
-	idx         *index.SymbolIndex
-	projectRoot string
-	mu          sync.RWMutex
+	idx        *index.SymbolIndex
+	fileReader *FileReader
+	crs        CRSRecorder
+	mu         sync.RWMutex
 }
 
 // NewSmellFinder creates a new code smell finder.
 //
 // # Inputs
 //
-//   - g: Code graph for relationship analysis.
 //   - idx: Symbol index for lookups.
 //   - projectRoot: Project root for reading source files.
 //
 // # Outputs
 //
 //   - *SmellFinder: Configured finder.
-func NewSmellFinder(g *graph.Graph, idx *index.SymbolIndex, projectRoot string) *SmellFinder {
+func NewSmellFinder(idx *index.SymbolIndex, projectRoot string) *SmellFinder {
 	return &SmellFinder{
-		graph:       g,
-		idx:         idx,
-		projectRoot: projectRoot,
+		idx:        idx,
+		fileReader: NewFileReader(projectRoot),
+		crs:        &NopCRSRecorder{},
 	}
+}
+
+// NewSmellFinderWithReader creates a smell finder with a shared FileReader.
+//
+// # Inputs
+//
+//   - idx: Symbol index for lookups.
+//   - reader: Shared cached file reader.
+//
+// # Outputs
+//
+//   - *SmellFinder: Configured finder.
+func NewSmellFinderWithReader(idx *index.SymbolIndex, reader *FileReader) *SmellFinder {
+	return &SmellFinder{
+		idx:        idx,
+		fileReader: reader,
+		crs:        &NopCRSRecorder{},
+	}
+}
+
+// SetCRS configures CRS recording for this finder.
+//
+// # Inputs
+//
+//   - recorder: CRS recorder for step tracking.
+func (s *SmellFinder) SetCRS(recorder CRSRecorder) {
+	s.crs = recorder
 }
 
 // FindCodeSmells finds code smells in the specified scope.
@@ -117,6 +155,10 @@ func (s *SmellFinder) FindCodeSmells(
 	if ctx == nil {
 		return nil, ErrInvalidInput
 	}
+
+	start := time.Now()
+	ctx, span := startSmellsSpan(ctx, scope)
+	defer span.End()
 
 	if opts == nil {
 		defaults := DefaultSmellOptions()
@@ -166,6 +208,11 @@ func (s *SmellFinder) FindCodeSmells(
 	if opts.MaxResults > 0 && len(results) > opts.MaxResults {
 		results = results[:opts.MaxResults]
 	}
+
+	dur := time.Since(start)
+	setSmellsSpanResult(span, len(results), nil)
+	recordSmellsMetrics(ctx, dur, len(results), nil)
+	s.crs.RecordToolStep(ctx, "find_code_smells", len(results), dur, nil)
 
 	return results, nil
 }
@@ -327,11 +374,10 @@ func (s *SmellFinder) detectGodObjects(ctx context.Context, scope string, opts *
 func (s *SmellFinder) detectErrorSwallowing(ctx context.Context, scope string, opts *SmellOptions) []CodeSmell {
 	var smells []CodeSmell
 
-	// Regex for error swallowing patterns
 	patterns := []*regexp.Regexp{
-		regexp.MustCompile(`if\s+err\s*!=\s*nil\s*{\s*}`),        // if err != nil { }
-		regexp.MustCompile(`if\s+err\s*!=\s*nil\s*{\s*//.*\s*}`), // if err != nil { // ... }
-		regexp.MustCompile(`_\s*=\s*\w+\(`),                      // _ = someFunc()
+		reErrorSwallowEmpty,
+		reErrorSwallowComment,
+		reErrorSwallowIgnore,
 	}
 
 	functions := s.idx.GetByKind(ast.SymbolKindFunction)
@@ -348,7 +394,7 @@ func (s *SmellFinder) detectErrorSwallowing(ctx context.Context, scope string, o
 		}
 
 		// Read function code
-		code, err := s.readSymbolCode(fn)
+		code, err := s.fileReader.ReadSymbolCode(fn)
 		if err != nil {
 			continue
 		}
@@ -360,13 +406,18 @@ func (s *SmellFinder) detectErrorSwallowing(ctx context.Context, scope string, o
 				lineOffset := strings.Count(code[:match[0]], "\n")
 				line := fn.StartLine + lineOffset
 
+				codeSnippet := code[match[0]:match[1]]
+				if opts.ContextLines > 0 {
+					codeSnippet = extractContext(code, match[0], match[1], opts.ContextLines)
+				}
+
 				smells = append(smells, CodeSmell{
 					Type:        SmellErrorSwallowing,
 					Severity:    SeverityWarning,
 					Location:    fmt.Sprintf("%s:%d", fn.FilePath, line),
 					Description: fmt.Sprintf("Potential error swallowing in '%s'", fn.Name),
 					Suggestion:  "Handle the error: log it, return it, or document why it's intentionally ignored",
-					Code:        code[match[0]:match[1]],
+					Code:        codeSnippet,
 				})
 			}
 		}
@@ -379,8 +430,7 @@ func (s *SmellFinder) detectErrorSwallowing(ctx context.Context, scope string, o
 func (s *SmellFinder) detectMagicNumbers(ctx context.Context, scope string, opts *SmellOptions) []CodeSmell {
 	var smells []CodeSmell
 
-	// Regex for magic numbers (excluding common values like 0, 1, 2)
-	pattern := regexp.MustCompile(`\b(\d{3,})\b`)
+	pattern := reMagicNumber
 	excluded := map[string]bool{
 		"100": true, "1000": true, "1024": true,
 		"8080": true, "3000": true, "443": true, "80": true,
@@ -399,7 +449,7 @@ func (s *SmellFinder) detectMagicNumbers(ctx context.Context, scope string, opts
 			continue
 		}
 
-		code, err := s.readSymbolCode(fn)
+		code, err := s.fileReader.ReadSymbolCode(fn)
 		if err != nil {
 			continue
 		}
@@ -460,7 +510,7 @@ func (s *SmellFinder) detectDeepNesting(ctx context.Context, scope string, opts 
 			continue
 		}
 
-		code, err := s.readSymbolCode(fn)
+		code, err := s.fileReader.ReadSymbolCode(fn)
 		if err != nil {
 			continue
 		}
@@ -494,10 +544,9 @@ func (s *SmellFinder) detectDeepNesting(ctx context.Context, scope string, opts 
 func (s *SmellFinder) detectEmptyInterface(ctx context.Context, scope string, opts *SmellOptions) []CodeSmell {
 	var smells []CodeSmell
 
-	// Regex for empty interface usage
 	patterns := []*regexp.Regexp{
-		regexp.MustCompile(`interface\s*{\s*}`),
-		regexp.MustCompile(`\bany\b`),
+		reEmptyInterface,
+		reAnyKeyword,
 	}
 
 	functions := s.idx.GetByKind(ast.SymbolKindFunction)
@@ -548,29 +597,6 @@ func (s *SmellFinder) inScope(sym *ast.Symbol, scope string, includeTests bool) 
 	}
 
 	return strings.HasPrefix(sym.FilePath, scope)
-}
-
-// readSymbolCode reads the source code for a symbol.
-func (s *SmellFinder) readSymbolCode(sym *ast.Symbol) (string, error) {
-	if sym == nil {
-		return "", fmt.Errorf("nil symbol")
-	}
-
-	filePath := filepath.Join(s.projectRoot, sym.FilePath)
-
-	content, err := os.ReadFile(filePath)
-	if err != nil {
-		return "", err
-	}
-
-	lines := strings.Split(string(content), "\n")
-
-	if sym.StartLine < 1 || sym.EndLine > len(lines) {
-		return "", fmt.Errorf("symbol lines out of bounds")
-	}
-
-	symbolLines := lines[sym.StartLine-1 : sym.EndLine]
-	return strings.Join(symbolLines, "\n"), nil
 }
 
 // countParameters counts the number of parameters in a function signature.
@@ -627,6 +653,25 @@ func calculateMaxNesting(code string) int {
 	}
 
 	return maxDepth
+}
+
+// extractContext extracts lines around a match position within code, providing
+// contextLines lines before and after the match.
+func extractContext(code string, matchStart, matchEnd, contextLines int) string {
+	lines := strings.Split(code, "\n")
+	startLineIdx := strings.Count(code[:matchStart], "\n")
+	endLineIdx := strings.Count(code[:matchEnd], "\n")
+
+	from := startLineIdx - contextLines
+	if from < 0 {
+		from = 0
+	}
+	to := endLineIdx + contextLines + 1
+	if to > len(lines) {
+		to = len(lines)
+	}
+
+	return strings.Join(lines[from:to], "\n")
 }
 
 // Summary generates a summary of code smell findings.

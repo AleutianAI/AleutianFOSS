@@ -514,6 +514,12 @@ func (m *mockCRSForCycleAnalysis) CheckDecisionAllowed(string, string) (bool, st
 }
 func (m *mockCRSForCycleAnalysis) GarbageCollectClauses() int { return 0 }
 
+// CRS-15: Similarity methods
+func (m *mockCRSForCycleAnalysis) RecordSimilarity(context.Context, string, string, float64) error {
+	return nil
+}
+func (m *mockCRSForCycleAnalysis) GetSimilarity(string, string) (float64, bool) { return -1, false }
+
 // GR-35: Delta history methods
 func (m *mockCRSForCycleAnalysis) SetSessionID(string) {}
 func (m *mockCRSForCycleAnalysis) ApplyWithSource(context.Context, Delta, string, map[string]string) (ApplyMetrics, error) {

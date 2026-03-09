@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -139,6 +140,14 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 
 		// Refresh graph if dirty files exist (before tool queries stale data)
 		p.maybeRefreshGraph(ctx, deps)
+
+		// CRS-19: Check graph staleness before tool dispatch.
+		// Runs once per session (cached for 60s). Logs warning/error if files changed.
+		var stalenessResult *graph.StalenessResult
+		if deps.StalenessChecker != nil {
+			sr := deps.StalenessChecker.Check()
+			stalenessResult = &sr
+		}
 
 		// Emit tool invocation event
 		p.emitToolInvocation(deps, &inv)
@@ -297,6 +306,18 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 			toolQuery := extractToolQuery(&inv)
 			if toolQuery != "" {
 				isRepetitive, similarity, similarQuery := p.checkSemanticRepetition(ctx, deps, inv.Tool, toolQuery)
+
+				// CRS-15: Record similarity to CRS for cross-session persistence.
+				if similarity > 0 && similarQuery != "" && deps.Session.HasCRS() {
+					currentKey := fmt.Sprintf("%s:%s", inv.Tool, toolQuery)
+					previousKey := fmt.Sprintf("%s:%s", inv.Tool, similarQuery)
+					if recErr := deps.Session.GetCRS().RecordSimilarity(ctx, currentKey, previousKey, 1.0-similarity); recErr != nil {
+						slog.Debug("CRS-15: Failed to record similarity",
+							slog.String("error", recErr.Error()),
+						)
+					}
+				}
+
 				if isRepetitive {
 					slog.Info("CB-30c: Blocking semantically repetitive tool call",
 						slog.String("session_id", deps.Session.ID),
@@ -435,6 +456,23 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 			// CRS-06: Emit EventToolExecuted to Coordinator for successful execution
 			p.emitCoordinatorEvent(ctx, deps, integration.EventToolExecuted, &inv, result, "", crs.ErrorCategoryNone)
 		}
+		// CRS-19: Attach staleness metadata to result and trace step.
+		if stalenessResult != nil && stalenessResult.IsStale {
+			if result != nil {
+				if result.TraceStep == nil {
+					result.TraceStep = &crs.TraceStep{
+						Metadata: make(map[string]string),
+					}
+				}
+				if result.TraceStep.Metadata == nil {
+					result.TraceStep.Metadata = make(map[string]string)
+				}
+				result.TraceStep.Metadata["graph_stale"] = "true"
+				result.TraceStep.Metadata["graph_stale_changed_files"] = fmt.Sprintf("%d", stalenessResult.ChangedFileCount)
+				result.TraceStep.Metadata["graph_stale_percent"] = fmt.Sprintf("%.1f", stalenessResult.PercentChanged*100)
+			}
+		}
+
 		p.recordTraceStep(deps, &inv, result, toolDuration, errMsg)
 
 		// GR-38 Issue 16: Track tokens for tool results.
@@ -649,7 +687,165 @@ func (p *ExecutePhase) recordTraceStep(deps *Dependencies, inv *agent.ToolInvoca
 			)
 		}
 	}
+
+	// CRS-WIRE-02: Generate CDCL clauses for error and empty-result conditions.
+	// This provides Layer 2 (CDCL clause generation) for ALL tools centrally,
+	// complementing the per-tool CRSRecorder in patterns/reason packages.
+	if deps.Session.HasCRS() {
+		p.generateToolClauses(context.Background(), deps, inv, result, errMsg)
+	}
 }
+
+// generateToolClauses creates CDCL clauses for tool error and empty-result conditions.
+//
+// Description:
+//
+//	Examines each tool execution result and generates CDCL clauses when the tool
+//	errors or returns empty results. Error conditions produce hard clauses
+//	(FailureTypeToolError); empty results produce soft clauses (FailureTypeInvalidOutput).
+//
+// Inputs:
+//   - ctx: Context for CRS operations.
+//   - deps: Session dependencies with CRS access.
+//   - inv: The tool invocation that was executed.
+//   - result: The tool's Result (may be nil on error).
+//   - errMsg: Non-empty if the tool errored.
+//
+// Outputs:
+//
+//	None (clauses are added to CRS as side effects).
+//
+// Thread Safety: Safe — CRS.AddClause is thread-safe.
+func (p *ExecutePhase) generateToolClauses(ctx context.Context, deps *Dependencies, inv *agent.ToolInvocation, result *tools.Result, errMsg string) {
+	crsInstance := deps.Session.GetCRS()
+	sessionID := deps.Session.ID
+
+	slog.Info("CRS-WIRE-02: generateToolClauses called",
+		slog.String("session_id", sessionID),
+		slog.String("tool", inv.Tool),
+		slog.Bool("has_error", errMsg != ""),
+		slog.Bool("has_result", result != nil),
+	)
+
+	// On error → hard clause (FailureTypeToolError)
+	if errMsg != "" {
+		clause := &crs.Clause{
+			ID: fmt.Sprintf("tool_error_%s_%d", inv.Tool, time.Now().UnixMilli()),
+			Literals: []crs.Literal{
+				{Variable: fmt.Sprintf("tool:%s", inv.Tool), Negated: true},
+				{Variable: fmt.Sprintf("error:%s", crs.ErrorCategoryInternal), Negated: true},
+			},
+			Source:      crs.SignalSourceHard,
+			LearnedAt:   time.Now().UnixMilli(),
+			FailureType: crs.FailureTypeToolError,
+			SessionID:   sessionID,
+		}
+		if addErr := crsInstance.AddClause(ctx, clause); addErr != nil {
+			slog.Warn("CRS-WIRE-02: CDCL clause generation failed",
+				slog.String("tool", inv.Tool),
+				slog.String("clause_type", "tool_error"),
+				slog.String("error", addErr.Error()),
+			)
+		} else {
+			slog.Info("CRS-WIRE-02: CDCL hard clause generated",
+				slog.String("session_id", sessionID),
+				slog.String("tool", inv.Tool),
+				slog.String("clause_id", clause.ID),
+				slog.String("failure_type", string(crs.FailureTypeToolError)),
+			)
+		}
+		return
+	}
+
+	// On empty results → hard clause (FailureTypeInvalidOutput).
+	// CDCL clauses must use SignalSourceHard per CRS validation (types.go:2190).
+	// Empty results from graph tools ARE hard signals — the tool ran authoritatively
+	// and found nothing. This is a definitive learned constraint.
+	resultCount := extractResultCount(result)
+	slog.Info("CRS-WIRE-02: extractResultCount",
+		slog.String("session_id", sessionID),
+		slog.String("tool", inv.Tool),
+		slog.Int("result_count", resultCount),
+		slog.Bool("has_result", result != nil),
+		slog.Bool("success", result != nil && result.Success),
+	)
+	if result != nil && result.Success && resultCount == 0 {
+		clause := &crs.Clause{
+			ID: fmt.Sprintf("empty_result_%s_%d", inv.Tool, time.Now().UnixMilli()),
+			Literals: []crs.Literal{
+				{Variable: fmt.Sprintf("tool:%s", inv.Tool), Negated: false},
+				{Variable: "outcome:empty", Negated: true},
+			},
+			Source:      crs.SignalSourceHard,
+			LearnedAt:   time.Now().UnixMilli(),
+			FailureType: crs.FailureTypeInvalidOutput,
+			SessionID:   sessionID,
+		}
+		if addErr := crsInstance.AddClause(ctx, clause); addErr != nil {
+			slog.Warn("CRS-WIRE-02: CDCL clause generation failed",
+				slog.String("tool", inv.Tool),
+				slog.String("clause_type", "empty_result"),
+				slog.String("error", addErr.Error()),
+			)
+		} else {
+			slog.Info("CRS-WIRE-02: CDCL empty-result clause generated",
+				slog.String("session_id", sessionID),
+				slog.String("tool", inv.Tool),
+				slog.String("clause_id", clause.ID),
+				slog.String("failure_type", string(crs.FailureTypeInvalidOutput)),
+				slog.Int("result_count", resultCount),
+			)
+		}
+	}
+}
+
+// extractResultCount extracts the result count from a tool result.
+//
+// Description:
+//
+//	Uses a priority chain to determine the discrete result count:
+//	(1) Result.ResultCount field (set by tools), (2) TraceStep metadata "match_count",
+//	(3) -1 indicating unknown (avoids false empty-result clauses).
+//
+// Inputs:
+//   - result: The tool's Result (may be nil).
+//
+// Outputs:
+//   - int: The result count, or -1 if unknown.
+//
+// Limitations:
+//   - Returns -1 for tools that don't set ResultCount and lack TraceStep metadata.
+func extractResultCount(result *tools.Result) int {
+	if result == nil {
+		return -1
+	}
+	// Priority 1: Direct field (set by IT_CRS_03 tools via Result.ResultCount).
+	// ResultCount > 0 is unambiguous.
+	if result.ResultCount > 0 {
+		return result.ResultCount
+	}
+	// Priority 2: TraceStep metadata (set by graph tools via match_count).
+	// This resolves the ResultCount=0 ambiguity: if the tool populated
+	// match_count metadata, it intentionally reported its count.
+	if result.TraceStep != nil && result.TraceStep.Metadata != nil {
+		for _, key := range resultCountKeys {
+			if mc, ok := result.TraceStep.Metadata[key]; ok {
+				if n, err := strconv.Atoi(mc); err == nil {
+					return n
+				}
+			}
+		}
+	}
+	// Priority 3: If tool set ResultCount=0 AND has a TraceStep (indicating
+	// it's a CRS-aware tool), trust the zero.
+	if result.ResultCount == 0 && result.TraceStep != nil {
+		return 0
+	}
+	return -1 // Unknown — tool doesn't support ResultCount
+}
+
+// resultCountKeys are TraceStep metadata keys that indicate discrete result counts.
+var resultCountKeys = []string{"match_count", "final_count", "path_length"}
 
 // extractSymbolsFromResult extracts symbol IDs from a tool result.
 func extractSymbolsFromResult(result *tools.Result) []string {
@@ -990,6 +1186,12 @@ func (p *ExecutePhase) updateContextWithResults(ctx context.Context, deps *Depen
 			tokensUsed = (len(outputText) + 3) / 4
 		}
 
+		// IT_CRS_03 AC-3: Extract tool name from TraceStep for pass-through decisions.
+		toolName := ""
+		if result.TraceStep != nil {
+			toolName = result.TraceStep.Tool
+		}
+
 		agentResult := agent.ToolResult{
 			InvocationID: uuid.NewString(),
 			Success:      result.Success,
@@ -999,6 +1201,8 @@ func (p *ExecutePhase) updateContextWithResults(ctx context.Context, deps *Depen
 			TokensUsed:   tokensUsed,
 			Cached:       result.Cached,
 			Truncated:    truncated,
+			Tool:         toolName,          // IT_CRS_03 AC-3
+			ProofDelta:   result.ProofDelta, // IT_CRS_03 AC-8
 		}
 
 		// Append to ToolResults - safe because session access is serialized
@@ -1108,6 +1312,23 @@ func (p *ExecutePhase) maybeRefreshGraph(ctx context.Context, deps *Dependencies
 		slog.Int("nodes_added", result.NodesAdded),
 		slog.Duration("duration", result.Duration),
 	)
+
+	// CRS-25b: Refresh Weaviate symbols for changed files.
+	if deps.SymbolStore != nil && deps.SymbolIndex != nil {
+		for _, file := range dirtyFiles {
+			if err := deps.SymbolStore.DeleteByFile(ctx, file); err != nil {
+				slog.Warn("CRS-25b: Failed to delete symbols for file",
+					slog.String("file", file), slog.String("error", err.Error()))
+			}
+		}
+		count, indexErr := deps.SymbolStore.IndexFileSymbols(ctx, deps.SymbolIndex, dirtyFiles, "")
+		if indexErr != nil {
+			slog.Warn("CRS-25b: Failed to re-index symbols", slog.String("error", indexErr.Error()))
+		} else if count > 0 {
+			slog.Info("CRS-25b: Symbols refreshed in Weaviate",
+				slog.Int("count", count), slog.Int("files", len(dirtyFiles)))
+		}
+	}
 
 	// GR-29: Invalidate CRS caches after successful refresh
 	p.invalidateGraphCaches(ctx, deps, result)
@@ -1616,6 +1837,7 @@ func (p *ExecutePhase) extractToolParameters(
 		return tools.FindArticulationPointsParams{
 			Top:            top,
 			IncludeBridges: includeBridges,
+			Package:        extractPackageContextFromQuery(query),
 		}, nil
 
 	case "find_dominators":
@@ -2017,7 +2239,8 @@ func (p *ExecutePhase) extractToolParameters(
 			slog.Int("top", top),
 		)
 		return tools.FindWeightedCriticalityParams{
-			Top: top,
+			Top:     top,
+			Package: extractPackageContextFromQuery(query),
 		}, nil
 
 	case "find_module_api":
@@ -2170,10 +2393,24 @@ func (p *ExecutePhase) extractToolParameters(
 		// "call chain from assigning a material to shader compilation"), search the
 		// symbol index for keywords and use the LLM to pick the best starting symbol.
 		if deps != nil && deps.SymbolIndex != nil && deps.ParamExtractor != nil {
-			resolved := resolveConceptualName(goCtx, funcName, query,
-				deps.SymbolIndex, deps.ParamExtractor, deps.GraphAnalytics)
-			if resolved != funcName {
-				funcName = resolved
+			var session *agent.Session
+			if deps != nil {
+				session = deps.Session
+			}
+			result := resolveConceptualName(goCtx, funcName, query,
+				deps.SymbolIndex, deps.ParamExtractor, session,
+				conceptualResolutionOpts{Analytics: deps.GraphAnalytics})
+			if result.Resolved != funcName {
+				funcName = result.Resolved
+			}
+			if result.Overridden {
+				p.learnFromFailure(goCtx, deps, crs.FailureEvent{
+					SessionID:    deps.Session.ID,
+					FailureType:  crs.FailureTypeResolutionDemotion,
+					Tool:         "get_call_chain",
+					Source:       crs.SignalSourceHard,
+					ErrorMessage: fmt.Sprintf("LLM picked tier%d [%s], overrode to tier0", result.LLMPickTier, result.LLMPick),
+				})
 			}
 		}
 
@@ -2480,6 +2717,7 @@ func convertMapToTypedParams(toolName string, params map[string]any) (tools.Type
 		return tools.FindArticulationPointsParams{
 			Top:            getIntParam(params, "top", 20),
 			IncludeBridges: getBoolParam(params, "include_bridges", true),
+			Package:        getStringParam(params, "package", ""),
 		}, nil
 
 	case "find_common_dependency":
@@ -2523,6 +2761,7 @@ func convertMapToTypedParams(toolName string, params map[string]any) (tools.Type
 			Top:          getIntParam(params, "top", 20),
 			Entry:        getStringParam(params, "entry", ""),
 			ShowQuadrant: getBoolParam(params, "show_quadrant", true),
+			Package:      getStringParam(params, "package", ""),
 		}, nil
 
 	case "find_module_api":
@@ -2718,20 +2957,203 @@ func (p *ExecutePhase) executeToolDirectlyWithFallback(
 
 	deps.Session.RecordTraceStep(stepBuilder.Build())
 
+	// CRS-WIRE-02: Generate CDCL clauses for forced tool path.
+	// The normal tool execution path calls p.recordTraceStep() which includes
+	// generateToolClauses(). The forced tool path bypasses p.recordTraceStep(),
+	// so we must call generateToolClauses() directly here.
+	if deps.Session.HasCRS() {
+		inv := &agent.ToolInvocation{Tool: toolName}
+		var errMsg string
+		if err != nil {
+			errMsg = err.Error()
+		}
+		p.generateToolClauses(ctx, deps, inv, result, errMsg)
+	}
+
+	// CRS-PROOF-01: Update proof numbers based on tool outcome.
+	if result != nil && deps.Session.HasCRS() {
+		crsInstance := deps.Session.GetCRS()
+		if crsInstance != nil {
+			if result.ResultCount > 0 {
+				// Success: tool returned results — easier to prove
+				proofNodeID := fmt.Sprintf("session:%s:tool:%s", deps.Session.ID, toolName)
+				if proofErr := crsInstance.UpdateProofNumber(ctx, crs.ProofUpdate{
+					NodeID: proofNodeID,
+					Type:   crs.ProofUpdateTypeDecrement,
+					Delta:  1,
+					Reason: "tool_success_with_results",
+					Source: crs.SignalSourceHard,
+				}); proofErr != nil {
+					slog.Warn("CRS-PROOF-01: failed to decrement proof number",
+						slog.String("tool", toolName),
+						slog.String("error", proofErr.Error()),
+					)
+				}
+				deps.Session.RecordTraceStep(crs.NewTraceStepBuilder().
+					WithAction("crs_proof_update").
+					WithTool(toolName).
+					WithMetadata("direction", "decrement").
+					WithMetadata("reason", "tool_success_with_results").
+					Build())
+			} else if result.ResultCount == 0 && result.ScopeApplied != "" {
+				// Scoped empty: scope is hard to prove
+				scopeNodeID := fmt.Sprintf("session:%s:tool:%s+scope:%s", deps.Session.ID, toolName, result.ScopeApplied)
+				if proofErr := crsInstance.UpdateProofNumber(ctx, crs.ProofUpdate{
+					NodeID: scopeNodeID,
+					Type:   crs.ProofUpdateTypeIncrement,
+					Delta:  1,
+					Reason: fmt.Sprintf("scoped_empty:scope=%s,pre_scope=%d", result.ScopeApplied, result.PreScopeCount),
+					Source: crs.SignalSourceHard,
+				}); proofErr != nil {
+					slog.Warn("CRS-PROOF-01: failed to increment proof number for scoped empty",
+						slog.String("tool", toolName),
+						slog.String("scope", result.ScopeApplied),
+						slog.String("error", proofErr.Error()),
+					)
+				}
+				deps.Session.RecordTraceStep(crs.NewTraceStepBuilder().
+					WithAction("crs_proof_update").
+					WithTool(toolName).
+					WithMetadata("direction", "increment").
+					WithMetadata("scope", result.ScopeApplied).
+					WithMetadata("pre_scope_count", fmt.Sprintf("%d", result.PreScopeCount)).
+					Build())
+			}
+		}
+	}
+
+	// CRS-SCOPE-01: Scope relaxation when scoped query returns empty.
+	// If the tool returned 0 results with a scope filter, but had results
+	// before filtering, retry once with the scope removed.
+	if result != nil && result.Success && result.ResultCount == 0 &&
+		result.ScopeApplied != "" && result.PreScopeCount > 0 {
+
+		relaxationKey := fmt.Sprintf("scope_relaxed_%s", toolName)
+		if !deps.Session.HasFlag(relaxationKey) {
+			deps.Session.SetFlag(relaxationKey)
+
+			// Record CRS reasoning step
+			deps.Session.RecordTraceStep(crs.NewTraceStepBuilder().
+				WithAction("crs_scope_relaxation").
+				WithTool(toolName).
+				WithMetadata("scope", result.ScopeApplied).
+				WithMetadata("pre_scope_count", fmt.Sprintf("%d", result.PreScopeCount)).
+				WithMetadata("reason", "scoped_query_empty_retrying_global").
+				Build())
+
+			// Generate CDCL clause: (tool:X ∧ ¬scope:Y) — this scope is empty for this tool
+			if deps.Session.HasCRS() {
+				crsInstance := deps.Session.GetCRS()
+				if crsInstance != nil {
+					scopeClause := &crs.Clause{
+						ID: fmt.Sprintf("scope_empty_%s_%s_%d", toolName, result.ScopeApplied, time.Now().UnixMilli()),
+						Literals: []crs.Literal{
+							{Variable: fmt.Sprintf("tool:%s", toolName), Negated: false},
+							{Variable: fmt.Sprintf("scope:%s", result.ScopeApplied), Negated: true},
+						},
+						Source:      crs.SignalSourceHard,
+						FailureType: crs.FailureTypeInvalidOutput,
+						SessionID:   deps.Session.ID,
+						LearnedAt:   time.Now().UnixMilli(),
+					}
+					if addErr := crsInstance.AddClause(ctx, scopeClause); addErr != nil {
+						slog.Warn("CRS-SCOPE-01: failed to add scope clause",
+							slog.String("tool", toolName),
+							slog.String("scope", result.ScopeApplied),
+							slog.String("error", addErr.Error()),
+						)
+					} else {
+						deps.Session.RecordTraceStep(crs.NewTraceStepBuilder().
+							WithAction("crs_scope_clause").
+							WithTool(toolName).
+							WithMetadata("clause_id", scopeClause.ID).
+							WithMetadata("scope", result.ScopeApplied).
+							Build())
+					}
+				}
+			}
+
+			// Save scoped (empty) result to context BEFORE re-executing
+			// so synthesis sees both the empty and populated results.
+			if deps.ContextManager != nil && deps.Context != nil {
+				if updated, updateErr := deps.ContextManager.Update(ctx, deps.Context, result); updateErr == nil {
+					deps.Context = updated
+					deps.Session.SetCurrentContext(updated)
+				}
+			}
+
+			// Re-execute with empty scope
+			slog.Info("CRS-SCOPE-01: Scope relaxation — retrying with empty scope",
+				slog.String("session_id", deps.Session.ID),
+				slog.String("tool", toolName),
+				slog.String("original_scope", result.ScopeApplied),
+				slog.Int("pre_scope_count", result.PreScopeCount),
+			)
+			relaxedParams := clearScopeFromParams(toolName, params)
+			relaxedResult, relaxedErr := tool.Execute(ctx, relaxedParams)
+			if relaxedErr == nil && relaxedResult != nil {
+				result = relaxedResult
+				err = relaxedErr
+
+				// Record proof decrement for successful relaxation
+				if result.ResultCount > 0 && deps.Session.HasCRS() {
+					crsInstance := deps.Session.GetCRS()
+					if crsInstance != nil {
+						proofNodeID := fmt.Sprintf("session:%s:tool:%s", deps.Session.ID, toolName)
+						_ = crsInstance.UpdateProofNumber(ctx, crs.ProofUpdate{
+							NodeID: proofNodeID,
+							Type:   crs.ProofUpdateTypeDecrement,
+							Delta:  1,
+							Reason: "scope_relaxation_success",
+							Source: crs.SignalSourceHard,
+						})
+						deps.Session.RecordTraceStep(crs.NewTraceStepBuilder().
+							WithAction("crs_proof_update").
+							WithTool(toolName).
+							WithMetadata("direction", "decrement").
+							WithMetadata("reason", "scope_relaxation_success").
+							Build())
+					}
+				}
+			}
+		}
+	}
+
 	// GR-59 Rev 4: Set session flag when forced graph tool completes successfully.
-	// Graph results are authoritative whether positive ("Found 3 implementations")
-	// or zero ("Symbol 'X' not found"). Both are definitive answers — the graph
-	// analyzed every source file. The LLM must synthesize from these results,
-	// not spiral into Grep/Glob loops trying to verify or search independently.
+	// CRS-GR59-01: Now CRS-aware — defer synthesis when scoped result is empty
+	// and scope relaxation hasn't been exhausted yet.
 	if graphToolsWithSubstantiveResults[toolName] &&
-		result != nil && result.Success {
-		deps.Session.SetGraphToolHadSubstantiveResults(true)
-		slog.Info("GR-59 Rev 4: Forced graph tool completed — will force synthesis",
-			slog.String("session_id", deps.Session.ID),
-			slog.String("tool", toolName),
-			slog.Int("output_len", len(result.OutputText)),
-			slog.Bool("has_positive_results", hasSubstantiveGraphResult(result.OutputText)),
-		)
+		result != nil && len(result.OutputText) > 0 {
+		hasPositiveResults := result.ResultCount > 0
+		crsExhausted := result.ScopeApplied == "" ||
+			deps.Session.HasFlag(fmt.Sprintf("scope_relaxed_%s", toolName))
+
+		if hasPositiveResults || crsExhausted {
+			deps.Session.SetGraphToolHadSubstantiveResults(true)
+			slog.Info("GR-59 Rev 4: Forced graph tool completed — will force synthesis",
+				slog.String("session_id", deps.Session.ID),
+				slog.String("tool", toolName),
+				slog.Int("output_len", len(result.OutputText)),
+				slog.Bool("has_positive_results", hasPositiveResults),
+			)
+			deps.Session.RecordTraceStep(crs.NewTraceStepBuilder().
+				WithAction("crs_synthesis_gate").
+				WithTool(toolName).
+				WithMetadata("reason", "authorized").
+				WithMetadata("has_positive_results", fmt.Sprintf("%t", hasPositiveResults)).
+				Build())
+		} else {
+			slog.Info("CRS-GR59-01: Empty scoped result, deferring synthesis for relaxation",
+				slog.String("tool", toolName),
+				slog.String("scope", result.ScopeApplied),
+			)
+			deps.Session.RecordTraceStep(crs.NewTraceStepBuilder().
+				WithAction("crs_synthesis_gate").
+				WithTool(toolName).
+				WithMetadata("reason", "deferred_for_scope_relaxation").
+				WithMetadata("scope", result.ScopeApplied).
+				Build())
+		}
 	}
 
 	// CB-30c: Track tokens for tool output.
@@ -2817,10 +3239,16 @@ func (p *ExecutePhase) updateProofNumber(ctx context.Context, deps *Dependencies
 		reason = "tool_failure: " + result.Error
 	}
 
+	// IT_CRS_03 AC-8: Use tool-specified proof delta when available.
+	var delta uint64 = 1
+	if result.ProofDelta > 0 {
+		delta = uint64(result.ProofDelta)
+	}
+
 	err := crsInstance.UpdateProofNumber(ctx, crs.ProofUpdate{
 		NodeID: nodeID,
 		Type:   updateType,
-		Delta:  1,
+		Delta:  delta,
 		Reason: reason,
 		Source: crs.SignalSourceHard, // Tool execution is a hard signal
 	})
@@ -2884,4 +3312,71 @@ func (p *ExecutePhase) markToolDisproven(ctx context.Context, deps *Dependencies
 			slog.Int("affected_nodes", affected),
 		)
 	}
+}
+
+// clearScopeFromParams removes the package/scope filter from tool parameters
+// for scope relaxation retry.
+//
+// Description:
+//
+//	CRS-SCOPE-01: When a scoped tool query returns 0 results but pre-scope
+//	results exist, the scope relaxation loop retries with an empty scope.
+//	This helper creates a copy of the params with the scope field cleared.
+//
+// Inputs:
+//
+//	toolName - The tool being re-executed.
+//	params - The original typed parameters.
+//
+// Outputs:
+//
+//	TypedParams with the scope field cleared, or the original params unchanged
+//	if the tool is not recognized.
+//
+// Thread Safety: Safe — creates new value copies, does not mutate input.
+func clearScopeFromParams(toolName string, params tools.TypedParams) tools.TypedParams {
+	switch toolName {
+	case "find_hotspots":
+		if p, ok := params.(tools.FindHotspotsParams); ok {
+			p.Package = ""
+			return p
+		}
+	case "find_important":
+		if p, ok := params.(tools.FindImportantParams); ok {
+			p.Package = ""
+			return p
+		}
+	case "find_dead_code":
+		if p, ok := params.(tools.FindDeadCodeParams); ok {
+			p.Package = ""
+			return p
+		}
+	case "find_communities":
+		if p, ok := params.(tools.FindCommunitiesParams); ok {
+			p.PackageFilter = ""
+			return p
+		}
+	// CRS-13: New scope-aware tools.
+	case "find_cycles":
+		if p, ok := params.(tools.FindCyclesParams); ok {
+			p.PackageFilter = ""
+			return p
+		}
+	case "find_symbol":
+		if p, ok := params.(tools.FindSymbolParams); ok {
+			p.Package = ""
+			return p
+		}
+	case "find_articulation_points":
+		if p, ok := params.(tools.FindArticulationPointsParams); ok {
+			p.Package = ""
+			return p
+		}
+	case "find_weighted_criticality":
+		if p, ok := params.(tools.FindWeightedCriticalityParams); ok {
+			p.Package = ""
+			return p
+		}
+	}
+	return params
 }

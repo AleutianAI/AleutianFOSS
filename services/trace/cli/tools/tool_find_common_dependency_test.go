@@ -417,3 +417,85 @@ func TestFindCommonDependencyTool_OutputFormat(t *testing.T) {
 		}
 	})
 }
+
+// TestFindCommonDependencyTool_CRS_Metadata verifies CRS metadata keys.
+func TestFindCommonDependencyTool_CRS_Metadata(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphForCommonDependency(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindCommonDependencyTool(analytics, idx)
+
+	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+		"targets": []string{"C", "D"},
+	}})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+
+	if result.TraceStep == nil {
+		t.Fatal("TraceStep should be populated")
+	}
+
+	meta := result.TraceStep.Metadata
+
+	t.Run("has entry", func(t *testing.T) {
+		if _, ok := meta["entry"]; !ok {
+			t.Error("TraceStep.Metadata missing 'entry'")
+		}
+	})
+
+	t.Run("has target_count", func(t *testing.T) {
+		val, ok := meta["target_count"]
+		if !ok {
+			t.Error("TraceStep.Metadata missing 'target_count'")
+		}
+		if val != "2" {
+			t.Errorf("target_count = %q, want '2'", val)
+		}
+	})
+
+	t.Run("has lcd", func(t *testing.T) {
+		if _, ok := meta["lcd"]; !ok {
+			t.Error("TraceStep.Metadata missing 'lcd'")
+		}
+	})
+
+	t.Run("has lcd_found", func(t *testing.T) {
+		val, ok := meta["lcd_found"]
+		if !ok {
+			t.Error("TraceStep.Metadata missing 'lcd_found'")
+		}
+		if val != "1" {
+			t.Errorf("lcd_found = %q, want '1'", val)
+		}
+	})
+
+	t.Run("has dom_converged", func(t *testing.T) {
+		if _, ok := meta["dom_converged"]; !ok {
+			t.Error("TraceStep.Metadata missing 'dom_converged'")
+		}
+	})
+
+	t.Run("has dom_iterations", func(t *testing.T) {
+		if _, ok := meta["dom_iterations"]; !ok {
+			t.Error("TraceStep.Metadata missing 'dom_iterations'")
+		}
+	})
+
+	t.Run("action and tool correct", func(t *testing.T) {
+		if result.TraceStep.Action != "tool_find_common_dependency" {
+			t.Errorf("Action = %q, want 'tool_find_common_dependency'", result.TraceStep.Action)
+		}
+		if result.TraceStep.Tool != "find_common_dependency" {
+			t.Errorf("Tool = %q, want 'find_common_dependency'", result.TraceStep.Tool)
+		}
+	})
+}

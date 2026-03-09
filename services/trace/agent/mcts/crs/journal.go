@@ -220,6 +220,33 @@ type Journal interface {
 
 	// Stats returns journal statistics.
 	Stats() JournalStats
+
+	// Backup creates a portable backup of the journal.
+	//
+	// Inputs:
+	//   - ctx: Context for cancellation. Must not be nil.
+	//   - w: Writer to receive backup data. Must not be nil.
+	//
+	// Outputs:
+	//   - error: Non-nil if backup fails.
+	//
+	// Thread Safety: Safe for concurrent use.
+	Backup(ctx context.Context, w io.Writer) error
+
+	// Restore loads state from a backup.
+	//
+	// Inputs:
+	//   - ctx: Context for cancellation. Must not be nil.
+	//   - r: Reader containing backup data. Must not be nil.
+	//
+	// Outputs:
+	//   - error: Non-nil if restore fails.
+	//
+	// Limitations:
+	//   - Restore is all-or-nothing: failure leaves journal in undefined state.
+	//
+	// Thread Safety: NOT safe for concurrent use. Caller must ensure exclusivity.
+	Restore(ctx context.Context, r io.Reader) error
 }
 
 // DeltaOrError is used for streaming replay.
@@ -463,6 +490,15 @@ func (j *BadgerJournal) decodeEntry(data []byte) (Delta, error) {
 
 // registerDeltaTypes registers all delta types for gob encoding.
 var deltaTypesRegistered sync.Once
+
+// RegisterDeltaTypesForSSE exposes gob type registration for SSE decoding.
+// CRS-27: Called by the SSE handler to ensure delta types are registered
+// before decoding NATS messages.
+//
+// Thread Safety: Safe for concurrent use (uses sync.Once internally).
+func RegisterDeltaTypesForSSE() {
+	registerDeltaTypes()
+}
 
 func registerDeltaTypes() {
 	deltaTypesRegistered.Do(func() {

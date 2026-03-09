@@ -13,15 +13,27 @@ package patterns
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
+)
+
+// Package-level compiled regexes for convention extraction.
+var (
+	reErrorWrap     = regexp.MustCompile(`fmt\.Errorf.*%w|errors\.Wrap|xerrors\.Errorf`)
+	reErrorf        = regexp.MustCompile(`fmt\.Errorf`)
+	reTableDriven   = regexp.MustCompile(`(?:tests|cases|testCases)\s*:?=\s*\[\]`)
+	reSubtest       = regexp.MustCompile(`t\.Run\(`)
+	reParallel      = regexp.MustCompile(`t\.Parallel\(\)`)
+	reDocExample    = regexp.MustCompile(`(?m)^//\s*Example:`)
+	reGroupedImport = regexp.MustCompile(`import\s+\([\s\S]*?\n\s*\n[\s\S]*?\)`)
+	reAliasImport   = regexp.MustCompile(`\w+\s+"`)
 )
 
 // ConventionType categorizes conventions.
@@ -55,6 +67,11 @@ type ConventionOptions struct {
 	// MinFrequency is the minimum frequency to report (0.0 - 1.0).
 	MinFrequency float64
 
+	// Types filters which convention categories to extract.
+	// Valid values: "naming", "error_handling", "file_organization", "testing", "documentation", "imports".
+	// Empty slice means all types.
+	Types []string
+
 	// IncludeTests includes test files in analysis.
 	IncludeTests bool
 }
@@ -79,9 +96,10 @@ func DefaultConventionOptions() ConventionOptions {
 //
 // This type is safe for concurrent use.
 type ConventionExtractor struct {
-	idx         *index.SymbolIndex
-	projectRoot string
-	mu          sync.RWMutex
+	idx        *index.SymbolIndex
+	fileReader *FileReader
+	crs        CRSRecorder
+	mu         sync.RWMutex
 }
 
 // NewConventionExtractor creates a new convention extractor.
@@ -96,9 +114,33 @@ type ConventionExtractor struct {
 //   - *ConventionExtractor: Configured extractor.
 func NewConventionExtractor(idx *index.SymbolIndex, projectRoot string) *ConventionExtractor {
 	return &ConventionExtractor{
-		idx:         idx,
-		projectRoot: projectRoot,
+		idx:        idx,
+		fileReader: NewFileReader(projectRoot),
+		crs:        &NopCRSRecorder{},
 	}
+}
+
+// NewConventionExtractorWithReader creates a convention extractor with a shared FileReader.
+//
+// # Inputs
+//
+//   - idx: Symbol index for lookups.
+//   - reader: Shared cached file reader.
+//
+// # Outputs
+//
+//   - *ConventionExtractor: Configured extractor.
+func NewConventionExtractorWithReader(idx *index.SymbolIndex, reader *FileReader) *ConventionExtractor {
+	return &ConventionExtractor{
+		idx:        idx,
+		fileReader: reader,
+		crs:        &NopCRSRecorder{},
+	}
+}
+
+// SetCRS configures CRS recording for this extractor.
+func (c *ConventionExtractor) SetCRS(recorder CRSRecorder) {
+	c.crs = recorder
 }
 
 // ExtractConventions extracts coding conventions from the specified scope.
@@ -131,12 +173,22 @@ func (c *ConventionExtractor) ExtractConventions(
 		return nil, ErrInvalidInput
 	}
 
+	start := time.Now()
+	ctx, span := startConventionsSpan(ctx, scope)
+	defer span.End()
+
 	if opts == nil {
 		defaults := DefaultConventionOptions()
 		opts = &defaults
 	}
 
 	var conventions []Convention
+
+	// Build type filter set for O(1) lookup
+	typeFilter := make(map[string]bool, len(opts.Types))
+	for _, t := range opts.Types {
+		typeFilter[t] = true
+	}
 
 	// Extract different types of conventions
 	extractors := []struct {
@@ -152,6 +204,10 @@ func (c *ConventionExtractor) ExtractConventions(
 	}
 
 	for _, extractor := range extractors {
+		// Skip if type filter is active and this type isn't included
+		if len(typeFilter) > 0 && !typeFilter[extractor.name] {
+			continue
+		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -170,6 +226,11 @@ func (c *ConventionExtractor) ExtractConventions(
 	sort.Slice(conventions, func(i, j int) bool {
 		return conventions[i].Frequency > conventions[j].Frequency
 	})
+
+	dur := time.Since(start)
+	setConventionsSpanResult(span, len(conventions), nil)
+	recordConventionsMetrics(ctx, dur, len(conventions), nil)
+	c.crs.RecordToolStep(ctx, "extract_conventions", len(conventions), dur, nil)
 
 	return conventions, nil
 }
@@ -273,8 +334,8 @@ func (c *ConventionExtractor) extractErrorHandlingConventions(
 	usesErrorf := 0
 	totalFuncs := 0
 
-	errwrapPatterns := regexp.MustCompile(`fmt\.Errorf.*%w|errors\.Wrap|xerrors\.Errorf`)
-	errorfPattern := regexp.MustCompile(`fmt\.Errorf`)
+	errwrapPatterns := reErrorWrap
+	errorfPattern := reErrorf
 
 	for _, fn := range allFuncs {
 		if ctx.Err() != nil {
@@ -293,7 +354,7 @@ func (c *ConventionExtractor) extractErrorHandlingConventions(
 		}
 
 		// Read function code to check patterns
-		code, err := c.readSymbolCode(fn)
+		code, err := c.fileReader.ReadSymbolCode(fn)
 		if err != nil {
 			continue
 		}
@@ -451,16 +512,16 @@ func (c *ConventionExtractor) extractTestingConventions(
 	subtests := 0
 	parallelTests := 0
 
-	tableDrivenPattern := regexp.MustCompile(`(?:tests|cases|testCases)\s*:?=\s*\[\]`)
-	subtestPattern := regexp.MustCompile(`t\.Run\(`)
-	parallelPattern := regexp.MustCompile(`t\.Parallel\(\)`)
+	tableDrivenPattern := reTableDriven
+	subtestPattern := reSubtest
+	parallelPattern := reParallel
 
 	for _, fn := range testFuncs {
 		if ctx.Err() != nil {
 			break
 		}
 
-		code, err := c.readSymbolCode(fn)
+		code, err := c.fileReader.ReadSymbolCode(fn)
 		if err != nil {
 			continue
 		}
@@ -524,7 +585,7 @@ func (c *ConventionExtractor) extractDocumentationConventions(
 	documented := 0
 	hasExamples := 0
 
-	examplePattern := regexp.MustCompile(`(?m)^//\s*Example:`)
+	examplePattern := reDocExample
 
 	for _, fn := range functions {
 		if ctx.Err() != nil {
@@ -592,8 +653,8 @@ func (c *ConventionExtractor) extractImportConventions(
 	aliasedImports := 0
 	totalFiles := 0
 
-	groupedPattern := regexp.MustCompile(`import\s+\([\s\S]*?\n\s*\n[\s\S]*?\)`)
-	aliasPattern := regexp.MustCompile(`\w+\s+"`)
+	groupedPattern := reGroupedImport
+	aliasPattern := reAliasImport
 
 	for filePath := range files {
 		if ctx.Err() != nil {
@@ -602,14 +663,12 @@ func (c *ConventionExtractor) extractImportConventions(
 
 		totalFiles++
 
-		fullPath := filepath.Join(c.projectRoot, filePath)
-		content, err := os.ReadFile(fullPath)
+		lines, err := c.fileReader.ReadLines(filePath)
 		if err != nil {
 			continue
 		}
 
 		// Get import section (first 50 lines should be enough)
-		lines := strings.Split(string(content), "\n")
 		if len(lines) > 50 {
 			lines = lines[:50]
 		}
@@ -670,21 +729,6 @@ func (c *ConventionExtractor) inScope(sym *ast.Symbol, scope string, includeTest
 	}
 
 	return strings.HasPrefix(sym.FilePath, scope)
-}
-
-func (c *ConventionExtractor) readSymbolCode(sym *ast.Symbol) (string, error) {
-	filePath := filepath.Join(c.projectRoot, sym.FilePath)
-	content, err := os.ReadFile(filePath)
-	if err != nil {
-		return "", err
-	}
-
-	lines := strings.Split(string(content), "\n")
-	if sym.StartLine < 1 || sym.EndLine > len(lines) {
-		return "", fmt.Errorf("lines out of bounds")
-	}
-
-	return strings.Join(lines[sym.StartLine-1:sym.EndLine], "\n"), nil
 }
 
 func classifyName(name string) []string {

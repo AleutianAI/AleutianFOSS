@@ -951,7 +951,7 @@ func TestDisambiguateGraphNodes(t *testing.T) {
 			FilePath: "cmd/main_test.go", StartLine: 5, EndLine: 10, Language: "go", Exported: false,
 		}
 
-		result := disambiguateGraphNodes([]*ast.Symbol{test, source})
+		result := DisambiguateGraphNodes([]*ast.Symbol{test, source})
 		if result.ID != source.ID {
 			t.Errorf("expected source file preferred, got %s", result.ID)
 		}
@@ -967,7 +967,7 @@ func TestDisambiguateGraphNodes(t *testing.T) {
 			FilePath: "pkg/b.go", StartLine: 5, EndLine: 10, Language: "go", Exported: false,
 		}
 
-		result := disambiguateGraphNodes([]*ast.Symbol{unexported, exported})
+		result := DisambiguateGraphNodes([]*ast.Symbol{unexported, exported})
 		if result.ID != exported.ID {
 			t.Errorf("expected exported preferred, got %s", result.ID)
 		}
@@ -983,7 +983,7 @@ func TestDisambiguateGraphNodes(t *testing.T) {
 			FilePath: "internal/warpc/gen/run.go", StartLine: 5, EndLine: 10, Language: "go", Exported: true,
 		}
 
-		result := disambiguateGraphNodes([]*ast.Symbol{deep, shallow})
+		result := DisambiguateGraphNodes([]*ast.Symbol{deep, shallow})
 		if result.ID != shallow.ID {
 			t.Errorf("expected shallow path preferred, got %s", result.ID)
 		}
@@ -999,7 +999,7 @@ func TestDisambiguateGraphNodes(t *testing.T) {
 			FilePath: "pkg/b.go", StartLine: 10, EndLine: 20, Language: "go", Exported: true,
 		}
 
-		result := disambiguateGraphNodes([]*ast.Symbol{st, fn})
+		result := DisambiguateGraphNodes([]*ast.Symbol{st, fn})
 		if result.ID != fn.ID {
 			t.Errorf("expected function preferred over struct, got %s", result.ID)
 		}
@@ -1010,21 +1010,21 @@ func TestDisambiguateGraphNodes(t *testing.T) {
 			ID: "pkg/a.go:10:X", Name: "X", Kind: ast.SymbolKindFunction,
 			FilePath: "pkg/a.go", StartLine: 10, EndLine: 20, Language: "go",
 		}
-		result := disambiguateGraphNodes([]*ast.Symbol{sym})
+		result := DisambiguateGraphNodes([]*ast.Symbol{sym})
 		if result.ID != sym.ID {
 			t.Errorf("expected single node returned, got %s", result.ID)
 		}
 	})
 
 	t.Run("nil slice returns nil", func(t *testing.T) {
-		result := disambiguateGraphNodes(nil)
+		result := DisambiguateGraphNodes(nil)
 		if result != nil {
 			t.Errorf("expected nil for nil slice, got %v", result)
 		}
 	})
 
 	t.Run("empty slice returns nil", func(t *testing.T) {
-		result := disambiguateGraphNodes([]*ast.Symbol{})
+		result := DisambiguateGraphNodes([]*ast.Symbol{})
 		if result != nil {
 			t.Errorf("expected nil for empty slice, got %v", result)
 		}
@@ -1040,7 +1040,7 @@ func TestDisambiguateGraphNodes(t *testing.T) {
 			FilePath: "internal/deep/test/helper_test.go", StartLine: 5, EndLine: 10, Language: "go", Exported: false,
 		}
 
-		result := disambiguateGraphNodes([]*ast.Symbol{bad, good})
+		result := DisambiguateGraphNodes([]*ast.Symbol{bad, good})
 		if result.ID != good.ID {
 			t.Errorf("expected good symbol preferred, got %s", result.ID)
 		}
@@ -1067,9 +1067,9 @@ func TestIsGraphNodeTestFile(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
-			got := isGraphNodeTestFile(tt.path)
+			got := IsGraphNodeTestFile(tt.path)
 			if got != tt.want {
-				t.Errorf("isGraphNodeTestFile(%q) = %v, want %v", tt.path, got, tt.want)
+				t.Errorf("IsGraphNodeTestFile(%q) = %v, want %v", tt.path, got, tt.want)
 			}
 		})
 	}
@@ -2123,5 +2123,106 @@ func TestGetCallChain_RetriesOnDepthOne(t *testing.T) {
 	}
 	if output.EdgeCount < 3 {
 		t.Errorf("expected at least 3 edges, got %d", output.EdgeCount)
+	}
+}
+
+// TestGetCallChain_CRS_Metadata verifies all CRS metadata keys are populated.
+func TestGetCallChain_CRS_Metadata(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithCallers(t)
+	tool := NewGetCallChainTool(g, idx)
+
+	t.Run("success path has resolved name and candidates metadata", func(t *testing.T) {
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"function_name": "main",
+			"direction":     "downstream",
+			"max_depth":     5,
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		if result.TraceStep == nil {
+			t.Fatal("TraceStep should be populated")
+		}
+
+		meta := result.TraceStep.Metadata
+		requiredKeys := []string{
+			"chain_length",
+			"depth",
+			"direction",
+			"truncated",
+			"resolved_id",
+			"resolution_method",
+			"candidates_count",
+		}
+		for _, key := range requiredKeys {
+			t.Run("has_"+key, func(t *testing.T) {
+				if _, ok := meta[key]; !ok {
+					t.Errorf("TraceStep.Metadata missing '%s'", key)
+				}
+			})
+		}
+
+		// resolved_id should be non-empty
+		if meta["resolved_id"] == "" {
+			t.Error("resolved_id should not be empty")
+		}
+
+		// resolution_method should be "index" or "graph_fallback"
+		rm := meta["resolution_method"]
+		if rm != "index" && rm != "graph_fallback" {
+			t.Errorf("resolution_method = %q, want 'index' or 'graph_fallback'", rm)
+		}
+	})
+
+	t.Run("not-found path has metadata", func(t *testing.T) {
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"function_name": "nonExistentFunction",
+			"direction":     "downstream",
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if result.Success {
+			t.Error("Expected failure for non-existent function")
+		}
+
+		if result.TraceStep == nil {
+			t.Fatal("TraceStep should be populated even on not-found")
+		}
+
+		// Not-found path should have direction and chain_length=0
+		if result.TraceStep.Metadata["chain_length"] != "0" {
+			t.Errorf("chain_length = %q, want '0'", result.TraceStep.Metadata["chain_length"])
+		}
+	})
+}
+
+// IT_CRS_03 AC-13: Verify candidate_retried metadata.
+func TestGetCallChain_CandidateRetryMetadata(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithCallers(t)
+	tool := NewGetCallChainTool(g, idx)
+
+	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+		"function_name": "main",
+		"direction":     "downstream",
+	}})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.TraceStep == nil {
+		t.Fatal("TraceStep should be populated")
+	}
+
+	meta := result.TraceStep.Metadata
+	for _, key := range []string{"candidate_retried", "original_candidate_id", "original_edge_count"} {
+		if _, ok := meta[key]; !ok {
+			t.Errorf("TraceStep.Metadata missing '%s'", key)
+		}
 	}
 }

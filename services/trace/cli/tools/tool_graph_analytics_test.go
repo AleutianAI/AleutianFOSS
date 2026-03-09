@@ -438,8 +438,11 @@ func TestFindPathTool_Execute(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
 		}
-		if !result.Success {
-			t.Fatalf("Execute() failed: %s", result.Error)
+		if result.Success {
+			t.Fatal("Execute() should return Success=false for disconnected symbols")
+		}
+		if result.Error == "" {
+			t.Error("expected non-empty Error for disconnected symbols")
 		}
 
 		output, ok := result.Output.(FindPathOutput)
@@ -461,8 +464,11 @@ func TestFindPathTool_Execute(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
 		}
-		if !result.Success {
-			t.Fatalf("Execute() failed: %s", result.Error)
+		if result.Success {
+			t.Fatal("Execute() should return Success=false for non-existent from symbol")
+		}
+		if result.Error == "" {
+			t.Error("expected non-empty Error for non-existent symbol")
 		}
 
 		// Should return a message about symbol not found
@@ -480,8 +486,11 @@ func TestFindPathTool_Execute(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
 		}
-		if !result.Success {
-			t.Fatalf("Execute() failed: %s", result.Error)
+		if result.Success {
+			t.Fatal("Execute() should return Success=false for non-existent to symbol")
+		}
+		if result.Error == "" {
+			t.Error("expected non-empty Error for non-existent symbol")
 		}
 
 		if result.OutputText == "" {

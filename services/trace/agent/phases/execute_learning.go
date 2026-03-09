@@ -185,6 +185,17 @@ func (p *ExecutePhase) generateClauseFromFailure(sessionID string, failure crs.F
 			})
 		}
 
+	case crs.FailureTypeResolutionDemotion:
+		// D3: Resolution demotion — block the demoted symbol within session.
+		// The ErrorMessage contains the demoted symbol name in format
+		// "LLM picked tierN [symbolName], overrode to tier0".
+		if failure.ErrorMessage != "" {
+			literals = append(literals, crs.Literal{
+				Variable: "resolved_symbol:" + failure.ErrorMessage,
+				Negated:  true,
+			})
+		}
+
 	default:
 		// Unknown failure type - cannot generate clause
 		return nil

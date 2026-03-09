@@ -40,6 +40,11 @@ type FindArticulationPointsParams struct {
 	// IncludeBridges indicates whether to include critical edges (bridges).
 	// Default: true
 	IncludeBridges bool
+
+	// Package filters articulation points to those in a matching package/directory.
+	// CRS-13: Uses matchesPackageScope() for boundary-aware cross-language matching.
+	// Empty string means no filter (all articulation points returned).
+	Package string
 }
 
 // ToolName returns the tool name for TypedParams interface.
@@ -47,10 +52,14 @@ func (p FindArticulationPointsParams) ToolName() string { return "find_articulat
 
 // ToMap converts typed parameters to the map consumed by Tool.Execute().
 func (p FindArticulationPointsParams) ToMap() map[string]any {
-	return map[string]any{
+	m := map[string]any{
 		"top":             p.Top,
 		"include_bridges": p.IncludeBridges,
 	}
+	if p.Package != "" {
+		m["package"] = p.Package
+	}
+	return m
 }
 
 // FindArticulationPointsOutput contains the structured result.
@@ -179,6 +188,12 @@ func (t *findArticulationPointsTool) Definition() ToolDefinition {
 				Required:    false,
 				Default:     true,
 			},
+			"package": {
+				Type:        ParamTypeString,
+				Description: "Filter articulation points to those in this package or directory (optional)",
+				Required:    false,
+				Default:     "",
+			},
 		},
 		Category:    CategoryExploration,
 		Priority:    84,
@@ -256,6 +271,35 @@ func (t *findArticulationPointsTool) Execute(ctx context.Context, params TypedPa
 		attribute.String("trace_action", traceStep.Action),
 	)
 
+	// CRS-13: Apply package scope filter to articulation points.
+	var scopeApplied string
+	var scopePreCount int
+	if p.Package != "" && t.index != nil {
+		scopeApplied = p.Package
+		scopePreCount = len(result.Points)
+
+		var filteredPoints []string
+		for _, pointID := range result.Points {
+			sym, ok := t.index.GetByID(pointID)
+			if !ok || sym == nil {
+				continue
+			}
+			if matchesPackageScope(sym, p.Package) {
+				filteredPoints = append(filteredPoints, pointID)
+			}
+		}
+
+		t.logger.Info("IT-07: find_articulation_points scope filter",
+			slog.String("package", p.Package),
+			slog.Int("before", scopePreCount),
+			slog.Int("after", len(filteredPoints)),
+		)
+
+		// Replace points with filtered set. Bridges are left unfiltered
+		// since they describe global connectivity properties.
+		result.Points = filteredPoints
+	}
+
 	// Calculate fragility score
 	fragilityScore := 0.0
 	if result.NodeCount > 0 {
@@ -283,13 +327,25 @@ func (t *findArticulationPointsTool) Execute(ctx context.Context, params TypedPa
 	traceStep.Metadata["fragility_score"] = fmt.Sprintf("%.4f", fragilityScore)
 	traceStep.Metadata["fragility_level"] = output.FragilityLevel
 
+	// CRS Gap: Add result count, node count, and input params for self-contained trace
+	traceStep.Metadata["result_count"] = fmt.Sprintf("%d", len(output.ArticulationPoints))
+	traceStep.Metadata["total_points"] = fmt.Sprintf("%d", len(result.Points))
+	traceStep.Metadata["node_count"] = fmt.Sprintf("%d", result.NodeCount)
+	traceStep.Metadata["bridges_included"] = fmt.Sprintf("%v", p.IncludeBridges)
+	traceStep.Metadata["bridge_count"] = fmt.Sprintf("%d", len(result.Bridges))
+	traceStep.Metadata["top"] = fmt.Sprintf("%d", p.Top)
+
+	hasResults := len(output.ArticulationPoints) > 0
 	return &Result{
-		Success:    true,
-		Output:     output,
-		OutputText: outputText,
-		TokensUsed: estimateTokens(outputText),
-		TraceStep:  &traceStep,
-		Duration:   time.Since(start),
+		Success:       hasResults,
+		Output:        output,
+		OutputText:    outputText,
+		TokensUsed:    estimateTokens(outputText),
+		TraceStep:     &traceStep,
+		Duration:      time.Since(start),
+		ResultCount:   len(output.ArticulationPoints),
+		ScopeApplied:  scopeApplied,
+		PreScopeCount: scopePreCount,
 	}, nil
 }
 
@@ -324,6 +380,13 @@ func (t *findArticulationPointsTool) parseParams(params map[string]any) (FindArt
 	if includeBridgesRaw, ok := params["include_bridges"]; ok {
 		if includeBridges, ok := parseBoolParam(includeBridgesRaw); ok {
 			p.IncludeBridges = includeBridges
+		}
+	}
+
+	// CRS-13: Extract package (optional)
+	if pkgRaw, ok := params["package"]; ok {
+		if pkg, ok := parseStringParam(pkgRaw); ok {
+			p.Package = strings.TrimSpace(pkg)
 		}
 	}
 

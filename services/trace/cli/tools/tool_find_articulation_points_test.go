@@ -222,8 +222,10 @@ func TestFindArticulationPointsTool_NoArticulationPoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if !result.Success {
-		t.Fatalf("Execute() failed: %s", result.Error)
+
+	// CRS hollow success: Success=false when 0 articulation points
+	if result.Success {
+		t.Error("Expected Success=false when no articulation points found (hollow success protection)")
 	}
 
 	output, ok := result.Output.(FindArticulationPointsOutput)
@@ -333,8 +335,10 @@ func TestFindArticulationPointsTool_EmptyGraph(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if !result.Success {
-		t.Fatalf("Execute() failed: %s", result.Error)
+
+	// CRS hollow success: Success=false when 0 articulation points in empty graph
+	if result.Success {
+		t.Error("Expected Success=false for empty graph (hollow success protection)")
 	}
 
 	output, ok := result.Output.(FindArticulationPointsOutput)
@@ -747,9 +751,7 @@ func TestFindArticulationPointsTool_FragilityLevels(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Execute() error = %v", err)
 			}
-			if !result.Success {
-				t.Fatalf("Execute() failed: %s", result.Error)
-			}
+			// Note: Success may be false for graphs with no articulation points (hollow success protection)
 
 			output, ok := result.Output.(FindArticulationPointsOutput)
 			if !ok {
@@ -901,5 +903,134 @@ func TestFindArticulationPointsTool_BridgeMetadata(t *testing.T) {
 	}
 	if bridge.To == "" {
 		t.Error("Bridge To should not be empty")
+	}
+}
+
+// TestFindArticulationPointsTool_CRS_Metadata verifies all CRS metadata keys are populated.
+func TestFindArticulationPointsTool_CRS_Metadata(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphForArticulationPoints(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindArticulationPointsTool(analytics, idx)
+
+	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+		"top":             5,
+		"include_bridges": true,
+	}})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+
+	if result.TraceStep == nil {
+		t.Fatal("TraceStep should be populated")
+	}
+
+	meta := result.TraceStep.Metadata
+
+	t.Run("has result_count", func(t *testing.T) {
+		if _, ok := meta["result_count"]; !ok {
+			t.Error("TraceStep.Metadata missing 'result_count'")
+		}
+	})
+
+	t.Run("has total_points", func(t *testing.T) {
+		if _, ok := meta["total_points"]; !ok {
+			t.Error("TraceStep.Metadata missing 'total_points'")
+		}
+	})
+
+	t.Run("has node_count", func(t *testing.T) {
+		if _, ok := meta["node_count"]; !ok {
+			t.Error("TraceStep.Metadata missing 'node_count'")
+		}
+	})
+
+	t.Run("has bridges_included", func(t *testing.T) {
+		val, ok := meta["bridges_included"]
+		if !ok {
+			t.Error("TraceStep.Metadata missing 'bridges_included'")
+		}
+		if val != "true" {
+			t.Errorf("bridges_included = %q, want 'true'", val)
+		}
+	})
+
+	t.Run("has bridge_count", func(t *testing.T) {
+		if _, ok := meta["bridge_count"]; !ok {
+			t.Error("TraceStep.Metadata missing 'bridge_count'")
+		}
+	})
+
+	t.Run("has top", func(t *testing.T) {
+		val, ok := meta["top"]
+		if !ok {
+			t.Error("TraceStep.Metadata missing 'top'")
+		}
+		if val != "5" {
+			t.Errorf("top = %q, want '5'", val)
+		}
+	})
+
+	t.Run("has fragility_score", func(t *testing.T) {
+		if _, ok := meta["fragility_score"]; !ok {
+			t.Error("TraceStep.Metadata missing 'fragility_score'")
+		}
+	})
+
+	t.Run("has fragility_level", func(t *testing.T) {
+		if _, ok := meta["fragility_level"]; !ok {
+			t.Error("TraceStep.Metadata missing 'fragility_level'")
+		}
+	})
+
+	t.Run("result_count matches output", func(t *testing.T) {
+		output, ok := result.Output.(FindArticulationPointsOutput)
+		if !ok {
+			t.Fatalf("Output is not FindArticulationPointsOutput")
+		}
+		expected := fmt.Sprintf("%d", len(output.ArticulationPoints))
+		if meta["result_count"] != expected {
+			t.Errorf("result_count = %q, want %q", meta["result_count"], expected)
+		}
+	})
+}
+
+// TestFindArticulationPointsTool_HollowSuccess verifies Success=false when no points found.
+func TestFindArticulationPointsTool_HollowSuccess(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createConnectedGraphNoArticulation(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindArticulationPointsTool(analytics, idx)
+
+	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{}})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if result.Success {
+		t.Error("Expected Success=false when no articulation points found")
+	}
+
+	// TraceStep should still be present
+	if result.TraceStep == nil {
+		t.Fatal("TraceStep should be populated even on hollow success")
+	}
+
+	// result_count should be "0"
+	if result.TraceStep.Metadata["result_count"] != "0" {
+		t.Errorf("result_count = %q, want '0'", result.TraceStep.Metadata["result_count"])
 	}
 }

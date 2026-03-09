@@ -1151,6 +1151,31 @@ func (a *GraphAnalytics) GetCouplingForPackage(pkg string) *CouplingMetrics {
 	}
 }
 
+// ShortestPath finds the shortest path between two symbols in the graph.
+//
+// Description:
+//
+//	D3c: Accessor that delegates to the underlying Graph's ShortestPath method.
+//	Used by filterByReachability to check if a candidate is reachable from the
+//	from-side symbol.
+//
+// Inputs:
+//   - ctx: Context for cancellation.
+//   - fromID: Source symbol ID.
+//   - toID: Destination symbol ID.
+//
+// Outputs:
+//   - *PathResult: Path details or nil if no path exists.
+//   - error: Non-nil if graph is unavailable or nodes not found.
+//
+// Thread Safety: Safe for concurrent use.
+func (a *GraphAnalytics) ShortestPath(ctx context.Context, fromID, toID string) (*PathResult, error) {
+	if a == nil || a.graph == nil {
+		return nil, fmt.Errorf("graph not available")
+	}
+	return a.graph.ShortestPath(ctx, fromID, toID)
+}
+
 // =============================================================================
 // CRS Session Management (GR-19c)
 // =============================================================================

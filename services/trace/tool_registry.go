@@ -311,6 +311,7 @@ func allToolDefinitions() []ToolDefinition {
 				{Name: "graph_id", Type: "string", Description: "The graph ID from /init", Required: true},
 				{Name: "scope", Type: "string", Description: "Package or file to scan", Required: false, Default: ""},
 				{Name: "min_severity", Type: "string", Description: "Minimum severity: INFO, WARNING, ERROR", Required: false, Default: "WARNING", Enum: []string{"INFO", "WARNING", "ERROR"}},
+				{Name: "context_lines", Type: "number", Description: "Lines of surrounding code to include in results (0 = no code context)", Required: false, Default: "0"},
 				{Name: "include_tests", Type: "boolean", Description: "Include test files", Required: false, Default: "false"},
 			},
 			Returns:     "Code smells with severity, location, and suggestions",
@@ -325,6 +326,7 @@ func allToolDefinitions() []ToolDefinition {
 				{Name: "scope", Type: "string", Description: "Package or file to scan", Required: false, Default: ""},
 				{Name: "min_similarity", Type: "number", Description: "Minimum similarity (0.0-1.0)", Required: false, Default: "0.8"},
 				{Name: "type", Type: "string", Description: "Type: exact, near, structural, all", Required: false, Default: "all", Enum: []string{"exact", "near", "structural", "all"}},
+				{Name: "include_tests", Type: "boolean", Description: "Include test files", Required: false, Default: "false"},
 			},
 			Returns:     "Duplications with locations, similarity, and refactoring suggestions",
 			Performance: "<500ms",
@@ -335,6 +337,7 @@ func allToolDefinitions() []ToolDefinition {
 			Category:    "patterns",
 			Parameters: []ToolParam{
 				{Name: "graph_id", Type: "string", Description: "The graph ID from /init", Required: true},
+				{Name: "scope", Type: "string", Description: "Package path prefix to filter (empty = all)", Required: false, Default: ""},
 				{Name: "level", Type: "string", Description: "Granularity: package, type, function", Required: false, Default: "package", Enum: []string{"package", "type", "function"}},
 			},
 			Returns:     "Circular dependencies with cycles and break point suggestions",

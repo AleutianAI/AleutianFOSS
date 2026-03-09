@@ -252,18 +252,36 @@ func (t *findCyclesTool) Execute(ctx context.Context, params TypedParams) (*Resu
 		})
 	}
 
-	// Filter by min_size, package_filter, and apply limit
-	var filtered []graph.CyclicDependency
-	lowerPkgFilter := strings.ToLower(p.PackageFilter)
+	// CRS-13: Track scope metadata for scope relaxation.
+	var scopeApplied string
+	var scopePreCount int
+
+	// Filter by min_size first (not scope-related).
+	var sizeFiltered []graph.CyclicDependency
 	for _, cycle := range cycles {
 		if cycle.Length < p.MinSize {
 			continue
 		}
+		sizeFiltered = append(sizeFiltered, cycle)
+	}
+
+	// Apply package filter (scope) and limit.
+	var filtered []graph.CyclicDependency
+	lowerPkgFilter := strings.ToLower(p.PackageFilter)
+	if lowerPkgFilter != "" {
+		scopeApplied = p.PackageFilter
+		scopePreCount = len(sizeFiltered)
+	}
+
+	for _, cycle := range sizeFiltered {
 		// IT-09 Fix 2: Filter by package if specified
+		// CRS-13 CR2: Use containsPackageSegment for boundary-aware matching.
+		// strings.Contains would match "log" in "dialog" — containsPackageSegment
+		// requires segment boundaries (/, ., start/end).
 		if lowerPkgFilter != "" {
 			matchesPkg := false
 			for _, pkg := range cycle.Packages {
-				if strings.Contains(strings.ToLower(pkg), lowerPkgFilter) {
+				if containsPackageSegment(strings.ToLower(pkg), lowerPkgFilter) {
 					matchesPkg = true
 					break
 				}
@@ -296,6 +314,26 @@ func (t *findCyclesTool) Execute(ctx context.Context, params TypedParams) (*Resu
 		)
 	}
 
+	// CRS: Add pipeline metadata
+	if traceStep.Metadata == nil {
+		traceStep.Metadata = make(map[string]string)
+	}
+	traceStep.Metadata["min_size"] = fmt.Sprintf("%d", p.MinSize)
+	traceStep.Metadata["limit"] = fmt.Sprintf("%d", p.Limit)
+	traceStep.Metadata["package_filter"] = p.PackageFilter
+	traceStep.Metadata["sort_by"] = p.SortBy
+	traceStep.Metadata["raw_cycle_count"] = fmt.Sprintf("%d", len(cycles))
+	traceStep.Metadata["final_count"] = fmt.Sprintf("%d", len(filtered))
+
+	// IT_CRS_03 AC-2: Detect zero-edge anomaly (nodes present but no edges).
+	if graphEdges, ok := traceStep.Metadata["graph_edges"]; ok {
+		if graphEdges == "0" {
+			if graphNodes, ok2 := traceStep.Metadata["graph_nodes"]; ok2 && graphNodes != "0" {
+				traceStep.Metadata["anomaly"] = "zero_edges_with_nodes"
+			}
+		}
+	}
+
 	// Build typed output
 	output := t.buildOutput(filtered)
 
@@ -303,12 +341,15 @@ func (t *findCyclesTool) Execute(ctx context.Context, params TypedParams) (*Resu
 	outputText := t.formatText(filtered)
 
 	return &Result{
-		Success:    true,
-		Output:     output,
-		OutputText: outputText,
-		TokensUsed: estimateTokens(outputText),
-		TraceStep:  &traceStep,
-		Duration:   time.Since(start),
+		Success:       true,
+		Output:        output,
+		OutputText:    outputText,
+		TokensUsed:    estimateTokens(outputText),
+		TraceStep:     &traceStep,
+		Duration:      time.Since(start),
+		ResultCount:   output.CycleCount,
+		ScopeApplied:  scopeApplied,
+		PreScopeCount: scopePreCount,
 	}, nil
 }
 

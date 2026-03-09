@@ -762,14 +762,19 @@ tests:
     name: gin_get_call_chain_c
     category: TOOL_HAPPY_PATH
     description: >
-      get_call_chain tool against Gin (test C). Target: from Context.Bind to validation.
+      get_call_chain tool against Gin (test C). Target: handleHTTPRequest downstream.
+      Rewritten from conceptual "Bind to validation" — Bind uses reflection calls
+      (ValueOf, Kind, Type) that have zero outgoing edges in static graph.
+      handleHTTPRequest has rich internal edges: ServeHTTP -> handleHTTPRequest ->
+      Next -> handler chain.
     query: |
-      Show the call chain from Context.Bind to data validation
+      Show the call chain from handleHTTPRequest
     expected_state: COMPLETE
     reference_answer: |
-      Context.Bind -> Context.MustBindWith -> binding.Bind -> specific binder
-      (e.g., jsonBinding.Bind) -> json.Decode -> validate with
-      binding.Validator.ValidateStruct for struct tag validation.
+      handleHTTPRequest (gin.go) calls getValue on the radix tree to find the
+      matching route, then calls Context.Next to execute the middleware/handler
+      chain. The chain includes Context.reset, Context.writermem.reset,
+      and error handling via Context.Errors.
     validations:
       - type: graph_tool_used
 

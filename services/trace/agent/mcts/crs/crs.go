@@ -613,7 +613,17 @@ func (c *crsImpl) Restore(ctx context.Context, cp Checkpoint) error {
 	// Restore all state from checkpoint (using snapshot's immutable copies)
 	c.proofData = snap.proofData
 	c.constraintData = snap.constraintData
-	c.similarityData = snap.similarityData
+	// CRS-15 CR2 Fix C2: Deep-copy similarityData to avoid aliasing snapshot's
+	// inner maps. Without this, subsequent RecordSimilarity() calls mutate the
+	// snapshot's inner map[string]float64, violating snapshot immutability.
+	c.similarityData = make(map[string]map[string]float64, len(snap.similarityData))
+	for k, peers := range snap.similarityData {
+		innerCopy := make(map[string]float64, len(peers))
+		for k2, dist := range peers {
+			innerCopy[k2] = dist
+		}
+		c.similarityData[k] = innerCopy
+	}
 	c.dependencyData = snap.dependencyData
 	c.historyData = snap.historyData
 	c.streamingData = newStreaming
@@ -653,7 +663,7 @@ func (c *crsImpl) Restore(ctx context.Context, cp Checkpoint) error {
 //   - error: Non-nil on failure.
 //
 // Thread Safety: Safe for concurrent use.
-func (c *crsImpl) SaveCheckpointToDisk(ctx context.Context, pm *PersistenceManager, projectHash string, journal *BadgerJournal) (*BackupMetadata, error) {
+func (c *crsImpl) SaveCheckpointToDisk(ctx context.Context, pm *PersistenceManager, projectHash string, journal Journal) (*BackupMetadata, error) {
 	if ctx == nil {
 		return nil, ErrNilContext
 	}
@@ -685,6 +695,41 @@ func (c *crsImpl) SaveCheckpointToDisk(ctx context.Context, pm *PersistenceManag
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "journal checkpoint failed")
 		return nil, fmt.Errorf("journal checkpoint: %w", err)
+	}
+
+	// CRS-15: Flush current similarity data to journal AFTER checkpoint.
+	// This ensures similarity deltas appear after the checkpoint marker
+	// so Replay() returns them during TryRestore(). Flushing before
+	// checkpoint would cause the delta to be marked as checkpointed
+	// and skipped during replay.
+	//
+	// CRS-15 Code Review Fix #1: Snapshot under lock, then write.
+	// Previous code had asymmetric RUnlock in two branches. Now we
+	// copy the data under a single RLock/RUnlock, then write outside
+	// the lock. The snapshot in simDelta is consistent; new writes
+	// arriving concurrently are expected to be missed (point-in-time).
+	simDelta := NewSimilarityDelta(SignalSourceSoft)
+	c.mu.RLock()
+	for key1, peers := range c.similarityData {
+		for key2, dist := range peers {
+			// Data is stored canonically (key1 < key2) via RecordSimilarity
+			// and applySimilarityDelta, so all entries qualify.
+			simDelta.Updates[[2]string{key1, key2}] = dist
+		}
+	}
+	c.mu.RUnlock()
+
+	if len(simDelta.Updates) > 0 {
+		if jErr := journal.Append(ctx, simDelta); jErr != nil {
+			c.logger.Warn("CRS-15: Failed to flush similarity to journal",
+				slog.String("error", jErr.Error()),
+				slog.Int("pairs", len(simDelta.Updates)),
+			)
+		} else {
+			c.logger.Debug("CRS-15: Flushed similarity data to journal",
+				slog.Int("pairs", len(simDelta.Updates)),
+			)
+		}
 	}
 
 	// Save to disk
@@ -730,7 +775,7 @@ func (c *crsImpl) SaveCheckpointToDisk(ctx context.Context, pm *PersistenceManag
 //   - error: Non-nil on failure (not on missing backup).
 //
 // Thread Safety: Safe for concurrent use.
-func (c *crsImpl) LoadCheckpointFromDisk(ctx context.Context, pm *PersistenceManager, projectHash string, journal *BadgerJournal) (*BackupMetadata, error) {
+func (c *crsImpl) LoadCheckpointFromDisk(ctx context.Context, pm *PersistenceManager, projectHash string, journal Journal) (*BackupMetadata, error) {
 	if ctx == nil {
 		return nil, ErrNilContext
 	}
@@ -835,12 +880,39 @@ func (c *crsImpl) applyConstraintDelta(d *ConstraintDelta, metrics *ApplyMetrics
 }
 
 func (c *crsImpl) applySimilarityDelta(d *SimilarityDelta, metrics *ApplyMetrics) error {
+	// CRS-15 CR2 Fix C1: Count total pairs for cap enforcement.
+	// Without this, journal replay can exceed maxSimilarityPairs.
+	const maxSimilarityPairs = 10000
+	totalPairs := 0
+	for _, peers := range c.similarityData {
+		totalPairs += len(peers)
+	}
+
 	for pair, dist := range d.Updates {
-		node1, node2 := pair[0], pair[1]
-		if c.similarityData[node1] == nil {
-			c.similarityData[node1] = make(map[string]float64)
+		// CRS-15 Code Review Fix #2: Enforce canonical key ordering on replay.
+		// Journal entries from older versions may have non-canonical ordering.
+		// Canonical: key1 < key2, matching RecordSimilarity and flush logic.
+		k1, k2 := pair[0], pair[1]
+		if k1 > k2 {
+			k1, k2 = k2, k1
 		}
-		c.similarityData[node1][node2] = dist
+
+		// Check if this pair already exists (update doesn't grow the count).
+		isUpdate := c.similarityData[k1] != nil && c.similarityData[k1][k2] != 0
+		if !isUpdate && totalPairs >= maxSimilarityPairs {
+			slog.Debug("CRS-15: Similarity pair cap reached during delta replay, skipping",
+				slog.Int("capacity", maxSimilarityPairs),
+			)
+			continue
+		}
+
+		if c.similarityData[k1] == nil {
+			c.similarityData[k1] = make(map[string]float64)
+		}
+		c.similarityData[k1][k2] = dist
+		if !isUpdate {
+			totalPairs++
+		}
 		metrics.EntriesModified++
 	}
 	metrics.IndexesUpdated = metrics.IndexesUpdated.Add(IndexSimilarity)
@@ -1561,12 +1633,20 @@ func (c *crsImpl) CheckCircuitBreaker(sessionID string, tool string) CircuitBrea
 
 	// If no proof data exists, check tool execution count as fallback
 	if !exists {
+		// CRS-16: Use per-tool threshold if configured, else default.
+		threshold := DefaultCircuitBreakerThreshold
+		if c.config != nil && c.config.CircuitBreakerThresholds != nil {
+			if perTool, ok := c.config.CircuitBreakerThresholds[tool]; ok && perTool > 0 {
+				threshold = perTool
+			}
+		}
+
 		// Use step recording data for backwards compatibility
 		count := c.CountToolExecutions(sessionID, tool)
-		if count >= DefaultCircuitBreakerThreshold {
+		if count >= threshold {
 			return CircuitBreakerResult{
 				ShouldFire:  true,
-				Reason:      fmt.Sprintf("tool %s called %d times (threshold: %d)", tool, count, DefaultCircuitBreakerThreshold),
+				Reason:      fmt.Sprintf("tool %s called %d times (threshold: %d)", tool, count, threshold),
 				ProofNumber: 0,
 				Status:      ProofStatusUnknown,
 			}
@@ -1950,4 +2030,127 @@ func (c *crsImpl) GarbageCollectClauses() int {
 	}
 
 	return removed
+}
+
+// -----------------------------------------------------------------------------
+// Similarity Index Methods (CRS-15)
+// -----------------------------------------------------------------------------
+
+// RecordSimilarity records a similarity pair between two query keys.
+//
+// Description:
+//
+//	Records that two queries are semantically similar with the given
+//	distance score. Stores in the similarity index symmetrically (both
+//	key1→key2 and key2→key1). This data persists across sessions via
+//	journal deltas.
+//
+// Inputs:
+//   - ctx: Context for cancellation. Must not be nil.
+//   - key1: First query key. Must not be empty.
+//   - key2: Second query key. Must not be empty or equal to key1.
+//   - distance: Similarity distance (0 = identical). Must be non-negative.
+//
+// Outputs:
+//   - error: Non-nil if validation fails or context cancelled.
+//
+// Thread Safety: Safe for concurrent use. Acquires write lock.
+func (c *crsImpl) RecordSimilarity(ctx context.Context, key1, key2 string, distance float64) error {
+	if ctx == nil {
+		return ErrNilContext
+	}
+	if key1 == "" || key2 == "" {
+		return fmt.Errorf("%w: similarity keys must not be empty", ErrDeltaValidation)
+	}
+	if key1 == key2 {
+		return fmt.Errorf("%w: self-similarity not allowed", ErrDeltaValidation)
+	}
+	if distance < 0 {
+		return fmt.Errorf("%w: similarity distance must be non-negative", ErrDeltaValidation)
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	_, span := otel.Tracer("crs").Start(ctx, "crs.RecordSimilarity",
+		trace.WithAttributes(
+			attribute.String("key1", key1),
+			attribute.String("key2", key2),
+			attribute.Float64("distance", distance),
+		),
+	)
+	defer span.End()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// CRS-15 Code Review Fix #6: Cap similarity entries to prevent unbounded growth.
+	// Count total pairs across all outer keys. 10,000 pairs is generous for
+	// any realistic session; beyond this we silently drop new entries.
+	const maxSimilarityPairs = 10000
+	totalPairs := 0
+	for _, peers := range c.similarityData {
+		totalPairs += len(peers)
+	}
+	if totalPairs >= maxSimilarityPairs {
+		c.logger.Debug("CRS-15: Similarity index at capacity, dropping entry",
+			slog.Int("capacity", maxSimilarityPairs),
+			slog.String("key1", key1),
+			slog.String("key2", key2),
+		)
+		return nil
+	}
+
+	// Store one direction only (GetSimilarity checks both via reverse lookup).
+	// Use canonical ordering (key1 < key2) for consistent storage.
+	k1, k2 := key1, key2
+	if k1 > k2 {
+		k1, k2 = k2, k1
+	}
+	if c.similarityData[k1] == nil {
+		c.similarityData[k1] = make(map[string]float64)
+	}
+	c.similarityData[k1][k2] = distance
+
+	c.generation.Add(1)
+
+	c.logger.Debug("CRS-15: Similarity recorded",
+		slog.String("key1", key1),
+		slog.String("key2", key2),
+		slog.Float64("distance", distance),
+	)
+
+	return nil
+}
+
+// GetSimilarity returns the recorded similarity distance between two keys.
+//
+// Inputs:
+//   - key1: First query key. Must not be empty.
+//   - key2: Second query key. Must not be empty.
+//
+// Outputs:
+//   - float64: The distance, or -1 if no similarity recorded.
+//   - bool: True if a similarity record exists.
+//
+// Thread Safety: Safe for concurrent use. Acquires read lock.
+func (c *crsImpl) GetSimilarity(key1, key2 string) (float64, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if peers, ok := c.similarityData[key1]; ok {
+		if dist, found := peers[key2]; found {
+			return dist, true
+		}
+	}
+	// Try reverse lookup (similarity is symmetric).
+	if peers, ok := c.similarityData[key2]; ok {
+		if dist, found := peers[key1]; found {
+			return dist, true
+		}
+	}
+	return -1, false
 }

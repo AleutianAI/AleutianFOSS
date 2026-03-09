@@ -539,7 +539,7 @@ func NewSessionRestorer(pm *PersistenceManager, config *SessionRestorerConfig) (
 // Inputs:
 //   - ctx: Context for cancellation and tracing. Must not be nil.
 //   - crsi: The CRS instance to restore into. Must not be nil.
-//   - journal: The BadgerJournal for replay. Must not be nil.
+//   - journal: The Journal for replay. Must not be nil.
 //   - sessionID: Session identifier for checkpoint lookup. Must not be nil.
 //
 // Outputs:
@@ -560,7 +560,7 @@ func NewSessionRestorer(pm *PersistenceManager, config *SessionRestorerConfig) (
 func (r *SessionRestorer) TryRestore(
 	ctx context.Context,
 	crsi CRS,
-	journal *BadgerJournal,
+	journal Journal,
 	sessionID *SessionIdentifier,
 ) (*RestoreResult, error) {
 	// GR-36 Code Review Fix: S5 - Input validation
@@ -664,7 +664,7 @@ retryLoop:
 func (r *SessionRestorer) tryRestoreOnce(
 	ctx context.Context,
 	crsi CRS,
-	journal *BadgerJournal,
+	journal Journal,
 	sessionID *SessionIdentifier,
 	logger *slog.Logger,
 	span trace.Span,
@@ -727,13 +727,35 @@ func (r *SessionRestorer) tryRestoreOnce(
 		return nil, fmt.Errorf("replay journal: %w", err)
 	}
 
-	// Apply all deltas
+	// Apply all deltas, pruning stale similarity entries (CRS-15).
+	prunedSimilarityPairs := 0
 	for i, delta := range deltas {
+		// CRS-15: Skip similarity deltas older than 7 days to prevent
+		// unbounded growth of cross-session similarity data.
+		if simDelta, ok := delta.(*SimilarityDelta); ok {
+			age := time.Since(time.UnixMilli(simDelta.Timestamp()))
+			if age > DefaultCheckpointMaxAge {
+				// CRS-15 Code Review Fix #4: Log pair count, not delta count.
+				prunedSimilarityPairs += len(simDelta.Updates)
+				logger.Debug("CRS-15: Pruning stale similarity delta",
+					slog.Duration("age", age),
+					slog.Int("pairs", len(simDelta.Updates)),
+				)
+				continue
+			}
+		}
+
 		if _, err := crsi.Apply(ctx, delta); err != nil {
 			sessionRestoreTotal.WithLabelValues("apply_error").Inc()
 			span.RecordError(err)
 			return nil, fmt.Errorf("apply delta %d: %w", i, err)
 		}
+	}
+
+	if prunedSimilarityPairs > 0 {
+		logger.Info("CRS-15: Pruned stale similarity pairs during restore",
+			slog.Int("pruned_pairs", prunedSimilarityPairs),
+		)
 	}
 
 	// NEW-12 Fix: Checkpoint journal after successful restore to prevent
@@ -804,9 +826,17 @@ func (r *SessionRestorer) validateCheckpoint(
 		return fmt.Errorf("%w: age=%v, max=%v", ErrCheckpointTooOld, age, r.config.CheckpointMaxAge)
 	}
 
-	// Note: Project hash validation would require storing it in metadata
-	// For now, we skip this check since BackupMetadata doesn't include project_hash
-	// TODO: Add project_hash to BackupMetadata in a future enhancement
+	// CRS-17: Validate project identity to prevent cross-project checkpoint contamination.
+	// cleanupPersistence() passes the checkpoint key (path hash) to SaveBackup(),
+	// which stores it as metadata.ProjectHash. Compare against the current session's
+	// CheckpointKey() to detect misconfigured checkpoint directories.
+	if metadata.ProjectHash != "" && sessionID != nil {
+		currentKey := sessionID.CheckpointKey()
+		if metadata.ProjectHash != currentKey {
+			return fmt.Errorf("%w: backup=%s, current=%s",
+				ErrProjectHashMismatch, metadata.ProjectHash, currentKey)
+		}
+	}
 
 	return nil
 }

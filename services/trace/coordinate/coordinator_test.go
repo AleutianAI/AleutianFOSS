@@ -13,6 +13,7 @@ package coordinate
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/analysis"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
@@ -736,4 +737,103 @@ func TestCountUniqueFiles(t *testing.T) {
 	if count != 3 {
 		t.Errorf("expected 3 unique files, got %d", count)
 	}
+}
+
+// IT_CRS_03: Verify CRS RecordToolStep is called from PlanChanges and ValidatePlan.
+func TestCoordinator_CRS_RecordToolStep(t *testing.T) {
+	g, idx := createTestGraph(t)
+
+	breaking := reason.NewBreakingChangeAnalyzer(g, idx)
+	blast := analysis.NewBlastRadiusAnalyzer(g, idx, nil)
+	validator := reason.NewChangeValidator(idx)
+
+	coord := NewMultiFileChangeCoordinator(g, idx, breaking, blast, validator)
+
+	// Use a recording CRS mock
+	recorder := &mockCRSRecorder{}
+	coord.SetCRS(recorder)
+
+	ctx := context.Background()
+
+	t.Run("PlanChanges_records_tool_step", func(t *testing.T) {
+		recorder.reset()
+		_, err := coord.PlanChanges(ctx, ChangeSet{
+			PrimaryChange: ChangeRequest{
+				TargetID:   "pkg/service.go:10:ProcessOrder",
+				ChangeType: ChangeRenameSymbol,
+			},
+			Description: "test plan",
+		}, nil)
+		if err != nil {
+			t.Fatalf("PlanChanges() error = %v", err)
+		}
+
+		if recorder.callCount == 0 {
+			t.Error("expected RecordToolStep to be called from PlanChanges")
+		}
+		if recorder.lastToolName != "plan_changes" {
+			t.Errorf("expected toolName=plan_changes, got %s", recorder.lastToolName)
+		}
+		if recorder.lastDuration <= 0 {
+			t.Error("expected duration > 0")
+		}
+		if recorder.lastErr != nil {
+			t.Errorf("expected no error, got %v", recorder.lastErr)
+		}
+	})
+
+	t.Run("ValidatePlan_records_tool_step", func(t *testing.T) {
+		recorder.reset()
+		plan, err := coord.PlanChanges(ctx, ChangeSet{
+			PrimaryChange: ChangeRequest{
+				TargetID:   "pkg/service.go:10:ProcessOrder",
+				ChangeType: ChangeRenameSymbol,
+			},
+			Description: "test validate",
+		}, nil)
+		if err != nil {
+			t.Fatalf("PlanChanges() error = %v", err)
+		}
+
+		recorder.reset()
+		_, err = coord.ValidatePlan(ctx, plan)
+		if err != nil {
+			t.Fatalf("ValidatePlan() error = %v", err)
+		}
+
+		if recorder.callCount == 0 {
+			t.Error("expected RecordToolStep to be called from ValidatePlan")
+		}
+		if recorder.lastToolName != "validate_plan" {
+			t.Errorf("expected toolName=validate_plan, got %s", recorder.lastToolName)
+		}
+		if recorder.lastDuration <= 0 {
+			t.Error("expected duration > 0")
+		}
+	})
+}
+
+// mockCRSRecorder tracks calls to RecordToolStep for testing.
+type mockCRSRecorder struct {
+	callCount       int
+	lastToolName    string
+	lastResultCount int
+	lastDuration    time.Duration
+	lastErr         error
+}
+
+func (m *mockCRSRecorder) RecordToolStep(_ context.Context, toolName string, resultCount int, duration time.Duration, err error) {
+	m.callCount++
+	m.lastToolName = toolName
+	m.lastResultCount = resultCount
+	m.lastDuration = duration
+	m.lastErr = err
+}
+
+func (m *mockCRSRecorder) reset() {
+	m.callCount = 0
+	m.lastToolName = ""
+	m.lastResultCount = 0
+	m.lastDuration = 0
+	m.lastErr = nil
 }

@@ -1190,7 +1190,7 @@ func TestCRS_CheckCircuitBreaker(t *testing.T) {
 			t.Error("expected ShouldFire=false with no executions")
 		}
 
-		// Add 5 tool executions (DefaultCircuitBreakerThreshold is 5 per GR-41b)
+		// Add tool executions up to DefaultCircuitBreakerThreshold
 		for i := 0; i < DefaultCircuitBreakerThreshold; i++ {
 			c.RecordStep(ctx, StepRecord{
 				SessionID: "session-1",
@@ -1678,6 +1678,183 @@ func TestCRS_CheckCircuitBreaker_JustBelowInfinite(t *testing.T) {
 	if result.ShouldFire {
 		t.Error("circuit breaker should not fire when proof number is below ProofNumberInfinite")
 	}
+}
+
+// TestCRS16_PerToolCircuitBreakerThresholds verifies that per-tool thresholds
+// override the default and that tools not in the map use the default.
+func TestCRS16_PerToolCircuitBreakerThresholds(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("per-tool threshold overrides default", func(t *testing.T) {
+		cfg := DefaultConfig()
+		// find_callers has threshold=4 in default config
+		c := New(cfg)
+
+		sessionID := "crs16-test-1"
+		tool := "find_callers"
+
+		// Execute find_callers 2 times (default threshold) — should NOT fire
+		for i := 0; i < DefaultCircuitBreakerThreshold; i++ {
+			c.RecordStep(ctx, StepRecord{
+				SessionID: sessionID,
+				Actor:     ActorRouter,
+				Decision:  DecisionExecuteTool,
+				Outcome:   OutcomeSuccess,
+				Tool:      tool,
+			})
+		}
+
+		result := c.CheckCircuitBreaker(sessionID, tool)
+		if result.ShouldFire {
+			t.Error("expected ShouldFire=false at default threshold (2) when per-tool threshold is 4")
+		}
+
+		// Execute 2 more times (total 4 = per-tool threshold) — should fire
+		for i := 0; i < 2; i++ {
+			c.RecordStep(ctx, StepRecord{
+				SessionID: sessionID,
+				Actor:     ActorRouter,
+				Decision:  DecisionExecuteTool,
+				Outcome:   OutcomeSuccess,
+				Tool:      tool,
+			})
+		}
+
+		result = c.CheckCircuitBreaker(sessionID, tool)
+		if !result.ShouldFire {
+			t.Error("expected ShouldFire=true at per-tool threshold (4)")
+		}
+		if result.ProofNumber != 0 {
+			t.Errorf("expected ProofNumber=0 (fallback path), got %d", result.ProofNumber)
+		}
+	})
+
+	t.Run("tool not in map uses default threshold", func(t *testing.T) {
+		cfg := DefaultConfig()
+		c := New(cfg)
+
+		sessionID := "crs16-test-2"
+		tool := "list_packages" // Not in per-tool map
+
+		// Execute at default threshold (2) — should fire
+		for i := 0; i < DefaultCircuitBreakerThreshold; i++ {
+			c.RecordStep(ctx, StepRecord{
+				SessionID: sessionID,
+				Actor:     ActorRouter,
+				Decision:  DecisionExecuteTool,
+				Outcome:   OutcomeSuccess,
+				Tool:      tool,
+			})
+		}
+
+		result := c.CheckCircuitBreaker(sessionID, tool)
+		if !result.ShouldFire {
+			t.Errorf("expected ShouldFire=true at default threshold (%d)", DefaultCircuitBreakerThreshold)
+		}
+	})
+
+	t.Run("Grep uses higher threshold", func(t *testing.T) {
+		cfg := DefaultConfig()
+		c := New(cfg)
+
+		sessionID := "crs16-test-3"
+		tool := "Grep"
+
+		// Execute 4 times — should NOT fire (Grep threshold=5)
+		for i := 0; i < 4; i++ {
+			c.RecordStep(ctx, StepRecord{
+				SessionID: sessionID,
+				Actor:     ActorRouter,
+				Decision:  DecisionExecuteTool,
+				Outcome:   OutcomeSuccess,
+				Tool:      tool,
+			})
+		}
+
+		result := c.CheckCircuitBreaker(sessionID, tool)
+		if result.ShouldFire {
+			t.Error("expected ShouldFire=false for Grep at 4 calls (threshold=5)")
+		}
+
+		// 5th call
+		c.RecordStep(ctx, StepRecord{
+			SessionID: sessionID,
+			Actor:     ActorRouter,
+			Decision:  DecisionExecuteTool,
+			Outcome:   OutcomeSuccess,
+			Tool:      tool,
+		})
+
+		result = c.CheckCircuitBreaker(sessionID, tool)
+		if !result.ShouldFire {
+			t.Error("expected ShouldFire=true for Grep at 5 calls (threshold=5)")
+		}
+	})
+
+	t.Run("nil config still applies default per-tool thresholds", func(t *testing.T) {
+		// New(nil) uses DefaultConfig() which includes per-tool overrides.
+		c := New(nil)
+
+		sessionID := "crs16-test-4"
+		tool := "find_callers" // Has threshold=4 in DefaultConfig
+
+		// Execute at default threshold (2) — should NOT fire (per-tool=4)
+		for i := 0; i < DefaultCircuitBreakerThreshold; i++ {
+			c.RecordStep(ctx, StepRecord{
+				SessionID: sessionID,
+				Actor:     ActorRouter,
+				Decision:  DecisionExecuteTool,
+				Outcome:   OutcomeSuccess,
+				Tool:      tool,
+			})
+		}
+
+		result := c.CheckCircuitBreaker(sessionID, tool)
+		if result.ShouldFire {
+			t.Error("expected ShouldFire=false at default threshold when per-tool=4")
+		}
+
+		// Execute to per-tool threshold (4 total)
+		for i := 0; i < 2; i++ {
+			c.RecordStep(ctx, StepRecord{
+				SessionID: sessionID,
+				Actor:     ActorRouter,
+				Decision:  DecisionExecuteTool,
+				Outcome:   OutcomeSuccess,
+				Tool:      tool,
+			})
+		}
+
+		result = c.CheckCircuitBreaker(sessionID, tool)
+		if !result.ShouldFire {
+			t.Error("expected ShouldFire=true at per-tool threshold (4)")
+		}
+	})
+
+	t.Run("proof data takes precedence over per-tool threshold", func(t *testing.T) {
+		cfg := DefaultConfig()
+		c := New(cfg)
+
+		sessionID := "crs16-test-5"
+		tool := "find_callers"
+		nodeID := fmt.Sprintf("session:%s:tool:%s", sessionID, tool)
+
+		// Set proof data to disproven — should fire regardless of per-tool threshold
+		c.UpdateProofNumber(ctx, ProofUpdate{
+			NodeID: nodeID,
+			Type:   ProofUpdateTypeDisproven,
+			Reason: "test",
+			Source: SignalSourceHard,
+		})
+
+		result := c.CheckCircuitBreaker(sessionID, tool)
+		if !result.ShouldFire {
+			t.Error("expected ShouldFire=true when proof data is disproven")
+		}
+		if result.Status != ProofStatusDisproven {
+			t.Errorf("status = %v, want Disproven", result.Status)
+		}
+	})
 }
 
 func TestSignalSource_IsValid(t *testing.T) {

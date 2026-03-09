@@ -1267,8 +1267,69 @@ run_extra_check() {
             fi
             ;;
 
+        semantic_resolution_used)
+            # CRS-26d: Check trace logs for semantic resolution layer activity.
+            local sem_count
+            sem_count=$(ssh_cmd "grep -c 'CRS-26j\|semantic.*resolved\|nearVector\|EmbedQuery' ~/trace_test/AleutianFOSS/trace_server.log 2>/dev/null" || echo "0")
+            if [ "$sem_count" -gt 0 ]; then
+                echo -e "    ${GREEN}✓ CRS-26d: Semantic resolution was invoked ($sem_count log entries)${NC}"
+            else
+                echo -e "    ${YELLOW}⚠ CRS-26d: No semantic resolution log entries found${NC}"
+            fi
+            ;;
+
         *)
             echo -e "    ${YELLOW}⚠ Unknown extra check: $check${NC}"
             ;;
     esac
+}
+
+# ==============================================================================
+# CRS-26d: WEAVIATE PRE-FLIGHT CHECK
+# ==============================================================================
+
+# verify_weaviate_symbols checks that Weaviate is reachable, the CodeSymbol class
+# exists, and symbols are indexed. Returns 0 on success, 1 on skip.
+#
+# Usage:
+#   if verify_weaviate_symbols; then
+#       echo "Weaviate ready for semantic tests"
+#   else
+#       echo "Skipping semantic tests"
+#   fi
+verify_weaviate_symbols() {
+    local weaviate_url="${WEAVIATE_URL:-http://localhost:12212}"
+
+    # Check 1: Weaviate is reachable.
+    if ! ssh_cmd "curl -sf ${weaviate_url}/v1/.well-known/ready" > /dev/null 2>&1; then
+        echo -e "    ${YELLOW}SKIP: Weaviate not reachable at ${weaviate_url}${NC}"
+        return 1
+    fi
+
+    # Check 2: CodeSymbol class exists.
+    local schema
+    schema=$(ssh_cmd "curl -sf ${weaviate_url}/v1/schema/CodeSymbol" 2>/dev/null)
+    if [ -z "$schema" ] || echo "$schema" | grep -q '"error"'; then
+        echo -e "    ${YELLOW}SKIP: CodeSymbol class not found in Weaviate${NC}"
+        return 1
+    fi
+
+    # Check 3: Verify vectorizer is "none" (CRS-26h migration complete).
+    local vectorizer
+    vectorizer=$(echo "$schema" | jq -r '.vectorizer // "unknown"' 2>/dev/null)
+    if [ "$vectorizer" != "none" ]; then
+        echo -e "    ${YELLOW}SKIP: CodeSymbol vectorizer is '$vectorizer', expected 'none' (CRS-26h)${NC}"
+        return 1
+    fi
+
+    # Check 4: Symbols are indexed (non-zero count).
+    local count
+    count=$(ssh_cmd "curl -sf '${weaviate_url}/v1/objects?class=CodeSymbol&limit=1'" 2>/dev/null | jq -r '.totalResults // 0')
+    if [ "$count" -eq 0 ] 2>/dev/null; then
+        echo -e "    ${YELLOW}SKIP: No CodeSymbol objects in Weaviate${NC}"
+        return 1
+    fi
+
+    echo -e "    ${GREEN}✓ Weaviate ready: CodeSymbol class with vectorizer=none, objects indexed${NC}"
+    return 0
 }

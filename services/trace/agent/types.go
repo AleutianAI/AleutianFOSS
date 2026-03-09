@@ -452,6 +452,15 @@ type ToolResult struct {
 
 	// Truncated indicates if output was truncated.
 	Truncated bool `json:"truncated"`
+
+	// Tool is the tool name that produced this result.
+	// IT_CRS_03 AC-3: Used by getSingleFormattedResult() for tool-specific
+	// pass-through decisions instead of fragile substring matching.
+	Tool string `json:"tool,omitempty"`
+
+	// ProofDelta overrides the default CRS proof delta when non-zero.
+	// IT_CRS_03 AC-8: Higher values = stronger signal (exact match = 2, fuzzy = 1).
+	ProofDelta int `json:"proof_delta,omitempty"`
 }
 
 // DurationMs returns the duration in milliseconds.
@@ -720,17 +729,24 @@ type ParamExtractor interface {
 	// ResolveConceptualSymbol uses the LLM to pick the best symbol from candidates
 	// when the query uses conceptual descriptions instead of function names.
 	// IT-12: Called as a fallback when regex extraction + fuzzy resolution fail.
+	// D3: Added tier0Count, tier1Count params for grouped prompt formatting.
+	// D3c: Added sourceContext param — describes the source function for find_path to-side.
 	//
 	// Inputs:
 	//   - ctx: Context for cancellation/timeout.
 	//   - query: The user's natural language query.
 	//   - candidates: Symbol candidates found by keyword search of the index.
+	//   - tier0Count: Number of tier0 (best match) candidates in the list.
+	//   - tier1Count: Number of tier1 (partial match) candidates in the list.
+	//   - sourceContext: Description of the source function (e.g., "Bind (method on Context
+	//     in context.go:757)"). Empty when not resolving a find_path to-side.
 	//
 	// Outputs:
 	//   - string: The best symbol name from the candidates.
 	//   - error: Non-nil if resolution fails.
 	ResolveConceptualSymbol(ctx context.Context, query string,
-		candidates []SymbolCandidate) (string, error)
+		candidates []SymbolCandidate, tier0Count, tier1Count int,
+		sourceContext string) (string, error)
 }
 
 // SymbolCandidate represents a symbol found by keyword search of the index.
@@ -748,6 +764,12 @@ type SymbolCandidate struct {
 
 	// Line is the line number where the symbol is defined.
 	Line int
+
+	// Receiver is the receiver type name for methods (e.g., "Context" for Context.Bind).
+	// D3c: Used to show method ownership in the LLM prompt so the model can
+	// distinguish validateHeader (method on Context) from validate (function).
+	// Empty for non-method symbols.
+	Receiver string
 
 	// OutEdges is the number of outgoing call edges (functions this symbol calls).
 	// IT-12 Rev 4: Populated when graph is available. Zero means unknown or no edges.

@@ -389,13 +389,24 @@ func (t *findExtractableRegionsTool) executeOnce(ctx context.Context, p FindExtr
 		slog.Int("extractable", len(extractable)),
 	)
 
+	// CRS: Add pipeline metadata
+	if traceStep.Metadata == nil {
+		traceStep.Metadata = make(map[string]string)
+	}
+	traceStep.Metadata["min_size"] = fmt.Sprintf("%d", p.MinSize)
+	traceStep.Metadata["max_size"] = fmt.Sprintf("%d", p.MaxSize)
+	traceStep.Metadata["top"] = fmt.Sprintf("%d", p.Top)
+	traceStep.Metadata["raw_region_count"] = fmt.Sprintf("%d", len(seseResult.Regions))
+	traceStep.Metadata["final_count"] = fmt.Sprintf("%d", len(extractable))
+
 	return &Result{
-		Success:    true,
-		Output:     output,
-		OutputText: outputText,
-		TokensUsed: estimateTokens(outputText),
-		TraceStep:  &traceStep,
-		Duration:   time.Since(start),
+		Success:     true,
+		Output:      output,
+		OutputText:  outputText,
+		TokensUsed:  estimateTokens(outputText),
+		TraceStep:   &traceStep,
+		Duration:    time.Since(start),
+		ResultCount: output.RegionCount,
 	}, nil
 }
 

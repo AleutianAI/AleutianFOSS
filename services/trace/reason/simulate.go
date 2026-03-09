@@ -13,6 +13,7 @@ package reason
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
@@ -34,6 +35,7 @@ type ChangeSimulator struct {
 	graph  *graph.Graph
 	index  *index.SymbolIndex
 	parser *SignatureParser
+	crs    CRSRecorder
 }
 
 // NewChangeSimulator creates a new ChangeSimulator.
@@ -56,7 +58,13 @@ func NewChangeSimulator(g *graph.Graph, idx *index.SymbolIndex) *ChangeSimulator
 		graph:  g,
 		index:  idx,
 		parser: NewSignatureParser(),
+		crs:    &NopCRSRecorder{},
 	}
+}
+
+// SetCRS configures CRS recording for this simulator.
+func (s *ChangeSimulator) SetCRS(recorder CRSRecorder) {
+	s.crs = recorder
 }
 
 // ChangeSimulation is the result of simulating a change.
@@ -167,6 +175,11 @@ func (s *ChangeSimulator) SimulateChange(
 	if ctx == nil {
 		return nil, ErrInvalidInput
 	}
+
+	start := time.Now()
+	ctx, span := startSimulateSpan(ctx, targetID)
+	defer span.End()
+
 	if err := ctx.Err(); err != nil {
 		return nil, ErrContextCanceled
 	}
@@ -235,6 +248,11 @@ func (s *ChangeSimulator) SimulateChange(
 
 	// Calculate confidence
 	result.Confidence = s.calculateSimulationConfidence(result)
+
+	dur := time.Since(start)
+	setSimulateSpanResult(span, len(result.CallersToUpdate), nil)
+	recordSimulateMetrics(ctx, dur, nil)
+	s.crs.RecordToolStep(ctx, "simulate_change", len(result.CallersToUpdate), dur, nil)
 
 	return result, nil
 }

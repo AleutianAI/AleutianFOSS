@@ -48,6 +48,10 @@ type SerializableGraph struct {
 
 	// Edges contains all edges in the graph.
 	Edges []SerializableEdge `json:"edges"`
+
+	// FileMtimes records file modification times (Unix seconds) at build time.
+	// CRS-19: Used for staleness detection across sessions.
+	FileMtimes map[string]int64 `json:"file_mtimes,omitempty"`
 }
 
 // SerializableNode is the JSON-serializable representation of a Node.
@@ -153,6 +157,7 @@ func (g *Graph) ToSerializable() *SerializableGraph {
 		GraphHash:     g.Hash(),
 		Nodes:         nodes,
 		Edges:         edges,
+		FileMtimes:    g.FileMtimes,
 	}
 }
 
@@ -217,6 +222,9 @@ func FromSerializable(sg *SerializableGraph, opts ...GraphOption) (*Graph, error
 	// Freeze the graph and restore the original BuiltAtMilli
 	g.Freeze()
 	g.BuiltAtMilli = sg.BuiltAtMilli
+
+	// CRS-19: Restore file mtimes for staleness detection.
+	g.FileMtimes = sg.FileMtimes
 
 	return g, nil
 }

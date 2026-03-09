@@ -367,7 +367,7 @@ func TestFindSymbolTool_TraceStepPopulated(t *testing.T) {
 	if result.TraceStep.Metadata == nil {
 		t.Fatal("TraceStep.Metadata should not be nil")
 	}
-	for _, key := range []string{"match_count", "used_fuzzy", "kind_filter"} {
+	for _, key := range []string{"match_count", "used_fuzzy", "kind_filter", "resolution_strategy"} {
 		if _, ok := result.TraceStep.Metadata[key]; !ok {
 			t.Errorf("TraceStep.Metadata should contain %q", key)
 		}
@@ -405,4 +405,68 @@ func TestFindSymbolTool_TraceStepOnError(t *testing.T) {
 	if result.TraceStep.Error == "" {
 		t.Error("TraceStep.Error should be set on validation failure")
 	}
+}
+
+// IT_CRS_03 AC-7: Verify hollow_success metadata for zero-match results.
+func TestFindSymbol_HollowSuccess(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithCallers(t)
+	tool := NewFindSymbolTool(g, idx)
+
+	t.Run("hollow_success_true_for_no_match", func(t *testing.T) {
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"name": "nonExistentSymbolXYZ123",
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if result.TraceStep == nil {
+			t.Fatal("TraceStep should be populated")
+		}
+		val, ok := result.TraceStep.Metadata["hollow_success"]
+		if !ok {
+			t.Fatal("hollow_success metadata missing")
+		}
+		if val != "true" {
+			t.Errorf("expected hollow_success=true for zero matches, got %s", val)
+		}
+	})
+
+	t.Run("hollow_success_false_for_match", func(t *testing.T) {
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"name": "parseConfig",
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if result.TraceStep == nil {
+			t.Fatal("TraceStep should be populated")
+		}
+		val, ok := result.TraceStep.Metadata["hollow_success"]
+		if !ok {
+			t.Fatal("hollow_success metadata missing")
+		}
+		if val != "false" {
+			t.Errorf("expected hollow_success=false for matches, got %s", val)
+		}
+	})
+}
+
+// IT_CRS_03 AC-8: Verify ProofDelta differs for fuzzy vs exact.
+func TestFindSymbol_ProofDelta(t *testing.T) {
+	ctx := context.Background()
+	g, idx := createTestGraphWithCallers(t)
+	tool := NewFindSymbolTool(g, idx)
+
+	t.Run("exact_match_proof_delta_2", func(t *testing.T) {
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"name": "parseConfig",
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if result.ProofDelta != 2 {
+			t.Errorf("expected ProofDelta=2 for exact match, got %d", result.ProofDelta)
+		}
+	})
 }

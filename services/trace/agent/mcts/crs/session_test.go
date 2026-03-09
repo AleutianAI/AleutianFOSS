@@ -13,6 +13,7 @@ package crs
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -550,6 +551,108 @@ func TestTryRestore_NoCheckpoint(t *testing.T) {
 	if result.Reason != "no checkpoint found" {
 		t.Errorf("unexpected reason: %s", result.Reason)
 	}
+}
+
+// -----------------------------------------------------------------------------
+// CRS-17: Project Identity Validation Tests
+// -----------------------------------------------------------------------------
+
+func TestCRS17_ValidateCheckpoint_ProjectHashMismatch(t *testing.T) {
+	tmpDir := t.TempDir()
+	pmConfig := PersistenceConfig{
+		BaseDir:           tmpDir,
+		CompressionLevel:  6,
+		LockTimeoutSec:    30,
+		MaxBackupRetries:  3,
+		ValidateOnRestore: true,
+	}
+	pm, err := NewPersistenceManager(&pmConfig)
+	if err != nil {
+		t.Fatalf("create persistence manager: %v", err)
+	}
+	defer pm.Close()
+
+	restorer, err := NewSessionRestorer(pm, nil)
+	if err != nil {
+		t.Fatalf("NewSessionRestorer failed: %v", err)
+	}
+
+	t.Run("mismatch returns error", func(t *testing.T) {
+		// Construct two SessionIdentifiers from different paths to get different CheckpointKeys.
+		sidOld := &SessionIdentifier{ProjectPath: "/project/alpha"}
+		sidNew := &SessionIdentifier{ProjectPath: "/project/beta"}
+
+		if sidOld.CheckpointKey() == sidNew.CheckpointKey() {
+			t.Fatal("test precondition: different paths must produce different checkpoint keys")
+		}
+
+		metadata := &BackupMetadata{
+			ProjectHash:   sidOld.CheckpointKey(),
+			BadgerVersion: BadgerDBVersion,
+			SchemaVersion: CurrentSchemaVersion,
+			CreatedAt:     time.Now().UnixMilli(),
+		}
+
+		err := restorer.validateCheckpoint(context.Background(), metadata, sidNew)
+		if err == nil {
+			t.Fatal("expected error for project hash mismatch, got nil")
+		}
+		if !errors.Is(err, ErrProjectHashMismatch) {
+			t.Errorf("expected ErrProjectHashMismatch, got: %v", err)
+		}
+	})
+
+	t.Run("match succeeds", func(t *testing.T) {
+		// Create a SessionIdentifier and compute its CheckpointKey
+		sid := &SessionIdentifier{
+			ProjectPath: "/test/project/path",
+		}
+		checkpointKey := sid.CheckpointKey()
+
+		metadata := &BackupMetadata{
+			ProjectHash:   checkpointKey,
+			BadgerVersion: BadgerDBVersion,
+			SchemaVersion: CurrentSchemaVersion,
+			CreatedAt:     time.Now().UnixMilli(),
+		}
+
+		err := restorer.validateCheckpoint(context.Background(), metadata, sid)
+		if err != nil {
+			t.Errorf("expected no error for matching hash, got: %v", err)
+		}
+	})
+
+	t.Run("empty metadata hash skips check", func(t *testing.T) {
+		// Legacy checkpoints without ProjectHash should still load.
+		metadata := &BackupMetadata{
+			ProjectHash:   "",
+			BadgerVersion: BadgerDBVersion,
+			SchemaVersion: CurrentSchemaVersion,
+			CreatedAt:     time.Now().UnixMilli(),
+		}
+		sid := &SessionIdentifier{
+			ProjectPath: "/any/project",
+		}
+
+		err := restorer.validateCheckpoint(context.Background(), metadata, sid)
+		if err != nil {
+			t.Errorf("expected no error for empty metadata hash (legacy), got: %v", err)
+		}
+	})
+
+	t.Run("nil sessionID skips check", func(t *testing.T) {
+		metadata := &BackupMetadata{
+			ProjectHash:   "abcdef0123456789abcdef0123456789",
+			BadgerVersion: BadgerDBVersion,
+			SchemaVersion: CurrentSchemaVersion,
+			CreatedAt:     time.Now().UnixMilli(),
+		}
+
+		err := restorer.validateCheckpoint(context.Background(), metadata, nil)
+		if err != nil {
+			t.Errorf("expected no error for nil sessionID, got: %v", err)
+		}
+	})
 }
 
 // -----------------------------------------------------------------------------

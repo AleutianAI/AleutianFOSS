@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/ast"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
@@ -154,6 +155,7 @@ type DeadCodeFinder struct {
 	graph       *graph.Graph
 	idx         *index.SymbolIndex
 	projectRoot string
+	crs         CRSRecorder
 	mu          sync.RWMutex
 }
 
@@ -173,7 +175,13 @@ func NewDeadCodeFinder(g *graph.Graph, idx *index.SymbolIndex, projectRoot strin
 		graph:       g,
 		idx:         idx,
 		projectRoot: projectRoot,
+		crs:         &NopCRSRecorder{},
 	}
+}
+
+// SetCRS configures CRS recording for this finder.
+func (d *DeadCodeFinder) SetCRS(recorder CRSRecorder) {
+	d.crs = recorder
 }
 
 // FindDeadCode finds unreferenced code in the specified scope.
@@ -206,6 +214,10 @@ func (d *DeadCodeFinder) FindDeadCode(
 	if ctx == nil {
 		return nil, ErrInvalidInput
 	}
+
+	start := time.Now()
+	ctx, span := startDeadCodeSpan(ctx, scope)
+	defer span.End()
 
 	if opts == nil {
 		defaults := DefaultDeadCodeOptions()
@@ -270,6 +282,11 @@ func (d *DeadCodeFinder) FindDeadCode(
 	if opts.MaxResults > 0 && len(results) > opts.MaxResults {
 		results = results[:opts.MaxResults]
 	}
+
+	dur := time.Since(start)
+	setDeadCodeSpanResult(span, len(results), nil)
+	recordDeadCodeMetrics(ctx, dur, len(results), nil)
+	d.crs.RecordToolStep(ctx, "find_dead_code", len(results), dur, nil)
 
 	return results, nil
 }

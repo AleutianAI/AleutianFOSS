@@ -12,10 +12,13 @@ package trace
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	agentcontext "github.com/AleutianAI/AleutianFOSS/services/trace/agent/context"
@@ -30,6 +33,9 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools/file"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/rag"
+	"github.com/nats-io/nats.go"
+	"github.com/weaviate/weaviate-go-client/v5/weaviate"
 )
 
 // coordinatorRegistry tracks coordinators by session ID for cleanup.
@@ -44,12 +50,14 @@ var coordinatorRegistry = struct {
 // persistenceRegistry tracks persistence components by session ID for cleanup.
 // GR-36: Prevent resource leaks by enabling session-based cleanup.
 var persistenceRegistry = struct {
-	mu       sync.RWMutex
-	managers map[string]*crs.PersistenceManager
-	journals map[string]*crs.BadgerJournal
+	mu          sync.RWMutex
+	managers    map[string]*crs.PersistenceManager
+	journals    map[string]crs.Journal
+	projectKeys map[string]string // CRS-17: maps session ID -> checkpoint key (path hash)
 }{
-	managers: make(map[string]*crs.PersistenceManager),
-	journals: make(map[string]*crs.BadgerJournal),
+	managers:    make(map[string]*crs.PersistenceManager),
+	journals:    make(map[string]crs.Journal),
+	projectKeys: make(map[string]string),
 }
 
 // journalsByProject tracks journals by project key (checkpoint key).
@@ -57,11 +65,43 @@ var persistenceRegistry = struct {
 // This prevents BadgerDB lock conflicts when multiple sessions work on the same project.
 var journalsByProject = struct {
 	mu       sync.RWMutex
-	journals map[string]*crs.BadgerJournal // key is checkpoint key (project hash)
-	sessions map[string]string             // maps project key -> session ID that owns it
+	journals map[string]crs.Journal // key is checkpoint key (project hash)
+	sessions map[string]string      // maps project key -> session ID that owns it
 }{
-	journals: make(map[string]*crs.BadgerJournal),
+	journals: make(map[string]crs.Journal),
 	sessions: make(map[string]string),
+}
+
+// computeGraphContentHash builds a content-aware hash from the graph ID and graph statistics.
+//
+// Description:
+//
+//	graphID alone is sha256(projectRoot) — stable per project path, not per content.
+//	This function combines graphID with node count and edge count to produce a hash
+//	that changes when the graph is rebuilt with different content.
+//	NOTE: BuiltAtMilli is intentionally excluded — it changes on every rebuild even
+//	when the source is identical, causing unnecessary 7-minute re-indexing cycles.
+//
+// Inputs:
+//
+//	graphID - The project-level graph identifier.
+//	cached - The cached graph containing statistics. Must not be nil.
+//
+// Outputs:
+//
+//	string - Hex-encoded SHA-256 hash incorporating graph content metadata.
+//
+// Thread Safety: Safe for concurrent use (read-only on cached).
+func computeGraphContentHash(graphID string, cached *CachedGraph) string {
+	nodeCount := 0
+	edgeCount := 0
+	if cached.Graph != nil {
+		nodeCount = cached.Graph.NodeCount()
+		edgeCount = cached.Graph.EdgeCount()
+	}
+	composite := fmt.Sprintf("%s:n%d:e%d", graphID, nodeCount, edgeCount)
+	hash := sha256.Sum256([]byte(composite))
+	return fmt.Sprintf("%x", hash)
 }
 
 // registerCoordinator stores a coordinator for later cleanup.
@@ -73,7 +113,9 @@ func registerCoordinator(sessionID string, coord *integration.Coordinator) {
 
 // registerPersistence stores persistence components for later cleanup.
 // GR-36: Called when session restore infrastructure is created.
-func registerPersistence(sessionID string, pm *crs.PersistenceManager, journal *crs.BadgerJournal) {
+// CRS-17: projectKey is the checkpoint key (path hash) used by SaveBackup for directory
+// addressing and metadata identity. Must not be empty when pm is non-nil.
+func registerPersistence(sessionID string, pm *crs.PersistenceManager, journal crs.Journal, projectKey string) {
 	persistenceRegistry.mu.Lock()
 	defer persistenceRegistry.mu.Unlock()
 	if pm != nil {
@@ -81,6 +123,9 @@ func registerPersistence(sessionID string, pm *crs.PersistenceManager, journal *
 	}
 	if journal != nil {
 		persistenceRegistry.journals[sessionID] = journal
+	}
+	if projectKey != "" {
+		persistenceRegistry.projectKeys[sessionID] = projectKey
 	}
 }
 
@@ -110,6 +155,7 @@ func closeExistingJournalForProject(projectKey string) bool {
 		persistenceRegistry.mu.Lock()
 		if oldSessionID != "" {
 			delete(persistenceRegistry.journals, oldSessionID)
+			delete(persistenceRegistry.projectKeys, oldSessionID)
 		}
 		persistenceRegistry.mu.Unlock()
 
@@ -120,7 +166,7 @@ func closeExistingJournalForProject(projectKey string) bool {
 
 // registerJournalForProject tracks a journal by its project key.
 // GR-36: Enables proper cleanup when multiple sessions work on the same project.
-func registerJournalForProject(projectKey, sessionID string, journal *crs.BadgerJournal) {
+func registerJournalForProject(projectKey, sessionID string, journal crs.Journal) {
 	journalsByProject.mu.Lock()
 	defer journalsByProject.mu.Unlock()
 	journalsByProject.journals[projectKey] = journal
@@ -143,38 +189,84 @@ func cleanupCoordinator(sessionID string) {
 
 // cleanupPersistence removes and closes persistence components for a session.
 // GR-36: Called when session ends to save checkpoint and close resources.
+// cleanupPersistence saves a checkpoint and closes journal/manager for a session.
+//
+// Lock ordering: persistenceRegistry.mu → journalsByProject.mu
+// (must always acquire in this order to avoid deadlocks).
 func cleanupPersistence(sessionID string) {
-	persistenceRegistry.mu.Lock()
-	defer persistenceRegistry.mu.Unlock()
+	var projectKey string
 
-	// Close journal first (flushes pending writes)
-	if journal, ok := persistenceRegistry.journals[sessionID]; ok {
-		if err := journal.Close(); err != nil {
-			slog.Warn("GR-36: Failed to close journal",
-				slog.String("session_id", sessionID),
-				slog.String("error", err.Error()),
-			)
-		} else {
-			slog.Debug("GR-36: Journal closed",
-				slog.String("session_id", sessionID),
-			)
-		}
-		delete(persistenceRegistry.journals, sessionID)
-	}
+	// Phase 1: Under persistenceRegistry lock — save, close, and remove entries.
+	func() {
+		persistenceRegistry.mu.Lock()
+		defer persistenceRegistry.mu.Unlock()
 
-	// Then close persistence manager
-	if pm, ok := persistenceRegistry.managers[sessionID]; ok {
-		if err := pm.Close(); err != nil {
-			slog.Warn("GR-36: Failed to close persistence manager",
-				slog.String("session_id", sessionID),
-				slog.String("error", err.Error()),
-			)
-		} else {
-			slog.Debug("GR-36: Persistence manager closed",
-				slog.String("session_id", sessionID),
-			)
+		// CRS-PERSIST-01: Save checkpoint before closing.
+		// CRS-17: Use projectKey (checkpoint key / path hash) instead of sessionID (UUID)
+		// so metadata.ProjectHash matches what TryRestore validates against.
+		pm := persistenceRegistry.managers[sessionID]
+		journal := persistenceRegistry.journals[sessionID]
+		projectKey = persistenceRegistry.projectKeys[sessionID]
+		if pm != nil && journal != nil && projectKey != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if _, err := pm.SaveBackup(ctx, projectKey, journal, nil); err != nil {
+				slog.Warn("CRS-PERSIST-01: Failed to save session checkpoint",
+					slog.String("session_id", sessionID),
+					slog.String("project_key", projectKey),
+					slog.String("error", err.Error()),
+				)
+			} else {
+				slog.Info("CRS-PERSIST-01: Session checkpoint saved",
+					slog.String("session_id", sessionID),
+					slog.String("project_key", projectKey),
+				)
+			}
 		}
-		delete(persistenceRegistry.managers, sessionID)
+
+		// Close journal first (flushes pending writes)
+		if journal != nil {
+			if err := journal.Close(); err != nil {
+				slog.Warn("GR-36: Failed to close journal",
+					slog.String("session_id", sessionID),
+					slog.String("error", err.Error()),
+				)
+			} else {
+				slog.Debug("GR-36: Journal closed",
+					slog.String("session_id", sessionID),
+				)
+			}
+			delete(persistenceRegistry.journals, sessionID)
+		}
+
+		// Then close persistence manager
+		if pm != nil {
+			if err := pm.Close(); err != nil {
+				slog.Warn("GR-36: Failed to close persistence manager",
+					slog.String("session_id", sessionID),
+					slog.String("error", err.Error()),
+				)
+			} else {
+				slog.Debug("GR-36: Persistence manager closed",
+					slog.String("session_id", sessionID),
+				)
+			}
+			delete(persistenceRegistry.managers, sessionID)
+		}
+		delete(persistenceRegistry.projectKeys, sessionID)
+	}()
+
+	// Phase 2: Under journalsByProject lock — remove stale project entry.
+	// CRS-17 CR2: Without this cleanup, closeExistingJournalForProject would
+	// attempt to Close() the already-closed journal on next session start,
+	// risking a double-close panic.
+	if projectKey != "" {
+		journalsByProject.mu.Lock()
+		if existingSession, ok := journalsByProject.sessions[projectKey]; ok && existingSession == sessionID {
+			delete(journalsByProject.journals, projectKey)
+			delete(journalsByProject.sessions, projectKey)
+		}
+		journalsByProject.mu.Unlock()
 	}
 }
 
@@ -222,6 +314,35 @@ type DefaultDependenciesFactory struct {
 	// persistenceBaseDir is the base directory for CRS persistence
 	// GR-36: Defaults to ~/.aleutian/crs if not set
 	persistenceBaseDir string
+
+	// weaviateClient is the Weaviate client for semantic resolution.
+	// CRS-25: Optional - if nil, RAG uses structural-only resolution.
+	weaviateClient *weaviate.Client
+
+	// weaviateDataSpace is the project isolation key for Weaviate.
+	weaviateDataSpace string
+
+	// embedClient is the embedding client for pre-computing vectors.
+	// CRS-26i: Routes embedding requests through the orchestrator.
+	embedClient *rag.EmbedClient
+
+	// indexingCoord is the shared symbol indexing coordinator.
+	// CRS-26l: When set, delegates symbol indexing to the coordinator
+	// instead of running an inline goroutine. Enables eager indexing
+	// at init time.
+	indexingCoord *SymbolIndexingCoordinator
+
+	// indexingMu guards indexingHash to prevent concurrent indexing goroutines
+	// from racing (delete-all + re-index interleaving).
+	// CRS-26l: Only used when indexingCoord is nil (legacy fallback).
+	indexingMu   sync.Mutex
+	indexingHash string // graph hash currently being indexed, empty when idle
+
+	// natsJS is the JetStream context for creating NATSJournals.
+	// CRS-27: When set, sessions use NATS JetStream for CRS delta persistence
+	// instead of embedded BadgerDB. Falls back to in-memory BadgerJournal when nil.
+	natsJS     nats.JetStreamContext
+	natsStream string // JetStream stream name (default: "CRS_DELTAS")
 }
 
 // DependenciesFactoryOption configures a DefaultDependenciesFactory.
@@ -387,6 +508,79 @@ func WithPersistenceBaseDir(dir string) DependenciesFactoryOption {
 	}
 }
 
+// WithWeaviateClient sets the Weaviate client for semantic RAG resolution.
+//
+// Description:
+//
+//	CRS-25: When set, the factory creates a CombinedResolver (structural + semantic)
+//	instead of a StructuralResolver-only. The dataSpace is used for project isolation.
+//
+// Inputs:
+//
+//	client - Weaviate client. May be nil (degrades to structural-only).
+//	dataSpace - Project isolation key.
+func WithWeaviateClient(client *weaviate.Client, dataSpace string) DependenciesFactoryOption {
+	return func(f *DefaultDependenciesFactory) {
+		f.weaviateClient = client
+		f.weaviateDataSpace = dataSpace
+	}
+}
+
+// WithEmbedClient sets the embedding client for pre-computing vectors.
+//
+// Description:
+//
+//	CRS-26i: When set, SymbolStore pre-computes vectors via the orchestrator's
+//	/v1/embed endpoint before inserting into Weaviate. SemanticResolver uses
+//	the same client to embed query tokens for nearVector search.
+//
+// Inputs:
+//
+//	client - Embedding client. May be nil (graceful degradation — no vectors).
+func WithEmbedClient(client *rag.EmbedClient) DependenciesFactoryOption {
+	return func(f *DefaultDependenciesFactory) {
+		f.embedClient = client
+	}
+}
+
+// WithIndexingCoordinator sets the shared symbol indexing coordinator.
+//
+// Description:
+//
+//	CRS-26l: When set, the factory delegates symbol indexing to the coordinator
+//	instead of running an inline goroutine. This enables eager indexing at
+//	graph init time via HandleInit.
+//
+// Inputs:
+//
+//	coord - The indexing coordinator. May be nil (falls back to inline goroutine).
+func WithIndexingCoordinator(coord *SymbolIndexingCoordinator) DependenciesFactoryOption {
+	return func(f *DefaultDependenciesFactory) {
+		f.indexingCoord = coord
+	}
+}
+
+// WithNATSJetStream sets the NATS JetStream context for CRS delta persistence.
+//
+// Description:
+//
+//	CRS-27: When set, sessions use NATS JetStream for CRS delta persistence
+//	instead of embedded BadgerDB. Falls back to in-memory BadgerJournal when
+//	NATS is unavailable at session creation time.
+//
+// Inputs:
+//
+//	js - JetStream context from a connected NATS client.
+//	streamName - JetStream stream name (e.g., "CRS_DELTAS").
+//
+// Thread Safety: Safe for concurrent use.
+func WithNATSJetStream(js nats.JetStreamContext, streamName string) DependenciesFactoryOption {
+	return func(f *DefaultDependenciesFactory) {
+		f.natsJS = js
+		f.natsStream = streamName
+	}
+}
+
 // Create implements agent.DependenciesFactory.
 //
 // Description:
@@ -471,6 +665,105 @@ func (f *DefaultDependenciesFactory) Create(session *agent.Session, query string
 						slog.Debug("CB-31d: Symbol resolution enabled",
 							slog.String("session_id", session.ID),
 						)
+
+						// CRS-25: Create RAG resolver for entity grounding.
+						// Layer 1 (structural) always available. Layer 2 (semantic) when Weaviate connected.
+						structural := rag.NewStructuralResolver(cached.Index)
+						if f.weaviateClient != nil && f.embedClient != nil {
+							semantic, sErr := rag.NewSemanticResolver(f.weaviateClient, f.weaviateDataSpace, f.embedClient)
+							if sErr != nil {
+								slog.Warn("CRS-26j: Semantic resolver init failed, using structural-only",
+									slog.String("error", sErr.Error()),
+								)
+								deps.RAGResolver = structural
+							} else {
+								deps.RAGResolver = rag.NewCombinedResolver(structural, semantic)
+								slog.Debug("CRS-25: Combined RAG resolver enabled (structural + semantic)",
+									slog.String("session_id", session.ID),
+									slog.Int("packages", len(structural.PackageNames())),
+								)
+
+								// CRS-26l: Delegate symbol indexing to coordinator if available.
+								if f.indexingCoord != nil {
+									f.indexingCoord.TriggerIndexing(graphID, cached)
+									if store := f.indexingCoord.GetSymbolStore(); store != nil {
+										deps.SymbolStore = store
+									}
+								} else {
+									// CRS-25: Legacy fallback — inline goroutine for indexing.
+									preHash := computeGraphContentHash(graphID, cached)
+									go func() {
+										defer func() {
+											if r := recover(); r != nil {
+												slog.Error("CRS-25: Panic in symbol indexing goroutine",
+													slog.Any("panic", r),
+												)
+											}
+										}()
+										f.indexingMu.Lock()
+										if f.indexingHash == preHash {
+											f.indexingMu.Unlock()
+											slog.Debug("CRS-25: Indexing already in progress for this graph", slog.String("graph_hash", preHash))
+											return
+										}
+										f.indexingHash = preHash
+										f.indexingMu.Unlock()
+										defer func() {
+											f.indexingMu.Lock()
+											f.indexingHash = ""
+											f.indexingMu.Unlock()
+										}()
+										indexCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+										defer cancel()
+										store, storeErr := rag.NewSymbolStore(f.weaviateClient, f.weaviateDataSpace, f.embedClient)
+										if storeErr != nil {
+											slog.Warn("CRS-25: Failed to create symbol store", slog.String("error", storeErr.Error()))
+											return
+										}
+										deps.SymbolStore = store
+										hasHash, hashErr := store.HasGraphHash(indexCtx, preHash)
+										if hashErr != nil {
+											slog.Warn("CRS-25: Failed to check graph hash", slog.String("error", hashErr.Error()))
+											return
+										}
+										if hasHash {
+											slog.Debug("CRS-25: Symbols already indexed for this graph", slog.String("graph_hash", preHash))
+											return
+										}
+										if delErr := store.DeleteAll(indexCtx); delErr != nil {
+											slog.Warn("CRS-25: Failed to delete stale symbols", slog.String("error", delErr.Error()))
+										}
+										count, idxErr := store.IndexSymbols(indexCtx, cached.Index, preHash, nil)
+										if idxErr != nil {
+											slog.Warn("CRS-25: Symbol indexing failed", slog.String("error", idxErr.Error()))
+										} else {
+											slog.Info("CRS-25: Symbols indexed into Weaviate",
+												slog.Int("count", count),
+												slog.String("graph_hash", preHash),
+											)
+										}
+									}()
+								}
+							}
+						} else {
+							deps.RAGResolver = structural
+							slog.Debug("CRS-25: Structural RAG resolver enabled (no Weaviate)",
+								slog.String("session_id", session.ID),
+								slog.Int("packages", len(structural.PackageNames())),
+							)
+						}
+					}
+				}
+
+				// CRS-19: Create staleness checker from graph's recorded file mtimes.
+				if cached.Graph != nil && len(cached.Graph.FileMtimes) > 0 {
+					projectRoot := session.GetProjectRoot()
+					if projectRoot != "" {
+						deps.StalenessChecker = graph.NewStalenessChecker(projectRoot, cached.Graph.FileMtimes)
+						slog.Debug("CRS-19: Staleness checker enabled",
+							slog.String("session_id", session.ID),
+							slog.Int("tracked_files", len(cached.Graph.FileMtimes)),
+						)
 					}
 				}
 
@@ -481,6 +774,14 @@ func (f *DefaultDependenciesFactory) Create(session *agent.Session, query string
 					// Register all CB-20/CB-31b exploration tools (graph-based)
 					// Use the centralized registration function
 					tools.RegisterExploreTools(registry, cached.Graph, cached.Index)
+
+					// CRS-26m: Register semantic search tools (vector-based)
+					if f.weaviateClient != nil && f.embedClient != nil {
+						tools.RegisterSemanticTools(registry, f.weaviateClient, f.weaviateDataSpace, f.embedClient, cached.Index)
+						slog.Info("Semantic tools registered",
+							slog.String("session_id", session.ID),
+						)
+					}
 
 					// Register CB-30 file operation tools (Read, Write, Edit, Glob, Grep, Diff, Tree, JSON)
 					projectRoot := session.GetProjectRoot()
@@ -530,9 +831,9 @@ func (f *DefaultDependenciesFactory) Create(session *agent.Session, query string
 		// CRS-WIRE-01: Wire journal to Bridge so coordinator-driven deltas
 		// (learned constraints, proof updates) are persisted.
 		var bridgeOpts []integration.BridgeOption
-		if deps.BadgerJournal != nil {
+		if deps.Journal != nil {
 			// Session restore path: persistent journal already created
-			bridgeOpts = append(bridgeOpts, integration.WithJournal(deps.BadgerJournal))
+			bridgeOpts = append(bridgeOpts, integration.WithJournal(deps.Journal))
 			slog.Info("CRS-WIRE-01: Persistent journal wired to Bridge",
 				slog.String("session_id", session.ID),
 			)
@@ -547,9 +848,9 @@ func (f *DefaultDependenciesFactory) Create(session *agent.Session, query string
 				AllowDegraded: true,
 			})
 			if memErr == nil {
-				deps.BadgerJournal = memJournal
+				deps.Journal = memJournal
 				bridgeOpts = append(bridgeOpts, integration.WithJournal(memJournal))
-				registerPersistence(session.ID, nil, memJournal)
+				registerPersistence(session.ID, nil, memJournal, "")
 				slog.Info("CRS-WIRE-01: In-memory journal wired to Bridge",
 					slog.String("session_id", session.ID),
 				)
@@ -655,29 +956,69 @@ func (f *DefaultDependenciesFactory) trySessionRestore(
 		return nil
 	}
 
-	// Create BadgerJournal for this session
-	// GR-36: First close any existing journal for this project to prevent lock conflicts
+	// Create journal for this session.
+	// CRS-27: Prefer NATS JetStream when available, fall back to BadgerDB.
+	// GR-36: First close any existing journal for this project to prevent lock conflicts.
 	projectKey := sessionIdentifier.CheckpointKey()
 	closeExistingJournalForProject(projectKey)
 
-	journalPath := filepath.Join(baseDir, projectKey, "journal")
-	journalConfig := crs.JournalConfig{
-		SessionID:  sessionID,
-		Path:       journalPath,
-		SyncWrites: false,
+	var journal crs.Journal
+	if f.natsJS != nil {
+		// CRS-27: Use NATS JetStream for CRS delta persistence
+		streamName := f.natsStream
+		if streamName == "" {
+			streamName = "CRS_DELTAS"
+		}
+		natsJournal, natsErr := crs.NewNATSJournal(crs.NATSJournalConfig{
+			SessionID:  sessionID,
+			JS:         f.natsJS,
+			StreamName: streamName,
+			Logger:     slog.Default(),
+		})
+		if natsErr != nil {
+			slog.Warn("CRS-27: Failed to create NATSJournal, falling back to BadgerDB",
+				slog.String("error", natsErr.Error()),
+			)
+		} else {
+			journal = natsJournal
+			slog.Info("CRS-27: Using NATS JetStream journal",
+				slog.String("session_id", sessionID),
+				slog.String("stream", streamName),
+			)
+		}
 	}
 
-	journal, err := crs.NewBadgerJournal(journalConfig)
-	if err != nil {
-		slog.Warn("GR-36: Failed to create BadgerJournal",
-			slog.String("error", err.Error()),
-		)
-		return nil
+	if journal == nil {
+		// Fall back to BadgerDB journal
+		journalPath := filepath.Join(baseDir, projectKey, "journal")
+		journalConfig := crs.JournalConfig{
+			SessionID:  sessionID,
+			Path:       journalPath,
+			SyncWrites: false,
+		}
+
+		badgerJournal, badgerErr := crs.NewBadgerJournal(journalConfig)
+		if badgerErr != nil {
+			slog.Warn("GR-36: Failed to create BadgerJournal",
+				slog.String("error", badgerErr.Error()),
+			)
+			return nil
+		}
+		journal = badgerJournal
 	}
-	deps.BadgerJournal = journal
+	deps.Journal = journal
+
+	// CRS-27: Attempt one-time migration from BadgerDB to NATS if applicable.
+	if natsJournal, ok := journal.(*crs.NATSJournal); ok {
+		if migErr := migrateFromBadgerIfNeeded(ctx, baseDir, projectKey, sessionID, natsJournal, pm); migErr != nil {
+			slog.Warn("CRS-27: Migration from BadgerDB failed (non-fatal)",
+				slog.String("error", migErr.Error()),
+			)
+		}
+	}
 
 	// Register for cleanup when session ends (both session-based and project-based)
-	registerPersistence(sessionID, pm, journal)
+	registerPersistence(sessionID, pm, journal, projectKey)
 	registerJournalForProject(projectKey, sessionID, journal)
 
 	// Create restorer and attempt restore
@@ -713,6 +1054,108 @@ func (f *DefaultDependenciesFactory) trySessionRestore(
 	}
 
 	return result
+}
+
+// migrateFromBadgerIfNeeded performs a one-time migration from BadgerDB to NATS JetStream.
+//
+// Description:
+//
+//	CRS-27: Checks if a BadgerDB backup exists for the project and the NATS stream
+//	is empty. If so, creates a temporary in-memory BadgerJournal, loads the backup
+//	into it, replays all deltas, and appends each to the NATS journal. The old
+//	backup is renamed to .migrated to prevent re-migration.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation.
+//	baseDir - CRS persistence base directory.
+//	projectKey - The checkpoint key (project hash).
+//	sessionID - Current session identifier.
+//	natsJournal - The NATS journal to migrate into.
+//	pm - Persistence manager for loading backups.
+//
+// Outputs:
+//
+//	error - Non-nil if migration fails (non-fatal, caller should log and continue).
+//
+// Thread Safety: Safe for concurrent use (operates on project-scoped paths).
+func migrateFromBadgerIfNeeded(
+	ctx context.Context,
+	baseDir string,
+	projectKey string,
+	sessionID string,
+	natsJournal *crs.NATSJournal,
+	pm *crs.PersistenceManager,
+) error {
+	// Check if NATS stream already has data for this session
+	stats := natsJournal.Stats()
+	if stats.TotalDeltas > 0 {
+		slog.Debug("CRS-27: NATS stream already has data, skipping migration",
+			slog.String("session_id", sessionID),
+			slog.Int64("total_deltas", int64(stats.TotalDeltas)),
+		)
+		return nil
+	}
+
+	// Check if a BadgerDB backup exists
+	backupDir := filepath.Join(baseDir, projectKey, "backups")
+	latestBackup := filepath.Join(backupDir, "latest.backup.gz")
+	if _, err := os.Stat(latestBackup); os.IsNotExist(err) {
+		slog.Debug("CRS-27: No BadgerDB backup found, nothing to migrate",
+			slog.String("path", latestBackup),
+		)
+		return nil
+	}
+
+	slog.Info("CRS-27: Migrating BadgerDB backup to NATS JetStream",
+		slog.String("project_key", projectKey),
+		slog.String("backup_path", latestBackup),
+	)
+
+	// Create temporary in-memory BadgerJournal for loading the backup
+	tmpJournal, err := crs.NewBadgerJournal(crs.JournalConfig{
+		SessionID: sessionID + "-migration",
+		InMemory:  true,
+	})
+	if err != nil {
+		return fmt.Errorf("creating temp journal for migration: %w", err)
+	}
+	defer tmpJournal.Close()
+
+	// Load backup into temp journal
+	_, err = pm.LoadBackup(ctx, projectKey, tmpJournal)
+	if err != nil {
+		return fmt.Errorf("loading BadgerDB backup: %w", err)
+	}
+
+	// Replay all deltas from temp journal and append to NATS
+	deltas, replayErr := tmpJournal.Replay(ctx)
+	if replayErr != nil {
+		return fmt.Errorf("replaying temp journal: %w", replayErr)
+	}
+
+	migratedCount := 0
+	for _, delta := range deltas {
+		if appendErr := natsJournal.Append(ctx, delta); appendErr != nil {
+			return fmt.Errorf("appending delta %d to NATS: %w", migratedCount, appendErr)
+		}
+		migratedCount++
+	}
+
+	// Rename old backup to prevent re-migration
+	migratedPath := latestBackup + ".migrated"
+	if renameErr := os.Rename(latestBackup, migratedPath); renameErr != nil {
+		slog.Warn("CRS-27: Failed to rename backup after migration (may re-migrate next time)",
+			slog.String("error", renameErr.Error()),
+		)
+	}
+
+	slog.Info("CRS-27: Migration complete",
+		slog.String("project_key", projectKey),
+		slog.Int("deltas_migrated", migratedCount),
+	)
+
+	return nil
 }
 
 // Ensure DefaultDependenciesFactory implements agent.DependenciesFactory.

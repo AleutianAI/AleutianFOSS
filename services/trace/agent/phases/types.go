@@ -36,6 +36,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/index"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/rag"
 )
 
 // Phase defines the interface for agent phases.
@@ -163,10 +164,12 @@ type Dependencies struct {
 	// GR-33/GR-36: Required for session restore and checkpoint save.
 	PersistenceManager *crs.PersistenceManager
 
-	// BadgerJournal stores CRS deltas for replay.
+	// Journal stores CRS deltas for replay.
 	// Optional - if nil, delta journaling is disabled.
 	// GR-33/GR-36: Required for session restore to replay deltas.
-	BadgerJournal *crs.BadgerJournal
+	// CRS-27: Changed from *crs.BadgerJournal to crs.Journal interface
+	// to support NATS JetStream and other journal backends.
+	Journal crs.Journal
 
 	// GraphAnalytics provides graph analysis operations (dominators, communities, etc).
 	// Required for symbol resolution in parameter extraction (CB-31d).
@@ -178,10 +181,27 @@ type Dependencies struct {
 	// Optional - if nil, parameter extraction falls back to raw symbol names.
 	SymbolIndex *index.SymbolIndex
 
+	// RAGResolver resolves query tokens against the code graph before param extraction.
+	// CRS-25: Optional - if nil, param extraction runs without entity grounding.
+	// When available, resolves entity names (packages, symbols) from the graph
+	// and injects them into the extraction context for the LLM.
+	// Accepts StructuralResolver (Layer 1 only) or CombinedResolver (Layers 1+2).
+	RAGResolver rag.Resolver
+
+	// SymbolStore handles Weaviate symbol index updates for incremental refresh.
+	// CRS-25b: Optional - if nil, incremental RAG refresh is disabled.
+	// When available, symbols are deleted/re-indexed when files change mid-session.
+	SymbolStore *rag.SymbolStore
+
 	// ParamExtractor uses a fast LLM to extract tool parameters from queries.
 	// IT-08b: Optional - nil when LLM parameter extraction is not enabled.
 	// When available, enhances regex-based extraction with semantic understanding.
 	ParamExtractor agent.ParamExtractor
+
+	// StalenessChecker detects if the code graph is stale relative to the working tree.
+	// CRS-19: Optional - if nil, staleness detection is disabled.
+	// When available, spot-checks file mtimes before graph tool dispatch.
+	StalenessChecker *graph.StalenessChecker
 }
 
 // GraphProvider initializes and provides access to the code graph.

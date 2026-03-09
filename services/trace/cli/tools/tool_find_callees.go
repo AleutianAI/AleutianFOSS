@@ -258,6 +258,7 @@ func (t *findCalleesTool) Execute(ctx context.Context, params TypedParams) (*Res
 	var results map[string]*graph.QueryResult
 	var queryErrors int
 	var resolvedKind ast.SymbolKind // IT-06b Issue 3: Track resolved symbol kind for formatText
+	strategy := "fallback"          // IT_CRS_01: Track resolution strategy for CRS metadata
 
 	if t.index != nil {
 		var symbols []*ast.Symbol
@@ -267,6 +268,7 @@ func (t *findCalleesTool) Execute(ctx context.Context, params TypedParams) (*Res
 		if strings.Contains(p.FunctionName, ".") {
 			symbol, _, err := ResolveFunctionWithFuzzy(ctx, t.index, p.FunctionName, logger)
 			if err == nil {
+				strategy = "dot_notation"
 				logger.Info("dot-notation resolved",
 					slog.String("tool", "find_callees"),
 					slog.String("query", p.FunctionName),
@@ -322,12 +324,16 @@ func (t *findCalleesTool) Execute(ctx context.Context, params TypedParams) (*Res
 			// "Build in hugolib" → prefer symbols whose FilePath contains "hugolib".
 			if len(symbols) > 1 && p.PackageHint != "" {
 				symbols = filterByPackageHint(symbols, p.PackageHint, logger, "find_callees")
+				strategy = "package_hint"
+			} else if len(symbols) > 0 {
+				strategy = "exact"
 			}
 
 			// P1: If no exact match, try fuzzy search (Feb 14, 2026)
 			if len(symbols) == 0 {
 				symbol, fuzzy, err := ResolveFunctionWithFuzzy(ctx, t.index, p.FunctionName, logger)
 				if err == nil && fuzzy {
+					strategy = "fuzzy"
 					logger.Info("P1: Using fuzzy match for function",
 						slog.String("tool", "find_callees"),
 						slog.String("query", p.FunctionName),
@@ -423,6 +429,15 @@ func (t *findCalleesTool) Execute(ctx context.Context, params TypedParams) (*Res
 
 	duration := time.Since(start)
 
+	// IT_CRS_01: Compute truncated flag from query results
+	truncated := false
+	for _, qr := range results {
+		if qr != nil && qr.Truncated {
+			truncated = true
+			break
+		}
+	}
+
 	// Build CRS TraceStep for reasoning trace continuity
 	toolStep := crs.NewTraceStepBuilder().
 		WithAction("tool_find_callees").
@@ -432,15 +447,18 @@ func (t *findCalleesTool) Execute(ctx context.Context, params TypedParams) (*Res
 		WithMetadata("resolved_count", fmt.Sprintf("%d", output.ResolvedCount)).
 		WithMetadata("external_count", fmt.Sprintf("%d", output.ExternalCount)).
 		WithMetadata("total_count", fmt.Sprintf("%d", output.TotalCount)).
+		WithMetadata("resolution_strategy", strategy).
+		WithMetadata("truncated", fmt.Sprintf("%t", truncated)).
 		Build()
 
 	return &Result{
-		Success:    true,
-		Output:     output,
-		OutputText: outputText,
-		TokensUsed: estimateTokens(outputText),
-		TraceStep:  &toolStep,
-		Duration:   duration,
+		Success:     true,
+		Output:      output,
+		OutputText:  outputText,
+		TokensUsed:  estimateTokens(outputText),
+		TraceStep:   &toolStep,
+		Duration:    duration,
+		ResultCount: output.TotalCount,
 	}, nil
 }
 

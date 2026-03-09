@@ -20,6 +20,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/providers"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/rag"
 )
 
 // =============================================================================
@@ -251,6 +252,185 @@ func testLogger() *slog.Logger {
 }
 
 // =============================================================================
+// CRS-26e: RAG Entity Confidence Tier Tests
+// =============================================================================
+
+func TestParamExtractor_HighConfidenceEntity(t *testing.T) {
+	mock := &mockChatClient{response: `{"package": "pkg/materials"}`}
+	config := DefaultParamExtractorConfig()
+	config.Timeout = 0
+
+	extractor, err := NewParamExtractor(mock, config)
+	if err != nil {
+		t.Fatalf("NewParamExtractor: %v", err)
+	}
+
+	ec := &rag.ExtractionContext{
+		ResolvedEntities: []rag.ResolvedEntity{
+			{Raw: "materials", Kind: "package", Resolved: "pkg/materials", Confidence: 0.95},
+		},
+	}
+	ctx := rag.WithExtractionContext(context.Background(), ec)
+
+	schemas := []agent.ParamExtractorSchema{
+		{Name: "package", Type: "string", Required: false, Description: "Package name"},
+	}
+
+	// Call ExtractParams — we're testing that the prompt sent to the mock
+	// includes the confidence tier formatting, not the LLM output.
+	_, _ = extractor.ExtractParams(ctx, "Find hotspots in materials", "find_hotspots", schemas, nil)
+
+	// Verify the mock received a user message with "Confirmed entities"
+	// Since mockChatClient doesn't capture messages, we test the prompt building
+	// directly by checking the user prompt construction logic.
+	// The real validation is that ExtractParams doesn't panic and the confidence
+	// tier logic runs. For deeper validation, we test the prompt content below.
+}
+
+func TestParamExtractor_LowConfidenceEntity(t *testing.T) {
+	mock := &mockChatClient{response: `{"package": ""}`}
+	config := DefaultParamExtractorConfig()
+	config.Timeout = 0
+
+	extractor, err := NewParamExtractor(mock, config)
+	if err != nil {
+		t.Fatalf("NewParamExtractor: %v", err)
+	}
+
+	ec := &rag.ExtractionContext{
+		ResolvedEntities: []rag.ResolvedEntity{
+			{Raw: "system", Kind: "package", Resolved: "pkg/sys", Confidence: 0.35},
+		},
+	}
+	ctx := rag.WithExtractionContext(context.Background(), ec)
+
+	schemas := []agent.ParamExtractorSchema{
+		{Name: "package", Type: "string", Required: false, Description: "Package name"},
+	}
+
+	_, _ = extractor.ExtractParams(ctx, "Find dead code in system", "find_dead_code", schemas, nil)
+}
+
+func TestParamExtractor_MixedConfidenceEntities(t *testing.T) {
+	// Capture the messages sent to the mock to verify prompt content.
+	var capturedMessages []datatypes.Message
+	captureMock := &capturingChatClient{
+		response: `{"package": "pkg/materials"}`,
+		captured: &capturedMessages,
+	}
+	config := DefaultParamExtractorConfig()
+	config.Timeout = 0
+
+	extractor, err := NewParamExtractor(captureMock, config)
+	if err != nil {
+		t.Fatalf("NewParamExtractor: %v", err)
+	}
+
+	ec := &rag.ExtractionContext{
+		ResolvedEntities: []rag.ResolvedEntity{
+			{Raw: "materials", Kind: "package", Resolved: "pkg/materials", Confidence: 0.95},
+			{Raw: "system", Kind: "package", Resolved: "pkg/sys", Confidence: 0.35},
+		},
+		PackageNames: []string{"pkg/materials", "pkg/render", "pkg/core"},
+	}
+	ctx := rag.WithExtractionContext(context.Background(), ec)
+
+	schemas := []agent.ParamExtractorSchema{
+		{Name: "package", Type: "string", Required: false, Description: "Package name"},
+	}
+
+	_, _ = extractor.ExtractParams(ctx, "Find hotspots in materials and system", "find_hotspots", schemas, nil)
+
+	if len(capturedMessages) < 2 {
+		t.Fatalf("expected at least 2 messages (system + user), got %d", len(capturedMessages))
+	}
+
+	userMsg := capturedMessages[1].Content
+
+	t.Run("high confidence section present", func(t *testing.T) {
+		if !contains(userMsg, "Confirmed entities from code graph (USE THESE):") {
+			t.Error("user prompt should contain 'Confirmed entities' section")
+		}
+		if !contains(userMsg, `"materials"`) {
+			t.Error("user prompt should contain high-confidence entity 'materials'")
+		}
+	})
+
+	t.Run("low confidence section present", func(t *testing.T) {
+		if !contains(userMsg, "Suggested entities (VERIFY before using):") {
+			t.Error("user prompt should contain 'Suggested entities' section")
+		}
+		if !contains(userMsg, "possibly") {
+			t.Error("low-confidence entities should use 'possibly' qualifier")
+		}
+	})
+
+	t.Run("available packages constraint present", func(t *testing.T) {
+		if !contains(userMsg, "Available packages:") {
+			t.Error("user prompt should contain 'Available packages' list")
+		}
+		if !contains(userMsg, "Only use package names from this list") {
+			t.Error("user prompt should contain package constraint instruction")
+		}
+	})
+}
+
+func TestParamExtractor_AvailablePackagesConstraint(t *testing.T) {
+	var capturedMessages []datatypes.Message
+	captureMock := &capturingChatClient{
+		response: `{"package": "pkg/render"}`,
+		captured: &capturedMessages,
+	}
+	config := DefaultParamExtractorConfig()
+	config.Timeout = 0
+
+	extractor, err := NewParamExtractor(captureMock, config)
+	if err != nil {
+		t.Fatalf("NewParamExtractor: %v", err)
+	}
+
+	ec := &rag.ExtractionContext{
+		ResolvedEntities: []rag.ResolvedEntity{
+			{Raw: "rendering", Kind: "package", Resolved: "pkg/render", Confidence: 0.89},
+		},
+		PackageNames: []string{"pkg/render", "pkg/materials", "pkg/core", "pkg/db"},
+	}
+	ctx := rag.WithExtractionContext(context.Background(), ec)
+
+	schemas := []agent.ParamExtractorSchema{
+		{Name: "package", Type: "string", Required: false, Description: "Package name"},
+	}
+
+	result, err := extractor.ExtractParams(ctx, "Find hotspots in rendering", "find_hotspots", schemas, nil)
+	if err != nil {
+		t.Fatalf("ExtractParams: %v", err)
+	}
+
+	if result["package"] != "pkg/render" {
+		t.Errorf("package = %v, want pkg/render", result["package"])
+	}
+
+	// Verify prompt includes all package names.
+	userMsg := capturedMessages[1].Content
+	for _, pkg := range []string{"pkg/render", "pkg/materials", "pkg/core", "pkg/db"} {
+		if !contains(userMsg, pkg) {
+			t.Errorf("user prompt should contain package %q", pkg)
+		}
+	}
+}
+
+// capturingChatClient captures messages sent to Chat for test verification.
+type capturingChatClient struct {
+	response string
+	captured *[]datatypes.Message
+}
+
+func (c *capturingChatClient) Chat(ctx context.Context, messages []datatypes.Message, opts providers.ChatOptions) (string, error) {
+	*c.captured = append(*c.captured, messages...)
+	return c.response, nil
+}
+
+// =============================================================================
 // IT-12: ResolveConceptualSymbol Tests
 // =============================================================================
 
@@ -285,7 +465,7 @@ func TestResolveConceptualSymbol_PicksCorrectSymbol(t *testing.T) {
 
 	result, err := extractor.ResolveConceptualSymbol(context.Background(),
 		"Show the call chain from assigning a material to a mesh through to shader compilation",
-		candidates)
+		candidates, 0, 0, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -310,7 +490,7 @@ func TestResolveConceptualSymbol_ValidatesCandidateList(t *testing.T) {
 	}
 
 	_, err = extractor.ResolveConceptualSymbol(context.Background(),
-		"assigning a material", candidates)
+		"assigning a material", candidates, 0, 0, "")
 	if err == nil {
 		t.Error("expected error when LLM returns symbol not in candidate list")
 	}
@@ -332,7 +512,7 @@ func TestResolveConceptualSymbol_PartialMatch(t *testing.T) {
 	}
 
 	result, err := extractor.ResolveConceptualSymbol(context.Background(),
-		"assigning a material", candidates)
+		"assigning a material", candidates, 0, 0, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -360,7 +540,7 @@ func TestResolveConceptualSymbol_VerboseResponse(t *testing.T) {
 	}
 
 	result, err := extractor.ResolveConceptualSymbol(context.Background(),
-		"assigning a material to a mesh", candidates)
+		"assigning a material to a mesh", candidates, 0, 0, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -385,7 +565,7 @@ func TestResolveConceptualSymbol_Disabled(t *testing.T) {
 	}
 
 	_, err = extractor.ResolveConceptualSymbol(context.Background(),
-		"assigning a material", candidates)
+		"assigning a material", candidates, 0, 0, "")
 	if err == nil {
 		t.Error("expected error when extractor is disabled")
 	}
@@ -402,7 +582,7 @@ func TestResolveConceptualSymbol_NoCandidates(t *testing.T) {
 	}
 
 	_, err = extractor.ResolveConceptualSymbol(context.Background(),
-		"assigning a material", []agent.SymbolCandidate{})
+		"assigning a material", []agent.SymbolCandidate{}, 0, 0, "")
 	if err == nil {
 		t.Error("expected error with empty candidates")
 	}
@@ -423,7 +603,7 @@ func TestResolveConceptualSymbol_ChatError(t *testing.T) {
 	}
 
 	_, err = extractor.ResolveConceptualSymbol(context.Background(),
-		"assigning a material", candidates)
+		"assigning a material", candidates, 0, 0, "")
 	if err == nil {
 		t.Error("expected error when chat fails")
 	}

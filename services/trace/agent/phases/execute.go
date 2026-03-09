@@ -28,6 +28,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/routing"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/config"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/rag"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -388,6 +389,19 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 		err    error
 	}
 	llmCh := make(chan llmParamResult, 1)
+	speculativeStart := time.Now() // CRS-14: Track speculative extraction wall-clock time.
+
+	// CRS-25: Resolve query entities against the graph before param extraction.
+	// This runs synchronously (~0ms, O(1) lookups) and enriches the context
+	// so the extraction model receives grounded entity names.
+	// Hoisted here so both speculative extraction and re-extraction paths can use it.
+	extractCtx := ctx
+	if deps.RAGResolver != nil {
+		ec := deps.RAGResolver.Resolve(ctx, deps.Query)
+		if len(ec.ResolvedEntities) > 0 {
+			extractCtx = rag.WithExtractionContext(ctx, ec)
+		}
+	}
 
 	var speculativeTool string
 	if deps.ParamExtractor != nil && deps.ParamExtractor.IsEnabled() && p.prefilter != nil {
@@ -427,8 +441,9 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 					return
 				}
 				// No regex hint — LLM extracts from scratch (parallel, no bias)
+				// CRS-25: extractCtx carries resolved entities for the prompt.
 				result, err := deps.ParamExtractor.ExtractParams(
-					ctx, deps.Query, tool, schemas, map[string]any{},
+					extractCtx, deps.Query, tool, schemas, map[string]any{},
 				)
 				llmCh <- llmParamResult{result, tool, err}
 			}(speculativeTool)
@@ -510,6 +525,19 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 		)
 		semanticSpan.End()
 
+		// CRS-15: Record similarity to CRS for cross-session persistence.
+		// CRS-15 Code Review Fix #3: deps.Query is intentionally used here —
+		// CheckSemanticStatus operates at user-query level, not tool-parameter level.
+		if similarity > 0 && similarCall != nil && deps.Session.HasCRS() {
+			currentKey := fmt.Sprintf("%s:%s", hardForcing.Tool, deps.Query)
+			previousKey := fmt.Sprintf("%s:%s", hardForcing.Tool, similarCall.RawQuery)
+			if recErr := deps.Session.GetCRS().RecordSimilarity(ctx, currentKey, previousKey, 1.0-similarity); recErr != nil {
+				slog.Debug("CRS-15: Failed to record similarity",
+					slog.String("error", recErr.Error()),
+				)
+			}
+		}
+
 		if status == "blocked" {
 			slog.Info("GR-38: Skipping hard force, semantically similar call already made",
 				slog.String("session_id", deps.Session.ID),
@@ -556,13 +584,17 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 		// The goroutine was launched BEFORE buildLLMRequest, so it has had ~570ms
 		// to complete on ministral-3:3b (~150ms typical). Result is ready.
 		llmResult := <-llmCh
+		speculativeDuration := time.Since(speculativeStart) // CRS-14
 		if llmResult.err == nil && llmResult.tool == hardForcing.Tool && llmResult.params != nil {
 			// Speculative hit: router confirmed our pre-filter prediction
 			converted, convErr := convertMapToTypedParams(hardForcing.Tool, llmResult.params)
 			if convErr == nil {
 				slog.Info("IT-08e: LLM param extraction succeeded (parallel, speculative hit)",
 					slog.String("tool", hardForcing.Tool),
+					slog.String("speculative_outcome", "hit"),
+					slog.Duration("speculative_duration", speculativeDuration),
 				)
+				routing.RecordSpeculativeExtraction("hit", speculativeDuration.Seconds())
 				// IT-Summary FIX-D: For find_path, preserve regex-extracted dot-notation
 				// names (Type.Method) when the LLM stripped them to bare names.
 				// The 3b model over-generalizes "strip package qualifiers" and removes
@@ -595,18 +627,83 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 				slog.Warn("IT-08e: LLM param conversion failed, using regex",
 					slog.String("tool", hardForcing.Tool),
 					slog.String("error", convErr.Error()),
+					slog.String("speculative_outcome", "hit_conversion_failed"),
 				)
+				routing.RecordSpeculativeExtraction("hit_conversion_failed", speculativeDuration.Seconds())
 			}
 		} else if llmResult.tool != "" && llmResult.tool != hardForcing.Tool {
-			// Mispredict: router picked a different tool than pre-filter top
-			slog.Info("IT-08e: Speculative mispredict, discarding LLM params",
+			// CRS-MISPREDICT-01: Re-extract params for the actual tool.
+			// The speculative LLM extracted params for the wrong tool. Instead of
+			// discarding and falling back to crude regex params, re-extract using
+			// the param extractor for the correct tool.
+			slog.Info("IT-08e: Speculative mispredict, attempting re-extraction",
 				slog.String("speculated", llmResult.tool),
 				slog.String("actual", hardForcing.Tool),
 			)
+			deps.Session.RecordTraceStep(crs.NewTraceStepBuilder().
+				WithAction("crs_mispredict_recovery").
+				WithTool(hardForcing.Tool).
+				WithMetadata("speculated", llmResult.tool).
+				WithMetadata("actual", hardForcing.Tool).
+				Build())
+
+			var reExtracted bool
+			if deps.ParamExtractor != nil && deps.ParamExtractor.IsEnabled() {
+				var actualToolDef *tools.ToolDefinition
+				for i := range toolDefs {
+					if toolDefs[i].Name == hardForcing.Tool {
+						actualToolDef = &toolDefs[i]
+						break
+					}
+				}
+				if actualToolDef != nil {
+					schemas := buildParamSchemas(actualToolDef)
+					if len(schemas) > 0 {
+						// CRS-25: Use extractCtx so re-extraction also gets resolved entities.
+						reResult, reErr := deps.ParamExtractor.ExtractParams(
+							extractCtx, deps.Query, hardForcing.Tool, schemas, map[string]any{},
+						)
+						if reErr == nil && reResult != nil {
+							converted, convErr := convertMapToTypedParams(hardForcing.Tool, reResult)
+							if convErr == nil {
+								params = converted
+								paramErr = nil
+								reExtracted = true
+								slog.Info("IT-08e: Re-extraction succeeded",
+									slog.String("tool", hardForcing.Tool),
+									slog.String("speculative_outcome", "mispredict_reextracted"),
+									slog.Duration("speculative_duration", speculativeDuration),
+								)
+								routing.RecordSpeculativeExtraction("mispredict_reextracted", speculativeDuration.Seconds())
+							}
+						}
+					}
+				}
+			}
+			if !reExtracted {
+				slog.Info("IT-08e: Re-extraction failed or unavailable, using regex params",
+					slog.String("tool", hardForcing.Tool),
+					slog.String("speculative_outcome", "mispredict_regex_fallback"),
+					slog.Duration("speculative_duration", speculativeDuration),
+				)
+				routing.RecordSpeculativeExtraction("mispredict_regex_fallback", speculativeDuration.Seconds())
+			}
 		} else if llmResult.err != nil {
 			slog.Debug("IT-08e: LLM param extraction unavailable, using regex",
 				slog.String("reason", llmResult.err.Error()),
+				slog.String("speculative_outcome", "error"),
+				slog.Duration("speculative_duration", speculativeDuration),
 			)
+			routing.RecordSpeculativeExtraction("error", speculativeDuration.Seconds())
+		} else {
+			// CRS-14 CR2 Fix H1: Catch-all for remaining cases (e.g., nil params
+			// with matching tool, empty tool with no error). Without this, the
+			// speculative extraction outcome is silently unrecorded.
+			slog.Debug("IT-08e: LLM param extraction returned empty result, using regex",
+				slog.String("speculative_outcome", "empty_result"),
+				slog.Duration("speculative_duration", speculativeDuration),
+			)
+			routing.RecordSpeculativeExtraction("empty_result", speculativeDuration.Seconds())
 		}
 
 		// IT-12: Conceptual symbol resolution for tools with symbol name params.
@@ -616,31 +713,203 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 		// query keywords and ask the LLM to pick the best real symbol.
 		if paramErr == nil && params != nil &&
 			deps.SymbolIndex != nil && deps.ParamExtractor != nil && deps.ParamExtractor.IsEnabled() {
+
+			// D3b: Validate extracted path params before conceptual resolution.
+			// Catches param extractor failures where "to" is a substring of "from"
+			// (e.g., from="Context.Bind" to="Bind") which would bypass resolution.
+			if hardForcing.Tool == "find_path" {
+				if fpParams, ok := params.(tools.FindPathParams); ok {
+					newFrom, newTo, paramValidated := validateExtractedPathParams(fpParams.From, fpParams.To, deps.Query)
+					if paramValidated {
+						fpParams.From = newFrom
+						fpParams.To = newTo
+						params = fpParams
+					}
+				}
+			}
+
 			switch hardForcing.Tool {
 			case "get_call_chain":
 				if gccParams, ok := params.(tools.GetCallChainParams); ok && gccParams.FunctionName != "" {
-					resolved := resolveConceptualName(ctx, gccParams.FunctionName, deps.Query,
-						deps.SymbolIndex, deps.ParamExtractor, deps.GraphAnalytics)
-					if resolved != gccParams.FunctionName {
-						gccParams.FunctionName = resolved
+					result := resolveConceptualName(ctx, gccParams.FunctionName, deps.Query,
+						deps.SymbolIndex, deps.ParamExtractor, deps.Session,
+						conceptualResolutionOpts{Analytics: deps.GraphAnalytics})
+					if result.Resolved != gccParams.FunctionName {
+						gccParams.FunctionName = result.Resolved
 						params = gccParams
+					}
+					if result.Overridden {
+						p.learnFromFailure(ctx, deps, crs.FailureEvent{
+							SessionID:    deps.Session.ID,
+							FailureType:  crs.FailureTypeResolutionDemotion,
+							Tool:         hardForcing.Tool,
+							Source:       crs.SignalSourceHard,
+							ErrorMessage: fmt.Sprintf("LLM picked tier%d [%s], overrode to tier0", result.LLMPickTier, result.LLMPick),
+						})
+					}
+				}
+			case "find_callers":
+				if fcParams, ok := params.(tools.FindCallersParams); ok && fcParams.FunctionName != "" {
+					result := resolveConceptualName(ctx, fcParams.FunctionName, deps.Query,
+						deps.SymbolIndex, deps.ParamExtractor, deps.Session,
+						conceptualResolutionOpts{Analytics: deps.GraphAnalytics})
+					if result.Resolved != fcParams.FunctionName {
+						fcParams.FunctionName = result.Resolved
+						params = fcParams
+					}
+					if result.Overridden {
+						p.learnFromFailure(ctx, deps, crs.FailureEvent{
+							SessionID:    deps.Session.ID,
+							FailureType:  crs.FailureTypeResolutionDemotion,
+							Tool:         hardForcing.Tool,
+							Source:       crs.SignalSourceHard,
+							ErrorMessage: fmt.Sprintf("LLM picked tier%d [%s], overrode to tier0", result.LLMPickTier, result.LLMPick),
+						})
+					}
+				}
+			case "find_callees":
+				if fceParams, ok := params.(tools.FindCalleesParams); ok && fceParams.FunctionName != "" {
+					result := resolveConceptualName(ctx, fceParams.FunctionName, deps.Query,
+						deps.SymbolIndex, deps.ParamExtractor, deps.Session,
+						conceptualResolutionOpts{Analytics: deps.GraphAnalytics})
+					if result.Resolved != fceParams.FunctionName {
+						fceParams.FunctionName = result.Resolved
+						params = fceParams
+					}
+					if result.Overridden {
+						p.learnFromFailure(ctx, deps, crs.FailureEvent{
+							SessionID:    deps.Session.ID,
+							FailureType:  crs.FailureTypeResolutionDemotion,
+							Tool:         hardForcing.Tool,
+							Source:       crs.SignalSourceHard,
+							ErrorMessage: fmt.Sprintf("LLM picked tier%d [%s], overrode to tier0", result.LLMPickTier, result.LLMPick),
+						})
+					}
+				}
+			case "find_implementations":
+				if fiParams, ok := params.(tools.FindImplementationsParams); ok && fiParams.InterfaceName != "" {
+					result := resolveConceptualName(ctx, fiParams.InterfaceName, deps.Query,
+						deps.SymbolIndex, deps.ParamExtractor, deps.Session,
+						conceptualResolutionOpts{Analytics: deps.GraphAnalytics, AcceptAnyKind: true})
+					if result.Resolved != fiParams.InterfaceName {
+						fiParams.InterfaceName = result.Resolved
+						params = fiParams
+					}
+					if result.Overridden {
+						p.learnFromFailure(ctx, deps, crs.FailureEvent{
+							SessionID:    deps.Session.ID,
+							FailureType:  crs.FailureTypeResolutionDemotion,
+							Tool:         hardForcing.Tool,
+							Source:       crs.SignalSourceHard,
+							ErrorMessage: fmt.Sprintf("LLM picked tier%d [%s], overrode to tier0", result.LLMPickTier, result.LLMPick),
+						})
+					}
+				}
+			case "find_references":
+				if frParams, ok := params.(tools.FindReferencesParams); ok && frParams.SymbolName != "" {
+					result := resolveConceptualName(ctx, frParams.SymbolName, deps.Query,
+						deps.SymbolIndex, deps.ParamExtractor, deps.Session,
+						conceptualResolutionOpts{Analytics: deps.GraphAnalytics, AcceptAnyKind: true})
+					if result.Resolved != frParams.SymbolName {
+						frParams.SymbolName = result.Resolved
+						params = frParams
+					}
+					if result.Overridden {
+						p.learnFromFailure(ctx, deps, crs.FailureEvent{
+							SessionID:    deps.Session.ID,
+							FailureType:  crs.FailureTypeResolutionDemotion,
+							Tool:         hardForcing.Tool,
+							Source:       crs.SignalSourceHard,
+							ErrorMessage: fmt.Sprintf("LLM picked tier%d [%s], overrode to tier0", result.LLMPickTier, result.LLMPick),
+						})
+					}
+				}
+			case "find_symbol":
+				if fsParams, ok := params.(tools.FindSymbolParams); ok && fsParams.Name != "" {
+					result := resolveConceptualName(ctx, fsParams.Name, deps.Query,
+						deps.SymbolIndex, deps.ParamExtractor, deps.Session,
+						conceptualResolutionOpts{Analytics: deps.GraphAnalytics, AcceptAnyKind: true})
+					if result.Resolved != fsParams.Name {
+						fsParams.Name = result.Resolved
+						params = fsParams
+					}
+					if result.Overridden {
+						p.learnFromFailure(ctx, deps, crs.FailureEvent{
+							SessionID:    deps.Session.ID,
+							FailureType:  crs.FailureTypeResolutionDemotion,
+							Tool:         hardForcing.Tool,
+							Source:       crs.SignalSourceHard,
+							ErrorMessage: fmt.Sprintf("LLM picked tier%d [%s], overrode to tier0", result.LLMPickTier, result.LLMPick),
+						})
 					}
 				}
 			case "find_path":
 				if fpParams, ok := params.(tools.FindPathParams); ok {
+					// D3c: Resolve from-side first, then use its ID for to-side reachability + context.
+					var fromSymbolID string
+					var sourceContext string
 					if fpParams.From != "" {
-						resolved := resolveConceptualName(ctx, fpParams.From, deps.Query,
-							deps.SymbolIndex, deps.ParamExtractor, deps.GraphAnalytics)
-						if resolved != fpParams.From {
-							fpParams.From = resolved
+						result := resolveConceptualName(ctx, fpParams.From, deps.Query,
+							deps.SymbolIndex, deps.ParamExtractor, deps.Session,
+							conceptualResolutionOpts{Analytics: deps.GraphAnalytics})
+						if result.Resolved != fpParams.From {
+							fpParams.From = result.Resolved
+						}
+						if result.Overridden {
+							p.learnFromFailure(ctx, deps, crs.FailureEvent{
+								SessionID:    deps.Session.ID,
+								FailureType:  crs.FailureTypeResolutionDemotion,
+								Tool:         hardForcing.Tool,
+								Source:       crs.SignalSourceHard,
+								ErrorMessage: fmt.Sprintf("LLM picked tier%d [%s], overrode to tier0", result.LLMPickTier, result.LLMPick),
+							})
+						}
+						// D3c: Look up resolved from symbol for reachability + context
+						if deps.SymbolIndex != nil {
+							if syms := deps.SymbolIndex.GetByName(fpParams.From); len(syms) > 0 {
+								// IT_CRS_02: When multiple symbols match, disambiguate
+								// to pick the best candidate (non-test, exported, shallow).
+								best := syms[0]
+								if len(syms) > 1 {
+									if disambiguated := tools.DisambiguateGraphNodes(syms); disambiguated != nil {
+										best = disambiguated
+									}
+								}
+								fromSymbolID = best.ID
+								if best.Receiver != "" {
+									sourceContext = fmt.Sprintf("%s (method on %s in %s:%d)",
+										best.Name, best.Receiver, best.FilePath, best.StartLine)
+								} else {
+									sourceContext = fmt.Sprintf("%s (%s in %s:%d)",
+										best.Name, best.Kind.String(), best.FilePath, best.StartLine)
+								}
+							}
 						}
 					}
 					if fpParams.To != "" {
-						resolved := resolveConceptualName(ctx, fpParams.To, deps.Query,
-							deps.SymbolIndex, deps.ParamExtractor, deps.GraphAnalytics)
-						if resolved != fpParams.To {
-							fpParams.To = resolved
+						result := resolveConceptualName(ctx, fpParams.To, deps.Query,
+							deps.SymbolIndex, deps.ParamExtractor, deps.Session,
+							conceptualResolutionOpts{
+								Analytics:     deps.GraphAnalytics,
+								FromSymbolID:  fromSymbolID,
+								SourceContext: sourceContext,
+							})
+						if result.Resolved != fpParams.To {
+							fpParams.To = result.Resolved
 						}
+						if result.Overridden {
+							p.learnFromFailure(ctx, deps, crs.FailureEvent{
+								SessionID:    deps.Session.ID,
+								FailureType:  crs.FailureTypeResolutionDemotion,
+								Tool:         hardForcing.Tool,
+								Source:       crs.SignalSourceHard,
+								ErrorMessage: fmt.Sprintf("LLM picked tier%d [%s], overrode to tier0", result.LLMPickTier, result.LLMPick),
+							})
+						}
+						// IT_CRS_02: To-side disambiguation is not needed at agent level.
+						// GetByName returns symbols with identical names, so there's nothing
+						// to update on fpParams.To. The tool's internal ResolveFunctionWithFuzzy
+						// handles To-side symbol resolution with its own multi-candidate retry.
 					}
 					params = fpParams
 				}
@@ -697,12 +966,10 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 				}
 
 				// GR-59 Rev 5: For graph tools, force synthesis immediately.
-				// Graph tools return authoritative results (positive or negative).
-				// Returning StateExecute lets the LLM spiral into Grep/Glob loops
-				// trying to verify graph results, which wastes steps and triggers
-				// circuit breakers. Force the LLM to synthesize from the graph
-				// result directly — no further tool calls needed.
-				if graphToolsWithSubstantiveResults[hardForcing.Tool] {
+				// CRS-GR59-01: Now CRS-aware — only force synthesis when results
+				// are positive or CRS has exhausted scope relaxation.
+				if graphToolsWithSubstantiveResults[hardForcing.Tool] &&
+					deps.Session.GraphToolHadSubstantiveResults() {
 					slog.Info("GR-59 Rev 5: Graph tool completed — forcing immediate synthesis",
 						slog.String("session_id", deps.Session.ID),
 						slog.String("tool", hardForcing.Tool),
@@ -1022,7 +1289,9 @@ Provide your answer now:`
 
 	// GR-44 Rev 2: Router enforcement - if router is configured, it MUST be used.
 	// No silent fallback to classifier allowed.
-	if sessionExists && deps.Session.Config.ToolRouterEnabled {
+	// Exception: In degraded mode (no tools available), the router has nothing to
+	// route — skip enforcement so the LLM can answer without tools.
+	if sessionExists && deps.Session.Config.ToolRouterEnabled && hasTools {
 		if !routerUsed {
 			// Router was configured but not used - this is a fatal error
 			router := deps.Session.GetToolRouter()
@@ -1457,6 +1726,17 @@ func (p *ExecutePhase) tryToolRouterSelection(ctx context.Context, deps *Depende
 	// the simple count-based circuit breaker misses.
 	if selection.Tool != "answer" && deps.Session != nil && deps.Query != "" {
 		isRepetitive, similarity, similarQuery := p.checkSemanticRepetition(ctx, deps, selection.Tool, deps.Query)
+
+		// CRS-15: Record similarity to CRS for cross-session persistence.
+		if similarity > 0 && similarQuery != "" && deps.Session.HasCRS() {
+			currentKey := fmt.Sprintf("%s:%s", selection.Tool, deps.Query)
+			previousKey := fmt.Sprintf("%s:%s", selection.Tool, similarQuery)
+			if recErr := deps.Session.GetCRS().RecordSimilarity(ctx, currentKey, previousKey, 1.0-similarity); recErr != nil {
+				slog.Debug("CRS-15: Failed to record similarity",
+					slog.String("error", recErr.Error()),
+				)
+			}
+		}
 
 		if isRepetitive {
 			srReason := fmt.Sprintf("semantic repetition: query %.0f%% similar to previous '%s'",
@@ -2090,6 +2370,34 @@ func (p *ExecutePhase) handleCompletion(ctx context.Context, deps *Dependencies,
 		deps.Session.SetCurrentContext(deps.Context)
 	}
 
+	// CRS-20: Synthesis quality gate — score how well the response reflects tool results.
+	// Observability only: does not block or retry. Must complete in < 100ms.
+	var qualityResult *SynthesisQualityResult
+	if deps.Context != nil && len(deps.Context.ToolResults) > 0 && responseContent != "" {
+		qr := scoreSynthesisQuality(responseContent, deps.Context.ToolResults)
+		qualityResult = &qr
+
+		// Record Prometheus metric.
+		synthesisQualityScore.Observe(qr.Score)
+
+		// Log quality warnings for low scores.
+		if qr.Score < 0.5 {
+			slog.Warn("SYNTH-QUALITY: Response may not reflect tool results",
+				slog.String("session_id", deps.Session.ID),
+				slog.Float64("score", qr.Score),
+				slog.String("reason", qr.Reason),
+				slog.Int("symbols_expected", qr.SymbolsExpected),
+				slog.Int("symbols_found", qr.SymbolsFound),
+			)
+		} else {
+			slog.Debug("CRS-20: Synthesis quality scored",
+				slog.String("session_id", deps.Session.ID),
+				slog.Float64("score", qr.Score),
+				slog.String("reason", qr.Reason),
+			)
+		}
+	}
+
 	// Emit step complete
 	p.emitStepComplete(deps, stepStart, stepNumber, 0)
 
@@ -2108,6 +2416,11 @@ func (p *ExecutePhase) handleCompletion(ctx context.Context, deps *Dependencies,
 		if groundingResult != nil {
 			completionStep.Metadata["grounded"] = fmt.Sprintf("%v", groundingResult.Grounded)
 			completionStep.Metadata["confidence"] = fmt.Sprintf("%.2f", groundingResult.Confidence)
+		}
+		// CRS-20: Include synthesis quality score in completion metadata.
+		if qualityResult != nil {
+			completionStep.Metadata["synthesis_quality_score"] = fmt.Sprintf("%.2f", qualityResult.Score)
+			completionStep.Metadata["synthesis_quality_reason"] = qualityResult.Reason
 		}
 		deps.Session.RecordTraceStep(completionStep)
 	}
@@ -2380,6 +2693,20 @@ var graphToolsWithSubstantiveResults = map[string]bool{
 	"find_module_api":           true,
 	"check_reducibility":        true,
 	"find_similar_code":         true, // IT-06c I-11: Was missing, preventing forced synthesis
+	// Analytics-layer CRS tool names (PascalCase, used in TraceStep.Tool by *WithCRS methods)
+	// CRS Gap 1D: sessionHasPriorGraphToolResults checks step.Tool against this map,
+	// but analytics tools emit PascalCase names, not the snake_case tool names above.
+	"DetectCommunities":        true,
+	"HotSpots":                 true,
+	"DeadCode":                 true,
+	"CyclicDependencies":       true,
+	"ShortestPath":             true, // find_path
+	"ArticulationPoints":       true,
+	"DetectLoops":              true,
+	"ComputeControlDependence": true,
+	"Dominators":               true,
+	"PageRank":                 true,
+	"CheckReducibility":        true,
 }
 
 // shouldForceSynthesisAfterGraphTools determines if we should force synthesis
@@ -2483,13 +2810,19 @@ func (p *ExecutePhase) sessionHasPriorGraphToolResults(deps *Dependencies) bool 
 	traceSteps := deps.Session.GetTraceSteps()
 	// Result count metadata keys used by graph tools to indicate substantive output.
 	resultCountKeys := []string{
-		"match_count",           // find_callers, find_implementations
-		"total_callers",         // find_callers
-		"total_implementations", // find_implementations
-		"resolved_count",        // find_callees
-		"total_count",           // find_callees
-		"reference_count",       // find_references
-		"chain_length",          // get_call_chain
+		"match_count",              // find_callers, find_implementations
+		"total_callers",            // find_callers
+		"total_implementations",    // find_implementations
+		"resolved_count",           // find_callees
+		"total_count",              // find_callees
+		"reference_count",          // find_references
+		"chain_length",             // get_call_chain
+		"final_count",              // find_communities, find_cycles, find_dead_code, find_extractable_regions, find_hotspots, find_important, find_loops, find_merge_points
+		"path_length",              // find_path, find_critical_path
+		"result_count",             // find_articulation_points
+		"target_count",             // find_common_dependency
+		"dependency_count",         // find_control_dependencies
+		"irreducible_region_count", // check_reducibility
 	}
 
 	for _, step := range traceSteps {

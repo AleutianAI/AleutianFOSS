@@ -36,6 +36,7 @@ type BreakingChangeAnalyzer struct {
 	graph  *graph.Graph
 	index  *index.SymbolIndex
 	parser *SignatureParser
+	crs    CRSRecorder
 }
 
 // NewBreakingChangeAnalyzer creates a new BreakingChangeAnalyzer.
@@ -63,7 +64,13 @@ func NewBreakingChangeAnalyzer(g *graph.Graph, idx *index.SymbolIndex) *Breaking
 		graph:  g,
 		index:  idx,
 		parser: NewSignatureParser(),
+		crs:    &NopCRSRecorder{},
 	}
+}
+
+// SetCRS configures CRS recording for this analyzer.
+func (a *BreakingChangeAnalyzer) SetCRS(recorder CRSRecorder) {
+	a.crs = recorder
 }
 
 // AnalyzeBreaking analyzes whether a proposed signature change would break callers.
@@ -197,8 +204,10 @@ func (a *BreakingChangeAnalyzer) AnalyzeBreaking(
 	// Identify safe changes
 	result.SafeChanges = a.identifySafeChanges(currentSig, proposedParsed)
 
+	dur := time.Since(start)
 	setAnalysisSpanResult(span, result.IsBreaking, result.CallersAffected, true)
-	recordAnalysisMetrics(ctx, "analyze_breaking", time.Since(start), result.IsBreaking, result.CallersAffected, true)
+	recordAnalysisMetrics(ctx, "analyze_breaking", dur, result.IsBreaking, result.CallersAffected, true)
+	a.crs.RecordToolStep(ctx, "check_breaking_changes", len(result.BreakingChanges), dur, nil)
 
 	return result, nil
 }

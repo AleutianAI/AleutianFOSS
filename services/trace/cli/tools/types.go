@@ -41,6 +41,9 @@ const (
 
 	// CategoryFile includes tools for file operations.
 	CategoryFile ToolCategory = "file"
+
+	// CategorySemantic includes tools for vector/semantic search.
+	CategorySemantic ToolCategory = "semantic"
 )
 
 // String returns the string representation of the category.
@@ -434,6 +437,25 @@ type Result struct {
 	// Tools that want full CRS integration should populate this.
 	// The dispatcher/execute phase will record it to the session.
 	TraceStep *crs.TraceStep `json:"trace_step,omitempty"`
+
+	// ResultCount is the number of discrete results the tool produced.
+	// Used by CRS Layer 2 to detect empty-result conditions for CDCL clause generation.
+	// Tools should set this; if 0, the phase will attempt extraction from TraceStep metadata.
+	ResultCount int `json:"result_count,omitempty"`
+
+	// ScopeApplied is the package/directory scope filter that was applied to this result.
+	// CRS-SCOPE-01: Used by scope relaxation to detect empty scoped results
+	// that should be retried with a wider scope.
+	ScopeApplied string `json:"scope_applied,omitempty"`
+
+	// PreScopeCount is the number of results before scope filtering was applied.
+	// CRS-SCOPE-01: When ResultCount==0 and PreScopeCount>0, scope relaxation
+	// knows that results exist but were filtered out by the scope.
+	PreScopeCount int `json:"pre_scope_count,omitempty"`
+
+	// ProofDelta overrides the default proof number delta (1) when non-zero.
+	// IT_CRS_03 AC-8: Higher values = stronger signal. Example: exact match = 2, fuzzy = 1.
+	ProofDelta int `json:"proof_delta,omitempty"`
 }
 
 // Invocation represents a pending or completed tool call.

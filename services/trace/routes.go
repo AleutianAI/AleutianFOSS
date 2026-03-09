@@ -11,6 +11,9 @@
 package trace
 
 import (
+	"net/http"
+
+	"github.com/AleutianAI/AleutianFOSS/services/trace/telemetry"
 	"github.com/gin-gonic/gin"
 )
 
@@ -33,6 +36,14 @@ import (
 //	GET  /v1/trace/symbol/:id - Get symbol by ID
 //	GET  /v1/trace/callers - Find function callers
 //	GET  /v1/trace/implementations - Find interface implementations
+//	GET  /v1/trace/callees - Find function callees
+//	GET  /v1/trace/call-chain - Find shortest call chain between two functions
+//	GET  /v1/trace/references - Find symbol references
+//	POST /v1/trace/analytics/hotspots - Find most-connected nodes
+//	POST /v1/trace/analytics/cycles - Find cyclic dependencies
+//	POST /v1/trace/analytics/important - Find most important nodes (PageRank)
+//	POST /v1/trace/analytics/communities - Detect code communities
+//	POST /v1/trace/analytics/path - Find shortest path between functions
 //	POST /v1/trace/seed - Seed library documentation
 //
 // Memory Endpoints:
@@ -76,6 +87,10 @@ import (
 //	POST /v1/trace/patterns/conventions - Extract conventions
 //	POST /v1/trace/patterns/dead_code - Find dead code
 //
+// Metrics Endpoints:
+//
+//	GET  /v1/metrics - Prometheus metrics (served via OTel exporter)
+//
 // Health Endpoints:
 //
 //	GET  /v1/trace/health - Health check
@@ -89,6 +104,16 @@ import (
 //	v1 := router.Group("/v1")
 //	trace.RegisterRoutes(v1, handlers)
 func RegisterRoutes(rg *gin.RouterGroup, handlers *Handlers) {
+	// Prometheus metrics endpoint (under /v1, not under /v1/trace)
+	rg.GET("/metrics", func(c *gin.Context) {
+		h := telemetry.MetricsHandler()
+		if h == nil {
+			c.String(http.StatusServiceUnavailable, "metrics not available: prometheus exporter not configured")
+			return
+		}
+		h.ServeHTTP(c.Writer, c.Request)
+	})
+
 	trace := rg.Group("/trace")
 	{
 		// Graph lifecycle
@@ -102,6 +127,21 @@ func RegisterRoutes(rg *gin.RouterGroup, handlers *Handlers) {
 		trace.GET("/callers", handlers.HandleCallers)
 		trace.GET("/implementations", handlers.HandleImplementations)
 
+		// Graph query endpoints (CB-00.0)
+		trace.GET("/callees", handlers.HandleFindCallees)
+		trace.GET("/call-chain", handlers.HandleGetCallChain)
+		trace.GET("/references", handlers.HandleFindReferences)
+
+		// Graph analytics endpoints (CB-00.0)
+		analyticsGroup := trace.Group("/analytics")
+		{
+			analyticsGroup.POST("/hotspots", handlers.HandleFindHotspots)
+			analyticsGroup.POST("/cycles", handlers.HandleFindCycles)
+			analyticsGroup.POST("/important", handlers.HandleFindImportant)
+			analyticsGroup.POST("/communities", handlers.HandleFindCommunities)
+			analyticsGroup.POST("/path", handlers.HandleFindPath)
+		}
+
 		// Library documentation seeding
 		trace.POST("/seed", handlers.HandleSeed)
 
@@ -112,6 +152,9 @@ func RegisterRoutes(rg *gin.RouterGroup, handlers *Handlers) {
 		trace.DELETE("/memories/:id", handlers.HandleDeleteMemory)
 		trace.POST("/memories/:id/validate", handlers.HandleValidateMemory)
 		trace.POST("/memories/:id/contradict", handlers.HandleContradictMemory)
+
+		// Indexing status (polled by trace-proxy for progress feedback)
+		trace.GET("/indexing/status", handlers.HandleIndexingStatus)
 
 		// Health checks
 		trace.GET("/health", handlers.HandleHealth)
@@ -260,6 +303,9 @@ func RegisterAgentRoutesWithMiddleware(rg *gin.RouterGroup, handlers *AgentHandl
 		// CRS Export API (CB-29-2)
 		agent.GET("/:id/reasoning", handlers.HandleGetReasoningTrace)
 		agent.GET("/:id/crs", handlers.HandleGetCRSExport)
+
+		// CRS-27: Live CRS decision streaming via Server-Sent Events
+		agent.GET("/:id/crs/stream", handlers.HandleCRSStream)
 
 		// Debug endpoints (GR-Phase1 Issue 5, Issue 5b)
 		debug := agent.Group("/debug")

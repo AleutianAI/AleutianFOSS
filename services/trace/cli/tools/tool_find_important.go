@@ -281,8 +281,8 @@ func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*R
 
 	// Phase 1: Filter out test and documentation files
 	var sourceOnly []graph.PageRankNode
+	filteredCount := 0 // IT_CRS_03 AC-4: Lifted to function scope for CRS metadata
 	if p.ExcludeTests {
-		filteredCount := 0
 		for _, prn := range pageRankNodes {
 			if prn.Node == nil || prn.Node.Symbol == nil {
 				continue
@@ -345,8 +345,11 @@ func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*R
 	// Do NOT fall back to global results — that silently gives wrong-scope data
 	// to the LLM. If conceptual scope names ("materials", "write path") don't
 	// match, the fix belongs in extractPackageContextFromQuery(), not here.
+	var scopeApplied string
+	var scopePreCount int
 	if p.Package != "" {
 		var packageFiltered []graph.PageRankNode
+		preScopeCount := len(pageRankNodes)
 		for _, prn := range pageRankNodes {
 			if prn.Node == nil || prn.Node.Symbol == nil {
 				continue
@@ -357,13 +360,15 @@ func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*R
 		}
 		t.logger.Info("IT-07: find_important package filter applied",
 			slog.String("package", p.Package),
-			slog.Int("before", len(pageRankNodes)),
+			slog.Int("before", preScopeCount),
 			slog.Int("after", len(packageFiltered)),
 		)
 		span.SetAttributes(attribute.Int("after_package_filter", len(packageFiltered)))
 		// CR-11: Unconditionally apply filter. Empty result = "no important
 		// symbols found in that scope." Do NOT fall back to global results.
 		pageRankNodes = packageFiltered
+		scopeApplied = p.Package
+		scopePreCount = preScopeCount
 	}
 
 	// Phase 3: Filter by kind if needed
@@ -422,6 +427,23 @@ func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*R
 		)
 	}
 
+	// CRS: Add pipeline metadata
+	if traceStep.Metadata == nil {
+		traceStep.Metadata = make(map[string]string)
+	}
+	traceStep.Metadata["top"] = fmt.Sprintf("%d", p.Top)
+	traceStep.Metadata["kind"] = p.Kind
+	traceStep.Metadata["package"] = p.Package
+	traceStep.Metadata["exclude_tests"] = fmt.Sprintf("%t", p.ExcludeTests)
+	traceStep.Metadata["reverse"] = fmt.Sprintf("%t", p.Reverse)
+	traceStep.Metadata["raw_count"] = fmt.Sprintf("%d", len(pageRankNodes))
+	traceStep.Metadata["final_count"] = fmt.Sprintf("%d", len(filtered))
+	if p.ExcludeTests {
+		traceStep.Metadata["grc_files_reclassified"] = fmt.Sprintf("%d", filteredCount)
+	} else {
+		traceStep.Metadata["grc_files_reclassified"] = "n/a"
+	}
+
 	// Build typed output
 	output := t.buildOutput(filtered)
 
@@ -429,12 +451,15 @@ func (t *findImportantTool) Execute(ctx context.Context, params TypedParams) (*R
 	outputText := t.formatText(filtered, p.Package)
 
 	return &Result{
-		Success:    true,
-		Output:     output,
-		OutputText: outputText,
-		TokensUsed: estimateTokens(outputText),
-		TraceStep:  &traceStep,
-		Duration:   time.Since(start),
+		Success:       true,
+		Output:        output,
+		OutputText:    outputText,
+		TokensUsed:    estimateTokens(outputText),
+		TraceStep:     &traceStep,
+		Duration:      time.Since(start),
+		ResultCount:   output.ResultCount,
+		ScopeApplied:  scopeApplied,
+		PreScopeCount: scopePreCount,
 	}, nil
 }
 

@@ -121,3 +121,156 @@ func recordAnalysisMetrics(ctx context.Context, operation string, duration time.
 		callersAffected.Record(ctx, int64(callers))
 	}
 }
+
+// ============================================================================
+// Refactor Suggester OTel
+// ============================================================================
+
+// startRefactorSpan creates a span for refactoring analysis.
+func startRefactorSpan(ctx context.Context, targetID string) (context.Context, trace.Span) {
+	return tracer.Start(ctx, "reason.RefactorSuggester.SuggestRefactor",
+		trace.WithAttributes(
+			attribute.String("reason.operation", "suggest_refactor"),
+			attribute.String("reason.target_id", targetID),
+		),
+	)
+}
+
+// setRefactorSpanResult sets result attributes on a refactor span.
+func setRefactorSpanResult(span trace.Span, suggestionCount int, err error) {
+	span.SetAttributes(
+		attribute.Int("reason.suggestion_count", suggestionCount),
+		attribute.Bool("reason.success", err == nil),
+	)
+	if err != nil {
+		span.RecordError(err)
+	}
+}
+
+// recordRefactorMetrics records metrics for refactoring analysis.
+func recordRefactorMetrics(ctx context.Context, duration time.Duration, suggestionCount int, err error) {
+	if initErr := initMetrics(); initErr != nil {
+		return
+	}
+	attrs := metric.WithAttributes(
+		attribute.String("operation", "suggest_refactor"),
+		attribute.Bool("success", err == nil),
+	)
+	analysisLatency.Record(ctx, duration.Seconds(), attrs)
+	analysisTotal.Add(ctx, 1, attrs)
+}
+
+// ============================================================================
+// Test Coverage Finder OTel
+// ============================================================================
+
+// startCoverageSpan creates a span for test coverage analysis.
+func startCoverageSpan(ctx context.Context, targetID string) (context.Context, trace.Span) {
+	return tracer.Start(ctx, "reason.TestCoverageFinder.FindTestCoverage",
+		trace.WithAttributes(
+			attribute.String("reason.operation", "find_test_coverage"),
+			attribute.String("reason.target_id", targetID),
+		),
+	)
+}
+
+// setCoverageSpanResult sets result attributes on a coverage span.
+func setCoverageSpanResult(span trace.Span, isCovered bool, err error) {
+	span.SetAttributes(
+		attribute.Bool("reason.is_covered", isCovered),
+		attribute.Bool("reason.success", err == nil),
+	)
+	if err != nil {
+		span.RecordError(err)
+	}
+}
+
+// recordCoverageMetrics records metrics for test coverage analysis.
+func recordCoverageMetrics(ctx context.Context, duration time.Duration, isCovered bool, err error) {
+	if initErr := initMetrics(); initErr != nil {
+		return
+	}
+	attrs := metric.WithAttributes(
+		attribute.String("operation", "find_test_coverage"),
+		attribute.Bool("success", err == nil),
+	)
+	analysisLatency.Record(ctx, duration.Seconds(), attrs)
+	analysisTotal.Add(ctx, 1, attrs)
+}
+
+// ============================================================================
+// Change Validator OTel
+// ============================================================================
+
+// startValidateSpan creates a span for change validation.
+func startValidateSpan(ctx context.Context, filePath string) (context.Context, trace.Span) {
+	return tracer.Start(ctx, "reason.ChangeValidator.ValidateChange",
+		trace.WithAttributes(
+			attribute.String("reason.operation", "validate_change"),
+			attribute.String("reason.file_path", filePath),
+		),
+	)
+}
+
+// setValidateSpanResult sets result attributes on a validation span.
+func setValidateSpanResult(span trace.Span, syntaxValid bool, errorCount int, err error) {
+	span.SetAttributes(
+		attribute.Bool("reason.syntax_valid", syntaxValid),
+		attribute.Int("reason.error_count", errorCount),
+		attribute.Bool("reason.success", err == nil),
+	)
+	if err != nil {
+		span.RecordError(err)
+	}
+}
+
+// recordValidateMetrics records metrics for change validation.
+func recordValidateMetrics(ctx context.Context, duration time.Duration, err error) {
+	if initErr := initMetrics(); initErr != nil {
+		return
+	}
+	attrs := metric.WithAttributes(
+		attribute.String("operation", "validate_change"),
+		attribute.Bool("success", err == nil),
+	)
+	analysisLatency.Record(ctx, duration.Seconds(), attrs)
+	analysisTotal.Add(ctx, 1, attrs)
+}
+
+// ============================================================================
+// Change Simulator OTel
+// ============================================================================
+
+// startSimulateSpan creates a span for change simulation.
+func startSimulateSpan(ctx context.Context, targetID string) (context.Context, trace.Span) {
+	return tracer.Start(ctx, "reason.ChangeSimulator.SimulateChange",
+		trace.WithAttributes(
+			attribute.String("reason.operation", "simulate_change"),
+			attribute.String("reason.target_id", targetID),
+		),
+	)
+}
+
+// setSimulateSpanResult sets result attributes on a simulation span.
+func setSimulateSpanResult(span trace.Span, callersToUpdate int, err error) {
+	span.SetAttributes(
+		attribute.Int("reason.callers_to_update", callersToUpdate),
+		attribute.Bool("reason.success", err == nil),
+	)
+	if err != nil {
+		span.RecordError(err)
+	}
+}
+
+// recordSimulateMetrics records metrics for change simulation.
+func recordSimulateMetrics(ctx context.Context, duration time.Duration, err error) {
+	if initErr := initMetrics(); initErr != nil {
+		return
+	}
+	attrs := metric.WithAttributes(
+		attribute.String("operation", "simulate_change"),
+		attribute.Bool("success", err == nil),
+	)
+	analysisLatency.Record(ctx, duration.Seconds(), attrs)
+	analysisTotal.Add(ctx, 1, attrs)
+}

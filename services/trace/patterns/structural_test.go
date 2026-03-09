@@ -540,10 +540,9 @@ func TestCircularDepFinder_Summary(t *testing.T) {
 // ============================================================================
 
 func TestNewDuplicationFinder(t *testing.T) {
-	g := graph.NewGraph("/test")
 	idx := index.NewSymbolIndex()
 
-	finder := NewDuplicationFinder(g, idx, "/test")
+	finder := NewDuplicationFinder(idx, "/test")
 
 	if finder == nil {
 		t.Fatal("NewDuplicationFinder returned nil")
@@ -551,9 +550,8 @@ func TestNewDuplicationFinder(t *testing.T) {
 }
 
 func TestDuplicationFinder_FindDuplication_NilContext(t *testing.T) {
-	g := graph.NewGraph("/test")
 	idx := index.NewSymbolIndex()
-	finder := NewDuplicationFinder(g, idx, "/test")
+	finder := NewDuplicationFinder(idx, "/test")
 
 	_, err := finder.FindDuplication(nil, "", nil)
 
@@ -563,9 +561,8 @@ func TestDuplicationFinder_FindDuplication_NilContext(t *testing.T) {
 }
 
 func TestDuplicationFinder_Summary(t *testing.T) {
-	g := graph.NewGraph("/test")
 	idx := index.NewSymbolIndex()
-	finder := NewDuplicationFinder(g, idx, "/test")
+	finder := NewDuplicationFinder(idx, "/test")
 
 	// Empty
 	summary := finder.Summary(nil)
@@ -586,9 +583,8 @@ func TestDuplicationFinder_Summary(t *testing.T) {
 }
 
 func TestDuplicationFinder_Stats(t *testing.T) {
-	g := graph.NewGraph("/test")
 	idx := index.NewSymbolIndex()
-	finder := NewDuplicationFinder(g, idx, "/test")
+	finder := NewDuplicationFinder(idx, "/test")
 
 	stats := finder.Stats()
 
@@ -602,8 +598,6 @@ func TestDuplicationFinder_Stats(t *testing.T) {
 // ============================================================================
 
 func TestDuplicationDetection_EndToEnd(t *testing.T) {
-	// Create graph and index
-	g := graph.NewGraph("/test")
 	idx := index.NewSymbolIndex()
 
 	// Add some symbols
@@ -630,12 +624,8 @@ func TestDuplicationDetection_EndToEnd(t *testing.T) {
 	idx.Add(sym1)
 	idx.Add(sym2)
 
-	_, _ = g.AddNode(sym1)
-	_, _ = g.AddNode(sym2)
-	g.Freeze()
-
 	// Create finder (without file system access, this won't find much)
-	finder := NewDuplicationFinder(g, idx, "/nonexistent")
+	finder := NewDuplicationFinder(idx, "/nonexistent")
 
 	ctx := context.Background()
 	opts := DefaultDuplicationOptions()

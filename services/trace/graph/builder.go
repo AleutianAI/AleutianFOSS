@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -337,6 +338,10 @@ func (b *Builder) Build(ctx context.Context, results []*ast.ParseResult) (*Build
 
 	// Phase 3: Finalize
 	state.graph.Freeze()
+
+	// CRS-19: Record file modification times for staleness detection across sessions.
+	RecordFileMtimes(state.graph, b.options.ProjectRoot)
+
 	duration := time.Since(state.startTime)
 	state.result.Stats.DurationMilli = duration.Milliseconds()
 	state.result.Stats.DurationMicro = duration.Microseconds()
@@ -1413,6 +1418,16 @@ func (b *Builder) resolveCallTarget(state *buildState, call ast.CallSite, caller
 		if call.Receiver == "this" || call.Receiver == "self" {
 			if resolved := b.resolveThisSelfCall(state, candidates, caller); resolved != "" {
 				return resolved
+			}
+		}
+
+		// CRS-26n Sub-strategy 3a2: Check if receiver is an imported package name.
+		// Go's AST produces identical output for `slog.Info()` (package call) and
+		// `logger.Info()` (method call). If the receiver matches an import, resolve
+		// as a package-qualified call and skip the receiver-matching strategies.
+		if call.Receiver != "this" && call.Receiver != "self" && call.Receiver != "super" {
+			if targetID, matched := b.resolveViaPackageImport(state, call, caller); matched {
+				return targetID
 			}
 		}
 
@@ -2621,6 +2636,147 @@ func matchesImportPath(filePath string, importPath string) bool {
 	return strings.HasSuffix(normalized, "/"+pathFragment)
 }
 
+// matchesGoImportPath checks if a symbol's file directory matches a Go import
+// path by progressive suffix matching on path segments.
+//
+// Description:
+//
+//	CRS-26n: Unlike matchesImportPath (Python), this does NOT convert dots to
+//	slashes, because Go import paths use dots in domain names (github.com).
+//	Splits the import path by "/", tries progressively shorter suffixes from
+//	the right, skipping the first segment (usually a domain like "github.com")
+//	for long paths.
+//
+// Inputs:
+//
+//	filePath - The symbol's source file path (e.g., "services/trace/service.go").
+//	importPath - The Go import path (e.g., "github.com/AleutianAI/AleutianFOSS/services/trace").
+//
+// Outputs:
+//
+//	bool - True if any suffix of importPath matches the file's directory.
+//
+// Thread Safety: Safe for concurrent use (pure function, no shared state).
+func matchesGoImportPath(filePath string, importPath string) bool {
+	parts := strings.Split(importPath, "/")
+	if len(parts) == 0 {
+		return false
+	}
+
+	symDir := filepath.Dir(filePath)
+
+	// Try suffixes from longest to shortest, skipping domain segment.
+	// Start from index 1 to skip "github.com" / domain segment.
+	startIdx := 1
+	if len(parts) <= 2 {
+		startIdx = 0 // Short paths like "log/slog" — use full path
+	}
+
+	for i := startIdx; i < len(parts); i++ {
+		suffix := strings.Join(parts[i:], "/")
+		if strings.HasSuffix(symDir, "/"+suffix) || symDir == suffix {
+			return true
+		}
+	}
+
+	return false
+}
+
+// resolveViaPackageImport checks if the call receiver is an imported package
+// name. If so, resolves the target as a package-qualified function call
+// instead of a method call.
+//
+// Description:
+//
+//	CRS-26n: Go's AST cannot distinguish `pkg.Function()` from `variable.Method()`
+//	— both produce IsMethod=true. This function checks if the receiver matches an
+//	import's local name. If it does, resolution skips receiver-based strategies
+//	(3b/3c) and either resolves to the correct internal symbol or returns "" for
+//	external/stdlib calls (caller creates a placeholder).
+//
+// Inputs:
+//
+//	state - The current build state with import and symbol maps.
+//	call - The call site being resolved.
+//	caller - The symbol containing the call.
+//
+// Outputs:
+//
+//	targetID - Symbol ID if resolved to internal package symbol, "" if external/stdlib.
+//	matched - True if receiver IS an imported package name, false if not.
+//
+// Thread Safety: Safe for concurrent use (reads only).
+func (b *Builder) resolveViaPackageImport(
+	state *buildState,
+	call ast.CallSite,
+	caller *ast.Symbol,
+) (targetID string, matched bool) {
+	imports := state.fileImports[caller.FilePath]
+	if len(imports) == 0 {
+		return "", false
+	}
+
+	receiver := call.Receiver
+
+	for _, imp := range imports {
+		localName := goImportLocalName(imp)
+		if localName == "" || localName != receiver {
+			continue
+		}
+
+		// MATCH: receiver is an imported package name.
+		// Look for Target in that package's symbols.
+		pkgName := localName // For Go, package name == import's last segment
+		allCandidates := b.resolveAllSymbolsByName(state, call.Target)
+
+		for _, id := range allCandidates {
+			sym := state.symbolsByID[id]
+			if sym == nil {
+				continue
+			}
+
+			// Fast filter: symbol must declare itself in the matching package
+			if sym.Package != pkgName {
+				continue
+			}
+
+			// Disambiguate: verify directory suffix matches import path
+			if matchesGoImportPath(sym.FilePath, imp.Path) {
+				return id, true
+			}
+		}
+
+		// Package name matched an import but no symbol found → external/stdlib
+		return "", true
+	}
+
+	// Receiver is NOT an imported package name
+	return "", false
+}
+
+// goImportLocalName returns the local name for a Go import, or "" if the
+// import should be skipped (dot imports, blank imports).
+//
+// Description:
+//
+//	CRS-26n: For Go imports, the local name is the Alias if set, otherwise
+//	the last segment of the import path. Dot imports ("." alias) and blank
+//	imports ("_" alias) return "" since they don't use qualified syntax.
+//
+// Thread Safety: Safe for concurrent use (pure function).
+func goImportLocalName(imp ast.Import) string {
+	if imp.Alias == "." || imp.Alias == "_" {
+		return ""
+	}
+	if imp.Alias != "" {
+		return imp.Alias
+	}
+	if idx := strings.LastIndexByte(imp.Path, '/'); idx >= 0 {
+		return imp.Path[idx+1:]
+	}
+	return imp.Path
+}
+
 // parseAliasedName splits a Python import name that may contain "as" alias.
 //
 // Description:
@@ -2696,6 +2852,7 @@ func extractTypeName(typeExpr string) string {
 //	tools (get_call_chain, find_callees, etc.).
 //
 //	Resolution strategy (checked in order):
+//	  0. CRS-26n: Receiver-based import match (Go): call.Receiver matches import local name
 //	  1. Dot-prefix alias match: "pd.read_csv" → prefix "pd" → import {Path: "pandas", Alias: "pd"} → "pandas"
 //	  2. Dot-prefix path-segment match: "os.MkdirAll" → prefix "os" → import {Path: "os"} → "os"
 //	  3. Bare name in import Names: "Flask()" → import {Path: "flask", Names: ["Flask"]} → "flask"
@@ -2712,6 +2869,19 @@ func extractTypeName(typeExpr string) string {
 func inferPackageFromCall(call ast.CallSite, fileImports []ast.Import) string {
 	if len(fileImports) == 0 {
 		return ""
+	}
+
+	// CRS-26n Strategy 0: Go-style receiver-based import match.
+	// When call.Receiver is set and IsMethod is true (Go dot-calls), check if
+	// the receiver matches an import's local name. This produces correct
+	// placeholder IDs like "external:log/slog:Info" instead of "external::Info".
+	if call.Receiver != "" && call.IsMethod {
+		for _, imp := range fileImports {
+			localName := goImportLocalName(imp)
+			if localName != "" && localName == call.Receiver {
+				return imp.Path
+			}
+		}
 	}
 
 	target := call.Target
