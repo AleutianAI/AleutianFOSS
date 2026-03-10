@@ -13,7 +13,23 @@ package agent
 import (
 	"context"
 	"fmt"
+
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 )
+
+// EnrichmentStepProvider provides enrichment TraceStep data.
+//
+// Description:
+//
+//	GR-76: Optional interface that GraphInitializer implementations can also
+//	implement to provide LSP enrichment statistics. ServiceGraphProvider
+//	checks for this via type assertion.
+//
+// Thread Safety: Implementations must be safe for concurrent use.
+type EnrichmentStepProvider interface {
+	// EnrichmentTraceStep returns a TraceStep for the given graph's enrichment stats.
+	EnrichmentTraceStep(graphID string) *crs.TraceStep
+}
 
 // GraphInitializer defines the initialization capability needed from a service.
 //
@@ -114,6 +130,29 @@ func (p *ServiceGraphProvider) IsAvailable() bool {
 	return p.initializer != nil
 }
 
+// EnrichmentTraceStep implements phases.GraphProvider.
+//
+// Description:
+//
+//	GR-76: Returns a TraceStep describing LSP enrichment quality by
+//	delegating to the initializer if it implements EnrichmentStepProvider.
+//
+// Inputs:
+//
+//	graphID - The graph ID to query.
+//
+// Outputs:
+//
+//	*crs.TraceStep - The enrichment TraceStep, or nil if unavailable.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (p *ServiceGraphProvider) EnrichmentTraceStep(graphID string) *crs.TraceStep {
+	if esp, ok := p.initializer.(EnrichmentStepProvider); ok {
+		return esp.EnrichmentTraceStep(graphID)
+	}
+	return nil
+}
+
 // NullGraphProvider is a no-op graph provider for degraded mode.
 //
 // Description:
@@ -149,4 +188,15 @@ func (p *NullGraphProvider) Initialize(ctx context.Context, projectRoot string) 
 //	bool - Always false.
 func (p *NullGraphProvider) IsAvailable() bool {
 	return false
+}
+
+// EnrichmentTraceStep implements phases.GraphProvider.
+//
+// Description:
+//
+//	Always returns nil — no graph available in degraded mode.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (p *NullGraphProvider) EnrichmentTraceStep(graphID string) *crs.TraceStep {
+	return nil
 }

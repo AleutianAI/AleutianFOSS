@@ -298,20 +298,13 @@ func (s *SymbolStore) DeleteAll(ctx context.Context) error {
 	ctx, span := tracer.Start(ctx, "rag.SymbolStore.DeleteAll")
 	defer span.End()
 
-	where := filters.Where().
-		WithPath([]string{"dataSpace"}).
-		WithOperator(filters.Equal).
-		WithValueString(s.dataSpace)
-
-	_, err := s.client.Batch().ObjectsBatchDeleter().
-		WithClassName(CodeSymbolClassName).
-		WithWhere(where).
-		Do(ctx)
-	if err != nil {
-		return fmt.Errorf("deleting all symbols for dataSpace %s: %w", s.dataSpace, err)
+	// CRS-26n: Schema drop+recreate in O(1) replaces batch delete which
+	// hangs on 300K+ objects. Safe because only one dataSpace is active.
+	if err := ResetCodeSymbolSchema(ctx, s.client); err != nil {
+		return fmt.Errorf("resetting schema for dataSpace %s: %w", s.dataSpace, err)
 	}
 
-	slog.Info("CRS-26i: All symbols deleted for re-index",
+	slog.Info("CRS-26n: All symbols cleared via schema reset",
 		slog.String("data_space", s.dataSpace),
 	)
 	return nil

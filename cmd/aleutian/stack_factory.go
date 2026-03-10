@@ -532,11 +532,13 @@ func (f *DefaultStackFactory) createModelEnsurer(cfg *config.AleutianConfig) Mod
 	}
 
 	modelConfig := ModelEnsurerConfig{
-		OllamaBaseURL:  cfg.ModelBackend.Ollama.BaseURL,
-		EmbeddingModel: cfg.ModelBackend.Ollama.EmbeddingModel,
-		LLMModel:       cfg.ModelBackend.Ollama.LLMModel,
-		DiskLimitGB:    cfg.ModelBackend.Ollama.DiskLimitGB,
-		BackendType:    cfg.ModelBackend.Type,
+		OllamaBaseURL:       cfg.ModelBackend.Ollama.BaseURL,
+		EmbeddingModel:      cfg.ModelBackend.Ollama.EmbeddingModel,
+		LLMModel:            cfg.ModelBackend.Ollama.LLMModel,
+		ToolRouterModel:     cfg.ModelBackend.Ollama.ToolRouterModel,
+		ParamExtractorModel: cfg.ModelBackend.Ollama.ParamExtractorModel,
+		DiskLimitGB:         cfg.ModelBackend.Ollama.DiskLimitGB,
+		BackendType:         cfg.ModelBackend.Type,
 	}
 	return NewDefaultModelEnsurer(modelConfig)
 }

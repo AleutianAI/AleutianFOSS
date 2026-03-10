@@ -230,10 +230,12 @@ func (h *AgentHandlers) HandleAgentRun(c *gin.Context) {
 		"project_root", req.ProjectRoot,
 		"query_len", len(req.Query))
 
-	// Create session with optional config
+	// Create session with optional config.
+	// CB-62: The proxy sends a partial config with only MainModel set.
+	// We must merge it into defaults so zero-valued fields don't fail validation.
 	var sessionConfig *agent.SessionConfig
 	if req.Config != nil {
-		sessionConfig = req.Config
+		sessionConfig = agent.DefaultSessionConfig().MergeOverrides(req.Config)
 	}
 
 	session, err := agent.NewSession(req.ProjectRoot, sessionConfig)
@@ -244,6 +246,13 @@ func (h *AgentHandlers) HandleAgentRun(c *gin.Context) {
 			Code:  "INVALID_CONFIG",
 		})
 		return
+	}
+
+	// CB-62: Log main model override when user selected a model in OpenWebUI.
+	if session.Config.MainModel != "" {
+		logger.Info("CB-62: Main model overridden by user selection",
+			"session_id", session.ID,
+			"main_model", session.Config.MainModel)
 	}
 
 	logger.Info("Session created",
@@ -1103,19 +1112,25 @@ func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent
 		"timeout", routerConfig.Timeout)
 
 	// CB-60b: Use startup-loaded roleConfig if available (avoids double-LoadRoleConfig).
-	// Merge per-session overrides for Router and ParamExtractor models.
+	// Merge per-session overrides for Main, Router, and ParamExtractor models.
+	// CB-62: MainModel override allows user's OpenWebUI selection to control the main LLM.
 	var roleConfig *providers.RoleConfig
 	if h.roleConfig != nil {
 		roleConfig = providers.MergeSessionOverrides(
 			h.roleConfig,
+			session.Config.MainModel,
 			session.Config.ToolRouterModel,
 			session.Config.ParamExtractorModel,
 		)
 	} else {
 		// Backward compatibility: load config when not injected via options.
+		mainFallback := os.Getenv("OLLAMA_MODEL")
+		if session.Config.MainModel != "" {
+			mainFallback = session.Config.MainModel
+		}
 		var roleErr error
 		roleConfig, roleErr = providers.LoadRoleConfig(
-			os.Getenv("OLLAMA_MODEL"),
+			mainFallback,
 			session.Config.ToolRouterModel,
 			session.Config.ParamExtractorModel,
 		)
@@ -1294,8 +1309,9 @@ func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent
 	// on resource-constrained systems. Re-warming ensures the first llm_call
 	// doesn't pay a ~14s cold-load penalty.
 	// CB-60: Only needed when router uses local Ollama (cloud providers don't evict).
+	// CB-62: Use session override if set, otherwise env var.
 	if routerLifecycle.IsLocal() {
-		mainModel := os.Getenv("OLLAMA_MODEL")
+		mainModel := roleConfig.Main.Model
 		if mainModel != "" && mainModel != routerConfig.Model && h.modelManager != nil {
 			mainWarmStart := time.Now()
 			if warmErr := h.modelManager.WarmModel(warmupCtx, mainModel, "24h", 65536); warmErr != nil {
@@ -1366,7 +1382,8 @@ func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent
 			}
 
 			// Re-warm main model after param model load (may have been evicted)
-			mainModel := os.Getenv("OLLAMA_MODEL")
+			// CB-62: Use roleConfig.Main.Model which includes session override.
+			mainModel := roleConfig.Main.Model
 			if mainModel != "" && mainModel != paramConfig.Model && h.modelManager != nil {
 				if warmErr := h.modelManager.WarmModel(warmupCtx, mainModel, "24h", 65536); warmErr != nil {
 					logger.Warn("initializeToolRouter: Main model re-warm after param model failed (non-fatal)",

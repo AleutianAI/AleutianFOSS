@@ -21,6 +21,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -215,7 +217,7 @@ func (p *ProxyServer) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Non-streaming path: block until agent completes, return JSON.
-	agentResp, sessionReused, err := p.callAgentLoop(ctx, threadKey, projectRoot, query)
+	agentResp, sessionReused, err := p.callAgentLoop(ctx, threadKey, projectRoot, query, req.Model)
 	if err != nil {
 		telemetry.RecordError(span, err)
 		logger.Error("Agent loop call failed", slog.String("error", err.Error()))
@@ -274,6 +276,9 @@ func (p *ProxyServer) handleModels(w http.ResponseWriter, r *http.Request) {
 	models := make([]ModelObject, 0, len(ollamaResp.Models))
 	now := time.Now().Unix()
 	for _, m := range ollamaResp.Models {
+		if isInfrastructureModel(m.Name) {
+			continue
+		}
 		models = append(models, ModelObject{
 			ID:      m.Name,
 			Object:  "model",
@@ -437,6 +442,7 @@ func (p *ProxyServer) handleInit(w http.ResponseWriter, r *http.Request) {
 //	threadKey   - hash of the first user message (stable per conversation)
 //	projectRoot - absolute path to the project directory
 //	query       - the user's latest message
+//	model       - user-selected main LLM model (empty = use server default)
 //
 // Outputs:
 //
@@ -447,7 +453,7 @@ func (p *ProxyServer) handleInit(w http.ResponseWriter, r *http.Request) {
 // Assumptions:
 //
 //	The trace server agent endpoints are available at config.TraceURL.
-func (p *ProxyServer) callAgentLoop(ctx context.Context, threadKey, projectRoot, query string) (*agentRunResponse, bool, error) {
+func (p *ProxyServer) callAgentLoop(ctx context.Context, threadKey, projectRoot, query, model string) (*agentRunResponse, bool, error) {
 	ctx, span := proxyTracer.Start(ctx, "proxy.callAgentLoop",
 		trace.WithAttributes(attribute.String("thread_key", threadKey)),
 	)
@@ -481,7 +487,7 @@ func (p *ProxyServer) callAgentLoop(ctx context.Context, threadKey, projectRoot,
 	}
 
 	// New session.
-	resp, err := p.callAgentRun(ctx, projectRoot, query)
+	resp, err := p.callAgentRun(ctx, projectRoot, query, model)
 	if err != nil {
 		return nil, false, err
 	}
@@ -523,15 +529,22 @@ type clarifyDetail struct {
 //	ctx         - request context
 //	projectRoot - project root path
 //	query       - user query
+//	model       - user-selected main LLM model (empty = use server default)
 //
 // Outputs:
 //
 //	*agentRunResponse - the agent's response
 //	error             - HTTP or decoding errors
-func (p *ProxyServer) callAgentRun(ctx context.Context, projectRoot, query string) (*agentRunResponse, error) {
+func (p *ProxyServer) callAgentRun(ctx context.Context, projectRoot, query, model string) (*agentRunResponse, error) {
 	payload := agentRunRequest{
 		ProjectRoot: p.translatePath(projectRoot),
 		Query:       query,
+	}
+	// CB-62: Forward user-selected model as main LLM override.
+	if model != "" {
+		payload.Config = &agentSessionConfig{
+			MainModel: model,
+		}
 	}
 
 	body, err := json.Marshal(payload)
@@ -732,7 +745,7 @@ func (p *ProxyServer) handleStreaming(
 	if !ok {
 		// ResponseWriter doesn't support flushing — fall back to buffered.
 		logger.Warn("ResponseWriter does not implement http.Flusher, falling back to buffered")
-		agentResp, sessionReused, err := p.callAgentLoop(ctx, threadKey, projectRoot, query)
+		agentResp, sessionReused, err := p.callAgentLoop(ctx, threadKey, projectRoot, query, model)
 		if err != nil {
 			telemetry.RecordError(span, err)
 			writeError(w, http.StatusBadGateway, "agent loop error: "+err.Error())
@@ -773,7 +786,7 @@ func (p *ProxyServer) handleStreaming(
 	}()
 
 	// Block on the agent call. Heartbeats keep the connection alive.
-	agentResp, sessionReused, err := p.callAgentLoop(ctx, threadKey, projectRoot, query)
+	agentResp, sessionReused, err := p.callAgentLoop(ctx, threadKey, projectRoot, query, model)
 	close(done)
 	<-stopped // Wait for heartbeat goroutine to fully exit before writing.
 
@@ -929,12 +942,20 @@ func (p *ProxyServer) AutoInit(projectRoot string) error {
 	defer span.End()
 
 	translated := p.translatePath(projectRoot)
+
+	langs := detectProjectLanguages(projectRoot)
 	span.SetAttributes(
 		attribute.String("project_root", translated),
+		attribute.StringSlice("languages", langs),
+	)
+	slog.Info("CRS-26m: Detected project languages",
+		slog.String("project_root", projectRoot),
+		slog.Any("languages", langs),
 	)
 
 	payload := initRequest{
 		ProjectRoot: translated,
+		Languages:   langs,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -1006,6 +1027,114 @@ func (p *ProxyServer) CleanupExpiredSessions() {
 // per project standards.
 //
 // Thread Safety: Not safe for concurrent use.
+// skipDirs are directories skipped during language detection to keep scanning fast.
+var skipDirs = map[string]bool{
+	".git":         true,
+	"node_modules": true,
+	"vendor":       true,
+	"__pycache__":  true,
+	".venv":        true,
+	"venv":         true,
+	"dist":         true,
+	"build":        true,
+	".tox":         true,
+	".mypy_cache":  true,
+}
+
+// extToLanguage maps file extensions to parser language identifiers for primary
+// code languages. This is a subset of all registered parsers — ancillary parsers
+// (CSS, HTML, SQL, YAML, Bash, Dockerfile, Markdown) are not included because
+// they don't drive language detection. Language strings must match the parser
+// registry in services/trace/ast/.
+var extToLanguage = map[string]string{
+	".go":  "go",
+	".py":  "python",
+	".pyi": "python",
+	".ts":  "typescript",
+	".tsx": "typescript",
+	".mts": "typescript",
+	".cts": "typescript",
+	".js":  "javascript",
+	".jsx": "javascript",
+	".mjs": "javascript",
+	".cjs": "javascript",
+}
+
+// detectProjectLanguages scans a project directory to determine which
+// programming languages are present.
+//
+// Description:
+//
+//	Walks the directory tree (max depth 4) collecting file extensions and
+//	mapping them to supported parser languages. Skips common non-source
+//	directories (node_modules, .git, vendor, etc.) for performance.
+//
+// Inputs:
+//
+//	projectRoot - Absolute path to the project root directory.
+//
+// Outputs:
+//
+//	[]string - Deduplicated list of detected languages (e.g., ["go", "python"]).
+//	           Returns ["go"] if no supported languages are detected or on error.
+//
+// Limitations:
+//
+//   - Max depth of 4 may miss deeply nested source files in unusual layouts.
+//   - Only detects languages with registered parsers (Go, Python, TypeScript, JavaScript).
+//
+// Thread Safety: Safe for concurrent use (read-only filesystem access).
+func detectProjectLanguages(projectRoot string) []string {
+	found := make(map[string]bool)
+
+	if walkErr := filepath.WalkDir(projectRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip unreadable entries
+		}
+
+		// Enforce max depth to keep scanning fast.
+		rel, relErr := filepath.Rel(projectRoot, path)
+		if relErr != nil {
+			return nil
+		}
+		depth := strings.Count(rel, string(filepath.Separator))
+		if depth > 4 {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		if d.IsDir() {
+			if skipDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		ext := strings.ToLower(filepath.Ext(d.Name()))
+		if lang, ok := extToLanguage[ext]; ok {
+			found[lang] = true
+		}
+		return nil
+	}); walkErr != nil {
+		slog.Warn("detectProjectLanguages: walk failed, falling back to [go]",
+			slog.String("project_root", projectRoot),
+			slog.String("error", walkErr.Error()))
+	}
+
+	if len(found) == 0 {
+		return []string{"go"}
+	}
+
+	langs := make([]string, 0, len(found))
+	for lang := range found {
+		langs = append(langs, lang)
+	}
+	sort.Strings(langs)
+	return langs
+}
+
 type initRequest struct {
 	// ProjectRoot is the absolute path to the project root directory.
 	ProjectRoot string `json:"project_root"`
@@ -1344,6 +1473,42 @@ func (p *ProxyServer) fetchIndexingStatus(ctx context.Context, client *http.Clie
 // Outputs:
 //
 //	string - The formatted number (e.g., "51,231").
+//
+// infrastructureModels are internal models that serve fixed roles (routing,
+// parameter extraction, embedding) and should not appear in the OpenWebUI
+// model dropdown. Users should only see models suitable for main LLM use.
+//
+// CB-62: Filtered in handleModels to prevent accidental selection.
+// Keys are exact "name:tag" matches. Ollama returns names with tags, so
+// "granite4:micro-h" and "nomic-embed-text-v2-moe" (no tag = ":latest" implied)
+// are both handled. The base name (without tag) is also checked for models
+// that Ollama may return as just "nomic-embed-text-v2-moe" without ":latest".
+var infrastructureModels = map[string]struct{}{
+	"granite4:micro-h":        {},
+	"ministral-3:3b":          {},
+	"nomic-embed-text-v2-moe": {},
+}
+
+// isInfrastructureModel returns true if the model name is an internal
+// infrastructure model that should be hidden from the user-facing model list.
+// Checks both exact match and base name (stripping :latest suffix).
+//
+// Thread Safety: Safe for concurrent use (read-only map).
+func isInfrastructureModel(name string) bool {
+	if _, ok := infrastructureModels[name]; ok {
+		return true
+	}
+	// Ollama may append ":latest" to models without explicit tags.
+	// Check the base name without the tag.
+	base := strings.TrimSuffix(name, ":latest")
+	if base != name {
+		if _, ok := infrastructureModels[base]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 func formatNumber(n int) string {
 	if n < 1000 {
 		return fmt.Sprintf("%d", n)

@@ -88,9 +88,9 @@ func TestURIToPath(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.uri, func(t *testing.T) {
-			got := uriToPath(tc.uri)
+			got := URIToPath(tc.uri)
 			if got != tc.expected {
-				t.Errorf("uriToPath(%q) = %q, want %q", tc.uri, got, tc.expected)
+				t.Errorf("URIToPath(%q) = %q, want %q", tc.uri, got, tc.expected)
 			}
 		})
 	}

@@ -222,6 +222,27 @@ type GraphProvider interface {
 	// Outputs:
 	//   bool - True if the service is available.
 	IsAvailable() bool
+
+	// EnrichmentTraceStep returns a TraceStep describing the LSP enrichment
+	// quality of the cached graph. Returns nil if no graph is cached or
+	// enrichment data is unavailable.
+	//
+	// Description:
+	//
+	//	GR-76: Called by InitPhase after SetGraphID to record enrichment
+	//	quality in the CRS journal. The LLM uses this to calibrate trust
+	//	in graph tool results.
+	//
+	// Inputs:
+	//
+	//	graphID - The graph ID to query.
+	//
+	// Outputs:
+	//
+	//	*crs.TraceStep - The enrichment TraceStep, or nil.
+	//
+	// Thread Safety: Safe for concurrent use.
+	EnrichmentTraceStep(graphID string) *crs.TraceStep
 }
 
 // PhaseResult contains the result of phase execution.

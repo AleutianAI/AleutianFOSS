@@ -126,9 +126,10 @@ type CalleeInfo struct {
 //
 // Thread Safety: Safe for concurrent use. All operations are read-only.
 type findCalleesTool struct {
-	graph  *graph.Graph
-	index  *index.SymbolIndex
-	logger *slog.Logger
+	graph     *graph.Graph
+	index     *index.SymbolIndex
+	analytics *graph.GraphAnalytics
+	logger    *slog.Logger
 }
 
 // NewFindCalleesTool creates the find_callees tool.
@@ -157,11 +158,12 @@ type findCalleesTool struct {
 //
 //   - Graph is frozen before tool creation
 //   - Index is populated with all symbols
-func NewFindCalleesTool(g *graph.Graph, idx *index.SymbolIndex) Tool {
+func NewFindCalleesTool(g *graph.Graph, idx *index.SymbolIndex, analytics *graph.GraphAnalytics) Tool {
 	return &findCalleesTool{
-		graph:  g,
-		index:  idx,
-		logger: slog.Default(),
+		graph:     g,
+		index:     idx,
+		analytics: analytics,
+		logger:    slog.Default(),
 	}
 }
 
@@ -348,6 +350,22 @@ func (t *findCalleesTool) Execute(ctx context.Context, params TypedParams) (*Res
 			attribute.Bool("index_used", true),
 			attribute.Int("index_matches", len(symbols)),
 		)
+
+		// CB-61a: When multiple symbols share a name, prefer production files over
+		// test files. Uses analytics.IsProductionFile() per CLAUDE.md. This prevents
+		// test-file callees from polluting results (e.g., conftest.py:read_csv merging
+		// its callees with readers.py:read_csv).
+		if len(symbols) > 1 && t.analytics != nil {
+			var prodSymbols []*ast.Symbol
+			for _, sym := range symbols {
+				if t.analytics.IsProductionFile(sym.FilePath) {
+					prodSymbols = append(prodSymbols, sym)
+				}
+			}
+			if len(prodSymbols) > 0 {
+				symbols = prodSymbols
+			}
+		}
 
 		if len(symbols) > 0 {
 			// IT-06b Issue 3: Capture the resolved symbol's kind for formatText.
@@ -548,6 +566,17 @@ func (t *findCalleesTool) buildOutput(functionName string, results map[string]*g
 			}
 		}
 	}
+
+	// CB-61a: Filter callees whose name matches the queried function. This prevents
+	// cross-symbol self-references (e.g., conftest:read_csv calls readers:read_csv,
+	// making read_csv appear as its own callee).
+	var filteredCallees []CalleeInfo
+	for _, c := range resolvedCallees {
+		if c.Name != functionName {
+			filteredCallees = append(filteredCallees, c)
+		}
+	}
+	resolvedCallees = filteredCallees
 
 	// Deduplicate external callees
 	seen := make(map[string]bool)

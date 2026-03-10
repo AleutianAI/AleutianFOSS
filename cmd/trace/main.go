@@ -71,6 +71,7 @@ import (
 	"syscall"
 	"time"
 
+	aleutianconfig "github.com/AleutianAI/AleutianFOSS/cmd/aleutian/config"
 	"github.com/AleutianAI/AleutianFOSS/services/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	"github.com/AleutianAI/AleutianFOSS/services/policy_engine"
@@ -185,6 +186,7 @@ func main() {
 	debug := flag.Bool("debug", false, "Enable debug mode")
 	withContext := flag.Bool("with-context", false, "Enable ContextManager for code context assembly")
 	withTools := flag.Bool("with-tools", false, "Enable tool registry for agentic exploration")
+	lspEnabled := flag.Bool("lsp-enabled", false, "Enable LSP-based graph enrichment (requires pyright/tsserver)")
 
 	// PORT env var override (matches orchestrator pattern for container deployments).
 	if envPort := os.Getenv("PORT"); envPort != "" {
@@ -245,7 +247,50 @@ func main() {
 			slog.Any("roots", cfg.AllowedRoots))
 	}
 
+	// GR-75: Wire LSP configuration from env vars and --lsp-enabled flag.
+	// Flag OR env var enables LSP (either triggers activation).
+	lspCfg := aleutianconfig.LSPConfigFromEnv()
+	if *lspEnabled {
+		lspCfg.Enabled = true
+	}
+
+	if lspCfg.Enabled {
+		// Override service LSP timeouts from LSPConfig
+		cfg.LSPStartupTimeout = lspCfg.StartupTimeout
+		cfg.LSPRequestTimeout = lspCfg.RequestTimeout
+		cfg.LSPIdleTimeout = lspCfg.IdleTimeout
+
+		// Verify language server binaries are available
+		verifier := aleutianconfig.NewLSPServerVerifier(lspCfg)
+		verifyResult := verifier.Verify()
+
+		// Disable languages whose binaries are missing
+		if !verifyResult.PythonAvailable {
+			lspCfg.PythonEnabled = false
+		}
+		if !verifyResult.TypeScriptAvailable {
+			lspCfg.TypeScriptEnabled = false
+		}
+
+		slog.Info("GR-75: LSP enrichment enabled",
+			slog.Bool("python", lspCfg.PythonEnabled),
+			slog.Bool("typescript", lspCfg.TypeScriptEnabled),
+			slog.Bool("javascript", lspCfg.TypeScriptEnabled),
+		)
+	}
+
 	svc := trace.NewService(cfg)
+
+	// GR-75: Store LSP availability on service for health endpoint.
+	// JavaScript uses the same typescript-language-server binary as TypeScript.
+	if lspCfg.Enabled {
+		lspLangs := map[string]bool{
+			"python":     lspCfg.PythonEnabled,
+			"typescript": lspCfg.TypeScriptEnabled,
+			"javascript": lspCfg.TypeScriptEnabled, // same binary as TypeScript
+		}
+		svc.SetLSPEnabled(true, lspLangs)
+	}
 
 	// Create handlers
 	handlers := trace.NewHandlers(svc)

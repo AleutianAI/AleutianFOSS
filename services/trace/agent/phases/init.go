@@ -95,6 +95,11 @@ func (p *InitPhase) Execute(ctx context.Context, deps *Dependencies) (agent.Agen
 	// Update session with graph ID
 	deps.Session.SetGraphID(graphID)
 
+	// GR-76: Emit enrichment quality TraceStep for the CRS journal.
+	if step := deps.GraphProvider.EnrichmentTraceStep(graphID); step != nil {
+		deps.Session.RecordTraceStep(*step)
+	}
+
 	// Emit state transition event
 	p.emitStateTransition(deps, agent.StateInit, agent.StatePlan, "graph initialized")
 

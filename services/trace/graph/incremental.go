@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -58,6 +59,11 @@ type IncrementalResult struct {
 
 	// FallbackReason is non-empty if a full rebuild was used instead.
 	FallbackReason string
+
+	// EnrichmentStats contains LSP enrichment results for the changed files.
+	// Zero-valued if LSP enrichment was not configured or not run.
+	// GR-76: Populated by Phase 6 when lspConfig is provided.
+	EnrichmentStats EnrichmentStats
 }
 
 // ShouldDoIncrementalUpdate determines whether an incremental update is appropriate.
@@ -131,6 +137,7 @@ func IncrementalRefresh(
 	baseGraph *Graph,
 	changedFiles []string,
 	changedResults []*ast.ParseResult,
+	lspConfig *LSPEnrichmentConfig,
 ) (*IncrementalResult, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("ctx must not be nil")
@@ -195,17 +202,33 @@ func IncrementalRefresh(
 		classExtends:           make(map[string]string),
 		classAdditionalParents: make(map[string][]string),
 		importNameMap:          make(map[string]map[string]importEntry),
+		symbolsByLocation:      make(map[string][]string),
 		startTime:              time.Now(),
 	}
 	state.result.Graph = working
 
-	// Populate symbolsByID and symbolsByName from remaining (unchanged) nodes.
+	// Populate symbolsByID, symbolsByName, symbolsByLocation, and placeholders
+	// from remaining (unchanged) nodes.
 	for _, node := range working.Nodes() {
 		if node.Symbol != nil {
 			state.symbolsByID[node.Symbol.ID] = node.Symbol
 			state.symbolsByName[node.Symbol.Name] = append(
 				state.symbolsByName[node.Symbol.Name], node.Symbol,
 			)
+			// GR-76: Populate symbolsByLocation so findNodeByLocation works
+			// during LSP enrichment. Without this, LSP definition queries
+			// return zero matches for unchanged nodes.
+			if node.Symbol.FilePath != "" && node.Symbol.StartLine > 0 {
+				locKey := fmt.Sprintf("%s:%d", node.Symbol.FilePath, node.Symbol.StartLine)
+				state.symbolsByLocation[locKey] = append(
+					state.symbolsByLocation[locKey], node.Symbol.ID,
+				)
+			}
+		}
+		// GR-76: Reconstruct placeholders map for LSP enrichment.
+		// Placeholder nodes have IDs starting with "external:".
+		if strings.HasPrefix(node.ID, "external:") {
+			state.placeholders[node.ID] = node
 		}
 	}
 
@@ -233,6 +256,33 @@ func IncrementalRefresh(
 		builder.extractFileEdges(ctx, state, r)
 	}
 	result.EdgesCreated = state.result.Stats.EdgesCreated
+
+	// Phase 6: LSP re-enrichment for changed files only (GR-76).
+	// Resolves placeholders created by Phase 5 using LSP definition queries,
+	// scoped to only edges originating from changed files.
+	if lspConfig != nil && lspConfig.Querier != nil {
+		changedSet := make(map[string]struct{}, len(changedFiles)*2)
+		for _, f := range changedFiles {
+			changedSet[f] = struct{}{}
+			// Edge locations may use absolute paths — include both forms.
+			if baseGraph.ProjectRoot != "" && !strings.HasPrefix(f, baseGraph.ProjectRoot) {
+				absPath := baseGraph.ProjectRoot + "/" + f
+				changedSet[absPath] = struct{}{}
+			}
+		}
+
+		// Wire LSP config into builder for enrichment
+		builder.options.LSPEnrichment = lspConfig
+
+		enrichStats, enrichErr := builder.lspEnrichmentPhaseScoped(ctx, state, changedSet)
+		result.EnrichmentStats = enrichStats
+		if enrichErr != nil {
+			slog.Warn("GR-76: LSP enrichment during incremental refresh failed",
+				slog.String("error", enrichErr.Error()),
+			)
+			// Non-fatal: proceed with heuristic-only edges
+		}
+	}
 
 	// Freeze the updated graph.
 	working.Freeze()

@@ -71,7 +71,7 @@ func RegisterExploreTools(registry *Registry, g *graph.Graph, idx *index.SymbolI
 	// These expose graph query functions directly to the agent for answering
 	// questions like "Find all functions that call X" without using Grep.
 	registry.Register(NewFindCallersTool(g, idx))
-	registry.Register(NewFindCalleesTool(g, idx))
+	registry.Register(NewFindCalleesTool(g, idx, nil))
 	registry.Register(NewFindImplementationsTool(g, idx))
 	registry.Register(NewFindSymbolTool(g, idx))
 	registry.Register(NewGetCallChainTool(g, idx))
@@ -104,6 +104,9 @@ func RegisterExploreTools(registry *Registry, g *graph.Graph, idx *index.SymbolI
 			}
 
 			analytics := graph.NewGraphAnalytics(hg)
+			// CB-61a: Re-register find_callees with analytics for production-file filtering.
+			// Registry supports re-registration (overwrites by name).
+			registry.Register(NewFindCalleesTool(g, idx, analytics))
 			registry.Register(NewFindHotspotsTool(analytics, idx))
 			registry.Register(NewFindDeadCodeTool(analytics, idx))
 			registry.Register(NewFindCyclesTool(analytics, idx))

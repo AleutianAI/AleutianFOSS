@@ -39,6 +39,7 @@ type SymbolIndexingCoordinator struct {
 	lastIndexedHash   string                 // hash of the last successfully indexed graph
 	lastStore         *rag.SymbolStore       // cached after successful indexing
 	progress          IndexingStatusResponse // live progress state
+	cancelFn          context.CancelFunc     // CRS-26n: cancel in-progress indexing
 }
 
 // NewSymbolIndexingCoordinator creates a new coordinator for background symbol indexing.
@@ -103,7 +104,12 @@ func (c *SymbolIndexingCoordinator) TriggerIndexing(graphID string, cached *Cach
 			slog.String("graph_hash", preHash))
 		return
 	}
+	// CRS-26n: Create cancellable context before launching the goroutine so
+	// CancelIndexing() can stop it immediately — no race window where cancelFn is nil.
+	// CRS-26i: 55K+ exported symbols × 100-per-batch embedding calls need ~10min.
+	indexCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	c.activeHash = preHash
+	c.cancelFn = cancel
 	c.mu.Unlock()
 
 	go func() {
@@ -117,14 +123,12 @@ func (c *SymbolIndexingCoordinator) TriggerIndexing(graphID string, cached *Cach
 		}()
 
 		defer func() {
+			cancel() // ensure context resources are freed
 			c.mu.Lock()
 			c.activeHash = ""
+			c.cancelFn = nil
 			c.mu.Unlock()
 		}()
-
-		// CRS-26i: 55K+ exported symbols × 100-per-batch embedding calls need ~10min.
-		indexCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-		defer cancel()
 
 		store, storeErr := rag.NewSymbolStore(c.weaviateClient, c.weaviateDataSpace, c.embedClient)
 		if storeErr != nil {
@@ -148,6 +152,15 @@ func (c *SymbolIndexingCoordinator) TriggerIndexing(graphID string, cached *Cach
 			c.mu.Unlock()
 			return
 		}
+
+		// CRS-26n: Set "deleting" phase so the stack manager's progress poll
+		// reflects that stale data is being cleared.
+		c.mu.Lock()
+		c.progress = IndexingStatusResponse{
+			InProgress: true,
+			Phase:      "deleting",
+		}
+		c.mu.Unlock()
 
 		// Delete stale symbols and re-index.
 		if delErr := store.DeleteAll(indexCtx); delErr != nil {
@@ -195,6 +208,46 @@ func (c *SymbolIndexingCoordinator) TriggerIndexing(graphID string, cached *Cach
 			)
 		}
 	}()
+}
+
+// CancelIndexing cancels any in-progress indexing goroutine via context.
+//
+// Description:
+//
+//	CRS-26n: Called before re-triggering indexing on project switch to stop
+//	the old goroutine. The goroutine's context is cancelled, which causes
+//	Weaviate batch operations and embedding calls to abort promptly.
+//
+// Thread Safety: Safe for concurrent use.
+func (c *SymbolIndexingCoordinator) CancelIndexing() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cancelFn != nil {
+		c.cancelFn()
+		c.cancelFn = nil
+		slog.Info("CRS-26n: Cancelled in-progress indexing",
+			slog.String("active_hash", c.activeHash))
+	}
+}
+
+// ResetState clears lastIndexedHash, lastStore, and progress so the next
+// TriggerIndexing doesn't short-circuit on a stale hash.
+//
+// Description:
+//
+//	CRS-26n: Called after CancelIndexing when switching projects. Without
+//	this, a project with an identical hash to the previous one would be
+//	skipped because lastIndexedHash still matches.
+//
+// Thread Safety: Safe for concurrent use.
+func (c *SymbolIndexingCoordinator) ResetState() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastIndexedHash = ""
+	c.lastStore = nil
+	c.activeHash = ""
+	c.progress = IndexingStatusResponse{}
+	slog.Info("CRS-26n: Indexing coordinator state reset")
 }
 
 // GetProgress returns a snapshot of the current indexing progress.

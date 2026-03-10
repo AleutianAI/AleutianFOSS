@@ -122,6 +122,12 @@ type Service struct {
 	// snapshotMgr is the optional graph snapshot manager (GR-65).
 	// Nil if BadgerDB is not configured.
 	snapshotMgr *graph.SnapshotManager
+
+	// lspEnabled is true when LSP enrichment is active (GR-75).
+	lspEnabled bool
+
+	// lspLanguages tracks which languages have LSP enrichment available.
+	lspLanguages map[string]bool
 }
 
 // CachedPlan holds a change plan and its associated graph ID.
@@ -187,6 +193,46 @@ func (s *Service) SetSnapshotManager(mgr *graph.SnapshotManager) {
 	s.snapshotMgr = mgr
 }
 
+// SetLSPEnabled configures LSP enrichment availability on the service.
+//
+// Description:
+//
+//	GR-75: Called during startup to record which languages have LSP
+//	enrichment available. Used by the health endpoint to report LSP status.
+//
+// Inputs:
+//
+//	enabled - Whether LSP enrichment is globally enabled.
+//	languages - Map of language name to availability (e.g. {"python": true, "typescript": false}).
+//
+// Thread Safety:
+//
+//	Must be called before the service starts serving requests.
+func (s *Service) SetLSPEnabled(enabled bool, languages map[string]bool) {
+	s.lspEnabled = enabled
+	s.lspLanguages = languages
+}
+
+// LSPEnrichmentStatus returns the LSP enrichment availability for health checks.
+//
+// Description:
+//
+//	GR-75: Returns whether LSP enrichment is enabled and which languages
+//	have binaries available. Used by the health endpoint to report
+//	container-level LSP status.
+//
+// Outputs:
+//
+//	enabled - Whether LSP enrichment is globally enabled.
+//	languages - Map of language name to availability.
+//
+// Thread Safety:
+//
+//	Safe for concurrent use (reads only immutable state set at startup).
+func (s *Service) LSPEnrichmentStatus() (bool, map[string]bool) {
+	return s.lspEnabled, s.lspLanguages
+}
+
 // Init initializes a code graph for a project.
 //
 // Description:
@@ -214,7 +260,8 @@ func (s *Service) SetSnapshotManager(mgr *graph.SnapshotManager) {
 //	ErrProjectTooLarge - Project exceeds configured limits
 //	ErrInitInProgress - Another init is running for this project
 //	ErrInitTimeout - Init took too long
-func (s *Service) Init(ctx context.Context, projectRoot string, languages, excludes []string) (*InitResponse, error) {
+func (s *Service) Init(ctx context.Context, projectRoot string, languages, excludes []string, forceRebuild ...bool) (*InitResponse, error) {
+	rebuild := len(forceRebuild) > 0 && forceRebuild[0]
 	// Validate project root
 	if err := s.validateProjectRoot(projectRoot); err != nil {
 		return nil, err
@@ -225,7 +272,31 @@ func (s *Service) Init(ctx context.Context, projectRoot string, languages, exclu
 		languages = []string{"go"}
 	}
 	if len(excludes) == 0 {
-		excludes = []string{"vendor/*", "*_test.go"}
+		excludes = []string{
+			// Directory excludes (matched against dir name at walk time)
+			"vendor",
+			"node_modules",
+			"__pycache__",
+			".venv",
+			"venv",
+			"dist",
+			"build",
+			".tox",
+			".mypy_cache",
+			// Go test files
+			"*_test.go",
+			// Python test files
+			"*_test.py",
+			"test_*.py",
+			"conftest.py",
+			// TypeScript / JavaScript test files
+			"*.test.ts",
+			"*.test.js",
+			"*.spec.ts",
+			"*.spec.js",
+			"*.test.tsx",
+			"*.test.jsx",
+		}
 	}
 
 	// Get init lock for this project to prevent concurrent inits
@@ -256,6 +327,26 @@ func (s *Service) Init(ctx context.Context, projectRoot string, languages, exclu
 	}
 	s.mu.RUnlock()
 
+	// GR-70a: Return cached graph if it exists and no rebuild was requested.
+	// The agent's InitPhase calls Init to get a graph handle, not to rebuild.
+	// Without this, the second Init OOMs due to GR-70's memory limit enforcement
+	// (first graph's heap allocations are still live).
+	if isRefresh && existing != nil && !rebuild {
+		slog.Info("GR-70a: Returning cached graph (skipping rebuild)",
+			slog.String("graph_id", graphID),
+			slog.Int("nodes", existing.Graph.NodeCount()),
+			slog.Int("edges", existing.Graph.EdgeCount()),
+		)
+		return &InitResponse{
+			GraphID:          graphID,
+			IsRefresh:        false,
+			FilesParsed:      0,
+			SymbolsExtracted: existing.Graph.NodeCount(),
+			EdgesBuilt:       existing.Graph.EdgeCount(),
+			ParseTimeMs:      0,
+		}, nil
+	}
+
 	// CRS-18: Try incremental refresh from prior snapshot.
 	if incrResp, incrErr := s.tryIncrementalRefresh(ctx, projectRoot, graphID, languages, excludes); incrErr == nil && incrResp != nil {
 		return incrResp, nil
@@ -272,15 +363,30 @@ func (s *Service) Init(ctx context.Context, projectRoot string, languages, exclu
 
 	// Build graph with edges using the Builder
 	// GR-41c: This ensures edge extraction (imports, calls, etc.) runs properly
-	builder := graph.NewBuilder(graph.WithProjectRoot(projectRoot))
+	builderOpts := []graph.BuilderOption{graph.WithProjectRoot(projectRoot)}
+
+	// GR-74/76: Wire LSP enrichment when LSP manager is available.
+	if lspConfig := s.buildLSPEnrichmentConfig(graphID); lspConfig != nil {
+		builderOpts = append(builderOpts, graph.WithLSPEnrichment(lspConfig))
+	}
+
+	builder := graph.NewBuilder(builderOpts...)
 	buildResult, err := builder.Build(ctx, parseResults)
 	if err != nil {
+		// GR-70: Build() now returns errors on context cancellation and memory limits.
+		// The partial buildResult is still usable for diagnostics.
+		slog.Warn("graph build failed",
+			slog.String("project_root", projectRoot),
+			slog.String("error", err.Error()),
+			slog.Int("nodes_created", buildResult.Stats.NodesCreated),
+			slog.Int("edges_created", buildResult.Stats.EdgesCreated),
+		)
 		return nil, fmt.Errorf("building graph: %w", err)
 	}
 
-	// R-1: Handle incomplete builds (context cancelled or memory limits)
+	// R-1: Handle incomplete builds (limit short-circuit without context error)
 	if buildResult.Incomplete {
-		slog.Warn("GR-41c: Graph build incomplete",
+		slog.Warn("graph build incomplete",
 			slog.String("project_root", projectRoot),
 			slog.Int("nodes_created", buildResult.Stats.NodesCreated),
 			slog.Int("edges_created", buildResult.Stats.EdgesCreated),
@@ -379,12 +485,13 @@ func (s *Service) Init(ctx context.Context, projectRoot string, languages, exclu
 
 	// Cache the graph
 	cached := &CachedGraph{
-		Graph:        g,
-		Index:        idx,
-		Assembler:    assembler,
-		Adapter:      adapter,
-		BuiltAtMilli: builtAtMilli,
-		ProjectRoot:  projectRoot,
+		Graph:           g,
+		Index:           idx,
+		Assembler:       assembler,
+		Adapter:         adapter,
+		BuiltAtMilli:    builtAtMilli,
+		ProjectRoot:     projectRoot,
+		EnrichmentStats: buildResult.Stats.LSPEnrichment,
 	}
 
 	if s.config.GraphTTL > 0 {
@@ -541,7 +648,7 @@ func (s *Service) tryIncrementalRefresh(
 			slog.Int("nodes", baseGraph.NodeCount()),
 			slog.Int("edges", baseGraph.EdgeCount()),
 		)
-		return s.cacheAndReturn(ctx, baseGraph, projectRoot, graphID, start, 0, nil)
+		return s.cacheAndReturn(ctx, baseGraph, projectRoot, graphID, start, 0, nil, nil)
 	}
 
 	// Parse only the changed files
@@ -568,8 +675,11 @@ func (s *Service) tryIncrementalRefresh(
 		changedResults = append(changedResults, pr)
 	}
 
+	// GR-76: Wire LSP enrichment config into incremental refresh.
+	lspConfig := s.buildLSPEnrichmentConfig(graphID)
+
 	// Run incremental refresh
-	incrResult, err := graph.IncrementalRefresh(ctx, baseGraph, changedFiles, changedResults)
+	incrResult, err := graph.IncrementalRefresh(ctx, baseGraph, changedFiles, changedResults, lspConfig)
 	if err != nil {
 		slog.Warn("CRS-18: Incremental refresh failed, falling back to full build",
 			slog.String("error", err.Error()),
@@ -584,10 +694,24 @@ func (s *Service) tryIncrementalRefresh(
 		slog.Int64("duration_ms", incrResult.DurationMilli),
 	)
 
-	return s.cacheAndReturn(ctx, incrResult.Graph, projectRoot, graphID, start, len(changedFiles), nil)
+	// GR-76: Merge incremental enrichment stats with previous graph's stats.
+	var mergedStats *graph.EnrichmentStats
+	s.mu.RLock()
+	if existing, ok := s.graphs[graphID]; ok && existing != nil {
+		merged := existing.EnrichmentStats
+		merged.Merge(incrResult.EnrichmentStats)
+		mergedStats = &merged
+	} else if incrResult.EnrichmentStats.PlaceholdersQueried > 0 {
+		mergedStats = &incrResult.EnrichmentStats
+	}
+	s.mu.RUnlock()
+
+	return s.cacheAndReturn(ctx, incrResult.Graph, projectRoot, graphID, start, len(changedFiles), nil, mergedStats)
 }
 
 // cacheAndReturn builds the CachedGraph, caches it, saves a snapshot, and returns InitResponse.
+//
+// GR-76: enrichmentStats is optional — if non-nil, stored on CachedGraph.
 func (s *Service) cacheAndReturn(
 	ctx context.Context,
 	g *graph.Graph,
@@ -595,6 +719,7 @@ func (s *Service) cacheAndReturn(
 	start time.Time,
 	filesParsed int,
 	errs []string,
+	enrichmentStats *graph.EnrichmentStats,
 ) (*InitResponse, error) {
 	idx := index.NewSymbolIndex()
 
@@ -629,6 +754,10 @@ func (s *Service) cacheAndReturn(
 		Adapter:      adapter,
 		BuiltAtMilli: builtAtMilli,
 		ProjectRoot:  projectRoot,
+	}
+	// GR-76: Store enrichment stats if available.
+	if enrichmentStats != nil {
+		cached.EnrichmentStats = *enrichmentStats
 	}
 	if s.config.GraphTTL > 0 {
 		cached.ExpiresAtMilli = time.Now().Add(s.config.GraphTTL).UnixMilli()
@@ -842,10 +971,17 @@ func (s *Service) parseProjectToResults(ctx context.Context, projectRoot string,
 
 		// Skip directories
 		if d.IsDir() {
-			// Skip excluded directories
+			// Skip excluded directories by matching both the relative path
+			// and the directory name itself. Bare names like "vendor" match
+			// the directory at any depth; glob patterns like "vendor/*" match
+			// the relPath for single-depth exclusions.
 			relPath, _ := filepath.Rel(projectRoot, path)
+			dirName := d.Name()
 			for _, pattern := range excludes {
 				if matched, _ := filepath.Match(pattern, relPath); matched {
+					return filepath.SkipDir
+				}
+				if matched, _ := filepath.Match(pattern, dirName); matched {
 					return filepath.SkipDir
 				}
 			}
@@ -2051,6 +2187,40 @@ func (s *Service) getOrCreateLSPManager(graphID string) (*lsp.Manager, error) {
 	s.lspManagers[graphID] = mgr
 
 	return mgr, nil
+}
+
+// buildLSPEnrichmentConfig constructs LSP enrichment configuration for the
+// given graph ID, or returns nil if LSP is not available.
+//
+// Description:
+//
+//	GR-76: Single source of truth for LSP enrichment parameters. Used by
+//	both Init() (full build) and tryIncrementalRefresh() to avoid duplicating
+//	configuration values.
+//
+// Inputs:
+//
+//	graphID - The graph ID for LSP manager lookup.
+//
+// Outputs:
+//
+//	*graph.LSPEnrichmentConfig - Configuration, or nil if LSP unavailable.
+//
+// Thread Safety: Safe for concurrent use.
+func (s *Service) buildLSPEnrichmentConfig(graphID string) *graph.LSPEnrichmentConfig {
+	mgr, err := s.getOrCreateLSPManager(graphID)
+	if err != nil || mgr == nil {
+		return nil
+	}
+	ops := lsp.NewOperations(mgr)
+	return &graph.LSPEnrichmentConfig{
+		Querier:            ops,
+		Manager:            mgr,
+		MaxConcurrentFiles: 4,
+		PerFileTimeout:     s.config.LSPRequestTimeout * 3,
+		TotalTimeout:       120 * time.Second,
+		Languages:          []string{"python", "typescript", "javascript"},
+	}
 }
 
 // getLSPOperations returns LSP operations for a graph.

@@ -18,6 +18,8 @@ When users run `aleutian stack start`, required Ollama models must be available:
 
  1. Embedding model (always required for RAG)
  2. LLM model (required if backend=ollama)
+ 3. Tool router model (optional, for trace agent tool routing)
+ 4. Parameter extractor model (optional, for trace agent parameter extraction)
 
 Previously, users encountered cryptic errors like "model not found" deep in
 the stack startup. This component provides clear, early verification with
@@ -120,6 +122,12 @@ const (
 	// DefaultLLMModel is used when OLLAMA_MODEL env var is not set.
 	DefaultLLMModel = "gpt-oss"
 
+	// DefaultToolRouterModel is the default model for tool routing in the trace agent.
+	DefaultToolRouterModel = "granite4:micro-h"
+
+	// DefaultParamExtractorModel is the default model for parameter extraction in the trace agent.
+	DefaultParamExtractorModel = "ministral-3:3b"
+
 	// DefaultDiskLimitGB is the default disk space limit for model storage.
 	DefaultDiskLimitGB = 50
 
@@ -149,6 +157,12 @@ const (
 
 	// ModelPurposeReranking indicates model is used for search reranking.
 	ModelPurposeReranking
+
+	// ModelPurposeToolRouting indicates model is used for tool selection routing.
+	ModelPurposeToolRouting
+
+	// ModelPurposeParamExtraction indicates model is used for parameter extraction.
+	ModelPurposeParamExtraction
 )
 
 // String returns the purpose as a human-readable string.
@@ -174,6 +188,10 @@ func (p ModelPurpose) String() string {
 		return "LLM"
 	case ModelPurposeReranking:
 		return "reranking"
+	case ModelPurposeToolRouting:
+		return "tool routing"
+	case ModelPurposeParamExtraction:
+		return "param extraction"
 	default:
 		return "unknown"
 	}
@@ -253,6 +271,12 @@ type ModelEnsurerConfig struct {
 
 	// LLMModel is the LLM model name (empty if not using Ollama for LLM).
 	LLMModel string
+
+	// ToolRouterModel is the model for trace agent tool routing (empty = default granite4:micro-h).
+	ToolRouterModel string
+
+	// ParamExtractorModel is the model for trace agent parameter extraction (empty = default ministral-3:3b).
+	ParamExtractorModel string
 
 	// DiskLimitGB is the maximum disk space for models (default: 50, 0 = no limit).
 	DiskLimitGB int64
@@ -468,6 +492,24 @@ func buildRequiredModelsList(cfg ModelEnsurerConfig) []RequiredModel {
 			Required:    true,
 			DefaultName: DefaultLLMModel,
 			EnvVar:      "OLLAMA_MODEL",
+		})
+
+		routerModel := resolveModelName(cfg.ToolRouterModel, DefaultToolRouterModel)
+		models = append(models, RequiredModel{
+			Name:        routerModel,
+			Purpose:     ModelPurposeToolRouting,
+			Required:    false, // Non-fatal: trace service degrades to regex fallback
+			DefaultName: DefaultToolRouterModel,
+			EnvVar:      "TRACE_ROUTER_MODEL",
+		})
+
+		paramModel := resolveModelName(cfg.ParamExtractorModel, DefaultParamExtractorModel)
+		models = append(models, RequiredModel{
+			Name:        paramModel,
+			Purpose:     ModelPurposeParamExtraction,
+			Required:    false, // Non-fatal: trace service degrades to regex fallback
+			DefaultName: DefaultParamExtractorModel,
+			EnvVar:      "TRACE_PARAM_MODEL",
 		})
 	}
 

@@ -1163,6 +1163,12 @@ func (p *ExecutePhase) buildLLMRequest(deps *Dependencies) (*llm.Request, *agent
 
 	request := llm.BuildRequest(deps.Context, toolDefs, p.maxTokens)
 
+	// CB-62: Apply per-session main model override from user's OpenWebUI selection.
+	// ModelOverride is respected by Ollama, OpenAI, and Gemini adapters.
+	if deps.Session != nil && deps.Session.Config.MainModel != "" {
+		request.ModelOverride = deps.Session.Config.MainModel
+	}
+
 	// History-Aware Routing: Route on EVERY step with full context.
 	// The router (Granite4:3b-h with Mamba2 architecture) handles O(n) linear
 	// complexity and can efficiently process tool history to avoid the
@@ -3094,6 +3100,11 @@ func (p *ExecutePhase) forceLLMSynthesis(
 
 	// Build request without tools — force text-only response.
 	synthRequest := llm.BuildRequest(deps.Context, nil, p.maxTokens)
+
+	// CB-62: Apply per-session main model override.
+	if deps.Session != nil && deps.Session.Config.MainModel != "" {
+		synthRequest.ModelOverride = deps.Session.Config.MainModel
+	}
 
 	// IT-11: Strip code context and system prompt from synthesis request.
 	// BuildRequest includes the full RAG code context (8-25KB) and system prompt

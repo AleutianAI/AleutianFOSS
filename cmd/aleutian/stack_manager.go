@@ -91,13 +91,18 @@ via mutex.
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1061,6 +1066,10 @@ func (s *DefaultStackManager) Start(ctx context.Context, opts StartOptions) (err
 		return err
 	}
 
+	// Phase 8: Initialize code graph and wait for indexing (non-blocking — warns on failure)
+	// CRS-26n: Stack manager triggers init directly instead of relying on proxy AutoInit.
+	s.triggerInitAndWaitForIndexing(ctx, env, opts)
+
 	// Success - print summary
 	s.printStartupSummary(startTime, opts)
 	return nil
@@ -1658,10 +1667,11 @@ func (s *DefaultStackManager) startContainers(ctx context.Context, opts StartOpt
 	}
 
 	upOpts := compose.UpOptions{
-		ForceBuild: opts.ForceBuild,
-		Env:        env,
-		Detach:     true,
-		Services:   opts.Services,
+		ForceBuild:    opts.ForceBuild,
+		ForceRecreate: true, // CRS-26n: ensure volume mounts reflect current TRACE_PROJECTS_DIR
+		Env:           env,
+		Detach:        true,
+		Services:      opts.Services,
 	}
 
 	var result *compose.ComposeResult
@@ -2056,6 +2066,417 @@ func (s *DefaultStackManager) collectDiagnostics(ctx context.Context, phase stri
 	}
 }
 
+// waitForIndexing polls the trace server's indexing status endpoint and
+// displays progress until indexing completes, fails, or times out.
+//
+// # Description
+//
+// After the stack is healthy, the trace-proxy auto-initializes: parsing code,
+// building the call graph, and indexing symbols into Weaviate. This method
+// polls GET /v1/trace/indexing/status every 3 seconds and prints progress
+// messages so the user knows their code is being indexed.
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation
+//
+// # Outputs
+//
+//   - None (writes progress to s.output; never returns an error)
+//
+// # Limitations
+//
+//   - Progress display is line-based, not a true progress bar
+//   - If the trace server is unreachable, silently retries until timeout
+//
+// # Assumptions
+//
+//   - Trace server is running on localhost:12217
+//   - IndexingStatusResponse matches services/trace/types.go
+func (s *DefaultStackManager) waitForIndexing(ctx context.Context) {
+	const (
+		pollInterval = 3 * time.Second
+		idleTimeout  = 15 * time.Second
+		totalTimeout = 5 * time.Minute
+		// statusURL must match the trace server port in printStartupSummary
+		// and podman-compose.yml.
+		statusURL = "http://localhost:12217/v1/trace/indexing/status"
+	)
+
+	type indexingStatus struct {
+		InProgress       bool   `json:"in_progress"`
+		Phase            string `json:"phase"`
+		SymbolsTotal     int    `json:"symbols_total"`
+		BatchesCompleted int    `json:"batches_completed"`
+		BatchesTotal     int    `json:"batches_total"`
+		SymbolsIndexed   int    `json:"symbols_indexed"`
+		Error            string `json:"error,omitempty"`
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	deadline := time.Now().Add(totalTimeout)
+	idleDeadline := time.Now().Add(idleTimeout)
+	lastPhase := ""
+	lastBatches := -1
+
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			if _, err := fmt.Fprintf(s.output, "  Warning: indexing still running in background (timed out waiting)\n"); err != nil {
+				slog.Warn("failed to write output", "error", err)
+			}
+			return
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, statusURL, nil)
+		if err != nil {
+			return
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			// Trace server may still be initializing — silently retry.
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(pollInterval):
+				continue
+			}
+		}
+
+		var status indexingStatus
+		decodeErr := json.NewDecoder(resp.Body).Decode(&status)
+		resp.Body.Close()
+		if decodeErr != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(pollInterval):
+				continue
+			}
+		}
+
+		// Handle error from indexing.
+		if status.Error != "" {
+			if _, err := fmt.Fprintf(s.output, "  Warning: indexing failed: %s\n", status.Error); err != nil {
+				slog.Warn("failed to write output", "error", err)
+			}
+			return
+		}
+
+		// Skip silently if indexing never starts (no project configured or Weaviate unavailable).
+		if status.Phase == "" || status.Phase == "idle" || status.Phase == "disabled" {
+			if time.Now().After(idleDeadline) {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(pollInterval):
+				continue
+			}
+		}
+
+		// Reset idle deadline once indexing actually starts.
+		idleDeadline = deadline
+
+		// Print phase transitions.
+		switch status.Phase {
+		case "collecting":
+			if lastPhase != "collecting" {
+				if _, err := fmt.Fprintf(s.output, "  Indexing code: collecting symbols...\n"); err != nil {
+					slog.Warn("failed to write output", "error", err)
+				}
+			}
+		case "embedding":
+			if lastPhase != "embedding" {
+				if _, err := fmt.Fprintf(s.output, "  Indexing code: embedding %s symbols...\n",
+					formatCount(status.SymbolsTotal)); err != nil {
+					slog.Warn("failed to write output", "error", err)
+				}
+			}
+		case "inserting":
+			if status.BatchesTotal > 0 && status.BatchesCompleted != lastBatches {
+				lastBatches = status.BatchesCompleted
+				pct := (status.BatchesCompleted * 100) / status.BatchesTotal
+				if _, err := fmt.Fprintf(s.output, "  Indexing code: inserting batch %d/%d (%d%%)...\n",
+					status.BatchesCompleted, status.BatchesTotal, pct); err != nil {
+					slog.Warn("failed to write output", "error", err)
+				}
+			}
+		case "complete":
+			if status.SymbolsIndexed > 0 {
+				if _, err := fmt.Fprintf(s.output, "  Code indexed: %s symbols ready\n",
+					formatCount(status.SymbolsIndexed)); err != nil {
+					slog.Warn("failed to write output", "error", err)
+				}
+			}
+			return
+		}
+
+		lastPhase = status.Phase
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
+// triggerInitAndWaitForIndexing sends POST /v1/trace/init to the trace server
+// and then polls for indexing completion.
+//
+// # Description
+//
+// CRS-26n: Replaces the old Phase 8 (waitForIndexing) which relied on proxy
+// AutoInit. The stack manager now triggers init directly after health checks,
+// ensuring the code graph is built with correct languages and the init happens
+// deterministically rather than racing with container startup.
+//
+// # Inputs
+//
+//   - ctx: Context for cancellation
+//   - env: Environment variables from profile resolution (for TRACE_PROJECTS_DIR)
+//   - opts: Start options (for checking service list)
+//
+// # Outputs
+//
+//   - None (writes progress to s.output; never returns an error)
+//
+// # Limitations
+//
+//   - If the trace server is unreachable, warns and does not fail startup
+//   - If init returns an error, warns and does not fail startup
+//
+// # Assumptions
+//
+//   - Trace server is running on localhost:12217
+//   - Services are healthy (Phase 7 completed)
+func (s *DefaultStackManager) triggerInitAndWaitForIndexing(ctx context.Context, env map[string]string, opts StartOptions) {
+	// Guard: skip if services is set and doesn't include "trace"
+	if len(opts.Services) > 0 {
+		hasTrace := false
+		for _, svc := range opts.Services {
+			if svc == "trace" {
+				hasTrace = true
+				break
+			}
+		}
+		if !hasTrace {
+			return
+		}
+	}
+
+	// Determine host-side project directory for language detection.
+	projectsDir := os.Getenv("TRACE_PROJECTS_DIR")
+	if projectsDir == "" {
+		projectsDir = env["TRACE_PROJECTS_DIR"]
+	}
+	if projectsDir == "" {
+		projectsDir = s.stackDir
+	}
+	if projectsDir == "" {
+		slog.Debug("CRS-26n: No project directory configured, skipping init")
+		return
+	}
+
+	// Detect languages from host-side project directory.
+	langs := detectStackProjectLanguages(projectsDir)
+	slog.Info("CRS-26n: Detected project languages",
+		slog.String("projects_dir", projectsDir),
+		slog.Any("languages", langs))
+
+	// POST /v1/trace/init with container-side path (/projects).
+	const initURL = "http://localhost:12217/v1/trace/init"
+	payload := struct {
+		ProjectRoot string   `json:"project_root"`
+		Languages   []string `json:"languages,omitempty"`
+	}{
+		ProjectRoot: "/projects",
+		Languages:   langs,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		slog.Warn("CRS-26n: Failed to marshal init request", slog.String("error", err.Error()))
+		return
+	}
+
+	initCtx, initCancel := context.WithTimeout(ctx, 60*time.Second)
+	defer initCancel()
+
+	req, err := http.NewRequestWithContext(initCtx, http.MethodPost, initURL, bytes.NewReader(body))
+	if err != nil {
+		slog.Warn("CRS-26n: Failed to create init request", slog.String("error", err.Error()))
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{} // timeout controlled by initCtx
+	resp, err := client.Do(req)
+	if err != nil {
+		if _, wErr := fmt.Fprintf(s.output, "  Warning: could not reach trace server for init: %v\n", err); wErr != nil {
+			slog.Warn("failed to write output", "error", wErr)
+		}
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		if _, wErr := fmt.Fprintf(s.output, "  Warning: trace init returned status %d: %s\n", resp.StatusCode, string(respBody)); wErr != nil {
+			slog.Warn("failed to write output", "error", wErr)
+		}
+		return
+	}
+
+	// Decode init response for logging.
+	var initResp struct {
+		GraphID          string `json:"graph_id"`
+		FilesParsed      int    `json:"files_parsed"`
+		SymbolsExtracted int    `json:"symbols_extracted"`
+		ParseTimeMs      int64  `json:"parse_time_ms"`
+	}
+	if decErr := json.NewDecoder(resp.Body).Decode(&initResp); decErr != nil {
+		slog.Warn("CRS-26n: Init succeeded but couldn't decode response",
+			slog.String("error", decErr.Error()))
+	} else if initResp.FilesParsed > 0 {
+		if _, wErr := fmt.Fprintf(s.output, "  Initializing code graph: %s files parsed, %s symbols\n",
+			formatCount(initResp.FilesParsed), formatCount(initResp.SymbolsExtracted)); wErr != nil {
+			slog.Warn("failed to write output", "error", wErr)
+		}
+	}
+
+	// Poll for indexing completion (reuse existing waitForIndexing logic).
+	s.waitForIndexing(ctx)
+}
+
+// detectStackProjectLanguages scans a project directory to determine which
+// programming languages are present.
+//
+// # Description
+//
+// CRS-26n: Duplicated from cmd/trace-proxy/proxy.go detectProjectLanguages
+// to avoid a cross-package dependency. Walks the directory tree (max depth 4)
+// collecting file extensions and mapping them to supported parser languages.
+//
+// # Inputs
+//
+//   - projectRoot: Absolute path to the project root directory
+//
+// # Outputs
+//
+//   - []string: Sorted list of detected languages. Returns ["go"] as fallback.
+//
+// # Thread Safety: Safe for concurrent use (read-only filesystem access).
+func detectStackProjectLanguages(projectRoot string) []string {
+	extToLang := map[string]string{
+		".go":  "go",
+		".py":  "python",
+		".ts":  "typescript",
+		".tsx": "typescript",
+		".mts": "typescript",
+		".cts": "typescript",
+		".js":  "javascript",
+		".jsx": "javascript",
+		".mjs": "javascript",
+		".cjs": "javascript",
+	}
+
+	skipDirs := map[string]bool{
+		".git": true, "node_modules": true, "vendor": true,
+		"__pycache__": true, ".venv": true, "venv": true,
+		"dist": true, "build": true, ".tox": true, ".mypy_cache": true,
+	}
+
+	found := make(map[string]bool)
+
+	if walkErr := filepath.WalkDir(projectRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		rel, relErr := filepath.Rel(projectRoot, path)
+		if relErr != nil {
+			return nil
+		}
+		depth := strings.Count(rel, string(filepath.Separator))
+		if depth > 4 {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			if skipDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(d.Name()))
+		if lang, ok := extToLang[ext]; ok {
+			found[lang] = true
+		}
+		return nil
+	}); walkErr != nil {
+		slog.Warn("CRS-26n: language detection walk failed, falling back to [go]",
+			slog.String("project_root", projectRoot),
+			slog.String("error", walkErr.Error()))
+	}
+
+	if len(found) == 0 {
+		return []string{"go"}
+	}
+
+	langs := make([]string, 0, len(found))
+	for lang := range found {
+		langs = append(langs, lang)
+	}
+	sort.Strings(langs)
+	return langs
+}
+
+// formatCount formats an integer with comma separators for readability.
+//
+// # Description
+//
+// Converts an integer to a string with thousands separators (e.g., 51231 → "51,231").
+//
+// # Inputs
+//
+//   - n: The integer to format
+//
+// # Outputs
+//
+//   - string: The formatted number string
+//
+// # Limitations
+//
+//   - Only handles positive integers correctly
+//
+// # Assumptions
+//
+//   - n is non-negative
+func formatCount(n int) string {
+	if n < 0 {
+		return fmt.Sprintf("%d", n)
+	}
+	s := fmt.Sprintf("%d", n)
+	if len(s) <= 3 {
+		return s
+	}
+
+	var result []byte
+	for i, c := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			result = append(result, ',')
+		}
+		result = append(result, byte(c))
+	}
+	return string(result)
+}
+
 // printStartupSummary outputs a summary after successful startup.
 //
 // # Description
@@ -2092,13 +2513,16 @@ func (s *DefaultStackManager) printStartupSummary(startTime time.Time, opts Star
 	if _, err := fmt.Fprintf(s.output, "\nAccess points:\n"); err != nil {
 		slog.Warn("failed to write output", "error", err)
 	}
-	if _, err := fmt.Fprintf(s.output, "  Chat UI:      http://localhost:8501\n"); err != nil {
+	if _, err := fmt.Fprintf(s.output, "  Trace Proxy:  http://localhost:12218  (OpenAI-compatible API)\n"); err != nil {
 		slog.Warn("failed to write output", "error", err)
 	}
-	if _, err := fmt.Fprintf(s.output, "  API:          http://localhost:8080\n"); err != nil {
+	if _, err := fmt.Fprintf(s.output, "  Trace Server: http://localhost:12217\n"); err != nil {
 		slog.Warn("failed to write output", "error", err)
 	}
-	if _, err := fmt.Fprintf(s.output, "  Weaviate:     http://localhost:12127\n"); err != nil {
+	if _, err := fmt.Fprintf(s.output, "  Jaeger:       http://localhost:12214  (Distributed tracing)\n"); err != nil {
+		slog.Warn("failed to write output", "error", err)
+	}
+	if _, err := fmt.Fprintf(s.output, "  Weaviate:     http://localhost:12212\n"); err != nil {
 		slog.Warn("failed to write output", "error", err)
 	}
 

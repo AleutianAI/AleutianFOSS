@@ -162,6 +162,14 @@ services:
       OLLAMA_MODEL: ${OLLAMA_MODEL:-gpt-oss}
       TRACE_ALLOWED_ROOTS: /projects
       NATS_URL: nats://nats:4222
+      # GR-75: LSP enrichment configuration for container mode.
+      # Language servers (pyright, tsserver) are bundled in the image.
+      # LSP is stdio-based — no new ports or volume mounts needed.
+      LSP_ENABLED: "true"
+      LSP_PYTHON_ENABLED: "true"
+      LSP_TYPESCRIPT_ENABLED: "true"
+      LSP_STARTUP_TIMEOUT_SECONDS: "30"
+      LSP_REQUEST_TIMEOUT_SECONDS: "5"
     volumes:
       - ${TRACE_PROJECTS_DIR:-.}:/projects:ro
     networks:
@@ -194,6 +202,7 @@ services:
       ALEUTIAN_TRACE_URL: http://trace:12217
       OLLAMA_URL: http://host.containers.internal:11434
       TRACE_CONTAINER_PREFIX: /projects
+      TRACE_SKIP_AUTO_INIT: "true"  # CRS-26n: stack manager handles init directly
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
       OTEL_EXPORTER_OTLP_INSECURE: "true"
     volumes:

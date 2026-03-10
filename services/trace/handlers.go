@@ -169,7 +169,8 @@ func (h *Handlers) HandleInit(c *gin.Context) {
 
 	logger.Info("Initializing graph", "project_root", req.ProjectRoot)
 
-	resp, err := h.svc.Init(c.Request.Context(), req.ProjectRoot, req.Languages, req.ExcludePatterns)
+	// GR-70a: HandleInit is an explicit user request — always rebuild.
+	resp, err := h.svc.Init(c.Request.Context(), req.ProjectRoot, req.Languages, req.ExcludePatterns, true)
 	if err != nil {
 		statusCode := http.StatusInternalServerError
 		errCode := "INIT_FAILED"
@@ -205,10 +206,15 @@ func (h *Handlers) HandleInit(c *gin.Context) {
 		"symbols_extracted", resp.SymbolsExtracted,
 		"parse_time_ms", resp.ParseTimeMs)
 
+	// CRS-26n: Cancel any in-progress indexing and reset state before
+	// re-triggering. This ensures project switches stop the old goroutine
+	// and clear stale hash state so the new project is always indexed.
 	// CRS-26l: Trigger eager symbol indexing immediately after graph init.
 	// This removes the 2-3 minute first-query penalty — symbols are indexed
 	// in the background before any user query arrives.
 	if h.indexingCoord != nil {
+		h.indexingCoord.CancelIndexing()
+		h.indexingCoord.ResetState()
 		if cached, err := h.svc.GetGraph(resp.GraphID); err == nil {
 			h.indexingCoord.TriggerIndexing(resp.GraphID, cached)
 			logger.Info("CRS-26l: Eager symbol indexing triggered",
@@ -513,10 +519,23 @@ func (h *Handlers) HandleIndexingStatus(c *gin.Context) {
 //
 //	200 OK: HealthResponse
 func (h *Handlers) HandleHealth(c *gin.Context) {
-	c.JSON(http.StatusOK, HealthResponse{
+	resp := HealthResponse{
 		Status:  "healthy",
 		Version: ServiceVersion,
-	})
+	}
+
+	// GR-75: Include LSP status when enrichment is enabled.
+	enabled, languages := h.svc.LSPEnrichmentStatus()
+	if enabled {
+		resp.LSP = &LSPHealthStatus{
+			Enabled:    true,
+			Python:     LSPLanguageStatus{Available: languages["python"]},
+			TypeScript: LSPLanguageStatus{Available: languages["typescript"]},
+			JavaScript: LSPLanguageStatus{Available: languages["javascript"]},
+		}
+	}
+
+	c.JSON(http.StatusOK, resp)
 }
 
 // HandleReady handles GET /v1/trace/ready.

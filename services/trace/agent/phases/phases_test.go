@@ -53,6 +53,10 @@ func (m *MockGraphProvider) IsAvailable() bool {
 	return m.available
 }
 
+func (m *MockGraphProvider) EnrichmentTraceStep(graphID string) *crs.TraceStep {
+	return nil
+}
+
 // Helper to create test dependencies
 func createTestDependencies() *Dependencies {
 	session, _ := agent.NewSession("/test/project", nil)

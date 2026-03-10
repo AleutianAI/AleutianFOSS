@@ -146,6 +146,12 @@ type SessionConfig struct {
 	// Default: "fallback"
 	DegradationMode string `json:"degradation_mode"`
 
+	// MainModel overrides the main reasoning LLM for this session.
+	// CB-62: When non-empty, overrides OLLAMA_MODEL / TRACE_MAIN_MODEL env vars.
+	// Set by the proxy when forwarding the user's model selection from OpenWebUI.
+	// Default: "" (use environment/startup config).
+	MainModel string `json:"main_model"`
+
 	// ToolRouterEnabled enables the micro-LLM tool router for faster tool selection.
 	// When enabled, a fast model (like granite4:micro-h) pre-selects tools before
 	// the main reasoning LLM, reducing latency.
@@ -213,6 +219,93 @@ func DefaultSessionConfig() *SessionConfig {
 		// IT-08e: Dedicated small model for parallel param extraction
 		ParamExtractorModel: "ministral-3:3b",
 	}
+}
+
+// MergeOverrides applies non-zero fields from overrides onto the receiver.
+//
+// Description:
+//
+//	Returns the receiver with non-zero fields from overrides applied.
+//	This allows callers to send a partial config (e.g., only MainModel)
+//	without zeroing out defaults for fields they didn't set.
+//
+// Inputs:
+//
+//	overrides - Partial config. Nil is safe (returns receiver unchanged).
+//
+// Outputs:
+//
+//	*SessionConfig - The receiver with overrides applied.
+//
+// Thread Safety: Not safe for concurrent use.
+func (c *SessionConfig) MergeOverrides(overrides *SessionConfig) *SessionConfig {
+	if overrides == nil {
+		return c
+	}
+	if overrides.MaxSteps > 0 {
+		c.MaxSteps = overrides.MaxSteps
+	}
+	if overrides.MaxTokensPerStep > 0 {
+		c.MaxTokensPerStep = overrides.MaxTokensPerStep
+	}
+	if overrides.MaxTotalTokens > 0 {
+		c.MaxTotalTokens = overrides.MaxTotalTokens
+	}
+	if overrides.MaxToolCallsPerStep > 0 {
+		c.MaxToolCallsPerStep = overrides.MaxToolCallsPerStep
+	}
+	if overrides.StepTimeout > 0 {
+		c.StepTimeout = overrides.StepTimeout
+	}
+	if overrides.TotalTimeout > 0 {
+		c.TotalTimeout = overrides.TotalTimeout
+	}
+	if overrides.InitialContextBudget > 0 {
+		c.InitialContextBudget = overrides.InitialContextBudget
+	}
+	if overrides.ContextEvictionPolicy != "" {
+		c.ContextEvictionPolicy = overrides.ContextEvictionPolicy
+	}
+	if overrides.SummarizationThreshold > 0 {
+		c.SummarizationThreshold = overrides.SummarizationThreshold
+	}
+	if overrides.SafetyCheckScope != "" {
+		c.SafetyCheckScope = overrides.SafetyCheckScope
+	}
+	if overrides.DegradationMode != "" {
+		c.DegradationMode = overrides.DegradationMode
+	}
+	if overrides.MainModel != "" {
+		c.MainModel = overrides.MainModel
+	}
+	if overrides.ToolRouterModel != "" {
+		c.ToolRouterModel = overrides.ToolRouterModel
+	}
+	if overrides.ToolRouterTimeout > 0 {
+		c.ToolRouterTimeout = overrides.ToolRouterTimeout
+	}
+	if overrides.ToolRouterConfidence > 0 {
+		c.ToolRouterConfidence = overrides.ToolRouterConfidence
+	}
+	if overrides.ParamExtractorModel != "" {
+		c.ParamExtractorModel = overrides.ParamExtractorModel
+	}
+	if overrides.ReflectionThreshold > 0 {
+		c.ReflectionThreshold = overrides.ReflectionThreshold
+	}
+	if overrides.ConfidenceThreshold > 0 {
+		c.ConfidenceThreshold = overrides.ConfidenceThreshold
+	}
+	if len(overrides.EnabledToolSets) > 0 {
+		c.EnabledToolSets = overrides.EnabledToolSets
+	}
+	if len(overrides.DisabledTools) > 0 {
+		c.DisabledTools = overrides.DisabledTools
+	}
+	if len(overrides.ToolPriorities) > 0 {
+		c.ToolPriorities = overrides.ToolPriorities
+	}
+	return c
 }
 
 // Validate checks that the configuration is valid.

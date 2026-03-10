@@ -165,3 +165,41 @@ func EnsureCodeSymbolSchema(ctx context.Context, client *weaviate.Client) error 
 		slog.String("vectorizer", schema.Vectorizer))
 	return nil
 }
+
+// ResetCodeSymbolSchema drops and recreates the CodeSymbol class in O(1),
+// regardless of object count. Replaces batch delete which hangs on 300K+ objects.
+//
+// Description:
+//
+//	CRS-26n: Single-project (one dataSpace at a time) means schema drop+recreate
+//	is safe. The class is deleted atomically then recreated via EnsureCodeSymbolSchema.
+//	Brief millisecond window where class doesn't exist — query callers already
+//	handle nil SymbolStore gracefully.
+//
+// Inputs:
+//
+//	ctx - Context for cancellation.
+//	client - Weaviate client. Must not be nil.
+//
+// Outputs:
+//
+//	error - Non-nil if schema recreation fails.
+//
+// Thread Safety: Safe for concurrent use.
+func ResetCodeSymbolSchema(ctx context.Context, client *weaviate.Client) error {
+	// Drop the class — ignore "class not found" errors (idempotent).
+	if err := client.Schema().ClassDeleter().WithClassName(CodeSymbolClassName).Do(ctx); err != nil {
+		// Weaviate returns an error if the class doesn't exist. That's fine — we're
+		// about to recreate it anyway.
+		slog.Debug("CRS-26n: Class delete returned error (may not exist yet)",
+			slog.String("error", err.Error()))
+	}
+
+	// Recreate with correct schema and vectorizer.
+	if err := EnsureCodeSymbolSchema(ctx, client); err != nil {
+		return fmt.Errorf("recreating CodeSymbol schema: %w", err)
+	}
+
+	slog.Info("CRS-26n: CodeSymbol schema reset (drop+recreate)")
+	return nil
+}
