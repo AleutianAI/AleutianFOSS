@@ -34,8 +34,8 @@ import (
 // Default builder configuration values.
 const (
 	// DefaultMaxMemoryMB is the default memory limit for building (2048MB).
-	// GR-80: Raised from 512 to 2048 so edge extraction completes for
-	// projects up to ~2M LOC. Will be removed when GR-80 (bbolt disk-backed
+	// GR-77: Raised from 512 to 2048 so edge extraction completes for
+	// projects up to ~2M LOC. Will be removed when GR-77 (bbolt disk-backed
 	// graph) eliminates the in-memory architecture.
 	DefaultMaxMemoryMB = 2048
 
@@ -941,7 +941,7 @@ func (b *Builder) extractEdgesParallel(ctx context.Context, state *buildState, r
 	wg.Wait()
 
 	// Check if context was cancelled during parallel extraction.
-	// GR-80: Check cancelCtx (not ctx) because memory limit cancellation
+	// GR-77: Check cancelCtx (not ctx) because memory limit cancellation
 	// calls cancel() on cancelCtx, which does not propagate to the parent ctx.
 	if cancelCtx.Err() != nil {
 		state.result.Incomplete = true

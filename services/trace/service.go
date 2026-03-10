@@ -77,6 +77,12 @@ type ServiceConfig struct {
 	// LSPRequestTimeout is the default timeout for LSP requests.
 	// Default: 10 seconds
 	LSPRequestTimeout time.Duration
+
+	// BboltDir is the directory for bbolt graph files.
+	// When set, frozen graphs are materialized to bbolt for fast restart.
+	// If empty, bbolt persistence is disabled (BadgerDB snapshots only).
+	// GR-77a: Phase 1a bbolt persistence.
+	BboltDir string
 }
 
 // DefaultServiceConfig returns sensible defaults.
@@ -506,6 +512,9 @@ func (s *Service) Init(ctx context.Context, projectRoot string, languages, exclu
 	// CRS-18: Save graph snapshot for future incremental refresh.
 	s.saveGraphSnapshot(ctx, g)
 
+	// GR-77a: Materialize to bbolt for fast restart.
+	s.saveBboltSnapshot(ctx, g)
+
 	return &InitResponse{
 		GraphID:          graphID,
 		IsRefresh:        isRefresh,
@@ -547,6 +556,114 @@ func (s *Service) saveGraphSnapshot(ctx context.Context, g *graph.Graph) {
 	)
 }
 
+// saveBboltSnapshot materializes a frozen graph to a bbolt file for fast restart.
+//
+// Description:
+//
+//	GR-77a: Non-blocking. Logs and returns on error. Does not affect the Init response.
+//	Writes to BboltDir/{projectHash}.db using atomic write-to-temp + rename.
+//
+// Thread Safety: Safe for concurrent use (MaterializeToDisk is read-only on frozen graph).
+func (s *Service) saveBboltSnapshot(ctx context.Context, g *graph.Graph) {
+	if s.config.BboltDir == "" || g == nil {
+		return
+	}
+
+	h := sha256.Sum256([]byte(g.ProjectRoot))
+	projectHash := hex.EncodeToString(h[:])[:16]
+	path := filepath.Join(s.config.BboltDir, projectHash+".db")
+
+	if err := os.MkdirAll(s.config.BboltDir, 0o755); err != nil {
+		slog.Warn("GR-77a: Failed to create bbolt directory",
+			slog.String("path", s.config.BboltDir),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+
+	saveCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	if err := g.MaterializeToDisk(saveCtx, path); err != nil {
+		slog.Warn("GR-77a: Failed to materialize graph to bbolt",
+			slog.String("project_root", g.ProjectRoot),
+			slog.String("path", path),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+
+	slog.Info("GR-77a: Graph materialized to bbolt",
+		slog.String("project_root", g.ProjectRoot),
+		slog.String("path", path),
+		slog.Int("nodes", g.NodeCount()),
+		slog.Int("edges", g.EdgeCount()),
+	)
+}
+
+// tryLoadFromBbolt attempts to load a graph from a bbolt file.
+//
+// Description:
+//
+//	GR-77a: Checks if a bbolt file exists for the project, validates schema,
+//	and loads the graph. Does NOT check staleness — the caller
+//	(tryIncrementalRefresh) handles staleness via findChangedSourceFiles and
+//	deleted file detection, avoiding redundant O(files) stat calls.
+//
+//	Does NOT delete stale/corrupt bbolt files. The file will be overwritten
+//	by saveBboltSnapshot on the next successful init.
+//
+// Inputs:
+//   - ctx: Context for cancellation. Must not be nil.
+//   - projectRoot: Absolute path to project root.
+//
+// Outputs:
+//   - *graph.Graph: The loaded graph, or nil if not available.
+//   - error: Non-nil only on unexpected errors (not file-not-found).
+//
+// Thread Safety: Safe for concurrent use.
+func (s *Service) tryLoadFromBbolt(ctx context.Context, projectRoot string) (*graph.Graph, error) {
+	if s.config.BboltDir == "" {
+		return nil, nil
+	}
+
+	h := sha256.Sum256([]byte(projectRoot))
+	projectHash := hex.EncodeToString(h[:])[:16]
+	path := filepath.Join(s.config.BboltDir, projectHash+".db")
+
+	// Check if file exists.
+	if _, err := os.Stat(path); err != nil {
+		return nil, nil
+	}
+
+	dg, err := graph.OpenDiskGraph(path)
+	if err != nil {
+		slog.Warn("GR-77a: Failed to open bbolt file, will be overwritten on next build",
+			slog.String("path", path),
+			slog.String("error", err.Error()),
+		)
+		return nil, nil
+	}
+	defer dg.Close()
+
+	loadedGraph, err := dg.LoadAsGraph(ctx)
+	if err != nil {
+		slog.Warn("GR-77a: Failed to load graph from bbolt, will be overwritten on next build",
+			slog.String("path", path),
+			slog.String("error", err.Error()),
+		)
+		return nil, nil
+	}
+
+	slog.Info("GR-77a: Graph loaded from bbolt",
+		slog.String("project_root", projectRoot),
+		slog.Int("nodes", loadedGraph.NodeCount()),
+		slog.Int("edges", loadedGraph.EdgeCount()),
+	)
+
+	return loadedGraph, nil
+}
+
 // tryIncrementalRefresh attempts to load a prior graph snapshot and apply
 // incremental changes. Returns nil, nil if incremental refresh is not possible
 // (no snapshot, too many changes, errors).
@@ -574,28 +691,54 @@ func (s *Service) tryIncrementalRefresh(
 	projectRoot, graphID string,
 	languages, excludes []string,
 ) (*InitResponse, error) {
-	if s.snapshotMgr == nil {
+	if s.snapshotMgr == nil && s.config.BboltDir == "" {
 		return nil, nil
 	}
 
 	start := time.Now()
 
-	// Compute project hash for snapshot lookup (same as snapshot.go:hashString)
-	h := sha256.Sum256([]byte(projectRoot))
-	projectHash := hex.EncodeToString(h[:])[:16]
-
-	// Try to load the latest snapshot
-	baseGraph, snapMeta, err := s.snapshotMgr.LoadLatest(ctx, projectHash)
-	if err != nil {
-		slog.Debug("CRS-18: No prior snapshot found",
+	// GR-77a: Try bbolt first (faster: binary decode vs JSON+gzip).
+	var baseGraph *graph.Graph
+	var snapMeta *graph.SnapshotMetadata
+	if bboltGraph, err := s.tryLoadFromBbolt(ctx, projectRoot); err == nil && bboltGraph != nil {
+		baseGraph = bboltGraph
+		slog.Info("GR-77a: Using bbolt graph for incremental refresh",
 			slog.String("project_root", projectRoot),
-			slog.String("error", err.Error()),
+			slog.Int("nodes", baseGraph.NodeCount()),
+			slog.Int("edges", baseGraph.EdgeCount()),
 		)
-		return nil, nil
 	}
 
-	// Detect changed files since snapshot
-	snapshotTime := time.UnixMilli(snapMeta.CreatedAtMilli)
+	// Fall through to BadgerDB if bbolt didn't provide a graph.
+	if baseGraph == nil {
+		if s.snapshotMgr == nil {
+			return nil, nil
+		}
+
+		// Compute project hash for snapshot lookup (same as snapshot.go:hashString)
+		h := sha256.Sum256([]byte(projectRoot))
+		projectHash := hex.EncodeToString(h[:])[:16]
+
+		var err error
+		baseGraph, snapMeta, err = s.snapshotMgr.LoadLatest(ctx, projectHash)
+		if err != nil {
+			slog.Debug("CRS-18: No prior snapshot found",
+				slog.String("project_root", projectRoot),
+				slog.String("error", err.Error()),
+			)
+			return nil, nil
+		}
+	}
+
+	// Detect changed files since snapshot.
+	// GR-77a: When loaded from bbolt, snapMeta is nil — use baseGraph.BuiltAtMilli.
+	var snapshotTimeMilli int64
+	if snapMeta != nil {
+		snapshotTimeMilli = snapMeta.CreatedAtMilli
+	} else {
+		snapshotTimeMilli = baseGraph.BuiltAtMilli
+	}
+	snapshotTime := time.UnixMilli(snapshotTimeMilli)
 	changedFiles, err := findChangedSourceFiles(ctx, projectRoot, snapshotTime, languages, excludes)
 	if err != nil {
 		slog.Debug("CRS-18: Failed to detect changed files, falling back to full build",
@@ -643,8 +786,12 @@ func (s *Service) tryIncrementalRefresh(
 	}
 
 	if len(changedFiles) == 0 {
+		snapshotID := "bbolt"
+		if snapMeta != nil {
+			snapshotID = snapMeta.SnapshotID
+		}
 		slog.Info("CRS-18: No files changed since snapshot, reusing as-is",
-			slog.String("snapshot_id", snapMeta.SnapshotID),
+			slog.String("snapshot_id", snapshotID),
 			slog.Int("nodes", baseGraph.NodeCount()),
 			slog.Int("edges", baseGraph.EdgeCount()),
 		)

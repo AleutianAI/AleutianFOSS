@@ -170,8 +170,13 @@ services:
       LSP_TYPESCRIPT_ENABLED: "true"
       LSP_STARTUP_TIMEOUT_SECONDS: "30"
       LSP_REQUEST_TIMEOUT_SECONDS: "5"
+      # GR-77a: Graph persistence directories inside the container.
+      # TRACE_DATA_DIR is mounted as a named volume (trace_data) for persistence.
+      TRACE_BBOLT_DIR: /data/graphs
+      TRACE_SNAPSHOT_DIR: /data/snapshots
     volumes:
       - ${TRACE_PROJECTS_DIR:-.}:/projects:ro
+      - trace_data:/data
     networks:
       - aleutian-network
     restart: unless-stopped
@@ -266,6 +271,7 @@ volumes:
   weaviate_data: {}
   models_cache: {}
   nats_data: {}
+  trace_data: {}
 
 networks:
   aleutian-network:

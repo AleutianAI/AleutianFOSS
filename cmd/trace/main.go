@@ -84,6 +84,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/routing"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/safety"
 	traceconfig "github.com/AleutianAI/AleutianFOSS/services/trace/config"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/rag"
 	badgerstore "github.com/AleutianAI/AleutianFOSS/services/trace/storage/badger"
 	natsStorage "github.com/AleutianAI/AleutianFOSS/services/trace/storage/nats"
@@ -232,6 +233,13 @@ func main() {
 	// Create service with default config
 	cfg := trace.DefaultServiceConfig()
 
+	// GR-77a: Wire bbolt graph persistence from environment.
+	if bboltDir := os.Getenv("TRACE_BBOLT_DIR"); bboltDir != "" {
+		cfg.BboltDir = bboltDir
+		slog.Info("GR-77a: bbolt graph persistence enabled",
+			slog.String("dir", bboltDir))
+	}
+
 	// Wire allowed roots from environment for container path security.
 	// TRACE_ALLOWED_ROOTS is a comma-separated list of path prefixes that the
 	// trace server is permitted to access. Set by podman-compose.yml to restrict
@@ -280,6 +288,32 @@ func main() {
 	}
 
 	svc := trace.NewService(cfg)
+
+	// GR-65: Wire BadgerDB snapshot persistence from environment.
+	var snapshotDB *badgerstore.DB
+	if snapshotDir := os.Getenv("TRACE_SNAPSHOT_DIR"); snapshotDir != "" {
+		snapCfg := badgerstore.DefaultConfig()
+		snapCfg.Path = snapshotDir
+		snapDB, snapErr := badgerstore.OpenDB(snapCfg)
+		if snapErr != nil {
+			slog.Warn("Snapshot BadgerDB unavailable, graph snapshots disabled",
+				slog.String("path", snapshotDir),
+				slog.String("error", snapErr.Error()),
+			)
+		} else {
+			snapMgr, mgrErr := graph.NewSnapshotManager(snapDB.DB, slog.Default())
+			if mgrErr != nil {
+				slog.Warn("Failed to create snapshot manager",
+					slog.String("error", mgrErr.Error()))
+				snapDB.Close()
+			} else {
+				snapshotDB = snapDB
+				svc.SetSnapshotManager(snapMgr)
+				slog.Info("Graph snapshot persistence enabled",
+					slog.String("path", snapshotDir))
+			}
+		}
+	}
 
 	// GR-75: Store LSP availability on service for health endpoint.
 	// JavaScript uses the same typescript-language-server binary as TypeScript.
@@ -433,6 +467,11 @@ func main() {
 		if routingDB != nil {
 			if err := routingDB.Close(); err != nil {
 				slog.Warn("Failed to close routing cache BadgerDB", slog.String("error", err.Error()))
+			}
+		}
+		if snapshotDB != nil {
+			if err := snapshotDB.Close(); err != nil {
+				slog.Warn("Failed to close snapshot BadgerDB", slog.String("error", err.Error()))
 			}
 		}
 		os.Exit(0)
