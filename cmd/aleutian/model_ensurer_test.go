@@ -146,6 +146,8 @@ func TestModelPurpose_String(t *testing.T) {
 		{ModelPurposeEmbedding, "embedding"},
 		{ModelPurposeLLM, "LLM"},
 		{ModelPurposeReranking, "reranking"},
+		{ModelPurposeToolRouting, "tool routing"},
+		{ModelPurposeParamExtraction, "param extraction"},
 		{ModelPurpose(999), "unknown"},
 	}
 
@@ -176,8 +178,8 @@ func TestNewDefaultModelEnsurerWithDeps_SetsRequiredModels(t *testing.T) {
 	ensurer := NewDefaultModelEnsurerWithDeps(mockChecker, mockManager, cfg)
 
 	models := ensurer.GetRequiredModels()
-	if len(models) != 2 {
-		t.Fatalf("Expected 2 required models, got %d", len(models))
+	if len(models) != 4 {
+		t.Fatalf("Expected 4 required models, got %d", len(models))
 	}
 
 	if models[0].Name != "test-embed" {
@@ -192,6 +194,26 @@ func TestNewDefaultModelEnsurerWithDeps_SetsRequiredModels(t *testing.T) {
 	}
 	if models[1].Purpose != ModelPurposeLLM {
 		t.Errorf("Expected LLM purpose, got %v", models[1].Purpose)
+	}
+
+	if models[2].Name != DefaultToolRouterModel {
+		t.Errorf("Expected tool router model %q, got %q", DefaultToolRouterModel, models[2].Name)
+	}
+	if models[2].Purpose != ModelPurposeToolRouting {
+		t.Errorf("Expected tool routing purpose, got %v", models[2].Purpose)
+	}
+	if models[2].Required {
+		t.Error("Tool router model should not be required")
+	}
+
+	if models[3].Name != DefaultParamExtractorModel {
+		t.Errorf("Expected param extractor model %q, got %q", DefaultParamExtractorModel, models[3].Name)
+	}
+	if models[3].Purpose != ModelPurposeParamExtraction {
+		t.Errorf("Expected param extraction purpose, got %v", models[3].Purpose)
+	}
+	if models[3].Required {
+		t.Error("Param extractor model should not be required")
 	}
 }
 
@@ -234,8 +256,8 @@ func TestNewDefaultModelEnsurerWithDeps_DefaultValues(t *testing.T) {
 	ensurer := NewDefaultModelEnsurerWithDeps(mockChecker, mockManager, cfg)
 
 	models := ensurer.GetRequiredModels()
-	if len(models) != 2 {
-		t.Fatalf("Expected 2 models with defaults, got %d", len(models))
+	if len(models) != 4 {
+		t.Fatalf("Expected 4 models with defaults, got %d", len(models))
 	}
 
 	if models[0].Name != DefaultEmbeddingModel {
@@ -246,6 +268,61 @@ func TestNewDefaultModelEnsurerWithDeps_DefaultValues(t *testing.T) {
 	if models[1].Name != DefaultLLMModel {
 		t.Errorf("Expected default LLM model %q, got %q",
 			DefaultLLMModel, models[1].Name)
+	}
+
+	if models[2].Name != DefaultToolRouterModel {
+		t.Errorf("Expected default tool router model %q, got %q",
+			DefaultToolRouterModel, models[2].Name)
+	}
+
+	if models[3].Name != DefaultParamExtractorModel {
+		t.Errorf("Expected default param extractor model %q, got %q",
+			DefaultParamExtractorModel, models[3].Name)
+	}
+}
+
+// TestNewDefaultModelEnsurerWithDeps_TraceModelsOptional verifies trace models are non-fatal.
+//
+// # Description
+//
+// Tests that when tool router and param extractor models are missing,
+// CanProceed is still true and warnings are generated.
+func TestNewDefaultModelEnsurerWithDeps_TraceModelsOptional(t *testing.T) {
+	mockChecker := &MockSystemChecker{
+		networkError:       nil,
+		availableDiskSpace: 100 * GB,
+	}
+	mockManager := &MockOllamaModelManager{
+		hasModelMap: map[string]bool{
+			"test-embed":               true,
+			"test-llm":                 true,
+			DefaultToolRouterModel:     false, // Missing
+			DefaultParamExtractorModel: false, // Missing
+		},
+		pullError: errors.New("model not found"),
+	}
+
+	ensurer := NewDefaultModelEnsurerWithDeps(mockChecker, mockManager, newTestConfig())
+	ctx := context.Background()
+
+	result, err := ensurer.EnsureModels(ctx)
+
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+
+	if !result.CanProceed {
+		t.Error("Expected CanProceed=true when only optional trace models are missing")
+	}
+
+	if len(result.Warnings) < 2 {
+		t.Errorf("Expected at least 2 warnings for missing trace models, got %d: %v",
+			len(result.Warnings), result.Warnings)
+	}
+
+	if len(result.ModelsMissing) != 0 {
+		t.Errorf("Expected no models in ModelsMissing (optional models use warnings), got %v",
+			result.ModelsMissing)
 	}
 }
 
@@ -340,8 +417,10 @@ func TestEnsureModels_AllAvailable(t *testing.T) {
 	mockChecker := &MockSystemChecker{}
 	mockManager := &MockOllamaModelManager{
 		hasModelMap: map[string]bool{
-			"test-embed": true,
-			"test-llm":   true,
+			"test-embed":               true,
+			"test-llm":                 true,
+			DefaultToolRouterModel:     true,
+			DefaultParamExtractorModel: true,
 		},
 		sizeMap: map[string]int64{
 			"test-embed": 500 * 1024 * 1024,
@@ -366,8 +445,8 @@ func TestEnsureModels_AllAvailable(t *testing.T) {
 		t.Errorf("Expected no models pulled, got %d", len(result.ModelsPulled))
 	}
 
-	if len(result.ModelsChecked) != 2 {
-		t.Errorf("Expected 2 models checked, got %d", len(result.ModelsChecked))
+	if len(result.ModelsChecked) != 4 {
+		t.Errorf("Expected 4 models checked, got %d", len(result.ModelsChecked))
 	}
 
 	for _, status := range result.ModelsChecked {
@@ -387,8 +466,10 @@ func TestEnsureModels_CustomModelSkipped(t *testing.T) {
 	mockChecker := &MockSystemChecker{}
 	mockManager := &MockOllamaModelManager{
 		hasModelMap: map[string]bool{
-			"test-embed": true,
-			"test-llm":   true,
+			"test-embed":               true,
+			"test-llm":                 true,
+			DefaultToolRouterModel:     true,
+			DefaultParamExtractorModel: true,
 		},
 		customModelMap: map[string]bool{
 			"test-llm": true, // LLM is custom
@@ -430,8 +511,10 @@ func TestEnsureModels_PullsSuccess(t *testing.T) {
 	}
 	mockManager := &MockOllamaModelManager{
 		hasModelMap: map[string]bool{
-			"test-embed": true,
-			"test-llm":   false, // Needs pulling
+			"test-embed":               true,
+			"test-llm":                 false, // Needs pulling
+			DefaultToolRouterModel:     true,
+			DefaultParamExtractorModel: true,
 		},
 		sizeMap: map[string]int64{
 			"test-llm": 4 * GB,
@@ -627,7 +710,10 @@ func TestEnsureModels_DiskLimitExceeded_WarnsButProceeds(t *testing.T) {
 	}
 	mockManager := &MockOllamaModelManager{
 		hasModelMap: map[string]bool{
-			"test-embed": false, // Needs pulling
+			"test-embed":               false, // Needs pulling
+			"test-llm":                 true,
+			DefaultToolRouterModel:     true,
+			DefaultParamExtractorModel: true,
 		},
 		sizeMap: map[string]int64{
 			"test-embed": 500 * 1024 * 1024, // 500MB
@@ -853,8 +939,10 @@ func TestFullWorkflow_FirstTimeSetup(t *testing.T) {
 	}
 	mockManager := &MockOllamaModelManager{
 		hasModelMap: map[string]bool{
-			"nomic-embed-text-v2-moe": false,
-			"gpt-oss":                 false,
+			"nomic-embed-text-v2-moe":  false,
+			"gpt-oss":                  false,
+			DefaultToolRouterModel:     false,
+			DefaultParamExtractorModel: false,
 		},
 		sizeMap: map[string]int64{
 			"nomic-embed-text-v2-moe": 500 * 1024 * 1024,
@@ -871,7 +959,6 @@ func TestFullWorkflow_FirstTimeSetup(t *testing.T) {
 
 	ensurer := NewDefaultModelEnsurerWithDeps(mockChecker, mockManager, cfg)
 
-	var pulledModels []string
 	ensurer.SetProgressCallback(func(status string, completed, total int64) {
 		// Track which models are being pulled
 	})
@@ -887,9 +974,9 @@ func TestFullWorkflow_FirstTimeSetup(t *testing.T) {
 		t.Error("Expected CanProceed=true after pulls")
 	}
 
-	if len(result.ModelsPulled) != 2 {
-		t.Errorf("Expected 2 models pulled, got %d: %v",
-			len(result.ModelsPulled), pulledModels)
+	if len(result.ModelsPulled) != 4 {
+		t.Errorf("Expected 4 models pulled, got %d: %v",
+			len(result.ModelsPulled), result.ModelsPulled)
 	}
 }
 
@@ -902,8 +989,10 @@ func TestFullWorkflow_ExistingUser(t *testing.T) {
 	mockChecker := &MockSystemChecker{}
 	mockManager := &MockOllamaModelManager{
 		hasModelMap: map[string]bool{
-			"nomic-embed-text-v2-moe": true,
-			"gpt-oss":                 true,
+			"nomic-embed-text-v2-moe":  true,
+			"gpt-oss":                  true,
+			DefaultToolRouterModel:     true,
+			DefaultParamExtractorModel: true,
 		},
 		sizeMap: map[string]int64{
 			"nomic-embed-text-v2-moe": 500 * 1024 * 1024,
@@ -955,8 +1044,10 @@ func TestFullWorkflow_OfflineWithCache(t *testing.T) {
 	}
 	mockManager := &MockOllamaModelManager{
 		hasModelMap: map[string]bool{
-			"nomic-embed-text-v2-moe": true, // Cached
-			"gpt-oss":                 true, // Cached
+			"nomic-embed-text-v2-moe":  true, // Cached
+			"gpt-oss":                  true, // Cached
+			DefaultToolRouterModel:     true, // Cached
+			DefaultParamExtractorModel: true, // Cached
 		},
 	}
 
@@ -996,8 +1087,10 @@ func TestEnsureModels_EmptyModelName(t *testing.T) {
 	mockChecker := &MockSystemChecker{}
 	mockManager := &MockOllamaModelManager{
 		hasModelMap: map[string]bool{
-			DefaultEmbeddingModel: true,
-			DefaultLLMModel:       true,
+			DefaultEmbeddingModel:      true,
+			DefaultLLMModel:            true,
+			DefaultToolRouterModel:     true,
+			DefaultParamExtractorModel: true,
 		},
 	}
 
@@ -1032,6 +1125,8 @@ func TestEnsureModels_VersionedModelName(t *testing.T) {
 		hasModelMap: map[string]bool{
 			"nomic-embed-text-v2-moe:latest": true,
 			"gpt-oss:7b-q4":                  true,
+			DefaultToolRouterModel:           true,
+			DefaultParamExtractorModel:       true,
 		},
 	}
 
@@ -1066,8 +1161,10 @@ func TestModelEnsureResult_AllFieldsPopulated(t *testing.T) {
 	}
 	mockManager := &MockOllamaModelManager{
 		hasModelMap: map[string]bool{
-			"test-embed": true,
-			"test-llm":   false,
+			"test-embed":               true,
+			"test-llm":                 false,
+			DefaultToolRouterModel:     true,
+			DefaultParamExtractorModel: true,
 		},
 		customModelMap: map[string]bool{
 			"test-embed": true,
@@ -1105,8 +1202,8 @@ func TestModelEnsureResult_AllFieldsPopulated(t *testing.T) {
 	}
 
 	// Verify specific values
-	if len(result.ModelsChecked) != 2 {
-		t.Errorf("Expected 2 models checked, got %d", len(result.ModelsChecked))
+	if len(result.ModelsChecked) != 4 {
+		t.Errorf("Expected 4 models checked, got %d", len(result.ModelsChecked))
 	}
 
 	if len(result.ModelsSkipped) != 1 || result.ModelsSkipped[0] != "test-embed" {

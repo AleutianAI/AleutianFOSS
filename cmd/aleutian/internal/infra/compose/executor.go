@@ -466,6 +466,13 @@ type UpOptions struct {
 	// Default: true (always detached for this interface)
 	Detach bool
 
+	// ForceRecreate forces recreation of containers even if their
+	// configuration hasn't changed. Guarantees volume mounts reflect
+	// current environment (e.g., TRACE_PROJECTS_DIR changes).
+	// Maps to: --force-recreate flag
+	// CRS-26n: Always set when stack manager starts trace services.
+	ForceRecreate bool
+
 	// RemoveOrphans removes containers for services not defined.
 	// Default: false
 	RemoveOrphans bool
@@ -895,6 +902,9 @@ func (e *DefaultComposeExecutor) Up(ctx context.Context, opts UpOptions) (*Compo
 
 	if opts.ForceBuild {
 		args = append(args, "--build")
+	}
+	if opts.ForceRecreate {
+		args = append(args, "--force-recreate")
 	}
 	if opts.RemoveOrphans {
 		args = append(args, "--remove-orphans")

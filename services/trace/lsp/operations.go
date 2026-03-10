@@ -126,12 +126,13 @@ func pathToURI(path string) string {
 	return u.String()
 }
 
-// uriToPath converts a file:// URI to an absolute file path.
+// URIToPath converts a file:// URI to an absolute file path.
 //
 // Description:
 //
 //	Properly decodes URL-encoded characters in the URI path.
-func uriToPath(uri string) string {
+//	Exported for use by the graph package's LSP enrichment phase.
+func URIToPath(uri string) string {
 	// Try to parse as URL first for proper decoding
 	if u, err := url.Parse(uri); err == nil && u.Scheme == "file" {
 		return u.Path
@@ -268,7 +269,7 @@ func (o *Operations) requestWithRetry(
 //	    return err
 //	}
 //	for _, loc := range locs {
-//	    fmt.Printf("Definition at %s:%d\n", uriToPath(loc.URI), loc.Range.Start.Line+1)
+//	    fmt.Printf("Definition at %s:%d\n", URIToPath(loc.URI), loc.Range.Start.Line+1)
 //	}
 func (o *Operations) Definition(ctx context.Context, filePath string, line, col int) ([]Location, error) {
 	if ctx == nil {
@@ -516,7 +517,7 @@ func (o *Operations) Hover(ctx context.Context, filePath string, line, col int) 
 //	    return err
 //	}
 //	for uri, edits := range edit.Changes {
-//	    fmt.Printf("File %s: %d edits\n", uriToPath(uri), len(edits))
+//	    fmt.Printf("File %s: %d edits\n", URIToPath(uri), len(edits))
 //	}
 func (o *Operations) Rename(ctx context.Context, filePath string, line, col int, newName string) (*WorkspaceEdit, error) {
 	if ctx == nil {
@@ -831,7 +832,7 @@ func (o *Operations) IsAvailable(filePath string) bool {
 //
 //	Convenience method for converting LSP URIs to file paths.
 func (o *Operations) URIToPath(uri string) string {
-	return uriToPath(uri)
+	return URIToPath(uri)
 }
 
 // PathToURI converts a file path to a file:// URI.
@@ -894,7 +895,7 @@ func (o *Operations) SummarizeWorkspaceEdit(edit *WorkspaceEdit) WorkspaceEditSu
 	}
 
 	for uri, edits := range edit.Changes {
-		filePath := uriToPath(uri)
+		filePath := URIToPath(uri)
 		editCount := len(edits)
 		summary.Files[filePath] = editCount
 		summary.TotalEdits += editCount
@@ -902,7 +903,7 @@ func (o *Operations) SummarizeWorkspaceEdit(edit *WorkspaceEdit) WorkspaceEditSu
 
 	// Also count document changes if present
 	for _, docChange := range edit.DocumentChanges {
-		filePath := uriToPath(docChange.TextDocument.URI)
+		filePath := URIToPath(docChange.TextDocument.URI)
 		editCount := len(docChange.Edits)
 		if _, exists := summary.Files[filePath]; !exists {
 			summary.Files[filePath] = editCount

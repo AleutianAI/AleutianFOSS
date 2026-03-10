@@ -24,7 +24,7 @@ func TestFindCalleesTool_Execute(t *testing.T) {
 	ctx := context.Background()
 	g, idx := createTestGraphWithCallers(t)
 
-	tool := NewFindCalleesTool(g, idx)
+	tool := NewFindCalleesTool(g, idx, nil)
 
 	t.Run("finds callees of main", func(t *testing.T) {
 		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
@@ -66,7 +66,7 @@ func TestFindCalleesTool_NilIndexFallback(t *testing.T) {
 	ctx := context.Background()
 	g, _ := createTestGraphWithCallers(t)
 
-	tool := NewFindCalleesTool(g, nil)
+	tool := NewFindCalleesTool(g, nil, nil)
 
 	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 		"function_name": "main",
@@ -95,7 +95,7 @@ func TestFindCalleesTool_MultipleMatches(t *testing.T) {
 	ctx := context.Background()
 	g, idx := createTestGraphWithMultipleMatches(t)
 
-	tool := NewFindCalleesTool(g, idx)
+	tool := NewFindCalleesTool(g, idx, nil)
 
 	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 		"function_name": "main",
@@ -122,7 +122,7 @@ func TestFindCalleesTool_MultipleMatches(t *testing.T) {
 // BenchmarkFindCallees_WithIndex benchmarks find_callees using O(1) index lookup.
 func BenchmarkFindCallees_WithIndex(b *testing.B) {
 	g, idx := createLargeGraph(b, 10000)
-	tool := NewFindCalleesTool(g, idx)
+	tool := NewFindCalleesTool(g, idx, nil)
 	ctx := context.Background()
 
 	b.ResetTimer()
@@ -139,7 +139,7 @@ func BenchmarkFindCallees_WithIndex(b *testing.B) {
 // BenchmarkFindCallees_WithoutIndex benchmarks find_callees using O(V) graph scan.
 func BenchmarkFindCallees_WithoutIndex(b *testing.B) {
 	g, _ := createLargeGraph(b, 10000)
-	tool := NewFindCalleesTool(g, nil) // nil index forces graph fallback
+	tool := NewFindCalleesTool(g, nil, nil) // nil index forces graph fallback
 	ctx := context.Background()
 
 	b.ResetTimer()
@@ -156,7 +156,7 @@ func BenchmarkFindCallees_WithoutIndex(b *testing.B) {
 // TestFindCalleesTool_ContextCancellation tests context cancellation for find_callees.
 func TestFindCalleesTool_ContextCancellation(t *testing.T) {
 	g, idx := createTestGraphWithMultipleMatches(t)
-	tool := NewFindCalleesTool(g, idx)
+	tool := NewFindCalleesTool(g, idx, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -174,7 +174,7 @@ func TestFindCalleesTool_ContextCancellation(t *testing.T) {
 func TestFindCalleesTool_DotNotationResolution(t *testing.T) {
 	g, idx := createTestGraphForDotNotation(t)
 	ctx := context.Background()
-	tool := NewFindCalleesTool(g, idx)
+	tool := NewFindCalleesTool(g, idx, nil)
 
 	t.Run("resolves Type.Method when method exists on type", func(t *testing.T) {
 		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
@@ -226,7 +226,7 @@ func TestFindCalleesTool_DotNotationResolution(t *testing.T) {
 func TestFindCalleesTool_ExternalCallees(t *testing.T) {
 	g, idx := createTestGraphForDotNotation(t)
 	ctx := context.Background()
-	tool := NewFindCalleesTool(g, idx)
+	tool := NewFindCalleesTool(g, idx, nil)
 
 	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 		"function_name": "Open",
@@ -256,7 +256,7 @@ func TestFindCalleesTool_ExternalCallees(t *testing.T) {
 func TestFindCalleesTool_EmptyCallees(t *testing.T) {
 	g, idx := createTestGraphForDotNotation(t)
 	ctx := context.Background()
-	tool := NewFindCalleesTool(g, idx)
+	tool := NewFindCalleesTool(g, idx, nil)
 
 	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 		"function_name": "leafFunction",
@@ -287,7 +287,7 @@ func TestFindCalleesTool_EmptyCallees(t *testing.T) {
 func TestFindCalleesTool_LimitClamping(t *testing.T) {
 	g, idx := createTestGraphForDotNotation(t)
 	ctx := context.Background()
-	tool := NewFindCalleesTool(g, idx)
+	tool := NewFindCalleesTool(g, idx, nil)
 
 	t.Run("limit zero clamped to 1", func(t *testing.T) {
 		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
@@ -320,7 +320,7 @@ func TestFindCalleesTool_LimitClamping(t *testing.T) {
 func TestFindCalleesTool_ResolvedDedup(t *testing.T) {
 	g, idx := createTestGraphWithDuplicateCallees(t)
 	ctx := context.Background()
-	tool := NewFindCalleesTool(g, idx)
+	tool := NewFindCalleesTool(g, idx, nil)
 
 	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 		"function_name": "dispatch",
@@ -347,7 +347,7 @@ func TestFindCalleesTool_ResolvedDedup(t *testing.T) {
 func TestFindCalleesTool_FormatTextOutput(t *testing.T) {
 	g, idx := createTestGraphForDotNotation(t)
 	ctx := context.Background()
-	tool := NewFindCalleesTool(g, idx)
+	tool := NewFindCalleesTool(g, idx, nil)
 
 	t.Run("output contains In-Codebase and External sections", func(t *testing.T) {
 		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
@@ -389,7 +389,7 @@ func TestFindCalleesTool_TraceStepPopulated(t *testing.T) {
 	ctx := context.Background()
 	g, idx := createTestGraphWithCallers(t)
 
-	tool := NewFindCalleesTool(g, idx)
+	tool := NewFindCalleesTool(g, idx, nil)
 	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 		"function_name": "main",
 	}})
@@ -434,7 +434,7 @@ func TestFindCalleesTool_TraceStepOnError(t *testing.T) {
 	ctx := context.Background()
 	g, idx := createTestGraphWithCallers(t)
 
-	tool := NewFindCalleesTool(g, idx)
+	tool := NewFindCalleesTool(g, idx, nil)
 	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 		"function_name": "",
 	}})
@@ -464,7 +464,7 @@ func TestFindCallees_DefinitiveFooter(t *testing.T) {
 	ctx := context.Background()
 	g, idx := createTestGraphWithCallers(t)
 
-	tool := NewFindCalleesTool(g, idx)
+	tool := NewFindCalleesTool(g, idx, nil)
 	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
 		"function_name": "main",
 		"limit":         50,
@@ -509,7 +509,7 @@ func TestFindCallees_TypeAliasMessage(t *testing.T) {
 	}
 	g.Freeze()
 
-	tool := NewFindCalleesTool(g, idx)
+	tool := NewFindCalleesTool(g, idx, nil)
 	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{"function_name": "HandlerFunc"}})
 	if err != nil {
 		t.Fatalf("Execute() error: %v", err)
@@ -548,7 +548,7 @@ func TestFindCallees_ResolvedKindEmpty_WhenNotFound(t *testing.T) {
 	idx := index.NewSymbolIndex()
 	g.Freeze()
 
-	tool := NewFindCalleesTool(g, idx)
+	tool := NewFindCalleesTool(g, idx, nil)
 	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{"function_name": "NonExistentSymbol"}})
 	if err != nil {
 		t.Fatalf("Execute() error: %v", err)
@@ -704,4 +704,220 @@ func createTestGraphWithDuplicateCallees(t *testing.T) (*graph.Graph, *index.Sym
 
 	g.Freeze()
 	return g, idx
+}
+
+// TestFindCalleesTool_ProductionFileFilter verifies that when multiple symbols share
+// a name, production files are preferred over test files. CB-61a Bug 2.
+func TestFindCalleesTool_ProductionFileFilter(t *testing.T) {
+	ctx := context.Background()
+
+	g := graph.NewGraph("/test")
+	idx := index.NewSymbolIndex()
+
+	// Production symbol: readers.py:read_csv calls _refine_defaults_read
+	prodReadCSV := &ast.Symbol{
+		ID:        "readers.py:100:read_csv",
+		Name:      "read_csv",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "pandas/io/parsers/readers.py",
+		StartLine: 100,
+		EndLine:   200,
+		StartCol:  0,
+		EndCol:    50,
+		Package:   "parsers",
+		Language:  "python",
+	}
+	refineDefaults := &ast.Symbol{
+		ID:        "readers.py:300:_refine_defaults_read",
+		Name:      "_refine_defaults_read",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "pandas/io/parsers/readers.py",
+		StartLine: 300,
+		EndLine:   350,
+		StartCol:  0,
+		EndCol:    50,
+		Package:   "parsers",
+		Language:  "python",
+	}
+
+	// Test symbol: test_conftest.py:read_csv calls update_kwargs (test-only callee)
+	testReadCSV := &ast.Symbol{
+		ID:        "test_conftest.py:10:read_csv",
+		Name:      "read_csv",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "tests/test_conftest.py",
+		StartLine: 10,
+		EndLine:   20,
+		StartCol:  0,
+		EndCol:    50,
+		Package:   "tests",
+		Language:  "python",
+	}
+	updateKwargs := &ast.Symbol{
+		ID:        "test_conftest.py:50:update_kwargs",
+		Name:      "update_kwargs",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "tests/test_conftest.py",
+		StartLine: 50,
+		EndLine:   60,
+		StartCol:  0,
+		EndCol:    50,
+		Package:   "tests",
+		Language:  "python",
+	}
+
+	for _, sym := range []*ast.Symbol{prodReadCSV, refineDefaults, testReadCSV, updateKwargs} {
+		g.AddNode(sym)
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("Failed to add %s: %v", sym.Name, err)
+		}
+	}
+
+	g.AddEdge(prodReadCSV.ID, refineDefaults.ID, graph.EdgeTypeCalls, ast.Location{FilePath: prodReadCSV.FilePath, StartLine: 110})
+	g.AddEdge(testReadCSV.ID, updateKwargs.ID, graph.EdgeTypeCalls, ast.Location{FilePath: testReadCSV.FilePath, StartLine: 15})
+	g.Freeze()
+
+	// Create analytics (uses heuristic fallback: "test" in path → non-production)
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+
+	t.Run("with_analytics_filters_test_symbols", func(t *testing.T) {
+		tool := NewFindCalleesTool(g, idx, analytics)
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"function_name": "read_csv",
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output := result.Output.(FindCalleesOutput)
+
+		// Should only have production callees (_refine_defaults_read), not test callees (update_kwargs)
+		if output.ResolvedCount != 1 {
+			t.Errorf("got %d resolved callees, want 1", output.ResolvedCount)
+		}
+		if len(output.ResolvedCallees) > 0 && output.ResolvedCallees[0].Name != "_refine_defaults_read" {
+			t.Errorf("got callee %q, want _refine_defaults_read", output.ResolvedCallees[0].Name)
+		}
+	})
+
+	t.Run("without_analytics_returns_all", func(t *testing.T) {
+		tool := NewFindCalleesTool(g, idx, nil)
+		result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+			"function_name": "read_csv",
+		}})
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute() failed: %s", result.Error)
+		}
+
+		output := result.Output.(FindCalleesOutput)
+
+		// Without analytics, both production and test callees are returned
+		// (minus self-name filter which removes read_csv→read_csv)
+		if output.ResolvedCount < 2 {
+			t.Errorf("got %d resolved callees, want >= 2 (both prod and test callees)", output.ResolvedCount)
+		}
+	})
+}
+
+// TestFindCalleesTool_SelfNameFilter verifies that a function does not appear
+// in its own callee list. CB-61a Bug 2 (self-reference from cross-symbol merging).
+func TestFindCalleesTool_SelfNameFilter(t *testing.T) {
+	ctx := context.Background()
+
+	g := graph.NewGraph("/test")
+	idx := index.NewSymbolIndex()
+
+	// Two symbols named "read_csv": test one calls production one
+	prodReadCSV := &ast.Symbol{
+		ID:        "readers.py:100:read_csv",
+		Name:      "read_csv",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "pandas/io/parsers/readers.py",
+		StartLine: 100,
+		EndLine:   200,
+		StartCol:  0,
+		EndCol:    50,
+		Package:   "parsers",
+		Language:  "python",
+	}
+	testReadCSV := &ast.Symbol{
+		ID:        "conftest.py:10:read_csv",
+		Name:      "read_csv",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "conftest.py",
+		StartLine: 10,
+		EndLine:   20,
+		StartCol:  0,
+		EndCol:    50,
+		Package:   "tests",
+		Language:  "python",
+	}
+	helperFunc := &ast.Symbol{
+		ID:        "readers.py:300:_read",
+		Name:      "_read",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "pandas/io/parsers/readers.py",
+		StartLine: 300,
+		EndLine:   350,
+		StartCol:  0,
+		EndCol:    50,
+		Package:   "parsers",
+		Language:  "python",
+	}
+
+	for _, sym := range []*ast.Symbol{prodReadCSV, testReadCSV, helperFunc} {
+		g.AddNode(sym)
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("Failed to add %s: %v", sym.Name, err)
+		}
+	}
+
+	// Production read_csv calls _read
+	g.AddEdge(prodReadCSV.ID, helperFunc.ID, graph.EdgeTypeCalls, ast.Location{FilePath: prodReadCSV.FilePath, StartLine: 110})
+	// Test read_csv calls production read_csv (cross-symbol self-reference)
+	g.AddEdge(testReadCSV.ID, prodReadCSV.ID, graph.EdgeTypeCalls, ast.Location{FilePath: testReadCSV.FilePath, StartLine: 15})
+	g.Freeze()
+
+	// Without analytics — both symbols queried, self-name filter prevents read_csv from appearing
+	tool := NewFindCalleesTool(g, idx, nil)
+	result, err := tool.Execute(ctx, MapParams{Params: map[string]any{
+		"function_name": "read_csv",
+	}})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Execute() failed: %s", result.Error)
+	}
+
+	output := result.Output.(FindCalleesOutput)
+
+	// read_csv should NOT appear in its own callee list
+	for _, callee := range output.ResolvedCallees {
+		if callee.Name == "read_csv" {
+			t.Error("CB-61a: read_csv should not appear as its own callee (self-name filter)")
+		}
+	}
+
+	// _read should still appear
+	found := false
+	for _, callee := range output.ResolvedCallees {
+		if callee.Name == "_read" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("Expected _read to appear as a callee of read_csv")
+	}
 }

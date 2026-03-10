@@ -12,12 +12,16 @@ package graph
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	posixpath "path"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -29,8 +33,11 @@ import (
 
 // Default builder configuration values.
 const (
-	// DefaultMaxMemoryMB is the default memory limit for building (512MB).
-	DefaultMaxMemoryMB = 512
+	// DefaultMaxMemoryMB is the default memory limit for building (2048MB).
+	// GR-77: Raised from 512 to 2048 so edge extraction completes for
+	// projects up to ~2M LOC. Will be removed when GR-77 (bbolt disk-backed
+	// graph) eliminates the in-memory architecture.
+	DefaultMaxMemoryMB = 2048
 
 	// DefaultWorkerCount is the default number of parallel workers.
 	// Set to 0 to use runtime.NumCPU().
@@ -41,6 +48,17 @@ const (
 	// interface/struct embedding chains. 20 is generous for any realistic codebase
 	// (Hugo's Page interface is 4 levels deep, the deepest known real-world case).
 	maxEmbedResolutionDepth = 20
+
+	// maxErrorSliceLen is the maximum number of FileError or EdgeError entries
+	// kept in a BuildResult. Once reached, new errors increment the truncation
+	// counter instead of appending. 1000 errors is enough for debugging; if you
+	// have more than 1000, the first 1000 tell the story.
+	maxErrorSliceLen = 1000
+
+	// memoryCheckInterval is how often (in files processed) the builder checks
+	// runtime.ReadMemStats against MaxMemoryMB. Checking every 100 files means
+	// at most 10-100 pauses for a large project, adding <10ms total.
+	memoryCheckInterval = 100
 )
 
 // ProgressPhase indicates which phase of building is in progress.
@@ -53,6 +71,10 @@ const (
 	// ProgressPhaseExtractingEdges indicates edges are being extracted.
 	ProgressPhaseExtractingEdges
 
+	// ProgressPhaseLSPEnrichment indicates LSP enrichment is resolving placeholders.
+	// GR-74: Inserted between edge extraction and finalization.
+	ProgressPhaseLSPEnrichment
+
 	// ProgressPhaseFinalizing indicates the graph is being finalized.
 	ProgressPhaseFinalizing
 )
@@ -64,6 +86,8 @@ func (p ProgressPhase) String() string {
 		return "collecting"
 	case ProgressPhaseExtractingEdges:
 		return "extracting_edges"
+	case ProgressPhaseLSPEnrichment:
+		return "lsp_enrichment"
 	case ProgressPhaseFinalizing:
 		return "finalizing"
 	default:
@@ -107,7 +131,9 @@ type BuilderOptions struct {
 	WorkerCount int
 
 	// ProgressCallback is called periodically with build progress.
-	// May be nil.
+	// May be nil. GR-73: Must be goroutine-safe — with WorkerCount > 1,
+	// this callback may be invoked from multiple goroutines concurrently.
+	// Progress reports may arrive out-of-order.
 	ProgressCallback ProgressFunc
 
 	// MaxNodes is the maximum number of nodes (passed to Graph).
@@ -115,6 +141,11 @@ type BuilderOptions struct {
 
 	// MaxEdges is the maximum number of edges (passed to Graph).
 	MaxEdges int
+
+	// LSPEnrichment configures optional LSP-based placeholder resolution.
+	// GR-74: When non-nil with a valid Querier, an enrichment phase runs
+	// between edge extraction and finalization.
+	LSPEnrichment *LSPEnrichmentConfig
 }
 
 // DefaultBuilderOptions returns sensible defaults.
@@ -169,6 +200,23 @@ func WithBuilderMaxNodes(n int) BuilderOption {
 func WithBuilderMaxEdges(n int) BuilderOption {
 	return func(o *BuilderOptions) {
 		o.MaxEdges = n
+	}
+}
+
+// WithLSPEnrichment configures LSP-based placeholder resolution.
+//
+// Description:
+//
+//	GR-74: When set, the builder runs an LSP enrichment phase between edge
+//	extraction and finalization. This phase queries language servers for
+//	unresolved placeholder targets, converting them into real edges.
+//
+// Inputs:
+//
+//	config - LSP enrichment configuration. If nil or Querier is nil, enrichment is skipped.
+func WithLSPEnrichment(config *LSPEnrichmentConfig) BuilderOption {
+	return func(o *BuilderOptions) {
+		o.LSPEnrichment = config
 	}
 }
 
@@ -243,6 +291,177 @@ type buildState struct {
 	// call resolution: when "merge" is called in frame.py and the file imports
 	// "merge" from "pandas.core.reshape.merge", we can resolve to the right symbol.
 	importNameMap map[string]map[string]importEntry
+
+	// symbolsByLocation maps "filePath:startLine" to symbol IDs at that location.
+	// GR-74: Built during collectPhase. Used by LSP enrichment to match definition
+	// locations returned by LSP servers to existing graph nodes.
+	symbolsByLocation map[string][]string
+
+	// GR-73: When non-nil, per-file edge extraction writes to this collector
+	// instead of directly to the graph. Used during parallel edge extraction.
+	collector *edgeCollector
+}
+
+// pendingEdge represents an edge to be inserted into the graph during the merge phase.
+// GR-73: Workers produce pendingEdges instead of calling AddEdge directly.
+type pendingEdge struct {
+	FromID   string
+	ToID     string
+	Type     EdgeType
+	Location ast.Location
+}
+
+// pendingPlaceholder represents a placeholder node to be created during the merge phase.
+// GR-73: Workers compute deterministic IDs and record placeholder requests.
+type pendingPlaceholder struct {
+	ID   string
+	Pkg  string
+	Name string
+}
+
+// workerResult contains the output of a single worker's edge extraction pass.
+// GR-73: Collected locally per-worker, then merged single-threaded.
+type workerResult struct {
+	Edges        []pendingEdge
+	Placeholders []pendingPlaceholder
+	EdgeErrors   []EdgeError
+	Stats        BuildStats
+}
+
+// edgeCollector accumulates edges, placeholders, errors, and stats locally
+// during parallel edge extraction. Not safe for concurrent use — each worker
+// gets its own collector.
+type edgeCollector struct {
+	edges        []pendingEdge
+	placeholders map[string]pendingPlaceholder // keyed by deterministic ID for dedup
+	edgeErrors   []EdgeError
+	stats        BuildStats
+}
+
+// newEdgeCollector creates a new edge collector with pre-allocated buffers.
+func newEdgeCollector() *edgeCollector {
+	return &edgeCollector{
+		edges:        make([]pendingEdge, 0, 256),
+		placeholders: make(map[string]pendingPlaceholder),
+		edgeErrors:   make([]EdgeError, 0, 16),
+	}
+}
+
+// toWorkerResult converts the collector's accumulated data into a workerResult.
+// GR-73: Placeholders are sorted by ID for deterministic merge ordering.
+func (c *edgeCollector) toWorkerResult() workerResult {
+	placeholders := make([]pendingPlaceholder, 0, len(c.placeholders))
+	for _, p := range c.placeholders {
+		placeholders = append(placeholders, p)
+	}
+	// Sort placeholders by ID for deterministic creation order during merge.
+	sort.Slice(placeholders, func(i, j int) bool {
+		return placeholders[i].ID < placeholders[j].ID
+	})
+	return workerResult{
+		Edges:        c.edges,
+		Placeholders: placeholders,
+		EdgeErrors:   c.edgeErrors,
+		Stats:        c.stats,
+	}
+}
+
+// stateStats returns the stats struct to increment — either the collector's stats
+// (parallel mode) or the result's stats (sequential mode).
+func stateStats(state *buildState) *BuildStats {
+	if state.collector != nil {
+		return &state.collector.stats
+	}
+	return &state.result.Stats
+}
+
+// stateAddEdge adds an edge to the graph (sequential) or buffers it (parallel).
+// In parallel mode, errors are not possible since edges are just buffered.
+// In sequential mode, returns the error from Graph.AddEdge.
+func stateAddEdge(state *buildState, fromID, toID string, edgeType EdgeType, loc ast.Location) error {
+	if state.collector != nil {
+		state.collector.edges = append(state.collector.edges, pendingEdge{
+			FromID:   fromID,
+			ToID:     toID,
+			Type:     edgeType,
+			Location: loc,
+		})
+		return nil
+	}
+	return state.graph.AddEdge(fromID, toID, edgeType, loc)
+}
+
+// stateGetOrCreatePlaceholder returns a placeholder ID. In parallel mode,
+// records the placeholder request without creating the node. In sequential mode,
+// delegates to the builder's getOrCreatePlaceholder.
+func stateGetOrCreatePlaceholder(b *Builder, state *buildState, pkg, name string) string {
+	if state.collector != nil {
+		// Compute deterministic ID without graph access
+		var id string
+		if pkg != "" {
+			id = fmt.Sprintf("external:%s:%s", pkg, name)
+		} else {
+			id = fmt.Sprintf("external::%s", name)
+		}
+		if _, exists := state.collector.placeholders[id]; !exists {
+			state.collector.placeholders[id] = pendingPlaceholder{
+				ID:   id,
+				Pkg:  pkg,
+				Name: name,
+			}
+			state.collector.stats.PlaceholderNodes++
+		}
+		return id
+	}
+	return b.getOrCreatePlaceholder(state, pkg, name)
+}
+
+// stateAddEdgeError adds an edge error to the collector (parallel) or result (sequential).
+func stateAddEdgeError(state *buildState, ee EdgeError) {
+	if state.collector != nil {
+		state.collector.edgeErrors = append(state.collector.edgeErrors, ee)
+		return
+	}
+	appendEdgeError(state, ee)
+}
+
+// appendFileError adds a FileError to the result, enforcing maxErrorSliceLen.
+// When the cap is reached, the error is counted but not stored.
+func appendFileError(state *buildState, fe FileError) {
+	if len(state.result.FileErrors) >= maxErrorSliceLen {
+		stateStats(state).FileErrorsTruncated++
+		return
+	}
+	state.result.FileErrors = append(state.result.FileErrors, fe)
+}
+
+// appendEdgeError adds an EdgeError to the result, enforcing maxErrorSliceLen.
+// When the cap is reached, the error is counted but not stored.
+func appendEdgeError(state *buildState, ee EdgeError) {
+	if len(state.result.EdgeErrors) >= maxErrorSliceLen {
+		stateStats(state).EdgeErrorsTruncated++
+		return
+	}
+	state.result.EdgeErrors = append(state.result.EdgeErrors, ee)
+}
+
+// placeholderPkg derives the package for a placeholder node from a symbol.
+// Uses sym.Package if non-empty, otherwise falls back to filepath.Dir(sym.FilePath).
+// GR-71: Ensures placeholder IDs are disambiguated by package.
+func placeholderPkg(sym *ast.Symbol) string {
+	if sym == nil {
+		return ""
+	}
+	if sym.Package != "" {
+		return sym.Package
+	}
+	if sym.FilePath != "" {
+		dir := filepath.Dir(sym.FilePath)
+		if dir != "." && dir != "" {
+			return dir
+		}
+	}
+	return ""
 }
 
 // importEntry represents a single imported name with its source module path
@@ -278,13 +497,16 @@ type importEntry struct {
 // Outputs:
 //
 //	*BuildResult - Contains the graph, any errors, and build statistics.
-//	error - Non-nil only for fatal errors (context cancelled returns partial result).
+//	  Always non-nil, even when error is returned (partial result for debugging).
+//	error - Non-nil when context is cancelled/expired or memory limit exceeded.
+//	  Wraps the underlying error (ctx.Err() or ErrMemoryLimitExceeded).
 //
 // Build Phases:
 //
 //  1. COLLECT: Validate and add all symbols as nodes
 //  2. EXTRACT EDGES: Create edges for imports, calls, implements, etc.
-//  3. FINALIZE: Freeze graph and compute statistics
+//  3. LSP ENRICHMENT (optional): Resolve placeholder targets via LSP definition lookup (GR-74)
+//  4. FINALIZE: Freeze graph and compute statistics
 func (b *Builder) Build(ctx context.Context, results []*ast.ParseResult) (*BuildResult, error) {
 	// Start tracing span
 	ctx, span := startBuildSpan(ctx, len(results))
@@ -307,6 +529,7 @@ func (b *Builder) Build(ctx context.Context, results []*ast.ParseResult) (*Build
 		classExtends:           make(map[string]string),
 		classAdditionalParents: make(map[string][]string),
 		importNameMap:          make(map[string]map[string]importEntry),
+		symbolsByLocation:      make(map[string][]string),
 		startTime:              time.Now(),
 	}
 	state.result.Graph = state.graph
@@ -315,11 +538,13 @@ func (b *Builder) Build(ctx context.Context, results []*ast.ParseResult) (*Build
 	if err := b.collectPhase(ctx, state, results); err != nil {
 		state.result.Incomplete = true
 		duration := time.Since(state.startTime)
-		state.result.Stats.DurationMilli = duration.Milliseconds()
-		state.result.Stats.DurationMicro = duration.Microseconds()
-		setBuildSpanResult(span, state.result.Stats.NodesCreated, state.result.Stats.EdgesCreated, true)
-		recordBuildMetrics(ctx, time.Since(state.startTime), state.result.Stats.NodesCreated, state.result.Stats.EdgesCreated, false)
-		return state.result, nil
+		stateStats(state).DurationMilli = duration.Milliseconds()
+		stateStats(state).DurationMicro = duration.Microseconds()
+		setBuildSpanResult(span, stateStats(state).NodesCreated, stateStats(state).EdgesCreated, true)
+		recordBuildMetrics(ctx, duration, stateStats(state).NodesCreated, stateStats(state).EdgesCreated, false)
+		// GR-70: Return context/memory errors to callers instead of swallowing them.
+		// Partial result is still returned for debugging.
+		return state.result, fmt.Errorf("graph build interrupted: %w", err)
 	}
 
 	// R3-P2b: Build import name map from fileImports (populated during collectPhase).
@@ -329,11 +554,26 @@ func (b *Builder) Build(ctx context.Context, results []*ast.ParseResult) (*Build
 	if err := b.extractEdgesPhase(ctx, state, results); err != nil {
 		state.result.Incomplete = true
 		duration := time.Since(state.startTime)
-		state.result.Stats.DurationMilli = duration.Milliseconds()
-		state.result.Stats.DurationMicro = duration.Microseconds()
-		setBuildSpanResult(span, state.result.Stats.NodesCreated, state.result.Stats.EdgesCreated, true)
-		recordBuildMetrics(ctx, time.Since(state.startTime), state.result.Stats.NodesCreated, state.result.Stats.EdgesCreated, false)
-		return state.result, nil
+		stateStats(state).DurationMilli = duration.Milliseconds()
+		stateStats(state).DurationMicro = duration.Microseconds()
+		setBuildSpanResult(span, stateStats(state).NodesCreated, stateStats(state).EdgesCreated, true)
+		recordBuildMetrics(ctx, duration, stateStats(state).NodesCreated, stateStats(state).EdgesCreated, false)
+		// GR-70: Return context/memory errors to callers instead of swallowing them.
+		return state.result, fmt.Errorf("graph build interrupted: %w", err)
+	}
+
+	// Phase 2.5: LSP Enrichment (optional)
+	// GR-74: Query LSP servers to resolve placeholder edge targets.
+	if b.options.LSPEnrichment != nil && b.options.LSPEnrichment.Querier != nil {
+		enrichStats, enrichErr := b.lspEnrichmentPhase(ctx, state)
+		state.result.Stats.LSPEnrichment = enrichStats
+		if enrichErr != nil {
+			slog.Warn("GR-74: LSP enrichment failed",
+				slog.String("error", enrichErr.Error()),
+				slog.Int("resolved", enrichStats.PlaceholdersResolved),
+				slog.Int("failed", enrichStats.PlaceholdersFailed),
+			)
+		}
 	}
 
 	// Phase 3: Finalize
@@ -343,14 +583,14 @@ func (b *Builder) Build(ctx context.Context, results []*ast.ParseResult) (*Build
 	RecordFileMtimes(state.graph, b.options.ProjectRoot)
 
 	duration := time.Since(state.startTime)
-	state.result.Stats.DurationMilli = duration.Milliseconds()
-	state.result.Stats.DurationMicro = duration.Microseconds()
+	stateStats(state).DurationMilli = duration.Milliseconds()
+	stateStats(state).DurationMicro = duration.Microseconds()
 
 	b.reportProgress(state, ProgressPhaseFinalizing, len(results), len(results))
 
 	// Record success metrics
-	setBuildSpanResult(span, state.result.Stats.NodesCreated, state.result.Stats.EdgesCreated, false)
-	recordBuildMetrics(ctx, time.Since(state.startTime), state.result.Stats.NodesCreated, state.result.Stats.EdgesCreated, true)
+	setBuildSpanResult(span, stateStats(state).NodesCreated, stateStats(state).EdgesCreated, false)
+	recordBuildMetrics(ctx, time.Since(state.startTime), stateStats(state).NodesCreated, stateStats(state).EdgesCreated, true)
 
 	return state.result, nil
 }
@@ -371,11 +611,11 @@ func (b *Builder) collectPhase(ctx context.Context, state *buildState, results [
 			} else {
 				filePath = fmt.Sprintf("result[%d]", i)
 			}
-			state.result.FileErrors = append(state.result.FileErrors, FileError{
+			appendFileError(state, FileError{
 				FilePath: filePath,
 				Err:      err,
 			})
-			state.result.Stats.FilesFailed++
+			stateStats(state).FilesFailed++
 			continue
 		}
 
@@ -383,6 +623,7 @@ func (b *Builder) collectPhase(ctx context.Context, state *buildState, results [
 		state.fileImports[r.FilePath] = r.Imports
 
 		// Add symbols as nodes
+		maxNodesHit := false
 		for _, sym := range r.Symbols {
 			if sym == nil {
 				continue
@@ -391,7 +632,16 @@ func (b *Builder) collectPhase(ctx context.Context, state *buildState, results [
 			// Add to graph
 			_, err := state.graph.AddNode(sym)
 			if err != nil {
-				state.result.FileErrors = append(state.result.FileErrors, FileError{
+				// GR-70: Short-circuit on max nodes — stop iterating remaining symbols/files.
+				if errors.Is(err, ErrMaxNodesExceeded) {
+					appendFileError(state, FileError{
+						FilePath: r.FilePath,
+						Err:      fmt.Errorf("add node %s: %w", sym.ID, err),
+					})
+					maxNodesHit = true
+					break
+				}
+				appendFileError(state, FileError{
 					FilePath: r.FilePath,
 					Err:      fmt.Errorf("add node %s: %w", sym.ID, err),
 				})
@@ -401,7 +651,11 @@ func (b *Builder) collectPhase(ctx context.Context, state *buildState, results [
 			// Index for resolution
 			state.symbolsByID[sym.ID] = sym
 			state.symbolsByName[sym.Name] = append(state.symbolsByName[sym.Name], sym)
-			state.result.Stats.NodesCreated++
+			stateStats(state).NodesCreated++
+
+			// GR-74: Index by location for LSP enrichment lookup
+			locKey := fmt.Sprintf("%s:%d", sym.FilePath, sym.StartLine)
+			state.symbolsByLocation[locKey] = append(state.symbolsByLocation[locKey], sym.ID)
 
 			// Track class inheritance from Metadata.Extends
 			if sym.Metadata != nil && sym.Metadata.Extends != "" {
@@ -418,8 +672,25 @@ func (b *Builder) collectPhase(ctx context.Context, state *buildState, results [
 			b.addChildSymbols(state, sym.Children, sym.ID)
 		}
 
-		state.result.Stats.FilesProcessed++
+		stateStats(state).FilesProcessed++
 		b.reportProgress(state, ProgressPhaseCollecting, len(results), i+1)
+
+		// GR-70: Break file loop when node limit reached.
+		if maxNodesHit {
+			slog.Debug("collectPhase: max nodes exceeded, stopping early",
+				slog.Int("nodes_created", stateStats(state).NodesCreated),
+				slog.Int("files_processed", stateStats(state).FilesProcessed),
+			)
+			state.result.Incomplete = true
+			break
+		}
+
+		// GR-70: Check memory limit every memoryCheckInterval files.
+		if b.options.MaxMemoryMB > 0 && (i+1)%memoryCheckInterval == 0 {
+			if err := b.checkMemoryLimit(); err != nil {
+				return err
+			}
+		}
 	}
 
 	return nil
@@ -448,7 +719,11 @@ func (b *Builder) addChildSymbols(state *buildState, children []*ast.Symbol, par
 
 		state.symbolsByID[child.ID] = child
 		state.symbolsByName[child.Name] = append(state.symbolsByName[child.Name], child)
-		state.result.Stats.NodesCreated++
+		stateStats(state).NodesCreated++
+
+		// GR-74: Index by location for LSP enrichment lookup
+		locKey := fmt.Sprintf("%s:%d", child.FilePath, child.StartLine)
+		state.symbolsByLocation[locKey] = append(state.symbolsByLocation[locKey], child.ID)
 
 		// Track parent-child relationship for receiver resolution
 		if parentID != "" {
@@ -472,21 +747,35 @@ func (b *Builder) addChildSymbols(state *buildState, children []*ast.Symbol, par
 }
 
 // extractEdgesPhase creates edges for symbol relationships.
+// GR-73: Uses parallel workers when WorkerCount > 1.
 func (b *Builder) extractEdgesPhase(ctx context.Context, state *buildState, results []*ast.ParseResult) error {
-	for i, r := range results {
-		// Check context
-		if err := ctx.Err(); err != nil {
+	workerCount := b.options.WorkerCount
+	if workerCount <= 0 {
+		workerCount = runtime.NumCPU()
+	}
+
+	// Filter nil results upfront
+	validResults := make([]*ast.ParseResult, 0, len(results))
+	for _, r := range results {
+		if r != nil {
+			validResults = append(validResults, r)
+		}
+	}
+
+	// GR-73: Use sequential path for single worker or small workloads.
+	if workerCount <= 1 || len(validResults) <= 1 {
+		b.extractEdgesSequential(ctx, state, validResults)
+	} else {
+		if err := b.extractEdgesParallel(ctx, state, validResults, workerCount); err != nil {
 			return err
 		}
+	}
 
-		if r == nil {
-			continue
-		}
-
-		// Extract edges for this file (GR-41: pass ctx for call edge tracing)
-		b.extractFileEdges(ctx, state, r)
-
-		b.reportProgress(state, ProgressPhaseExtractingEdges, len(results), i+1)
+	// GR-70: Skip post-loop phases if build was short-circuited by limits.
+	// These phases all call AddEdge which will fail immediately, generating
+	// only noise errors.
+	if state.result.Incomplete {
+		return nil
 	}
 
 	// GR-40 FIX (C-3): Associate methods with types across all files
@@ -500,7 +789,7 @@ func (b *Builder) extractEdgesPhase(ctx context.Context, state *buildState, resu
 	// Supports Go interfaces and Python Protocols.
 	if err := b.computeInterfaceImplementations(ctx, state); err != nil {
 		// Non-fatal: interface detection failure shouldn't fail the build
-		state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+		stateAddEdgeError(state, EdgeError{
 			FromID:   "interface_detection",
 			ToID:     "all",
 			EdgeType: EdgeTypeImplements,
@@ -531,12 +820,203 @@ func (b *Builder) extractEdgesPhase(ctx context.Context, state *buildState, resu
 
 	// GR-41: Record call edge metrics after all edges extracted
 	recordCallEdgeMetrics(ctx,
-		state.result.Stats.CallEdgesResolved,
-		state.result.Stats.CallEdgesUnresolved,
-		state.result.Stats.CallEdgesResolved+state.result.Stats.CallEdgesUnresolved,
+		stateStats(state).CallEdgesResolved,
+		stateStats(state).CallEdgesUnresolved,
+		stateStats(state).CallEdgesResolved+stateStats(state).CallEdgesUnresolved,
 	)
 
 	return nil
+}
+
+// extractEdgesSequential processes files sequentially (WorkerCount=1 path).
+// This is the original extraction loop, preserved for correctness baseline.
+func (b *Builder) extractEdgesSequential(ctx context.Context, state *buildState, results []*ast.ParseResult) {
+	for i, r := range results {
+		if err := ctx.Err(); err != nil {
+			state.result.Incomplete = true
+			return
+		}
+
+		b.extractFileEdges(ctx, state, r)
+		b.reportProgress(state, ProgressPhaseExtractingEdges, len(results), i+1)
+
+		// GR-70: Short-circuit on max edges.
+		if state.graph.EdgeCount() >= state.graph.options.MaxEdges {
+			slog.Debug("extractEdgesSequential: max edges exceeded, stopping early",
+				slog.Int("edges_created", stateStats(state).EdgesCreated),
+				slog.Int("files_processed", i+1),
+			)
+			state.result.Incomplete = true
+			break
+		}
+
+		// GR-70: Check memory limit periodically.
+		if b.options.MaxMemoryMB > 0 && (i+1)%memoryCheckInterval == 0 {
+			if err := b.checkMemoryLimit(); err != nil {
+				state.result.Incomplete = true
+				return
+			}
+		}
+	}
+}
+
+// extractEdgesParallel processes files in parallel using worker goroutines.
+// GR-73: Each worker gets an edgeCollector; results are merged single-threaded.
+//
+// Thread Safety:
+//
+//	Workers read shared state (symbolsByID, symbolsByName, etc.) concurrently.
+//	Workers write only to their local edgeCollector — no shared mutation.
+//	The merge phase runs single-threaded after all workers complete.
+func (b *Builder) extractEdgesParallel(ctx context.Context, state *buildState, results []*ast.ParseResult, workerCount int) error {
+	if workerCount > len(results) {
+		workerCount = len(results)
+	}
+
+	// Partition files across workers using round-robin for balanced load.
+	partitions := make([][]*ast.ParseResult, workerCount)
+	for i, r := range results {
+		partitions[i%workerCount] = append(partitions[i%workerCount], r)
+	}
+
+	// Launch workers
+	workerResults := make([]workerResult, workerCount)
+	var wg sync.WaitGroup
+	var filesProcessed atomic.Int64
+	cancelCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	for w := 0; w < workerCount; w++ {
+		wg.Add(1)
+		go func(workerIdx int, partition []*ast.ParseResult) {
+			defer wg.Done()
+
+			collector := newEdgeCollector()
+
+			// Create a worker-local buildState that shares read-only maps
+			// but writes to the local collector.
+			// INVARIANT: When collector != nil, all mutations MUST go through
+			// stateAddEdge/stateGetOrCreatePlaceholder/stateAddEdgeError/stateStats.
+			// Direct writes to state.result or state.graph are data races.
+			workerState := &buildState{
+				graph:                  state.graph,
+				result:                 state.result,
+				symbolsByID:            state.symbolsByID,
+				symbolsByName:          state.symbolsByName,
+				fileImports:            state.fileImports,
+				placeholders:           state.placeholders,
+				symbolParent:           state.symbolParent,
+				classExtends:           state.classExtends,
+				classAdditionalParents: state.classAdditionalParents,
+				importNameMap:          state.importNameMap,
+				symbolsByLocation:      state.symbolsByLocation,
+				startTime:              state.startTime,
+				collector:              collector,
+			}
+
+			for fi, r := range partition {
+				if cancelCtx.Err() != nil {
+					return
+				}
+
+				b.extractFileEdges(cancelCtx, workerState, r)
+
+				processed := filesProcessed.Add(1)
+				b.reportProgress(state, ProgressPhaseExtractingEdges, len(results), int(processed))
+
+				// GR-73/GR-70: Check memory limit periodically (checkMemoryLimit is safe
+				// to call concurrently — runtime.ReadMemStats uses STW).
+				if b.options.MaxMemoryMB > 0 && (fi+1)%memoryCheckInterval == 0 {
+					if err := b.checkMemoryLimit(); err != nil {
+						cancel()
+						return
+					}
+				}
+			}
+
+			workerResults[workerIdx] = collector.toWorkerResult()
+		}(w, partitions[w])
+	}
+
+	wg.Wait()
+
+	// Check if context was cancelled during parallel extraction.
+	// GR-77: Check cancelCtx (not ctx) because memory limit cancellation
+	// calls cancel() on cancelCtx, which does not propagate to the parent ctx.
+	if cancelCtx.Err() != nil {
+		state.result.Incomplete = true
+		// If the parent context is also cancelled, return that error.
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return ErrMemoryLimitExceeded
+	}
+
+	// GR-73: Single-threaded merge phase
+	b.mergeWorkerResults(state, workerResults)
+
+	return nil
+}
+
+// mergeWorkerResults merges all worker results into the main build state.
+// Creates placeholder nodes (deduped), inserts all edges, aggregates errors and stats.
+//
+// Thread Safety: Must be called single-threaded after all workers complete.
+func (b *Builder) mergeWorkerResults(state *buildState, results []workerResult) {
+	// Phase 1: Create all placeholder nodes (deduped across workers)
+	seenPlaceholders := make(map[string]bool)
+	for _, wr := range results {
+		for _, p := range wr.Placeholders {
+			if seenPlaceholders[p.ID] {
+				continue
+			}
+			seenPlaceholders[p.ID] = true
+
+			// Only create if not already in graph (may exist from collectPhase)
+			if _, exists := state.graph.GetNode(p.ID); !exists {
+				b.getOrCreatePlaceholder(state, p.Pkg, p.Name)
+			}
+		}
+	}
+
+	// Phase 2: Insert all edges
+	for _, wr := range results {
+		for _, pe := range wr.Edges {
+			err := state.graph.AddEdge(pe.FromID, pe.ToID, pe.Type, pe.Location)
+			if err != nil && !strings.Contains(err.Error(), "already exists") {
+				appendEdgeError(state, EdgeError{
+					FromID:   pe.FromID,
+					ToID:     pe.ToID,
+					EdgeType: pe.Type,
+					Err:      err,
+				})
+			}
+		}
+	}
+
+	// Phase 3: Aggregate errors
+	for _, wr := range results {
+		for _, ee := range wr.EdgeErrors {
+			appendEdgeError(state, ee)
+		}
+	}
+
+	// Phase 4: Sum stats from all workers.
+	// NOTE: PlaceholderNodes is NOT summed from workers — it's counted during
+	// Phase 1's getOrCreatePlaceholder calls which handle cross-worker dedup.
+	for _, wr := range results {
+		state.result.Stats.EdgesCreated += wr.Stats.EdgesCreated
+		state.result.Stats.AmbiguousResolves += wr.Stats.AmbiguousResolves
+		state.result.Stats.CallEdgesResolved += wr.Stats.CallEdgesResolved
+		state.result.Stats.CallEdgesUnresolved += wr.Stats.CallEdgesUnresolved
+		state.result.Stats.ValidationBypassed += wr.Stats.ValidationBypassed
+		state.result.Stats.ValidationRejected += wr.Stats.ValidationRejected
+	}
+
+	// GR-70: Check if max edges was exceeded during merge
+	if state.graph.EdgeCount() >= state.graph.options.MaxEdges {
+		state.result.Incomplete = true
+	}
 }
 
 // extractFileEdges extracts all edge types from a single file's parse result.
@@ -646,14 +1126,14 @@ func (b *Builder) extractImportEdges(ctx context.Context, state *buildState, r *
 			}
 		}
 		// Create placeholder for imported package
-		pkgID := b.getOrCreatePlaceholder(state, imp.Path, imp.Path)
+		pkgID := stateGetOrCreatePlaceholder(b, state, imp.Path, imp.Path)
 
 		// Create edge from package symbol to imported package
-		err := state.graph.AddEdge(sourceID, pkgID, EdgeTypeImports, imp.Location)
+		err := stateAddEdge(state, sourceID, pkgID, EdgeTypeImports, imp.Location)
 		if err != nil {
 			// Check if it's a duplicate edge error (not fatal)
 			if !strings.Contains(err.Error(), "already exists") {
-				state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+				stateAddEdgeError(state, EdgeError{
 					FromID:   sourceID,
 					ToID:     pkgID,
 					EdgeType: EdgeTypeImports,
@@ -670,7 +1150,7 @@ func (b *Builder) extractImportEdges(ctx context.Context, state *buildState, r *
 			continue
 		}
 
-		state.result.Stats.EdgesCreated++
+		stateStats(state).EdgesCreated++
 		edgesCreated++
 
 		slog.Debug("GR-41c: Created import edge",
@@ -779,14 +1259,14 @@ func (b *Builder) extractReceiverEdge(state *buildState, sym *ast.Symbol) {
 
 	if len(targets) == 0 {
 		// Create placeholder
-		targetID := b.getOrCreatePlaceholder(state, sym.Package, receiverName)
+		targetID := stateGetOrCreatePlaceholder(b, state, sym.Package, receiverName)
 		targets = []string{targetID}
 	}
 
 	for _, targetID := range targets {
-		err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeReceives, sym.Location())
+		err := stateAddEdge(state, sym.ID, targetID, EdgeTypeReceives, sym.Location())
 		if err != nil {
-			state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+			stateAddEdgeError(state, EdgeError{
 				FromID:   sym.ID,
 				ToID:     targetID,
 				EdgeType: EdgeTypeReceives,
@@ -794,11 +1274,11 @@ func (b *Builder) extractReceiverEdge(state *buildState, sym *ast.Symbol) {
 			})
 			continue
 		}
-		state.result.Stats.EdgesCreated++
+		stateStats(state).EdgesCreated++
 	}
 
 	if len(targets) > 1 {
-		state.result.Stats.AmbiguousResolves++
+		stateStats(state).AmbiguousResolves++
 	}
 }
 
@@ -809,21 +1289,22 @@ func (b *Builder) extractReturnTypeEdges(state *buildState, sym *ast.Symbol) {
 	}
 
 	// Parse return type (simplified - just use the type name)
-	returnType := extractTypeName(sym.Metadata.ReturnType)
+	// GR-71: Pass language for language-aware builtin filtering.
+	returnType := extractTypeName(sym.Metadata.ReturnType, sym.Language)
 	if returnType == "" {
 		return
 	}
 
 	targets := b.resolveSymbolByName(state, returnType, sym.FilePath)
 	if len(targets) == 0 {
-		targetID := b.getOrCreatePlaceholder(state, "", returnType)
+		targetID := stateGetOrCreatePlaceholder(b, state, placeholderPkg(sym), returnType)
 		targets = []string{targetID}
 	}
 
 	for _, targetID := range targets {
-		err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeReturns, sym.Location())
+		err := stateAddEdge(state, sym.ID, targetID, EdgeTypeReturns, sym.Location())
 		if err != nil {
-			state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+			stateAddEdgeError(state, EdgeError{
 				FromID:   sym.ID,
 				ToID:     targetID,
 				EdgeType: EdgeTypeReturns,
@@ -831,11 +1312,11 @@ func (b *Builder) extractReturnTypeEdges(state *buildState, sym *ast.Symbol) {
 			})
 			continue
 		}
-		state.result.Stats.EdgesCreated++
+		stateStats(state).EdgesCreated++
 	}
 
 	if len(targets) > 1 {
-		state.result.Stats.AmbiguousResolves++
+		stateStats(state).AmbiguousResolves++
 	}
 }
 
@@ -860,19 +1341,25 @@ func (b *Builder) extractImplementsEdges(state *buildState, sym *ast.Symbol) {
 	for _, ifaceName := range sym.Metadata.Implements {
 		targets := b.resolveSymbolByName(state, ifaceName, sym.FilePath)
 		if len(targets) == 0 {
-			targetID := b.getOrCreatePlaceholder(state, "", ifaceName)
+			targetID := stateGetOrCreatePlaceholder(b, state, placeholderPkg(sym), ifaceName)
 			targets = []string{targetID}
 		}
 
 		for _, targetID := range targets {
 			// Validate edge type - target should be interface
 			if !b.validateEdgeType(state, sym.ID, targetID, EdgeTypeImplements) {
+				stateStats(state).ValidationRejected++
+				slog.Debug("GR-71: edge rejected by validateEdgeType",
+					slog.String("from", sym.ID),
+					slog.String("to", targetID),
+					slog.String("edge_type", EdgeTypeImplements.String()),
+				)
 				continue
 			}
 
-			err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeImplements, sym.Location())
+			err := stateAddEdge(state, sym.ID, targetID, EdgeTypeImplements, sym.Location())
 			if err != nil {
-				state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+				stateAddEdgeError(state, EdgeError{
 					FromID:   sym.ID,
 					ToID:     targetID,
 					EdgeType: EdgeTypeImplements,
@@ -880,11 +1367,11 @@ func (b *Builder) extractImplementsEdges(state *buildState, sym *ast.Symbol) {
 				})
 				continue
 			}
-			state.result.Stats.EdgesCreated++
+			stateStats(state).EdgesCreated++
 		}
 
 		if len(targets) > 1 {
-			state.result.Stats.AmbiguousResolves++
+			stateStats(state).AmbiguousResolves++
 		}
 	}
 }
@@ -899,14 +1386,14 @@ func (b *Builder) extractEmbedsEdges(state *buildState, sym *ast.Symbol) {
 	embeddedName := sym.Metadata.Extends
 	targets := b.resolveSymbolByName(state, embeddedName, sym.FilePath)
 	if len(targets) == 0 {
-		targetID := b.getOrCreatePlaceholder(state, "", embeddedName)
+		targetID := stateGetOrCreatePlaceholder(b, state, placeholderPkg(sym), embeddedName)
 		targets = []string{targetID}
 	}
 
 	for _, targetID := range targets {
-		err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeEmbeds, sym.Location())
+		err := stateAddEdge(state, sym.ID, targetID, EdgeTypeEmbeds, sym.Location())
 		if err != nil {
-			state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+			stateAddEdgeError(state, EdgeError{
 				FromID:   sym.ID,
 				ToID:     targetID,
 				EdgeType: EdgeTypeEmbeds,
@@ -914,11 +1401,11 @@ func (b *Builder) extractEmbedsEdges(state *buildState, sym *ast.Symbol) {
 			})
 			continue
 		}
-		state.result.Stats.EdgesCreated++
+		stateStats(state).EdgesCreated++
 	}
 
 	if len(targets) > 1 {
-		state.result.Stats.AmbiguousResolves++
+		stateStats(state).AmbiguousResolves++
 	}
 
 	// IT-03a Phase 16 G-1: Additional embeds stored in Implements for Go structs.
@@ -932,13 +1419,13 @@ func (b *Builder) extractEmbedsEdges(state *buildState, sym *ast.Symbol) {
 		for _, additionalEmbed := range sym.Metadata.Implements {
 			addlTargets := b.resolveSymbolByName(state, additionalEmbed, sym.FilePath)
 			if len(addlTargets) == 0 {
-				targetID := b.getOrCreatePlaceholder(state, "", additionalEmbed)
+				targetID := stateGetOrCreatePlaceholder(b, state, placeholderPkg(sym), additionalEmbed)
 				addlTargets = []string{targetID}
 			}
 			for _, targetID := range addlTargets {
-				err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeEmbeds, sym.Location())
+				err := stateAddEdge(state, sym.ID, targetID, EdgeTypeEmbeds, sym.Location())
 				if err != nil {
-					state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+					stateAddEdgeError(state, EdgeError{
 						FromID:   sym.ID,
 						ToID:     targetID,
 						EdgeType: EdgeTypeEmbeds,
@@ -946,7 +1433,7 @@ func (b *Builder) extractEmbedsEdges(state *buildState, sym *ast.Symbol) {
 					})
 					continue
 				}
-				state.result.Stats.EdgesCreated++
+				stateStats(state).EdgesCreated++
 			}
 		}
 	}
@@ -983,14 +1470,14 @@ func (b *Builder) extractInterfaceEmbedsEdges(state *buildState, sym *ast.Symbol
 	embeddedName := sym.Metadata.Extends
 	targets := b.resolveSymbolByName(state, embeddedName, sym.FilePath)
 	if len(targets) == 0 {
-		targetID := b.getOrCreatePlaceholder(state, "", embeddedName)
+		targetID := stateGetOrCreatePlaceholder(b, state, placeholderPkg(sym), embeddedName)
 		targets = []string{targetID}
 	}
 
 	for _, targetID := range targets {
-		err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeEmbeds, sym.Location())
+		err := stateAddEdge(state, sym.ID, targetID, EdgeTypeEmbeds, sym.Location())
 		if err != nil {
-			state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+			stateAddEdgeError(state, EdgeError{
 				FromID:   sym.ID,
 				ToID:     targetID,
 				EdgeType: EdgeTypeEmbeds,
@@ -998,7 +1485,7 @@ func (b *Builder) extractInterfaceEmbedsEdges(state *buildState, sym *ast.Symbol
 			})
 			continue
 		}
-		state.result.Stats.EdgesCreated++
+		stateStats(state).EdgesCreated++
 	}
 
 	// Additional embedded interfaces (stored in Implements for Go interfaces)
@@ -1006,13 +1493,13 @@ func (b *Builder) extractInterfaceEmbedsEdges(state *buildState, sym *ast.Symbol
 		for _, additionalEmbed := range sym.Metadata.Implements {
 			addlTargets := b.resolveSymbolByName(state, additionalEmbed, sym.FilePath)
 			if len(addlTargets) == 0 {
-				targetID := b.getOrCreatePlaceholder(state, "", additionalEmbed)
+				targetID := stateGetOrCreatePlaceholder(b, state, placeholderPkg(sym), additionalEmbed)
 				addlTargets = []string{targetID}
 			}
 			for _, targetID := range addlTargets {
-				err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeEmbeds, sym.Location())
+				err := stateAddEdge(state, sym.ID, targetID, EdgeTypeEmbeds, sym.Location())
 				if err != nil {
-					state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+					stateAddEdgeError(state, EdgeError{
 						FromID:   sym.ID,
 						ToID:     targetID,
 						EdgeType: EdgeTypeEmbeds,
@@ -1020,7 +1507,7 @@ func (b *Builder) extractInterfaceEmbedsEdges(state *buildState, sym *ast.Symbol
 					})
 					continue
 				}
-				state.result.Stats.EdgesCreated++
+				stateStats(state).EdgesCreated++
 			}
 		}
 	}
@@ -1047,7 +1534,7 @@ func (b *Builder) extractDecoratorArgEdges(state *buildState, sym *ast.Symbol) {
 			if len(targets) == 0 {
 				// Only create placeholder for reasonable identifier names
 				if len(argName) > 0 && argName[0] >= 'A' && argName[0] <= 'Z' {
-					targetID := b.getOrCreatePlaceholder(state, "", argName)
+					targetID := stateGetOrCreatePlaceholder(b, state, placeholderPkg(sym), argName)
 					targets = []string{targetID}
 				} else {
 					continue
@@ -1055,9 +1542,9 @@ func (b *Builder) extractDecoratorArgEdges(state *buildState, sym *ast.Symbol) {
 			}
 
 			for _, targetID := range targets {
-				err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeReferences, sym.Location())
+				err := stateAddEdge(state, sym.ID, targetID, EdgeTypeReferences, sym.Location())
 				if err != nil {
-					state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+					stateAddEdgeError(state, EdgeError{
 						FromID:   sym.ID,
 						ToID:     targetID,
 						EdgeType: EdgeTypeReferences,
@@ -1065,11 +1552,11 @@ func (b *Builder) extractDecoratorArgEdges(state *buildState, sym *ast.Symbol) {
 					})
 					continue
 				}
-				state.result.Stats.EdgesCreated++
+				stateStats(state).EdgesCreated++
 			}
 
 			if len(targets) > 1 {
-				state.result.Stats.AmbiguousResolves++
+				stateStats(state).AmbiguousResolves++
 			}
 		}
 	}
@@ -1094,16 +1581,16 @@ func (b *Builder) extractTypeArgEdges(state *buildState, sym *ast.Symbol) {
 			continue // Don't create placeholders for type args
 		}
 		for _, targetID := range targets {
-			err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeReferences, sym.Location())
+			err := stateAddEdge(state, sym.ID, targetID, EdgeTypeReferences, sym.Location())
 			if err != nil && !strings.Contains(err.Error(), "already exists") {
-				state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+				stateAddEdgeError(state, EdgeError{
 					FromID:   sym.ID,
 					ToID:     targetID,
 					EdgeType: EdgeTypeReferences,
 					Err:      err,
 				})
 			} else if err == nil {
-				state.result.Stats.EdgesCreated++
+				stateStats(state).EdgesCreated++
 			}
 		}
 	}
@@ -1123,16 +1610,16 @@ func (b *Builder) extractTypeNarrowingEdges(state *buildState, sym *ast.Symbol) 
 			continue
 		}
 		for _, targetID := range targets {
-			err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeReferences, sym.Location())
+			err := stateAddEdge(state, sym.ID, targetID, EdgeTypeReferences, sym.Location())
 			if err != nil && !strings.Contains(err.Error(), "already exists") {
-				state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+				stateAddEdgeError(state, EdgeError{
 					FromID:   sym.ID,
 					ToID:     targetID,
 					EdgeType: EdgeTypeReferences,
 					Err:      err,
 				})
 			} else if err == nil {
-				state.result.Stats.EdgesCreated++
+				stateStats(state).EdgesCreated++
 			}
 		}
 	}
@@ -1162,14 +1649,15 @@ func (b *Builder) extractTypeRefEdges(state *buildState, sym *ast.Symbol) {
 		return
 	}
 
-	// Deduplicate: a function referencing the same type in both params and return
-	// should produce only one edge.
+	// GR-72: Deduplicate by (name, file, line) — same type on different lines creates
+	// distinct edges with distinct locations. Same type on the same line is deduped.
 	seen := make(map[string]bool)
 	for _, typeRef := range sym.TypeReferences {
-		if seen[typeRef.Name] {
+		dedupKey := fmt.Sprintf("%s:%s:%d", typeRef.Name, typeRef.Location.FilePath, typeRef.Location.StartLine)
+		if seen[dedupKey] {
 			continue
 		}
-		seen[typeRef.Name] = true
+		seen[dedupKey] = true
 
 		targets := b.resolveSymbolByName(state, typeRef.Name, sym.FilePath)
 		if len(targets) == 0 {
@@ -1180,16 +1668,16 @@ func (b *Builder) extractTypeRefEdges(state *buildState, sym *ast.Symbol) {
 		// containing `-> Series` or `: Series`, not the function's `def` line.
 		edgeLoc := typeRef.Location
 		for _, targetID := range targets {
-			err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeReferences, edgeLoc)
+			err := stateAddEdge(state, sym.ID, targetID, EdgeTypeReferences, edgeLoc)
 			if err != nil && !strings.Contains(err.Error(), "already exists") {
-				state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+				stateAddEdgeError(state, EdgeError{
 					FromID:   sym.ID,
 					ToID:     targetID,
 					EdgeType: EdgeTypeReferences,
 					Err:      err,
 				})
 			} else if err == nil {
-				state.result.Stats.EdgesCreated++
+				stateStats(state).EdgesCreated++
 			}
 		}
 	}
@@ -1248,7 +1736,7 @@ func (b *Builder) extractCallEdges(ctx context.Context, state *buildState, sym *
 			// creating the placeholder. This gives external nodes accurate
 			// package information (e.g., "pd.read_csv" → package "pandas").
 			pkg := inferPackageFromCall(call, state.fileImports[sym.FilePath])
-			targetID = b.getOrCreatePlaceholder(state, pkg, call.Target)
+			targetID = stateGetOrCreatePlaceholder(b, state, pkg, call.Target)
 			callsUnresolved++
 		} else {
 			callsResolved++
@@ -1265,15 +1753,21 @@ func (b *Builder) extractCallEdges(ctx context.Context, state *buildState, sym *
 
 		// Validate edge type
 		if !b.validateEdgeType(state, sym.ID, targetID, EdgeTypeCalls) {
+			stateStats(state).ValidationRejected++
+			slog.Debug("GR-71: edge rejected by validateEdgeType",
+				slog.String("from", sym.ID),
+				slog.String("to", targetID),
+				slog.String("edge_type", EdgeTypeCalls.String()),
+			)
 			continue
 		}
 
 		// Create the edge
-		err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeCalls, call.Location)
+		err := stateAddEdge(state, sym.ID, targetID, EdgeTypeCalls, call.Location)
 		if err != nil {
 			// Check if it's a duplicate edge error (not fatal)
 			if !strings.Contains(err.Error(), "already exists") {
-				state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+				stateAddEdgeError(state, EdgeError{
 					FromID:   sym.ID,
 					ToID:     targetID,
 					EdgeType: EdgeTypeCalls,
@@ -1282,7 +1776,7 @@ func (b *Builder) extractCallEdges(ctx context.Context, state *buildState, sym *
 			}
 			continue
 		}
-		state.result.Stats.EdgesCreated++
+		stateStats(state).EdgesCreated++
 	}
 
 	// IT-03a C-1: Create REFERENCES edges for callback/HOF arguments
@@ -1296,24 +1790,24 @@ func (b *Builder) extractCallEdges(ctx context.Context, state *buildState, sym *
 				if targetID == sym.ID {
 					continue
 				}
-				err := state.graph.AddEdge(sym.ID, targetID, EdgeTypeReferences, call.Location)
+				err := stateAddEdge(state, sym.ID, targetID, EdgeTypeReferences, call.Location)
 				if err != nil && !strings.Contains(err.Error(), "already exists") {
-					state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+					stateAddEdgeError(state, EdgeError{
 						FromID:   sym.ID,
 						ToID:     targetID,
 						EdgeType: EdgeTypeReferences,
 						Err:      err,
 					})
 				} else if err == nil {
-					state.result.Stats.EdgesCreated++
+					stateStats(state).EdgesCreated++
 				}
 			}
 		}
 	}
 
 	// Track call edge stats for observability
-	state.result.Stats.CallEdgesResolved += callsResolved
-	state.result.Stats.CallEdgesUnresolved += callsUnresolved
+	stateStats(state).CallEdgesResolved += callsResolved
+	stateStats(state).CallEdgesUnresolved += callsUnresolved
 
 	// GR-41: Record span attributes
 	span.SetAttributes(
@@ -1346,42 +1840,51 @@ func (b *Builder) resolveCallTarget(state *buildState, call ast.CallSite, caller
 	// Strategy 1: Direct name match in same package
 	// For simple calls like "DoWork()"
 	if !strings.Contains(target, ".") && !call.IsMethod {
-		candidates := b.resolveSymbolByName(state, target, caller.FilePath)
-		// R3-P2b-Self: Filter out the caller itself to prevent self-referential
-		// false matches. When DataFrame.merge calls bare merge(), same-file priority
-		// returns DataFrame.merge first, which then gets skipped as self-referential
-		// at line 879 and resolution gives up. By filtering here, we fall through
-		// to cross-file candidates.
-		candidates = filterOutID(candidates, caller.ID)
+		// CB-61a: Implicit dunder calls (del x["k"] → __delitem__, x[i] → __getitem__)
+		// arrive with IsMethod=false from the parser. Without type inference, name-match
+		// picks the wrong class's dunder. Same philosophy as the Strategy 3 dunder guard
+		// (~line 1467): a missing edge is better than a false edge.
+		isDunderS1 := len(target) > 4 && strings.HasPrefix(target, "__") && strings.HasSuffix(target, "__")
+		if isDunderS1 && caller.Language != "go" {
+			// Fall through to placeholder creation — no resolution for implicit dunders
+		} else {
+			candidates := b.resolveSymbolByName(state, target, caller.FilePath)
+			// R3-P2b-Self: Filter out the caller itself to prevent self-referential
+			// false matches. When DataFrame.merge calls bare merge(), same-file priority
+			// returns DataFrame.merge first, which then gets skipped as self-referential
+			// at line 879 and resolution gives up. By filtering here, we fall through
+			// to cross-file candidates.
+			candidates = filterOutID(candidates, caller.ID)
 
-		// R3-P2b-Self: If same-file candidates were all self-referential, try all files.
-		if len(candidates) == 0 {
-			allCandidates := b.resolveAllSymbolsByName(state, target)
-			candidates = filterOutID(allCandidates, caller.ID)
-		}
-
-		// R3-P2b-ImportMap: Try import-aware resolution first to disambiguate
-		// among cross-file candidates.
-		if len(candidates) > 0 {
-			if resolved := b.resolveViaImportMap(state, target, caller.FilePath, candidates); resolved != "" {
-				return resolved
+			// R3-P2b-Self: If same-file candidates were all self-referential, try all files.
+			if len(candidates) == 0 {
+				allCandidates := b.resolveAllSymbolsByName(state, target)
+				candidates = filterOutID(allCandidates, caller.ID)
 			}
-			// Prefer functions/methods, not types
-			for _, id := range candidates {
-				if sym, ok := state.symbolsByID[id]; ok {
-					if sym.Kind == ast.SymbolKindFunction || sym.Kind == ast.SymbolKindMethod {
-						return id
+
+			// R3-P2b-ImportMap: Try import-aware resolution first to disambiguate
+			// among cross-file candidates.
+			if len(candidates) > 0 {
+				if resolved := b.resolveViaImportMap(state, target, caller.FilePath, candidates); resolved != "" {
+					return resolved
+				}
+				// Prefer functions/methods, not types
+				for _, id := range candidates {
+					if sym, ok := state.symbolsByID[id]; ok {
+						if sym.Kind == ast.SymbolKindFunction || sym.Kind == ast.SymbolKindMethod {
+							return id
+						}
 					}
 				}
+				// Fall back to first match
+				return candidates[0]
 			}
-			// Fall back to first match
-			return candidates[0]
-		}
 
-		// R3-P2b-ImportMap: Even with no candidates, try import map
-		// (for aliased imports where the local name doesn't match any symbol name).
-		if resolved := b.resolveViaImportMap(state, target, caller.FilePath, nil); resolved != "" {
-			return resolved
+			// R3-P2b-ImportMap: Even with no candidates, try import map
+			// (for aliased imports where the local name doesn't match any symbol name).
+			if resolved := b.resolveViaImportMap(state, target, caller.FilePath, nil); resolved != "" {
+				return resolved
+			}
 		}
 	}
 
@@ -1421,11 +1924,13 @@ func (b *Builder) resolveCallTarget(state *buildState, call ast.CallSite, caller
 			}
 		}
 
-		// CRS-26n Sub-strategy 3a2: Check if receiver is an imported package name.
+		// CRS-26n Sub-strategy 3a2: Check if receiver is an imported Go package name.
 		// Go's AST produces identical output for `slog.Info()` (package call) and
 		// `logger.Info()` (method call). If the receiver matches an import, resolve
 		// as a package-qualified call and skip the receiver-matching strategies.
-		if call.Receiver != "this" && call.Receiver != "self" && call.Receiver != "super" {
+		// Language-gated to Go: Python/JS import semantics differ (receiver is a
+		// variable name, not a package alias).
+		if caller.Language == "go" && call.Receiver != "this" && call.Receiver != "self" && call.Receiver != "super" {
 			if targetID, matched := b.resolveViaPackageImport(state, call, caller); matched {
 				return targetID
 			}
@@ -1465,14 +1970,39 @@ func (b *Builder) resolveCallTarget(state *buildState, call ast.CallSite, caller
 		// will have no edge. This is acceptable — a missing edge is better than
 		// a false edge that inflates analytics.
 		isDunder := len(target) > 4 && strings.HasPrefix(target, "__") && strings.HasSuffix(target, "__")
+		isNonGo := caller.Language != "go"
 
-		// Sub-strategy 3c: Fallback — first method/property match (original behavior)
+		// GR-67: For non-Go languages, use global candidate count to detect polymorphic
+		// methods. Fetch all candidates once for both 3c and 3d.
+		var allCandidates []string
+		if isNonGo && !isDunder {
+			allCandidates = b.resolveAllSymbolsByName(state, target)
+		}
+
+		// Sub-strategy 3c: Fallback — method/property match with false-positive guards.
 		// R3-P1d: Include Property symbols so self.some_property resolves correctly.
+		// GR-67: If multiple classes define this method across the entire project, it's
+		// ambiguous without type inference — skip. If exactly one defines it, resolve.
+		// Go preserves original first-match behavior (package system disambiguates earlier).
 		if !isDunder {
-			for _, id := range candidates {
-				if sym, ok := state.symbolsByID[id]; ok {
-					if sym.Kind == ast.SymbolKindMethod || sym.Kind == ast.SymbolKindProperty {
-						return id
+			if isNonGo {
+				var methodCandidates []string
+				for _, id := range allCandidates {
+					if sym, ok := state.symbolsByID[id]; ok {
+						if sym.Kind == ast.SymbolKindMethod || sym.Kind == ast.SymbolKindProperty {
+							methodCandidates = append(methodCandidates, id)
+						}
+					}
+				}
+				if len(methodCandidates) == 1 {
+					return methodCandidates[0]
+				}
+			} else {
+				for _, id := range candidates {
+					if sym, ok := state.symbolsByID[id]; ok {
+						if sym.Kind == ast.SymbolKindMethod || sym.Kind == ast.SymbolKindProperty {
+							return id
+						}
 					}
 				}
 			}
@@ -1482,11 +2012,26 @@ func (b *Builder) resolveCallTarget(state *buildState, call ast.CallSite, caller
 		// When a callable is stored as a Variable (e.g., handler = _MergeOperation),
 		// method-style calls like obj.handler() won't match Method/Property in 3c.
 		// Accept Variable as last resort after Method/Property have been tried.
+		// GR-67: Same global-count heuristic as 3c for non-Go languages.
 		if !isDunder {
-			for _, id := range candidates {
-				if sym, ok := state.symbolsByID[id]; ok {
-					if sym.Kind == ast.SymbolKindVariable {
-						return id
+			if isNonGo {
+				var varCandidates []string
+				for _, id := range allCandidates {
+					if sym, ok := state.symbolsByID[id]; ok {
+						if sym.Kind == ast.SymbolKindVariable {
+							varCandidates = append(varCandidates, id)
+						}
+					}
+				}
+				if len(varCandidates) == 1 {
+					return varCandidates[0]
+				}
+			} else {
+				for _, id := range candidates {
+					if sym, ok := state.symbolsByID[id]; ok {
+						if sym.Kind == ast.SymbolKindVariable {
+							return id
+						}
 					}
 				}
 			}
@@ -1876,7 +2421,7 @@ func filterOutID(ids []string, exclude string) []string {
 //
 // # Outputs
 //
-//   - None. Edges are added to state.graph; count recorded in state.result.Stats.
+//   - None. Edges are added to state.graph; count recorded in stateStats(state).
 //
 // # Thread Safety
 //
@@ -1942,7 +2487,7 @@ func (b *Builder) resolveNamedImportEdges(ctx context.Context, state *buildState
 				// Edge failures are separately recorded in EdgeErrors.
 				matched = true
 
-				err := state.graph.AddEdge(sourceID, sym.ID, EdgeTypeReferences, entry.Location)
+				err := stateAddEdge(state, sourceID, sym.ID, EdgeTypeReferences, entry.Location)
 				if err != nil {
 					if strings.Contains(err.Error(), "already exists") {
 						// Duplicate edges are benign — same symbol imported via
@@ -1950,7 +2495,7 @@ func (b *Builder) resolveNamedImportEdges(ctx context.Context, state *buildState
 						// a type annotation. Not an error.
 						continue
 					}
-					state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+					stateAddEdgeError(state, EdgeError{
 						FromID:   sourceID,
 						ToID:     sym.ID,
 						EdgeType: EdgeTypeReferences,
@@ -1959,8 +2504,8 @@ func (b *Builder) resolveNamedImportEdges(ctx context.Context, state *buildState
 					continue
 				}
 
-				state.result.Stats.EdgesCreated++
-				state.result.Stats.NamedImportEdgesResolved++
+				stateStats(state).EdgesCreated++
+				stateStats(state).NamedImportEdgesResolved++
 				resolved++
 
 				slog.Debug("GR-62: named import edge created",
@@ -2074,7 +2619,7 @@ func semanticNameFromImportPath(importPath string) string {
 //
 // Outputs:
 //
-//	None. Edges are added to state.graph; count recorded in state.result.Stats.
+//	None. Edges are added to state.graph; count recorded in stateStats(state).
 //
 // Thread Safety: Modifies state.graph and state.result. Not safe for concurrent use.
 func (b *Builder) resolveCommonJSAliasImportEdges(ctx context.Context, state *buildState, results []*ast.ParseResult) {
@@ -2153,13 +2698,13 @@ func (b *Builder) resolveCommonJSAliasImportEdges(ctx context.Context, state *bu
 					continue
 				}
 
-				err := state.graph.AddEdge(sourceID, sym.ID, EdgeTypeReferences, imp.Location)
+				err := stateAddEdge(state, sourceID, sym.ID, EdgeTypeReferences, imp.Location)
 				if err != nil {
 					if strings.Contains(err.Error(), "already exists") {
 						found = true
 						continue
 					}
-					state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+					stateAddEdgeError(state, EdgeError{
 						FromID:   sourceID,
 						ToID:     sym.ID,
 						EdgeType: EdgeTypeReferences,
@@ -2168,8 +2713,8 @@ func (b *Builder) resolveCommonJSAliasImportEdges(ctx context.Context, state *bu
 					continue
 				}
 
-				state.result.Stats.EdgesCreated++
-				state.result.Stats.CommonJSImportEdgesResolved++
+				stateStats(state).EdgesCreated++
+				stateStats(state).CommonJSImportEdgesResolved++
 				resolved++
 				found = true
 
@@ -2226,7 +2771,7 @@ func (b *Builder) resolveCommonJSAliasImportEdges(ctx context.Context, state *bu
 //
 // Outputs:
 //
-//	None. Edges added to state.graph; count in state.result.Stats.DynamicImportEdgesResolved.
+//	None. Edges added to state.graph; count in stateStats(state).DynamicImportEdgesResolved.
 //
 // Thread Safety: Modifies state.graph and state.result. Not safe for concurrent use.
 func (b *Builder) resolveDynamicImportEdges(ctx context.Context, state *buildState, results []*ast.ParseResult) {
@@ -2283,13 +2828,13 @@ func (b *Builder) resolveDynamicImportEdges(ctx context.Context, state *buildSta
 					continue
 				}
 
-				err := state.graph.AddEdge(sourceID, sym.ID, EdgeTypeReferences, imp.Location)
+				err := stateAddEdge(state, sourceID, sym.ID, EdgeTypeReferences, imp.Location)
 				if err != nil {
 					if strings.Contains(err.Error(), "already exists") {
 						found = true
 						continue
 					}
-					state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+					stateAddEdgeError(state, EdgeError{
 						FromID:   sourceID,
 						ToID:     sym.ID,
 						EdgeType: EdgeTypeReferences,
@@ -2298,8 +2843,8 @@ func (b *Builder) resolveDynamicImportEdges(ctx context.Context, state *buildSta
 					continue
 				}
 
-				state.result.Stats.EdgesCreated++
-				state.result.Stats.DynamicImportEdgesResolved++
+				stateStats(state).EdgesCreated++
+				stateStats(state).DynamicImportEdgesResolved++
 				resolved++
 				found = true
 
@@ -2361,7 +2906,7 @@ func (b *Builder) resolveDynamicImportEdges(ctx context.Context, state *buildSta
 //
 // Outputs:
 //
-//	None. Edges added to state.graph; count in state.result.Stats.DecoratorArgEdgesResolved.
+//	None. Edges added to state.graph; count in stateStats(state).DecoratorArgEdgesResolved.
 //
 // Thread Safety: Modifies state.graph and state.result. Not safe for concurrent use.
 func (b *Builder) resolveDecoratorArgEdges(ctx context.Context, state *buildState, results []*ast.ParseResult) {
@@ -2431,15 +2976,15 @@ func (b *Builder) resolveDecoratorArgEdges(ctx context.Context, state *buildStat
 						StartLine: sym.StartLine,
 						EndLine:   sym.EndLine,
 					}
-					err := state.graph.AddEdge(sourceID, resolvedID, EdgeTypeReferences, loc)
+					err := stateAddEdge(state, sourceID, resolvedID, EdgeTypeReferences, loc)
 					if err != nil {
 						if strings.Contains(err.Error(), "already exists") {
 							// Edge already exists (created by another pass). Count it in stats.
-							state.result.Stats.DecoratorArgEdgesResolved++
+							stateStats(state).DecoratorArgEdgesResolved++
 							resolved++
 							continue
 						}
-						state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+						stateAddEdgeError(state, EdgeError{
 							FromID:   sourceID,
 							ToID:     resolvedID,
 							EdgeType: EdgeTypeReferences,
@@ -2448,8 +2993,8 @@ func (b *Builder) resolveDecoratorArgEdges(ctx context.Context, state *buildStat
 						continue
 					}
 
-					state.result.Stats.EdgesCreated++
-					state.result.Stats.DecoratorArgEdgesResolved++
+					stateStats(state).EdgesCreated++
+					stateStats(state).DecoratorArgEdgesResolved++
 					resolved++
 
 					slog.Debug("IT-06e Bug 5: decorator arg edge created",
@@ -2663,7 +3208,9 @@ func matchesGoImportPath(filePath string, importPath string) bool {
 		return false
 	}
 
-	symDir := filepath.Dir(filePath)
+	// Use posixpath.Dir (POSIX) not filepath.Dir — file paths from tree-sitter
+	// always use forward slashes regardless of OS.
+	symDir := posixpath.Dir(filePath)
 
 	// Try suffixes from longest to shortest, skipping domain segment.
 	// Start from index 1 to skip "github.com" / domain segment.
@@ -2705,6 +3252,14 @@ func matchesGoImportPath(filePath string, importPath string) bool {
 //	targetID - Symbol ID if resolved to internal package symbol, "" if external/stdlib.
 //	matched - True if receiver IS an imported package name, false if not.
 //
+// Limitations:
+//
+//   - Go-only: caller must be language-gated before calling this function.
+//   - For aliased imports of versioned Go packages (import mypkg "repo/v2"),
+//     pkgName is derived from the last path segment, not the alias.
+//   - Variable shadowing of package names (var slog = mySlog) causes false
+//     matches — accepted tradeoff (uncommon pattern).
+//
 // Thread Safety: Safe for concurrent use (reads only).
 func (b *Builder) resolveViaPackageImport(
 	state *buildState,
@@ -2726,7 +3281,17 @@ func (b *Builder) resolveViaPackageImport(
 
 		// MATCH: receiver is an imported package name.
 		// Look for Target in that package's symbols.
-		pkgName := localName // For Go, package name == import's last segment
+		// For aliased imports (import mypkg "github.com/user/repo/v2"), the
+		// actual Go package name is the last segment of the path ("v2" or "repo"),
+		// not the alias. Use the path's last segment when an alias is present.
+		pkgName := localName
+		if imp.Alias != "" {
+			if idx := strings.LastIndexByte(imp.Path, '/'); idx >= 0 {
+				pkgName = imp.Path[idx+1:]
+			} else {
+				pkgName = imp.Path
+			}
+		}
 		allCandidates := b.resolveAllSymbolsByName(state, call.Target)
 
 		for _, id := range allCandidates {
@@ -2795,16 +3360,62 @@ func parseAliasedName(name string) (localName, originalName string) {
 	return localName, originalName
 }
 
-// extractTypeName extracts a simple type name from a type expression.
-// For example: "*User" -> "User", "[]string" -> "string", "map[string]User" -> "User"
-func extractTypeName(typeExpr string) string {
-	// Remove pointer prefix
+// builtinsByLanguage maps language names to their built-in/primitive type names.
+// GR-71: Package-level var (not recreated on every call). Types in this map are
+// filtered out by extractTypeName to avoid creating placeholder nodes for primitives.
+var builtinsByLanguage = map[string]map[string]bool{
+	"go": {
+		"string": true, "int": true, "int8": true, "int16": true, "int32": true, "int64": true,
+		"uint": true, "uint8": true, "uint16": true, "uint32": true, "uint64": true,
+		"float32": true, "float64": true, "complex64": true, "complex128": true,
+		"bool": true, "byte": true, "rune": true, "uintptr": true, "error": true, "any": true,
+	},
+	"python": {
+		"str": true, "int": true, "float": true, "bool": true,
+		"list": true, "List": true, "dict": true, "Dict": true,
+		"tuple": true, "Tuple": true, "set": true, "Set": true,
+		"None": true, "NoneType": true, "bytes": true, "object": true,
+		"type": true, "complex": true, "any": true,
+		"Optional": true, "Union": true, "Callable": true, "Iterator": true,
+		"Generator": true, "Sequence": true, "Mapping": true, "FrozenSet": true,
+	},
+	"typescript": {
+		"number": true, "string": true, "boolean": true, "undefined": true, "null": true,
+		"void": true, "never": true, "unknown": true, "any": true, "symbol": true,
+		"bigint": true, "object": true,
+	},
+	"javascript": {
+		"number": true, "string": true, "boolean": true, "undefined": true, "null": true,
+		"void": true, "never": true, "unknown": true, "any": true, "symbol": true,
+		"bigint": true, "object": true,
+	},
+}
+
+// extractTypeName extracts a simple type name from a type expression, filtering
+// out language-specific built-in types.
+//
+// Description:
+//
+//	Strips Go, Python, and TypeScript type syntax to extract the base type name.
+//	Examples: "*User" -> "User", "[]string" -> "" (Go builtin), "List[User]" -> "List" (Python builtin).
+//	Returns "" if the type is a built-in for the given language.
+//
+// Inputs:
+//
+//	typeExpr - The type expression string from AST metadata.
+//	language - The source language ("go", "python", "typescript", "javascript").
+//
+// Outputs:
+//
+//	The extracted type name, or "" if it is a built-in type.
+func extractTypeName(typeExpr, language string) string {
+	// Remove pointer prefix (Go)
 	typeExpr = strings.TrimPrefix(typeExpr, "*")
 
-	// Remove slice prefix
+	// Remove slice prefix (Go)
 	typeExpr = strings.TrimPrefix(typeExpr, "[]")
 
-	// Handle map - extract value type
+	// Handle map - extract value type (Go)
 	if strings.HasPrefix(typeExpr, "map[") {
 		closeBracket := strings.Index(typeExpr, "]")
 		if closeBracket > 0 && closeBracket < len(typeExpr)-1 {
@@ -2812,7 +3423,7 @@ func extractTypeName(typeExpr string) string {
 		}
 	}
 
-	// Remove channel prefix
+	// Remove channel prefix (Go)
 	typeExpr = strings.TrimPrefix(typeExpr, "chan ")
 	typeExpr = strings.TrimPrefix(typeExpr, "<-chan ")
 	typeExpr = strings.TrimPrefix(typeExpr, "chan<- ")
@@ -2820,20 +3431,22 @@ func extractTypeName(typeExpr string) string {
 	// Remove any remaining pointer
 	typeExpr = strings.TrimPrefix(typeExpr, "*")
 
-	// Extract just the type name (before any generic brackets)
+	// GR-71: Strip generic brackets for both Go/Python ([) and TypeScript (<).
 	bracketIdx := strings.Index(typeExpr, "[")
 	if bracketIdx > 0 {
 		typeExpr = typeExpr[:bracketIdx]
 	}
-
-	// Skip built-in types
-	builtins := map[string]bool{
-		"string": true, "int": true, "int8": true, "int16": true, "int32": true, "int64": true,
-		"uint": true, "uint8": true, "uint16": true, "uint32": true, "uint64": true,
-		"float32": true, "float64": true, "complex64": true, "complex128": true,
-		"bool": true, "byte": true, "rune": true, "error": true, "any": true,
+	angleBracketIdx := strings.Index(typeExpr, "<")
+	if angleBracketIdx > 0 {
+		typeExpr = typeExpr[:angleBracketIdx]
 	}
 
+	// GR-71: Check language-specific builtins, falling back to Go builtins for unknown languages.
+	builtins := builtinsByLanguage[language]
+	if builtins == nil {
+		// GR-71: Unknown language — don't apply Go-specific filtering.
+		return typeExpr
+	}
 	if builtins[typeExpr] {
 		return ""
 	}
@@ -2963,7 +3576,7 @@ func (b *Builder) getOrCreatePlaceholder(state *buildState, pkg, name string) st
 	}
 
 	state.placeholders[id] = node
-	state.result.Stats.PlaceholderNodes++
+	stateStats(state).PlaceholderNodes++
 	return id
 }
 
@@ -2972,8 +3585,17 @@ func (b *Builder) validateEdgeType(state *buildState, fromID, toID string, edgeT
 	fromSym := state.symbolsByID[fromID]
 	toSym := state.symbolsByID[toID]
 
-	// If we don't have symbol info, allow the edge
+	// GR-71: If we don't have symbol info (e.g., placeholder nodes), bypass validation.
+	// Tracked for observability — a high count may indicate placeholder ID issues.
 	if fromSym == nil || toSym == nil {
+		stateStats(state).ValidationBypassed++
+		slog.Debug("GR-71: edge validation bypassed — symbol not in symbolsByID",
+			slog.String("from_id", fromID),
+			slog.String("to_id", toID),
+			slog.String("edge_type", edgeType.String()),
+			slog.Bool("from_nil", fromSym == nil),
+			slog.Bool("to_nil", toSym == nil),
+		)
 		return true
 	}
 
@@ -2985,7 +3607,7 @@ func (b *Builder) validateEdgeType(state *buildState, fromID, toID string, edgeT
 	case EdgeTypeImplements:
 		return toSym.Kind == ast.SymbolKindInterface
 	case EdgeTypeEmbeds:
-		return fromSym.Kind == ast.SymbolKindStruct || fromSym.Kind == ast.SymbolKindClass
+		return fromSym.Kind == ast.SymbolKindStruct || fromSym.Kind == ast.SymbolKindClass || fromSym.Kind == ast.SymbolKindInterface
 	default:
 		return true
 	}
@@ -3049,6 +3671,10 @@ func (b *Builder) reportProgress(state *buildState, phase ProgressPhase, total, 
 		return
 	}
 
+	// GR-73: During parallel extraction, worker stats are buffered in local
+	// collectors and not yet merged into state.result.Stats. NodesCreated
+	// reflects only collectPhase nodes; EdgesCreated is 0 until merge.
+	// This is expected — callers should use FilesProcessed for progress tracking.
 	b.options.ProgressCallback(BuildProgress{
 		Phase:          phase,
 		FilesTotal:     total,
@@ -3056,6 +3682,29 @@ func (b *Builder) reportProgress(state *buildState, phase ProgressPhase, total, 
 		NodesCreated:   state.result.Stats.NodesCreated,
 		EdgesCreated:   state.result.Stats.EdgesCreated,
 	})
+}
+
+// checkMemoryLimit reads runtime memory stats and returns ErrMemoryLimitExceeded
+// if the current heap allocation exceeds MaxMemoryMB.
+//
+// Description:
+//
+//	Causes a brief STW pause (~100us). Called every memoryCheckInterval files
+//	during collectPhase and extractEdgesPhase.
+//
+// Thread Safety: Safe to call from the build goroutine.
+func (b *Builder) checkMemoryLimit() error {
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+	limitBytes := uint64(b.options.MaxMemoryMB) * 1024 * 1024
+	if memStats.HeapAlloc > limitBytes {
+		slog.Warn("memory limit exceeded",
+			slog.Uint64("heap_alloc_bytes", memStats.HeapAlloc),
+			slog.Int("limit_mb", b.options.MaxMemoryMB),
+		)
+		return ErrMemoryLimitExceeded
+	}
+	return nil
 }
 
 // === GR-40 FIX (C-3): Cross-File Method Association ===
@@ -3209,37 +3858,55 @@ func extractReceiverTypeFromSignature(sig string) string {
 	}
 
 	receiver := sig[6 : 6+parenEnd]
-	// receiver is like "h *Handler" or "s Server"
+	// receiver is like "h *Handler" or "s Server" or "c *Cache[K, V]"
 
-	parts := strings.Fields(receiver)
+	// GR-72: Use SplitN with limit 2 — the variable name is the first token,
+	// everything after is the type (which may contain spaces in generics).
+	parts := strings.SplitN(strings.TrimSpace(receiver), " ", 2)
 	if len(parts) < 2 {
 		return ""
 	}
 
-	typePart := parts[len(parts)-1]
+	typePart := strings.TrimSpace(parts[1])
 	// Remove * prefix if pointer receiver
-	return strings.TrimPrefix(typePart, "*")
+	typePart = strings.TrimPrefix(typePart, "*")
+	// GR-72: Strip generic type parameters (e.g., Handler[T] → Handler, Cache[K, V] → Cache)
+	if bracketIdx := strings.Index(typePart, "["); bracketIdx > 0 {
+		typePart = typePart[:bracketIdx]
+	}
+	return typePart
 }
 
 // extractParamsFromSignature extracts the parameter list from a method signature.
+// GR-72: Handles both methods `func (r Type) Name(params)` and standalone `func Name(params)`.
 func extractParamsFromSignature(sig string) string {
 	if sig == "" {
 		return ""
 	}
 
-	// Find the method name and params: "func (r Type) Name(params) returns"
-	// First, skip past the receiver
-	start := strings.Index(sig, ") ")
-	if start == -1 {
+	var paramStart int
+	if strings.HasPrefix(sig, "func (") {
+		// Method: skip past receiver "func (r Type) "
+		recvEnd := strings.Index(sig[6:], ")")
+		if recvEnd == -1 {
+			return ""
+		}
+		// Find the params '(' after the receiver
+		idx := strings.Index(sig[6+recvEnd:], "(")
+		if idx == -1 {
+			return ""
+		}
+		paramStart = idx + 6 + recvEnd
+	} else if strings.HasPrefix(sig, "func ") {
+		// Standalone function: "func Name(params) returns"
+		idx := strings.Index(sig[5:], "(")
+		if idx == -1 {
+			return ""
+		}
+		paramStart = idx + 5
+	} else {
 		return ""
 	}
-
-	// Find the opening paren of params
-	paramStart := strings.Index(sig[start:], "(")
-	if paramStart == -1 {
-		return ""
-	}
-	paramStart += start
 
 	// Find the matching closing paren
 	depth := 0
@@ -3268,19 +3935,66 @@ func extractParamsFromSignature(sig string) string {
 }
 
 // extractReturnsFromSignature extracts the return types from a method signature.
+// GR-72: Handles multi-return types like `(string, error)` where the signature ends with `)`.
 func extractReturnsFromSignature(sig string) string {
 	if sig == "" {
 		return ""
 	}
 
-	// Find the last ) which ends the params
-	lastParen := strings.LastIndex(sig, ")")
-	if lastParen == -1 || lastParen >= len(sig)-1 {
+	// Find the params opening paren by looking for the pattern "Name(" after the receiver.
+	// For methods: "func (r *Type) Name(params) returns"
+	// For standalone: "func Name(params) returns"
+	// We need to find the params' closing paren using depth-matching, then take what's after.
+	var paramOpenIdx int
+	if strings.HasPrefix(sig, "func (") {
+		// Method: skip past receiver "func (r Type) "
+		recvEnd := strings.Index(sig[6:], ")")
+		if recvEnd == -1 {
+			return ""
+		}
+		// Find the params '(' after the receiver
+		paramOpenIdx = strings.Index(sig[6+recvEnd:], "(")
+		if paramOpenIdx == -1 {
+			return ""
+		}
+		paramOpenIdx += 6 + recvEnd
+	} else if strings.HasPrefix(sig, "func ") {
+		// Standalone function: "func Name(params) returns"
+		paramOpenIdx = strings.Index(sig[5:], "(")
+		if paramOpenIdx == -1 {
+			return ""
+		}
+		paramOpenIdx += 5
+	} else {
 		return ""
 	}
 
-	// Everything after is the return type(s)
-	returns := strings.TrimSpace(sig[lastParen+1:])
+	// Depth-match to find the params closing paren
+	depth := 0
+	paramCloseIdx := -1
+	for i := paramOpenIdx; i < len(sig); i++ {
+		switch sig[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				paramCloseIdx = i
+			}
+		}
+		if paramCloseIdx != -1 {
+			break
+		}
+	}
+	if paramCloseIdx == -1 {
+		return ""
+	}
+
+	// Everything after the params closing paren is the return type(s)
+	returns := strings.TrimSpace(sig[paramCloseIdx+1:])
+	if returns == "" {
+		return ""
+	}
 
 	// Remove outer parens from multi-return: "(int, error)" -> "int, error"
 	if strings.HasPrefix(returns, "(") && strings.HasSuffix(returns, ")") {
@@ -3584,9 +4298,9 @@ func (b *Builder) computeInterfaceImplementations(ctx context.Context, state *bu
 				// Check if type's method set is a superset of interface's method set
 				if isMethodSuperset(typeMethods, ifaceMethods) {
 					// Create EdgeTypeImplements from type to interface
-					err := state.graph.AddEdge(typeID, ifaceID, EdgeTypeImplements, typeSym.Location())
+					err := stateAddEdge(state, typeID, ifaceID, EdgeTypeImplements, typeSym.Location())
 					if err != nil {
-						state.result.EdgeErrors = append(state.result.EdgeErrors, EdgeError{
+						stateAddEdgeError(state, EdgeError{
 							FromID:   typeID,
 							ToID:     ifaceID,
 							EdgeType: EdgeTypeImplements,
@@ -3596,7 +4310,7 @@ func (b *Builder) computeInterfaceImplementations(ctx context.Context, state *bu
 					}
 					edgesCreated++
 					langEdges++
-					state.result.Stats.EdgesCreated++
+					stateStats(state).EdgesCreated++
 				}
 			}
 		}
@@ -3606,7 +4320,7 @@ func (b *Builder) computeInterfaceImplementations(ctx context.Context, state *bu
 	}
 
 	// Track stats for observability
-	state.result.Stats.GoInterfaceEdges = edgesCreated
+	stateStats(state).GoInterfaceEdges = edgesCreated
 
 	// Record metrics with language dimension (GR-40a C-2 fix)
 	for lang, edges := range edgesByLang {

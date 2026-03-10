@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -99,7 +100,23 @@ func computeGraphContentHash(graphID string, cached *CachedGraph) string {
 		nodeCount = cached.Graph.NodeCount()
 		edgeCount = cached.Graph.EdgeCount()
 	}
-	composite := fmt.Sprintf("%s:n%d:e%d", graphID, nodeCount, edgeCount)
+
+	// CRS-26n: Include a hash of sorted file paths from the index to prevent
+	// collisions when two different projects have the same node+edge count.
+	// graphID = sha256("/projects") is always the same across project switches
+	// (container mount point is constant), so file identity is needed.
+	fileHash := ""
+	if cached.Index != nil {
+		h := sha256.New()
+		files := cached.Index.GetUniqueFilePaths()
+		sort.Strings(files)
+		for _, f := range files {
+			h.Write([]byte(f))
+		}
+		fileHash = fmt.Sprintf(":%x", h.Sum(nil)[:8])
+	}
+
+	composite := fmt.Sprintf("%s:n%d:e%d%s", graphID, nodeCount, edgeCount, fileHash)
 	hash := sha256.Sum256([]byte(composite))
 	return fmt.Sprintf("%x", hash)
 }

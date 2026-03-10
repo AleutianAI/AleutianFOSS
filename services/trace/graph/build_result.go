@@ -123,6 +123,90 @@ type BuildStats struct {
 
 	// DurationMicro is the total build time in microseconds (for sub-millisecond precision).
 	DurationMicro int64
+
+	// FileErrorsTruncated is the number of file errors dropped after the cap was reached.
+	// See maxErrorSliceLen.
+	FileErrorsTruncated int
+
+	// EdgeErrorsTruncated is the number of edge errors dropped after the cap was reached.
+	// See maxErrorSliceLen.
+	EdgeErrorsTruncated int
+
+	// ValidationBypassed is the number of edge validation checks that were bypassed
+	// because one or both symbols were not in the symbolsByID map (e.g., placeholder nodes).
+	// GR-71: Tracked for observability — a high count may indicate placeholder ID issues.
+	ValidationBypassed int
+
+	// ValidationRejected is the number of edges rejected by validateEdgeType because
+	// the edge type was invalid for the source/target node kinds.
+	// GR-71: Tracked for observability — helps diagnose false-positive edge creation.
+	ValidationRejected int
+
+	// LSPEnrichment contains statistics from the LSP enrichment phase (GR-74).
+	// Zero-valued if LSP enrichment was not configured or not run.
+	LSPEnrichment EnrichmentStats
+}
+
+// EnrichmentStats contains statistics about the LSP enrichment phase.
+//
+// Description:
+//
+//	GR-74: Tracks how many placeholder nodes were queried against LSP servers,
+//	how many were successfully resolved to real symbol nodes, and related metrics.
+//
+// Thread Safety:
+//
+//	Immutable after the enrichment phase completes.
+type EnrichmentStats struct {
+	// PlaceholdersQueried is the number of placeholder nodes sent to LSP for resolution.
+	PlaceholdersQueried int
+
+	// PlaceholdersResolved is the number of placeholders successfully resolved to real nodes.
+	PlaceholdersResolved int
+
+	// PlaceholdersFailed is the number of placeholders where LSP returned an error.
+	PlaceholdersFailed int
+
+	// PlaceholdersSkipped is the number of placeholders skipped (wrong language, no location, etc.).
+	PlaceholdersSkipped int
+
+	// FilesQueried is the number of unique source files opened in the LSP server.
+	FilesQueried int
+
+	// OrphanedRemoved is the number of placeholder nodes removed because all their edges were resolved.
+	OrphanedRemoved int
+
+	// LSPErrors is the total number of LSP operation errors (open, definition, etc.).
+	LSPErrors int
+
+	// DurationMicro is the total enrichment phase time in microseconds.
+	DurationMicro int64
+}
+
+// Merge adds the counters from another EnrichmentStats into this one.
+// DurationMicro and FilesQueried reflect the latest run only (not cumulative).
+//
+// Description:
+//
+//	GR-76: Used to merge incremental enrichment results into the cumulative
+//	stats stored on CachedGraph. Additive for resolution counters so the CRS
+//	sees the total enrichment state of the graph, not just the latest delta.
+//
+// Inputs:
+//
+//	delta - The incremental enrichment stats to merge in.
+//
+// Thread Safety: NOT safe for concurrent use.
+func (e *EnrichmentStats) Merge(delta EnrichmentStats) {
+	e.PlaceholdersQueried += delta.PlaceholdersQueried
+	e.PlaceholdersResolved += delta.PlaceholdersResolved
+	e.PlaceholdersFailed += delta.PlaceholdersFailed
+	e.PlaceholdersSkipped += delta.PlaceholdersSkipped
+	e.OrphanedRemoved += delta.OrphanedRemoved
+	e.LSPErrors += delta.LSPErrors
+	// DurationMicro and FilesQueried reflect latest run, not cumulative
+	e.DurationMicro = delta.DurationMicro
+	e.FilesQueried = delta.FilesQueried
 }
 
 // BuildResult contains the result of a graph build operation.
@@ -152,14 +236,15 @@ type BuildResult struct {
 	Incomplete bool
 }
 
-// HasErrors returns true if any file or edge errors occurred.
+// HasErrors returns true if any file or edge errors occurred, including truncated.
 func (r *BuildResult) HasErrors() bool {
-	return len(r.FileErrors) > 0 || len(r.EdgeErrors) > 0
+	return len(r.FileErrors) > 0 || len(r.EdgeErrors) > 0 ||
+		r.Stats.FileErrorsTruncated > 0 || r.Stats.EdgeErrorsTruncated > 0
 }
 
-// TotalErrors returns the total number of errors (file + edge).
+// TotalErrors returns the total number of errors (file + edge), including truncated.
 func (r *BuildResult) TotalErrors() int {
-	return len(r.FileErrors) + len(r.EdgeErrors)
+	return len(r.FileErrors) + len(r.EdgeErrors) + r.Stats.FileErrorsTruncated + r.Stats.EdgeErrorsTruncated
 }
 
 // Success returns true if the build completed without errors and is complete.

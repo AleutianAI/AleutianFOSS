@@ -38,7 +38,7 @@ func TestToolDefinitions(t *testing.T) {
 		},
 		{
 			name:     "find_callees",
-			tool:     NewFindCalleesTool(g, idx),
+			tool:     NewFindCalleesTool(g, idx, nil),
 			wantName: "find_callees",
 			wantCat:  CategoryExploration,
 		},

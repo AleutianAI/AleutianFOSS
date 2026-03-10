@@ -270,6 +270,11 @@ func (p *ExecutePhase) retryDesperationWithStrongerPrompt(
 	// This avoids duplicate router calls and the associated semantic correction warnings.
 	request := llm.BuildRequest(deps.Context, nil, p.maxTokens) // nil tools - desperation mode
 
+	// CB-62: Apply per-session main model override.
+	if deps.Session != nil && deps.Session.Config.MainModel != "" {
+		request.ModelOverride = deps.Session.Config.MainModel
+	}
+
 	// TR-9 Fix: Modify request instead of rebuilding from scratch
 	// Add explicit anti-tool-call instruction to system prompt
 	desperationPrompt := `

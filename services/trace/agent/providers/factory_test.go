@@ -325,7 +325,7 @@ func TestMergeSessionOverrides_EmptyKeepsBase(t *testing.T) {
 		ParamExtractor: ProviderConfig{Provider: ProviderOllama, Model: "param-model"},
 	}
 
-	merged := MergeSessionOverrides(base, "", "")
+	merged := MergeSessionOverrides(base, "", "", "")
 
 	if merged.Router.Model != "router-model" {
 		t.Errorf("Router.Model = %q, want %q", merged.Router.Model, "router-model")
@@ -345,7 +345,7 @@ func TestMergeSessionOverrides_OverridesApplied(t *testing.T) {
 		ParamExtractor: ProviderConfig{Provider: ProviderOllama, Model: "param-model"},
 	}
 
-	merged := MergeSessionOverrides(base, "new-router", "new-param")
+	merged := MergeSessionOverrides(base, "", "new-router", "new-param")
 
 	if merged.Router.Model != "new-router" {
 		t.Errorf("Router.Model = %q, want %q", merged.Router.Model, "new-router")
@@ -355,16 +355,16 @@ func TestMergeSessionOverrides_OverridesApplied(t *testing.T) {
 	}
 }
 
-func TestMergeSessionOverrides_MainNeverOverridden(t *testing.T) {
+func TestMergeSessionOverrides_MainNotOverriddenWhenEmpty(t *testing.T) {
 	base := &RoleConfig{
 		Main:           ProviderConfig{Provider: ProviderAnthropic, Model: "claude-sonnet", APIKey: "sk-test"},
 		Router:         ProviderConfig{Provider: ProviderOllama, Model: "router-model"},
 		ParamExtractor: ProviderConfig{Provider: ProviderOllama, Model: "param-model"},
 	}
 
-	merged := MergeSessionOverrides(base, "new-router", "new-param")
+	merged := MergeSessionOverrides(base, "", "new-router", "new-param")
 
-	// Main must be identical to base
+	// Main must be identical to base when mainModel is empty
 	if merged.Main.Provider != base.Main.Provider {
 		t.Errorf("Main.Provider = %q, want %q", merged.Main.Provider, base.Main.Provider)
 	}
@@ -377,7 +377,7 @@ func TestMergeSessionOverrides_MainNeverOverridden(t *testing.T) {
 }
 
 func TestMergeSessionOverrides_NilBase(t *testing.T) {
-	result := MergeSessionOverrides(nil, "router", "param")
+	result := MergeSessionOverrides(nil, "main", "router", "param")
 	if result != nil {
 		t.Error("expected nil for nil base")
 	}
@@ -389,13 +389,77 @@ func TestMergeSessionOverrides_DoesNotMutateBase(t *testing.T) {
 		ParamExtractor: ProviderConfig{Model: "original"},
 	}
 
-	_ = MergeSessionOverrides(base, "override", "override")
+	_ = MergeSessionOverrides(base, "", "override", "override")
 
 	if base.Router.Model != "original" {
 		t.Errorf("base.Router.Model was mutated to %q", base.Router.Model)
 	}
 	if base.ParamExtractor.Model != "original" {
 		t.Errorf("base.ParamExtractor.Model was mutated to %q", base.ParamExtractor.Model)
+	}
+}
+
+// =============================================================================
+// CB-62: Main Model Override Tests
+// =============================================================================
+
+func TestMergeSessionOverrides_MainModelOverride(t *testing.T) {
+	base := &RoleConfig{
+		Main:           ProviderConfig{Provider: ProviderOllama, Model: "gpt-oss:20b", BaseURL: "http://localhost:11434"},
+		Router:         ProviderConfig{Provider: ProviderOllama, Model: "granite4:micro-h"},
+		ParamExtractor: ProviderConfig{Provider: ProviderOllama, Model: "ministral-3:3b"},
+	}
+
+	merged := MergeSessionOverrides(base, "qwen3:14b", "", "")
+
+	if merged.Main.Model != "qwen3:14b" {
+		t.Errorf("Main.Model = %q, want %q", merged.Main.Model, "qwen3:14b")
+	}
+	// Provider and BaseURL should be preserved from base
+	if merged.Main.Provider != ProviderOllama {
+		t.Errorf("Main.Provider = %q, want %q", merged.Main.Provider, ProviderOllama)
+	}
+	if merged.Main.BaseURL != "http://localhost:11434" {
+		t.Errorf("Main.BaseURL = %q, want %q", merged.Main.BaseURL, "http://localhost:11434")
+	}
+	// Router and param should be unchanged
+	if merged.Router.Model != "granite4:micro-h" {
+		t.Errorf("Router.Model = %q, want %q", merged.Router.Model, "granite4:micro-h")
+	}
+	if merged.ParamExtractor.Model != "ministral-3:3b" {
+		t.Errorf("ParamExtractor.Model = %q, want %q", merged.ParamExtractor.Model, "ministral-3:3b")
+	}
+}
+
+func TestMergeSessionOverrides_AllThreeOverridden(t *testing.T) {
+	base := &RoleConfig{
+		Main:           ProviderConfig{Provider: ProviderOllama, Model: "gpt-oss:20b"},
+		Router:         ProviderConfig{Provider: ProviderOllama, Model: "granite4:micro-h"},
+		ParamExtractor: ProviderConfig{Provider: ProviderOllama, Model: "ministral-3:3b"},
+	}
+
+	merged := MergeSessionOverrides(base, "llama3:70b", "granite4:3b-h", "phi3:mini")
+
+	if merged.Main.Model != "llama3:70b" {
+		t.Errorf("Main.Model = %q, want %q", merged.Main.Model, "llama3:70b")
+	}
+	if merged.Router.Model != "granite4:3b-h" {
+		t.Errorf("Router.Model = %q, want %q", merged.Router.Model, "granite4:3b-h")
+	}
+	if merged.ParamExtractor.Model != "phi3:mini" {
+		t.Errorf("ParamExtractor.Model = %q, want %q", merged.ParamExtractor.Model, "phi3:mini")
+	}
+}
+
+func TestMergeSessionOverrides_MainOverrideDoesNotMutateBase(t *testing.T) {
+	base := &RoleConfig{
+		Main: ProviderConfig{Model: "original-main"},
+	}
+
+	_ = MergeSessionOverrides(base, "overridden-main", "", "")
+
+	if base.Main.Model != "original-main" {
+		t.Errorf("base.Main.Model was mutated to %q", base.Main.Model)
 	}
 }
 

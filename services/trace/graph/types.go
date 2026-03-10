@@ -325,11 +325,52 @@ func (g *Graph) IsFrozen() bool {
 //	Index validation adds O(V + E) overhead on freeze. For graphs with
 //	millions of nodes, consider using FreezeWithoutValidation().
 func (g *Graph) Freeze() {
+	// GR-73: Sort edges for deterministic ordering regardless of worker count.
+	// Sort key: (FromID, ToID, Type, Location.FilePath, Location.StartLine).
+	sortEdges(g.edges)
+
+	// Sort per-node Outgoing/Incoming slices for deterministic iteration.
+	for _, node := range g.nodes {
+		sortEdges(node.Outgoing)
+		sortEdges(node.Incoming)
+	}
+
+	// Sort per-type edge slices.
+	for i := range g.edgesByType {
+		sortEdges(g.edgesByType[i])
+	}
+
+	// Sort per-file edge slices.
+	for file := range g.edgesByFile {
+		sortEdges(g.edgesByFile[file])
+	}
+
 	// GR-06/07/08: Validate secondary indexes before freezing
 	g.validateIndexes()
 
 	g.state = GraphStateReadOnly
 	g.BuiltAtMilli = time.Now().UnixMilli()
+}
+
+// sortEdges sorts a slice of edges by (FromID, ToID, Type, FilePath, StartLine)
+// for deterministic ordering. GR-73.
+func sortEdges(edges []*Edge) {
+	sort.SliceStable(edges, func(i, j int) bool {
+		a, b := edges[i], edges[j]
+		if a.FromID != b.FromID {
+			return a.FromID < b.FromID
+		}
+		if a.ToID != b.ToID {
+			return a.ToID < b.ToID
+		}
+		if a.Type != b.Type {
+			return a.Type < b.Type
+		}
+		if a.Location.FilePath != b.Location.FilePath {
+			return a.Location.FilePath < b.Location.FilePath
+		}
+		return a.Location.StartLine < b.Location.StartLine
+	})
 }
 
 // validateIndexes verifies secondary index integrity.
@@ -564,6 +605,193 @@ func (g *Graph) AddEdge(fromID, toID string, edgeType EdgeType, loc ast.Location
 	}
 
 	return nil
+}
+
+// ReplaceEdgeTarget re-points an existing edge from its current target to a new target node.
+//
+// Description:
+//
+//	GR-74: Used by LSP enrichment to replace placeholder edge targets with
+//	real symbol nodes after LSP definition lookup resolves the placeholder.
+//	Removes the edge from the old target's Incoming slice, updates edge.ToID,
+//	and appends to the new target's Incoming slice.
+//
+// Inputs:
+//
+//	edge - The edge to retarget. Must not be nil.
+//	newToID - ID of the new target node. Must exist in the graph.
+//
+// Outputs:
+//
+//	error - Non-nil if graph is frozen, edge is nil, or newToID not found.
+//
+// Errors:
+//
+//	ErrGraphFrozen - Graph has been frozen
+//	ErrNodeNotFound - newToID does not exist in the graph
+//
+// Thread Safety:
+//
+//	NOT safe for concurrent use. Must be called during build phase only.
+func (g *Graph) ReplaceEdgeTarget(edge *Edge, newToID string) error {
+	if g.state == GraphStateReadOnly {
+		return ErrGraphFrozen
+	}
+	if edge == nil {
+		return fmt.Errorf("%w: edge must not be nil", ErrInvalidNode)
+	}
+
+	newTarget, ok := g.nodes[newToID]
+	if !ok {
+		return fmt.Errorf("%w: target %s", ErrNodeNotFound, newToID)
+	}
+
+	// Remove edge from old target's Incoming slice
+	oldTarget, ok := g.nodes[edge.ToID]
+	if ok {
+		incoming := oldTarget.Incoming
+		for i, e := range incoming {
+			if e == edge {
+				oldTarget.Incoming = append(incoming[:i], incoming[i+1:]...)
+				break
+			}
+		}
+	}
+
+	// Update edge target
+	edge.ToID = newToID
+
+	// Add to new target's Incoming slice
+	newTarget.Incoming = append(newTarget.Incoming, edge)
+
+	return nil
+}
+
+// RemoveNode removes a node and all its edges from the graph.
+//
+// Description:
+//
+//	GR-74: Used by LSP enrichment to clean up orphaned placeholder nodes
+//	after all their edges have been resolved to real targets. Removes the node
+//	from all indexes (nodes, nodesByName, nodesByKind) and removes all edges
+//	connected to the node from the graph's edges slice and secondary indexes.
+//
+// Inputs:
+//
+//	id - The ID of the node to remove. Must exist in the graph.
+//
+// Outputs:
+//
+//	error - Non-nil if graph is frozen or node not found.
+//
+// Errors:
+//
+//	ErrGraphFrozen - Graph has been frozen
+//	ErrNodeNotFound - Node does not exist
+//
+// Thread Safety:
+//
+//	NOT safe for concurrent use. Must be called during build phase only.
+func (g *Graph) RemoveNode(id string) error {
+	if g.state == GraphStateReadOnly {
+		return ErrGraphFrozen
+	}
+
+	node, ok := g.nodes[id]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrNodeNotFound, id)
+	}
+
+	// Collect all edges to remove (both incoming and outgoing)
+	edgesToRemove := make(map[*Edge]struct{})
+	for _, e := range node.Outgoing {
+		edgesToRemove[e] = struct{}{}
+	}
+	for _, e := range node.Incoming {
+		edgesToRemove[e] = struct{}{}
+	}
+
+	// Remove edges from counterpart nodes
+	for _, e := range node.Outgoing {
+		if target, exists := g.nodes[e.ToID]; exists && target != node {
+			target.Incoming = removeEdgeFromSlice(target.Incoming, e)
+		}
+	}
+	for _, e := range node.Incoming {
+		if source, exists := g.nodes[e.FromID]; exists && source != node {
+			source.Outgoing = removeEdgeFromSlice(source.Outgoing, e)
+		}
+	}
+
+	// Remove edges from g.edges
+	filtered := make([]*Edge, 0, len(g.edges)-len(edgesToRemove))
+	for _, e := range g.edges {
+		if _, remove := edgesToRemove[e]; !remove {
+			filtered = append(filtered, e)
+		}
+	}
+	g.edges = filtered
+
+	// Remove edges from edgesByType index
+	for e := range edgesToRemove {
+		if e.Type >= 0 && e.Type < NumEdgeTypes {
+			g.edgesByType[e.Type] = removeEdgeFromSlice(g.edgesByType[e.Type], e)
+		}
+	}
+
+	// Remove edges from edgesByFile index
+	for e := range edgesToRemove {
+		if e.Location.FilePath != "" {
+			if fileEdges, ok := g.edgesByFile[e.Location.FilePath]; ok {
+				g.edgesByFile[e.Location.FilePath] = removeEdgeFromSlice(fileEdges, e)
+				if len(g.edgesByFile[e.Location.FilePath]) == 0 {
+					delete(g.edgesByFile, e.Location.FilePath)
+				}
+			}
+		}
+	}
+
+	// Remove from nodesByName index
+	if node.Symbol != nil && node.Symbol.Name != "" {
+		name := node.Symbol.Name
+		nodes := g.nodesByName[name]
+		for i, n := range nodes {
+			if n.ID == id {
+				g.nodesByName[name] = append(nodes[:i], nodes[i+1:]...)
+				break
+			}
+		}
+		if len(g.nodesByName[name]) == 0 {
+			delete(g.nodesByName, name)
+		}
+	}
+
+	// Remove from nodesByKind index
+	if node.Symbol != nil {
+		kind := node.Symbol.Kind
+		nodes := g.nodesByKind[kind]
+		for i, n := range nodes {
+			if n.ID == id {
+				g.nodesByKind[kind] = append(nodes[:i], nodes[i+1:]...)
+				break
+			}
+		}
+	}
+
+	// Remove from primary map
+	delete(g.nodes, id)
+
+	return nil
+}
+
+// removeEdgeFromSlice removes an edge pointer from a slice by identity.
+func removeEdgeFromSlice(edges []*Edge, target *Edge) []*Edge {
+	for i, e := range edges {
+		if e == target {
+			return append(edges[:i], edges[i+1:]...)
+		}
+	}
+	return edges
 }
 
 // Nodes returns an iterator function over all nodes in the graph.

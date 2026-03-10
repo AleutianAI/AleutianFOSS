@@ -12,6 +12,7 @@ package graph
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -455,9 +456,13 @@ func TestBuilder_Build_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
+	// GR-70: Build() now returns error on context cancellation.
 	result, err := builder.Build(ctx, parseResults)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected error when context cancelled")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled in error chain, got: %v", err)
 	}
 
 	// Should be marked incomplete
@@ -491,9 +496,13 @@ func TestBuilder_Build_ContextTimeout(t *testing.T) {
 	// Wait for timeout
 	time.Sleep(1 * time.Millisecond)
 
+	// GR-70: Build() now returns error on context timeout.
 	result, err := builder.Build(ctx, parseResults)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected error when context timed out")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("expected context.DeadlineExceeded in error chain, got: %v", err)
 	}
 
 	// Should be marked incomplete
@@ -777,12 +786,96 @@ func TestExtractTypeName(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.input, func(t *testing.T) {
-			result := extractTypeName(tc.input)
+			result := extractTypeName(tc.input, "go")
 			if result != tc.expected {
-				t.Errorf("extractTypeName(%q) = %q, expected %q", tc.input, result, tc.expected)
+				t.Errorf("extractTypeName(%q, \"go\") = %q, expected %q", tc.input, result, tc.expected)
 			}
 		})
 	}
+}
+
+func TestExtractTypeName_Python(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"str", ""},              // Python builtin
+		{"float", ""},            // Python builtin
+		{"int", ""},              // Python builtin
+		{"None", ""},             // Python builtin
+		{"bytes", ""},            // Python builtin
+		{"List[User]", ""},       // List is Python builtin, stripped at [
+		{"Dict[str, int]", ""},   // Dict is Python builtin
+		{"Optional[Config]", ""}, // Optional is a Python typing builtin
+		{"User", "User"},         // Not a builtin
+		{"DataFrame", "DataFrame"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			result := extractTypeName(tc.input, "python")
+			if result != tc.expected {
+				t.Errorf("extractTypeName(%q, \"python\") = %q, expected %q", tc.input, result, tc.expected)
+			}
+		})
+	}
+}
+
+func TestExtractTypeName_TypeScript(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"number", ""},               // TS builtin
+		{"boolean", ""},              // TS builtin
+		{"void", ""},                 // TS builtin
+		{"string", ""},               // TS builtin
+		{"undefined", ""},            // TS builtin
+		{"Promise<User>", "Promise"}, // Promise not builtin, stripped at <
+		{"Array<string>", "Array"},   // Array not builtin
+		{"User", "User"},
+		{"Observable<Event>", "Observable"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			result := extractTypeName(tc.input, "typescript")
+			if result != tc.expected {
+				t.Errorf("extractTypeName(%q, \"typescript\") = %q, expected %q", tc.input, result, tc.expected)
+			}
+		})
+	}
+}
+
+func TestExtractTypeName_CrossLanguage(t *testing.T) {
+	// "int" is a builtin in all supported languages.
+	for _, lang := range []string{"go", "python", "typescript", "javascript"} {
+		t.Run("int_"+lang, func(t *testing.T) {
+			result := extractTypeName("int", lang)
+			if lang == "typescript" || lang == "javascript" {
+				// TS/JS don't have "int" as builtin
+				if result != "int" {
+					t.Errorf("expected \"int\" for %s, got %q", lang, result)
+				}
+			} else {
+				if result != "" {
+					t.Errorf("expected \"\" for %s, got %q", lang, result)
+				}
+			}
+		})
+	}
+
+	// "float32" is only a Go builtin.
+	t.Run("float32_go", func(t *testing.T) {
+		if extractTypeName("float32", "go") != "" {
+			t.Error("float32 should be builtin for Go")
+		}
+	})
+	t.Run("float32_python", func(t *testing.T) {
+		if extractTypeName("float32", "python") == "" {
+			t.Error("float32 should NOT be builtin for Python")
+		}
+	})
 }
 
 func TestExtractDir(t *testing.T) {
@@ -6773,5 +6866,1092 @@ func TestInferPackageFromCall_GoReceiver(t *testing.T) {
 				t.Errorf("inferPackageFromCall(%+v) = %q, want %q", tt.call, got, tt.wantPkg)
 			}
 		})
+	}
+}
+
+// TestResolveCallTarget_Strategy3c_FalsePositiveGuards tests that Strategy 3c/3d
+// false-positive guards work correctly for Python, JavaScript, TypeScript, and Go.
+// GR-67: Non-Go languages use global candidate counting — if multiple classes define
+// a method, it's polymorphic and unresolvable without type inference.
+func TestResolveCallTarget_Strategy3c_FalsePositiveGuards(t *testing.T) {
+	// Helper to create a minimal buildState with given symbols.
+	makeBuildState := func(symbols []*ast.Symbol) *buildState {
+		byID := make(map[string]*ast.Symbol)
+		byName := make(map[string][]*ast.Symbol)
+		for _, sym := range symbols {
+			byID[sym.ID] = sym
+			byName[sym.Name] = append(byName[sym.Name], sym)
+		}
+		return &buildState{
+			graph:                  NewGraph(""),
+			symbolsByID:            byID,
+			symbolsByName:          byName,
+			fileImports:            make(map[string][]ast.Import),
+			placeholders:           make(map[string]*Node),
+			symbolParent:           make(map[string]string),
+			classExtends:           make(map[string]string),
+			classAdditionalParents: make(map[string][]string),
+			importNameMap:          make(map[string]map[string]importEntry),
+			startTime:              time.Now(),
+			result: &BuildResult{
+				FileErrors: make([]FileError, 0),
+				EdgeErrors: make([]EdgeError, 0),
+			},
+		}
+	}
+
+	makeSymbol := func(id, name string, kind ast.SymbolKind, lang, filePath string) *ast.Symbol {
+		return &ast.Symbol{
+			ID:        id,
+			Name:      name,
+			Kind:      kind,
+			Language:  lang,
+			FilePath:  filePath,
+			StartLine: 1,
+			EndLine:   10,
+			StartCol:  0,
+			EndCol:    50,
+		}
+	}
+
+	builder := NewBuilder()
+
+	t.Run("polymorphic_skips_python", func(t *testing.T) {
+		// Python caller, target="update", two Method candidates globally → returns ""
+		sym1 := makeSymbol("pkg/ops.py:10:Term.update", "update", ast.SymbolKindMethod, "python", "pkg/ops.py")
+		sym2 := makeSymbol("pkg/conftest.py:20:update_kwargs", "update", ast.SymbolKindMethod, "python", "pkg/conftest.py")
+		caller := makeSymbol("pkg/io.py:1:read_csv", "read_csv", ast.SymbolKindFunction, "python", "pkg/io.py")
+		state := makeBuildState([]*ast.Symbol{sym1, sym2, caller})
+
+		call := ast.CallSite{Target: "update", IsMethod: true, Receiver: "kwds"}
+		got := builder.resolveCallTarget(state, call, caller)
+		if got != "" {
+			t.Errorf("expected empty (polymorphic), got %q", got)
+		}
+	})
+
+	t.Run("polymorphic_skips_javascript", func(t *testing.T) {
+		// JavaScript caller, target="push", two Method candidates globally → returns ""
+		sym1 := makeSymbol("src/queue.js:10:Queue.push", "push", ast.SymbolKindMethod, "javascript", "src/queue.js")
+		sym2 := makeSymbol("src/stack.js:20:Stack.push", "push", ast.SymbolKindMethod, "javascript", "src/stack.js")
+		caller := makeSymbol("src/app.js:1:init", "init", ast.SymbolKindFunction, "javascript", "src/app.js")
+		state := makeBuildState([]*ast.Symbol{sym1, sym2, caller})
+
+		call := ast.CallSite{Target: "push", IsMethod: true, Receiver: "items"}
+		got := builder.resolveCallTarget(state, call, caller)
+		if got != "" {
+			t.Errorf("expected empty (polymorphic), got %q", got)
+		}
+	})
+
+	t.Run("polymorphic_skips_typescript", func(t *testing.T) {
+		// TypeScript caller, target="filter", two Method candidates globally → returns ""
+		sym1 := makeSymbol("src/utils.ts:10:Collection.filter", "filter", ast.SymbolKindMethod, "typescript", "src/utils.ts")
+		sym2 := makeSymbol("src/query.ts:20:QuerySet.filter", "filter", ast.SymbolKindMethod, "typescript", "src/query.ts")
+		caller := makeSymbol("src/main.ts:1:run", "run", ast.SymbolKindFunction, "typescript", "src/main.ts")
+		state := makeBuildState([]*ast.Symbol{sym1, sym2, caller})
+
+		call := ast.CallSite{Target: "filter", IsMethod: true, Receiver: "results"}
+		got := builder.resolveCallTarget(state, call, caller)
+		if got != "" {
+			t.Errorf("expected empty (polymorphic), got %q", got)
+		}
+	})
+
+	t.Run("unique_candidate_resolves", func(t *testing.T) {
+		// Python caller, target="handleRequest", one Method candidate globally → returns it
+		sym1 := makeSymbol("pkg/server.py:10:Server.handleRequest", "handleRequest", ast.SymbolKindMethod, "python", "pkg/server.py")
+		caller := makeSymbol("pkg/app.py:1:run", "run", ast.SymbolKindFunction, "python", "pkg/app.py")
+		state := makeBuildState([]*ast.Symbol{sym1, caller})
+
+		call := ast.CallSite{Target: "handleRequest", IsMethod: true, Receiver: "obj"}
+		got := builder.resolveCallTarget(state, call, caller)
+		if got != sym1.ID {
+			t.Errorf("expected %q (unique candidate), got %q", sym1.ID, got)
+		}
+	})
+
+	t.Run("unique_builtin_named_resolves", func(t *testing.T) {
+		// Python caller, target="get", but only ONE Method candidate globally → resolves.
+		// Even though "get" is a common builtin name, if only one project class defines it,
+		// global count says it's unambiguous. Trade-off: might be dict.get(), but without
+		// type inference we can't know — and the data says there's only one match.
+		sym1 := makeSymbol("pkg/cache.py:10:Cache.get", "get", ast.SymbolKindMethod, "python", "pkg/cache.py")
+		caller := makeSymbol("pkg/app.py:1:fetch", "fetch", ast.SymbolKindFunction, "python", "pkg/app.py")
+		state := makeBuildState([]*ast.Symbol{sym1, caller})
+
+		call := ast.CallSite{Target: "get", IsMethod: true, Receiver: "obj"}
+		got := builder.resolveCallTarget(state, call, caller)
+		if got != sym1.ID {
+			t.Errorf("expected %q (unique even if builtin-named), got %q", sym1.ID, got)
+		}
+	})
+
+	t.Run("ambiguous_multiple_skips", func(t *testing.T) {
+		// Python caller, target="process", three Method candidates globally → returns ""
+		sym1 := makeSymbol("pkg/a.py:10:A.process", "process", ast.SymbolKindMethod, "python", "pkg/a.py")
+		sym2 := makeSymbol("pkg/b.py:20:B.process", "process", ast.SymbolKindMethod, "python", "pkg/b.py")
+		sym3 := makeSymbol("pkg/c.py:30:C.process", "process", ast.SymbolKindMethod, "python", "pkg/c.py")
+		caller := makeSymbol("pkg/main.py:1:main", "main", ast.SymbolKindFunction, "python", "pkg/main.py")
+		state := makeBuildState([]*ast.Symbol{sym1, sym2, sym3, caller})
+
+		call := ast.CallSite{Target: "process", IsMethod: true, Receiver: "obj"}
+		got := builder.resolveCallTarget(state, call, caller)
+		if got != "" {
+			t.Errorf("expected empty (ambiguous), got %q", got)
+		}
+	})
+
+	t.Run("go_preserves_first_match", func(t *testing.T) {
+		// Go caller, target="update", two Method candidates → returns first
+		sym1 := makeSymbol("pkg/ops.go:10:Term.update", "update", ast.SymbolKindMethod, "go", "pkg/ops.go")
+		sym2 := makeSymbol("pkg/conf.go:20:Config.update", "update", ast.SymbolKindMethod, "go", "pkg/conf.go")
+		caller := makeSymbol("pkg/main.go:1:main", "main", ast.SymbolKindFunction, "go", "pkg/main.go")
+		state := makeBuildState([]*ast.Symbol{sym1, sym2, caller})
+
+		call := ast.CallSite{Target: "update", IsMethod: true, Receiver: "x"}
+		got := builder.resolveCallTarget(state, call, caller)
+		// Go should still resolve — first match from file-prioritized candidates.
+		// Both are in "other" tier (different file from caller), so iteration order
+		// from symbolsByName determines which is first.
+		if got != sym1.ID && got != sym2.ID {
+			t.Errorf("expected one of the candidates (Go first-match), got %q", got)
+		}
+	})
+
+	t.Run("variable_unique_resolves", func(t *testing.T) {
+		// Python caller, target="handler", one Variable candidate globally → returns it
+		sym1 := makeSymbol("pkg/routes.py:10:handler", "handler", ast.SymbolKindVariable, "python", "pkg/routes.py")
+		caller := makeSymbol("pkg/app.py:1:dispatch", "dispatch", ast.SymbolKindFunction, "python", "pkg/app.py")
+		state := makeBuildState([]*ast.Symbol{sym1, caller})
+
+		call := ast.CallSite{Target: "handler", IsMethod: true, Receiver: "obj"}
+		got := builder.resolveCallTarget(state, call, caller)
+		if got != sym1.ID {
+			t.Errorf("expected %q (unique variable), got %q", sym1.ID, got)
+		}
+	})
+
+	t.Run("variable_ambiguous_skips", func(t *testing.T) {
+		// Python caller, target="handler", two Variable candidates globally → returns ""
+		sym1 := makeSymbol("pkg/a.py:10:handler", "handler", ast.SymbolKindVariable, "python", "pkg/a.py")
+		sym2 := makeSymbol("pkg/b.py:20:handler", "handler", ast.SymbolKindVariable, "python", "pkg/b.py")
+		caller := makeSymbol("pkg/main.py:1:main", "main", ast.SymbolKindFunction, "python", "pkg/main.py")
+		state := makeBuildState([]*ast.Symbol{sym1, sym2, caller})
+
+		call := ast.CallSite{Target: "handler", IsMethod: true, Receiver: "obj"}
+		got := builder.resolveCallTarget(state, call, caller)
+		if got != "" {
+			t.Errorf("expected empty (ambiguous variables), got %q", got)
+		}
+	})
+}
+
+// TestBuilder_DunderStrategy1Guard verifies that implicit dunder calls (e.g.,
+// del x["k"] → __delitem__) with IsMethod=false do NOT resolve via Strategy 1
+// name-match in non-Go languages. CB-61a: missing edge > false edge.
+func TestBuilder_DunderStrategy1Guard(t *testing.T) {
+	t.Run("python_dunder_becomes_placeholder", func(t *testing.T) {
+		// Scope.__delitem__ exists in the codebase, but an implicit `del kwds["sep"]`
+		// should NOT resolve to it — the receiver type is unknown.
+		delitemMethod := &ast.Symbol{
+			ID:        "scope.py:10:Scope.__delitem__",
+			Name:      "__delitem__",
+			Kind:      ast.SymbolKindMethod,
+			FilePath:  "scope.py",
+			StartLine: 10,
+			EndLine:   20,
+			StartCol:  0,
+			EndCol:    50,
+			Language:  "python",
+			Package:   "scope",
+		}
+
+		caller := testSymbolWithCalls("read_csv", ast.SymbolKindFunction, "readers.py", 100, []ast.CallSite{
+			{
+				Target:   "__delitem__",
+				IsMethod: false, // implicit dunder: del kwds["sep"]
+				Location: ast.Location{
+					FilePath:  "readers.py",
+					StartLine: 105,
+				},
+			},
+		})
+		caller.Language = "python"
+
+		result := testParseResult("readers.py", []*ast.Symbol{caller}, nil)
+		result2 := testParseResult("scope.py", []*ast.Symbol{delitemMethod}, nil)
+		result2.Language = "python"
+		result.Language = "python"
+
+		builder := NewBuilder()
+		buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result, result2})
+		if err != nil {
+			t.Fatalf("Build failed: %v", err)
+		}
+
+		// Verify NO call edge to Scope.__delitem__
+		g := buildResult.Graph
+		callerNode, ok := g.GetNode(caller.ID)
+		if !ok {
+			t.Fatal("Caller node not found in graph")
+		}
+
+		for _, edge := range callerNode.Outgoing {
+			if edge.Type == EdgeTypeCalls && edge.ToID == delitemMethod.ID {
+				t.Error("CB-61a: implicit dunder __delitem__ should NOT resolve to Scope.__delitem__ via Strategy 1")
+			}
+		}
+
+		// It should create a placeholder instead
+		if buildResult.Stats.PlaceholderNodes == 0 {
+			t.Error("Expected placeholder node for unresolved implicit dunder call")
+		}
+	})
+
+	t.Run("go_dunder_like_name_still_resolves", func(t *testing.T) {
+		// Go callers with dunder-like function names should still resolve normally.
+		// The guard is language-specific (non-Go only).
+		target := testSymbol("__delitem__", ast.SymbolKindFunction, "main.go", 10)
+		caller := testSymbolWithCalls("Caller", ast.SymbolKindFunction, "main.go", 50, []ast.CallSite{
+			{
+				Target:   "__delitem__",
+				IsMethod: false,
+				Location: ast.Location{
+					FilePath:  "main.go",
+					StartLine: 55,
+				},
+			},
+		})
+
+		result := testParseResult("main.go", []*ast.Symbol{caller, target}, nil)
+
+		builder := NewBuilder()
+		buildResult, err := builder.Build(context.Background(), []*ast.ParseResult{result})
+		if err != nil {
+			t.Fatalf("Build failed: %v", err)
+		}
+
+		// Verify Go DOES resolve the dunder-like name
+		g := buildResult.Graph
+		callerNode, ok := g.GetNode(caller.ID)
+		if !ok {
+			t.Fatal("Caller node not found in graph")
+		}
+
+		hasCallEdge := false
+		for _, edge := range callerNode.Outgoing {
+			if edge.Type == EdgeTypeCalls && edge.ToID == target.ID {
+				hasCallEdge = true
+				break
+			}
+		}
+
+		if !hasCallEdge {
+			t.Error("Go callers should still resolve dunder-like function names via Strategy 1")
+		}
+	})
+}
+
+// =============================================================================
+// GR-70: Builder Safety Tests
+// =============================================================================
+
+func TestBuilder_Build_MaxNodesShortCircuit(t *testing.T) {
+	// Set MaxNodes very low so the builder hits the limit quickly.
+	builder := NewBuilder(
+		WithProjectRoot("/test"),
+		WithBuilderMaxNodes(5),
+	)
+
+	// Create enough symbols to exceed the limit.
+	var results []*ast.ParseResult
+	for i := 0; i < 10; i++ {
+		results = append(results, testParseResult(
+			fmt.Sprintf("file%d.go", i),
+			[]*ast.Symbol{
+				testSymbol(fmt.Sprintf("Func%d", i), ast.SymbolKindFunction, fmt.Sprintf("file%d.go", i), 1),
+			},
+			nil,
+		))
+	}
+
+	result, err := builder.Build(context.Background(), results)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should be marked incomplete due to limit.
+	if !result.Incomplete {
+		t.Error("expected Incomplete=true when max nodes exceeded")
+	}
+
+	// Should have processed fewer than all files.
+	if result.Stats.FilesProcessed >= 10 {
+		t.Errorf("expected early termination, but processed %d/10 files", result.Stats.FilesProcessed)
+	}
+
+	// Should have created at most MaxNodes nodes.
+	if result.Stats.NodesCreated > 5 {
+		t.Errorf("expected at most 5 nodes, got %d", result.Stats.NodesCreated)
+	}
+
+	// Graph should be non-nil.
+	if result.Graph == nil {
+		t.Error("expected non-nil graph")
+	}
+}
+
+func TestBuilder_Build_MaxEdgesShortCircuit(t *testing.T) {
+	// Set MaxEdges very low.
+	builder := NewBuilder(
+		WithProjectRoot("/test"),
+		WithBuilderMaxEdges(2),
+	)
+
+	// Create symbols with import edges that will be created during extraction.
+	// Each file imports a target, creating an edge.
+	targetSym := testSymbol("Target", ast.SymbolKindFunction, "target.go", 1)
+	targetSym.Package = "pkg"
+
+	var results []*ast.ParseResult
+	results = append(results, testParseResult("target.go", []*ast.Symbol{targetSym}, nil))
+
+	for i := 0; i < 10; i++ {
+		callerName := fmt.Sprintf("Caller%d", i)
+		callerSym := testSymbolWithCalls(callerName, ast.SymbolKindFunction, fmt.Sprintf("caller%d.go", i), 1, []ast.CallSite{
+			{
+				Target:   "Target",
+				Location: ast.Location{FilePath: fmt.Sprintf("caller%d.go", i), StartLine: 2},
+			},
+		})
+		results = append(results, testParseResult(
+			fmt.Sprintf("caller%d.go", i),
+			[]*ast.Symbol{callerSym},
+			nil,
+		))
+	}
+
+	result, err := builder.Build(context.Background(), results)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should be marked incomplete due to edge limit.
+	if !result.Incomplete {
+		t.Error("expected Incomplete=true when max edges exceeded")
+	}
+
+	// Should have created at most MaxEdges edges.
+	if result.Graph.EdgeCount() > 2 {
+		t.Errorf("expected at most 2 edges, got %d", result.Graph.EdgeCount())
+	}
+}
+
+func TestBuilder_Build_ErrorCap(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+
+	// Create more than maxErrorSliceLen nil parse results. Each nil result
+	// generates a FileError via validateParseResult without triggering
+	// MaxNodes short-circuit.
+	totalNils := maxErrorSliceLen + 500
+	results := make([]*ast.ParseResult, totalNils)
+	// All entries are nil by default.
+
+	result, err := builder.Build(context.Background(), results)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// FileErrors should be capped at maxErrorSliceLen.
+	if len(result.FileErrors) != maxErrorSliceLen {
+		t.Errorf("expected FileErrors capped at %d, got %d", maxErrorSliceLen, len(result.FileErrors))
+	}
+
+	// Truncation counter should record the excess.
+	expectedTruncated := totalNils - maxErrorSliceLen
+	if result.Stats.FileErrorsTruncated != expectedTruncated {
+		t.Errorf("expected FileErrorsTruncated=%d, got %d", expectedTruncated, result.Stats.FileErrorsTruncated)
+	}
+
+	// TotalErrors should include both stored and truncated.
+	expectedTotal := len(result.FileErrors) + len(result.EdgeErrors) + result.Stats.FileErrorsTruncated + result.Stats.EdgeErrorsTruncated
+	if result.TotalErrors() != expectedTotal {
+		t.Errorf("TotalErrors()=%d, expected %d", result.TotalErrors(), expectedTotal)
+	}
+}
+
+func TestBuilder_Build_MemoryLimit(t *testing.T) {
+	// Set MaxMemoryMB to 1 — any real Go process uses more than 1MB of heap.
+	builder := NewBuilder(
+		WithProjectRoot("/test"),
+		WithMaxMemoryMB(1),
+	)
+
+	// Create enough files to trigger the memoryCheckInterval threshold.
+	var results []*ast.ParseResult
+	for i := 0; i < memoryCheckInterval+10; i++ {
+		results = append(results, testParseResult(
+			fmt.Sprintf("file%d.go", i),
+			[]*ast.Symbol{
+				testSymbol(fmt.Sprintf("Func%d", i), ast.SymbolKindFunction, fmt.Sprintf("file%d.go", i), 1),
+			},
+			nil,
+		))
+	}
+
+	result, err := builder.Build(context.Background(), results)
+
+	// Should return ErrMemoryLimitExceeded.
+	if err == nil {
+		t.Fatal("expected error when memory limit exceeded")
+	}
+	if !errors.Is(err, ErrMemoryLimitExceeded) {
+		t.Errorf("expected ErrMemoryLimitExceeded in error chain, got: %v", err)
+	}
+
+	// Should be marked incomplete.
+	if !result.Incomplete {
+		t.Error("expected Incomplete=true when memory limit exceeded")
+	}
+
+	// Should still have a valid partial graph.
+	if result.Graph == nil {
+		t.Error("expected non-nil graph even with memory limit exceeded")
+	}
+}
+
+// TestBuilder_PlaceholderDisambiguation verifies that two files in different packages
+// both referencing an unresolved type with the same name create distinct placeholder nodes.
+// GR-71 Issue 1.
+func TestBuilder_PlaceholderDisambiguation(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	// Two symbols in different packages, both with unresolved return type "Reader"
+	symA := &ast.Symbol{
+		ID:        "pkg_a:FileReader",
+		Name:      "FileReader",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "pkg_a/file.go",
+		StartLine: 1,
+		EndLine:   10,
+		Language:  "go",
+		Package:   "pkg_a",
+		Metadata: &ast.SymbolMetadata{
+			ReturnType: "Reader",
+		},
+	}
+
+	symB := &ast.Symbol{
+		ID:        "pkg_b:NetReader",
+		Name:      "NetReader",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "pkg_b/net.go",
+		StartLine: 1,
+		EndLine:   10,
+		Language:  "go",
+		Package:   "pkg_b",
+		Metadata: &ast.SymbolMetadata{
+			ReturnType: "Reader",
+		},
+	}
+
+	parseResults := []*ast.ParseResult{
+		testParseResult("pkg_a/file.go", []*ast.Symbol{symA}, nil),
+		testParseResult("pkg_b/net.go", []*ast.Symbol{symB}, nil),
+	}
+
+	result, err := builder.Build(ctx, parseResults)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should create 2 distinct placeholders: external:pkg_a:Reader and external:pkg_b:Reader
+	if result.Stats.PlaceholderNodes != 2 {
+		t.Errorf("expected 2 distinct placeholders for Reader in different packages, got %d", result.Stats.PlaceholderNodes)
+	}
+
+	_, okA := result.Graph.GetNode("external:pkg_a:Reader")
+	if !okA {
+		t.Error("expected placeholder external:pkg_a:Reader")
+	}
+
+	_, okB := result.Graph.GetNode("external:pkg_b:Reader")
+	if !okB {
+		t.Error("expected placeholder external:pkg_b:Reader")
+	}
+}
+
+// TestBuilder_PlaceholderDedup_SamePackage verifies that two symbols in the same package
+// referencing the same unresolved type create only one placeholder node.
+// GR-71 Issue 1.
+func TestBuilder_PlaceholderDedup_SamePackage(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	// Two symbols in the same package, both with unresolved return type "Writer"
+	symA := &ast.Symbol{
+		ID:        "mypkg:FuncA",
+		Name:      "FuncA",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "mypkg/a.go",
+		StartLine: 1,
+		EndLine:   10,
+		Language:  "go",
+		Package:   "mypkg",
+		Metadata: &ast.SymbolMetadata{
+			ReturnType: "Writer",
+		},
+	}
+
+	symB := &ast.Symbol{
+		ID:        "mypkg:FuncB",
+		Name:      "FuncB",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "mypkg/b.go",
+		StartLine: 1,
+		EndLine:   10,
+		Language:  "go",
+		Package:   "mypkg",
+		Metadata: &ast.SymbolMetadata{
+			ReturnType: "Writer",
+		},
+	}
+
+	parseResults := []*ast.ParseResult{
+		testParseResult("mypkg/a.go", []*ast.Symbol{symA}, nil),
+		testParseResult("mypkg/b.go", []*ast.Symbol{symB}, nil),
+	}
+
+	result, err := builder.Build(ctx, parseResults)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should create only 1 placeholder: external:mypkg:Writer (deduplicated)
+	if result.Stats.PlaceholderNodes != 1 {
+		t.Errorf("expected 1 placeholder for Writer in same package (deduped), got %d", result.Stats.PlaceholderNodes)
+	}
+
+	_, ok := result.Graph.GetNode("external:mypkg:Writer")
+	if !ok {
+		t.Error("expected placeholder external:mypkg:Writer")
+	}
+}
+
+// TestBuilder_ValidateEdgeType_PlaceholderBypass verifies that validation is bypassed
+// (and counted) when one or both symbols are placeholders not in symbolsByID.
+// GR-71 Issue 3.
+func TestBuilder_ValidateEdgeType_PlaceholderBypass(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	// Create a function that calls an unresolved external target.
+	// The external target becomes a placeholder, which is NOT in symbolsByID,
+	// so validateEdgeType should bypass validation and increment the counter.
+	sym := &ast.Symbol{
+		ID:        "myfile:Caller",
+		Name:      "Caller",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "myfile.go",
+		StartLine: 1,
+		EndLine:   10,
+		Language:  "go",
+		Package:   "mypkg",
+		Calls: []ast.CallSite{
+			{
+				Target:   "UnresolvedFunc",
+				Location: ast.Location{FilePath: "myfile.go", StartLine: 5},
+			},
+		},
+	}
+
+	parseResults := []*ast.ParseResult{
+		testParseResult("myfile.go", []*ast.Symbol{sym}, nil),
+	}
+
+	result, err := builder.Build(ctx, parseResults)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The call to UnresolvedFunc creates a placeholder. The validateEdgeType call
+	// for the Calls edge should bypass because the placeholder is not in symbolsByID.
+	if result.Stats.ValidationBypassed == 0 {
+		t.Error("expected ValidationBypassed > 0 when edge targets a placeholder node")
+	}
+}
+
+// TestBuilder_ValidateEdgeType_Rejection verifies that invalid edges are rejected
+// and counted. For example, an EdgeTypeImplements edge where the target is not an interface.
+// GR-71 Issue 3.
+func TestBuilder_ValidateEdgeType_Rejection(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	// Create a struct that claims to implement another struct (not an interface).
+	// validateEdgeType should reject this edge.
+	targetStruct := &ast.Symbol{
+		ID:        "mypkg:TargetStruct",
+		Name:      "TargetStruct",
+		Kind:      ast.SymbolKindStruct,
+		FilePath:  "mypkg/target.go",
+		StartLine: 1,
+		EndLine:   10,
+		Language:  "go",
+		Package:   "mypkg",
+	}
+
+	implStruct := &ast.Symbol{
+		ID:        "mypkg:ImplStruct",
+		Name:      "ImplStruct",
+		Kind:      ast.SymbolKindStruct,
+		FilePath:  "mypkg/impl.go",
+		StartLine: 1,
+		EndLine:   10,
+		Language:  "go",
+		Package:   "mypkg",
+		Metadata: &ast.SymbolMetadata{
+			Implements: []string{"TargetStruct"},
+		},
+	}
+
+	parseResults := []*ast.ParseResult{
+		testParseResult("mypkg/target.go", []*ast.Symbol{targetStruct}, nil),
+		testParseResult("mypkg/impl.go", []*ast.Symbol{implStruct}, nil),
+	}
+
+	result, err := builder.Build(ctx, parseResults)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The implements edge should be rejected because TargetStruct is a struct, not an interface.
+	if result.Stats.ValidationRejected == 0 {
+		t.Error("expected ValidationRejected > 0 when implements target is not an interface")
+	}
+
+	// Verify the target resolved to the real symbol (not a placeholder bypass).
+	if result.Stats.ValidationBypassed != 0 {
+		t.Errorf("expected ValidationBypassed == 0 (target should resolve, not placeholder), got %d", result.Stats.ValidationBypassed)
+	}
+
+	// Verify no implements edge was created
+	edges := result.Graph.GetEdgesByType(EdgeTypeImplements)
+	for _, e := range edges {
+		if e.ToID == "mypkg:TargetStruct" {
+			t.Error("expected no EdgeTypeImplements edge to struct TargetStruct, but found one")
+		}
+	}
+}
+
+// TestExtractReceiverTypeFromSignature tests generic and non-generic receiver extraction.
+// GR-72 Issue 1.
+func TestExtractReceiverTypeFromSignature(t *testing.T) {
+	tests := []struct {
+		name string
+		sig  string
+		want string
+	}{
+		{"pointer_receiver", "func (h *Handler) Serve()", "Handler"},
+		{"value_receiver", "func (h Handler) Serve()", "Handler"},
+		{"generic_pointer", "func (h *Handler[T]) Serve()", "Handler"},
+		{"generic_multi_param", "func (c *Cache[K, V]) Get()", "Cache"},
+		{"generic_value_constrained", "func (m Map[K comparable, V any]) Set()", "Map"},
+		{"empty_string", "", ""},
+		{"not_a_func", "not a func", ""},
+		{"no_receiver", "func DoThing(x int) error", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractReceiverTypeFromSignature(tt.sig)
+			if got != tt.want {
+				t.Errorf("extractReceiverTypeFromSignature(%q) = %q, want %q", tt.sig, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestExtractReturnsFromSignature tests multi-return, single return, and no return extraction.
+// GR-72 Issue 2.
+func TestExtractReturnsFromSignature(t *testing.T) {
+	tests := []struct {
+		name string
+		sig  string
+		want string
+	}{
+		{"multi_return", "func (r *Type) Method() (string, error)", "string, error"},
+		{"single_return", "func (r *Type) Method() error", "error"},
+		{"no_return", "func (r *Type) Method()", ""},
+		{"standalone_single", "func DoThing(x int) error", "error"},
+		{"standalone_multi", "func DoThing(x int) (int, error)", "int, error"},
+		{"standalone_no_return", "func DoThing(x int)", ""},
+		{"empty_string", "", ""},
+		{"nested_func_param", "func (r *Type) Method(fn func(int) bool) error", "error"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractReturnsFromSignature(tt.sig)
+			if got != tt.want {
+				t.Errorf("extractReturnsFromSignature(%q) = %q, want %q", tt.sig, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestExtractParamsFromSignature tests method and standalone function param extraction.
+// GR-72 Issue 2.
+func TestExtractParamsFromSignature(t *testing.T) {
+	tests := []struct {
+		name string
+		sig  string
+		want string
+	}{
+		{"method_with_params", "func (r *Type) Method(x int) error", "x int"},
+		{"method_multi_params", "func (r *Type) Method(ctx context.Context, name string) error", "ctx context.Context, name string"},
+		{"method_no_params", "func (r *Type) Method() error", ""},
+		{"standalone_with_params", "func DoThing(x int) error", "x int"},
+		{"standalone_multi_params", "func DoThing(ctx context.Context, name string) error", "ctx context.Context, name string"},
+		{"standalone_no_params", "func DoThing() error", ""},
+		{"nested_func_param", "func (r *Type) Method(fn func(int) bool) error", "fn func(int) bool"},
+		{"empty_string", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractParamsFromSignature(tt.sig)
+			if got != tt.want {
+				t.Errorf("extractParamsFromSignature(%q) = %q, want %q", tt.sig, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestExtractTypeRefEdges_MultiLocation verifies that the same type referenced on
+// different lines creates multiple edges with distinct locations.
+// GR-72 Issue 3.
+func TestExtractTypeRefEdges_MultiLocation(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	// Target type that will be referenced
+	targetSym := &ast.Symbol{
+		ID:        "pkg:Config",
+		Name:      "Config",
+		Kind:      ast.SymbolKindStruct,
+		FilePath:  "pkg/config.go",
+		StartLine: 1,
+		EndLine:   10,
+		Language:  "go",
+		Package:   "pkg",
+	}
+
+	// Function that references Config at two different lines
+	callerSym := &ast.Symbol{
+		ID:        "pkg:LoadConfig",
+		Name:      "LoadConfig",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "pkg/loader.go",
+		StartLine: 1,
+		EndLine:   30,
+		Language:  "go",
+		Package:   "pkg",
+		TypeReferences: []ast.TypeReference{
+			{Name: "Config", Location: ast.Location{FilePath: "pkg/loader.go", StartLine: 10}},
+			{Name: "Config", Location: ast.Location{FilePath: "pkg/loader.go", StartLine: 25}},
+		},
+	}
+
+	parseResults := []*ast.ParseResult{
+		testParseResult("pkg/config.go", []*ast.Symbol{targetSym}, nil),
+		testParseResult("pkg/loader.go", []*ast.Symbol{callerSym}, nil),
+	}
+
+	result, err := builder.Build(ctx, parseResults)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Count reference edges from LoadConfig to Config
+	refEdges := result.Graph.GetEdgesByType(EdgeTypeReferences)
+	var matchingEdges []*Edge
+	for _, e := range refEdges {
+		if e.FromID == "pkg:LoadConfig" && e.ToID == "pkg:Config" {
+			matchingEdges = append(matchingEdges, e)
+		}
+	}
+
+	if len(matchingEdges) != 2 {
+		t.Errorf("expected 2 reference edges (one per line), got %d", len(matchingEdges))
+	}
+
+	// Verify distinct locations
+	if len(matchingEdges) == 2 {
+		if matchingEdges[0].Location.StartLine == matchingEdges[1].Location.StartLine {
+			t.Error("expected edges to have distinct locations")
+		}
+	}
+}
+
+// TestExtractTypeRefEdges_SameLineDedup verifies that the same type referenced
+// twice on the same line is deduplicated to one edge.
+// GR-72 Issue 3.
+func TestExtractTypeRefEdges_SameLineDedup(t *testing.T) {
+	builder := NewBuilder(WithProjectRoot("/test"))
+	ctx := context.Background()
+
+	targetSym := &ast.Symbol{
+		ID:        "pkg:Config",
+		Name:      "Config",
+		Kind:      ast.SymbolKindStruct,
+		FilePath:  "pkg/config.go",
+		StartLine: 1,
+		EndLine:   10,
+		Language:  "go",
+		Package:   "pkg",
+	}
+
+	// Function that references Config twice on the same line (e.g., func(x Config, y Config))
+	callerSym := &ast.Symbol{
+		ID:        "pkg:MergeConfigs",
+		Name:      "MergeConfigs",
+		Kind:      ast.SymbolKindFunction,
+		FilePath:  "pkg/merge.go",
+		StartLine: 1,
+		EndLine:   20,
+		Language:  "go",
+		Package:   "pkg",
+		TypeReferences: []ast.TypeReference{
+			{Name: "Config", Location: ast.Location{FilePath: "pkg/merge.go", StartLine: 10}},
+			{Name: "Config", Location: ast.Location{FilePath: "pkg/merge.go", StartLine: 10}},
+		},
+	}
+
+	parseResults := []*ast.ParseResult{
+		testParseResult("pkg/config.go", []*ast.Symbol{targetSym}, nil),
+		testParseResult("pkg/merge.go", []*ast.Symbol{callerSym}, nil),
+	}
+
+	result, err := builder.Build(ctx, parseResults)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Count reference edges from MergeConfigs to Config
+	refEdges := result.Graph.GetEdgesByType(EdgeTypeReferences)
+	count := 0
+	for _, e := range refEdges {
+		if e.FromID == "pkg:MergeConfigs" && e.ToID == "pkg:Config" {
+			count++
+		}
+	}
+
+	if count != 1 {
+		t.Errorf("expected 1 reference edge (same-line dedup), got %d", count)
+	}
+}
+
+// makeParallelTestProject creates a set of parse results suitable for parallel
+// builder testing. Returns N files, each with a function that calls an unresolved
+// "SharedHelper" and imports "fmt".
+func makeParallelTestProject(fileCount int) []*ast.ParseResult {
+	results := make([]*ast.ParseResult, fileCount)
+	for i := 0; i < fileCount; i++ {
+		filePath := fmt.Sprintf("pkg/file_%d.go", i)
+		symName := fmt.Sprintf("Func_%d", i)
+		sym := &ast.Symbol{
+			ID:        fmt.Sprintf("pkg:%s", symName),
+			Name:      symName,
+			Kind:      ast.SymbolKindFunction,
+			FilePath:  filePath,
+			StartLine: 1,
+			EndLine:   20,
+			Language:  "go",
+			Package:   "pkg",
+			Calls: []ast.CallSite{
+				{
+					Target:   "SharedHelper",
+					Location: ast.Location{FilePath: filePath, StartLine: 10},
+				},
+			},
+		}
+		results[i] = testParseResult(filePath, []*ast.Symbol{sym}, []ast.Import{
+			{Path: "fmt", Alias: "fmt", Location: ast.Location{FilePath: filePath, StartLine: 1}},
+		})
+	}
+	return results
+}
+
+// TestBuilder_Build_Parallel_Correctness verifies that parallel and sequential builds
+// produce identical graph structure (same hash).
+// GR-73.
+func TestBuilder_Build_Parallel_Correctness(t *testing.T) {
+	results := makeParallelTestProject(20)
+	ctx := context.Background()
+
+	// Build with WorkerCount=1 (sequential)
+	builder1 := NewBuilder(WithProjectRoot("/test"), WithWorkerCount(1))
+	result1, err := builder1.Build(ctx, results)
+	if err != nil {
+		t.Fatalf("sequential build error: %v", err)
+	}
+	result1.Graph.Freeze()
+	hash1 := result1.Graph.Hash()
+
+	// Build with WorkerCount=4 (parallel)
+	builder4 := NewBuilder(WithProjectRoot("/test"), WithWorkerCount(4))
+	result4, err := builder4.Build(ctx, results)
+	if err != nil {
+		t.Fatalf("parallel build error: %v", err)
+	}
+	result4.Graph.Freeze()
+	hash4 := result4.Graph.Hash()
+
+	if hash1 != hash4 {
+		t.Errorf("graph hashes differ: sequential=%s parallel=%s", hash1, hash4)
+		t.Errorf("sequential: nodes=%d edges=%d", result1.Graph.NodeCount(), result1.Graph.EdgeCount())
+		t.Errorf("parallel:   nodes=%d edges=%d", result4.Graph.NodeCount(), result4.Graph.EdgeCount())
+	}
+
+	// Verify basic stats match
+	if result1.Stats.EdgesCreated != result4.Stats.EdgesCreated {
+		t.Errorf("edges_created mismatch: sequential=%d parallel=%d",
+			result1.Stats.EdgesCreated, result4.Stats.EdgesCreated)
+	}
+	if result1.Stats.PlaceholderNodes != result4.Stats.PlaceholderNodes {
+		t.Errorf("placeholder_nodes mismatch: sequential=%d parallel=%d",
+			result1.Stats.PlaceholderNodes, result4.Stats.PlaceholderNodes)
+	}
+}
+
+// TestBuilder_Build_Parallel_ContextCancellation verifies clean shutdown when
+// context is cancelled during parallel extraction.
+// GR-73.
+func TestBuilder_Build_Parallel_ContextCancellation(t *testing.T) {
+	results := makeParallelTestProject(50)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel immediately — workers should stop quickly
+	cancel()
+
+	builder := NewBuilder(WithProjectRoot("/test"), WithWorkerCount(4))
+	result, err := builder.Build(ctx, results)
+
+	// Should return an error (context cancelled)
+	if err == nil {
+		t.Fatal("expected error when context is cancelled")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled in error chain, got: %v", err)
+	}
+
+	// Should be marked incomplete
+	if !result.Incomplete {
+		t.Error("expected Incomplete=true when context cancelled")
+	}
+
+	// Should have a valid graph (partial)
+	if result.Graph == nil {
+		t.Error("expected non-nil graph even with cancellation")
+	}
+}
+
+// TestBuilder_Build_Parallel_PlaceholderDedup verifies that multiple workers
+// creating the same placeholder produce a single node after merge.
+// GR-73.
+func TestBuilder_Build_Parallel_PlaceholderDedup(t *testing.T) {
+	// 8 files all calling the same unresolved function
+	results := makeParallelTestProject(8)
+	ctx := context.Background()
+
+	builder := NewBuilder(WithProjectRoot("/test"), WithWorkerCount(4))
+	result, err := builder.Build(ctx, results)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// SharedHelper should resolve to exactly 1 placeholder node
+	// (even though 8 workers all requested it).
+	// Note: inferPackageFromCall returns "" for bare function calls with no import match,
+	// so the placeholder ID is "external::SharedHelper".
+	node, ok := result.Graph.GetNode("external::SharedHelper")
+	if !ok {
+		t.Fatal("expected placeholder node for SharedHelper")
+	}
+	if node.Symbol.Kind != ast.SymbolKindExternal {
+		t.Errorf("expected SymbolKindExternal, got %v", node.Symbol.Kind)
+	}
+
+	// fmt should also be deduplicated to 1 placeholder
+	_, fmtOk := result.Graph.GetNode("external:fmt:fmt")
+	if !fmtOk {
+		t.Error("expected placeholder node for fmt")
+	}
+}
+
+// TestBuilder_Build_Parallel_ErrorCollection verifies that stats from
+// multiple workers are all aggregated in the merge phase.
+// GR-73.
+func TestBuilder_Build_Parallel_ErrorCollection(t *testing.T) {
+	results := makeParallelTestProject(20)
+	ctx := context.Background()
+
+	builder := NewBuilder(WithProjectRoot("/test"), WithWorkerCount(4))
+	result, err := builder.Build(ctx, results)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if result.Graph == nil {
+		t.Fatal("expected non-nil graph")
+	}
+
+	// All 20 function nodes should be present (created during collectPhase)
+	if result.Graph.NodeCount() < 20 {
+		t.Errorf("expected at least 20 nodes (one per file), got %d", result.Graph.NodeCount())
+	}
+
+	// Each file calls unresolved "SharedHelper", which creates a placeholder.
+	// Verify stats are aggregated from all workers: CallEdgesUnresolved should be 20
+	// (one per file) since each file has one call to an external symbol.
+	if result.Stats.CallEdgesUnresolved < 20 {
+		t.Errorf("expected CallEdgesUnresolved >= 20 (one per file), got %d", result.Stats.CallEdgesUnresolved)
+	}
+
+	// Verify placeholder was created (deduplicated across workers)
+	if result.Stats.PlaceholderNodes < 1 {
+		t.Errorf("expected PlaceholderNodes >= 1, got %d", result.Stats.PlaceholderNodes)
+	}
+
+	// Verify edges were created (each file contributes at least one call edge)
+	if result.Stats.EdgesCreated < 20 {
+		t.Errorf("expected EdgesCreated >= 20, got %d", result.Stats.EdgesCreated)
+	}
+}
+
+// BenchmarkBuilder_Build_Workers1 benchmarks sequential build.
+func BenchmarkBuilder_Build_Workers1(b *testing.B) {
+	results := makeParallelTestProject(100)
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		builder := NewBuilder(WithProjectRoot("/test"), WithWorkerCount(1))
+		_, _ = builder.Build(ctx, results)
+	}
+}
+
+// BenchmarkBuilder_Build_Workers4 benchmarks parallel build with 4 workers.
+func BenchmarkBuilder_Build_Workers4(b *testing.B) {
+	results := makeParallelTestProject(100)
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		builder := NewBuilder(WithProjectRoot("/test"), WithWorkerCount(4))
+		_, _ = builder.Build(ctx, results)
 	}
 }

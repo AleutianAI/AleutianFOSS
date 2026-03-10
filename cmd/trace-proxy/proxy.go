@@ -21,6 +21,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -192,6 +194,17 @@ func (p *ProxyServer) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 		attribute.Bool("proxy.stream", req.Stream),
 	)
 
+	// Detect UI meta-requests (title generation, follow-up suggestions, etc.)
+	// that should bypass the trace agent and go directly to Ollama.
+	if isUIMetaRequest(query) {
+		span.SetAttributes(attribute.Bool("proxy.ui_meta_bypass", true))
+		logger.Info("UI meta-request detected, bypassing trace agent",
+			slog.Int("query_len", len(query)),
+		)
+		p.forwardToOllama(ctx, w, req, logger, span)
+		return
+	}
+
 	// Resolve project root: header > config default.
 	projectRoot := r.Header.Get("X-Project-Root")
 	if projectRoot == "" {
@@ -215,7 +228,7 @@ func (p *ProxyServer) handleChatCompletions(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Non-streaming path: block until agent completes, return JSON.
-	agentResp, sessionReused, err := p.callAgentLoop(ctx, threadKey, projectRoot, query)
+	agentResp, sessionReused, err := p.callAgentLoop(ctx, threadKey, projectRoot, query, req.Model)
 	if err != nil {
 		telemetry.RecordError(span, err)
 		logger.Error("Agent loop call failed", slog.String("error", err.Error()))
@@ -274,6 +287,9 @@ func (p *ProxyServer) handleModels(w http.ResponseWriter, r *http.Request) {
 	models := make([]ModelObject, 0, len(ollamaResp.Models))
 	now := time.Now().Unix()
 	for _, m := range ollamaResp.Models {
+		if isInfrastructureModel(m.Name) {
+			continue
+		}
 		models = append(models, ModelObject{
 			ID:      m.Name,
 			Object:  "model",
@@ -437,6 +453,7 @@ func (p *ProxyServer) handleInit(w http.ResponseWriter, r *http.Request) {
 //	threadKey   - hash of the first user message (stable per conversation)
 //	projectRoot - absolute path to the project directory
 //	query       - the user's latest message
+//	model       - user-selected main LLM model (empty = use server default)
 //
 // Outputs:
 //
@@ -447,7 +464,7 @@ func (p *ProxyServer) handleInit(w http.ResponseWriter, r *http.Request) {
 // Assumptions:
 //
 //	The trace server agent endpoints are available at config.TraceURL.
-func (p *ProxyServer) callAgentLoop(ctx context.Context, threadKey, projectRoot, query string) (*agentRunResponse, bool, error) {
+func (p *ProxyServer) callAgentLoop(ctx context.Context, threadKey, projectRoot, query, model string) (*agentRunResponse, bool, error) {
 	ctx, span := proxyTracer.Start(ctx, "proxy.callAgentLoop",
 		trace.WithAttributes(attribute.String("thread_key", threadKey)),
 	)
@@ -481,7 +498,7 @@ func (p *ProxyServer) callAgentLoop(ctx context.Context, threadKey, projectRoot,
 	}
 
 	// New session.
-	resp, err := p.callAgentRun(ctx, projectRoot, query)
+	resp, err := p.callAgentRun(ctx, projectRoot, query, model)
 	if err != nil {
 		return nil, false, err
 	}
@@ -523,15 +540,22 @@ type clarifyDetail struct {
 //	ctx         - request context
 //	projectRoot - project root path
 //	query       - user query
+//	model       - user-selected main LLM model (empty = use server default)
 //
 // Outputs:
 //
 //	*agentRunResponse - the agent's response
 //	error             - HTTP or decoding errors
-func (p *ProxyServer) callAgentRun(ctx context.Context, projectRoot, query string) (*agentRunResponse, error) {
+func (p *ProxyServer) callAgentRun(ctx context.Context, projectRoot, query, model string) (*agentRunResponse, error) {
 	payload := agentRunRequest{
 		ProjectRoot: p.translatePath(projectRoot),
 		Query:       query,
+	}
+	// CB-62: Forward user-selected model as main LLM override.
+	if model != "" {
+		payload.Config = &agentSessionConfig{
+			MainModel: model,
+		}
 	}
 
 	body, err := json.Marshal(payload)
@@ -732,7 +756,7 @@ func (p *ProxyServer) handleStreaming(
 	if !ok {
 		// ResponseWriter doesn't support flushing — fall back to buffered.
 		logger.Warn("ResponseWriter does not implement http.Flusher, falling back to buffered")
-		agentResp, sessionReused, err := p.callAgentLoop(ctx, threadKey, projectRoot, query)
+		agentResp, sessionReused, err := p.callAgentLoop(ctx, threadKey, projectRoot, query, model)
 		if err != nil {
 			telemetry.RecordError(span, err)
 			writeError(w, http.StatusBadGateway, "agent loop error: "+err.Error())
@@ -773,7 +797,7 @@ func (p *ProxyServer) handleStreaming(
 	}()
 
 	// Block on the agent call. Heartbeats keep the connection alive.
-	agentResp, sessionReused, err := p.callAgentLoop(ctx, threadKey, projectRoot, query)
+	agentResp, sessionReused, err := p.callAgentLoop(ctx, threadKey, projectRoot, query, model)
 	close(done)
 	<-stopped // Wait for heartbeat goroutine to fully exit before writing.
 
@@ -929,12 +953,20 @@ func (p *ProxyServer) AutoInit(projectRoot string) error {
 	defer span.End()
 
 	translated := p.translatePath(projectRoot)
+
+	langs := detectProjectLanguages(projectRoot)
 	span.SetAttributes(
 		attribute.String("project_root", translated),
+		attribute.StringSlice("languages", langs),
+	)
+	slog.Info("CRS-26m: Detected project languages",
+		slog.String("project_root", projectRoot),
+		slog.Any("languages", langs),
 	)
 
 	payload := initRequest{
 		ProjectRoot: translated,
+		Languages:   langs,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -1006,6 +1038,114 @@ func (p *ProxyServer) CleanupExpiredSessions() {
 // per project standards.
 //
 // Thread Safety: Not safe for concurrent use.
+// skipDirs are directories skipped during language detection to keep scanning fast.
+var skipDirs = map[string]bool{
+	".git":         true,
+	"node_modules": true,
+	"vendor":       true,
+	"__pycache__":  true,
+	".venv":        true,
+	"venv":         true,
+	"dist":         true,
+	"build":        true,
+	".tox":         true,
+	".mypy_cache":  true,
+}
+
+// extToLanguage maps file extensions to parser language identifiers for primary
+// code languages. This is a subset of all registered parsers — ancillary parsers
+// (CSS, HTML, SQL, YAML, Bash, Dockerfile, Markdown) are not included because
+// they don't drive language detection. Language strings must match the parser
+// registry in services/trace/ast/.
+var extToLanguage = map[string]string{
+	".go":  "go",
+	".py":  "python",
+	".pyi": "python",
+	".ts":  "typescript",
+	".tsx": "typescript",
+	".mts": "typescript",
+	".cts": "typescript",
+	".js":  "javascript",
+	".jsx": "javascript",
+	".mjs": "javascript",
+	".cjs": "javascript",
+}
+
+// detectProjectLanguages scans a project directory to determine which
+// programming languages are present.
+//
+// Description:
+//
+//	Walks the directory tree (max depth 4) collecting file extensions and
+//	mapping them to supported parser languages. Skips common non-source
+//	directories (node_modules, .git, vendor, etc.) for performance.
+//
+// Inputs:
+//
+//	projectRoot - Absolute path to the project root directory.
+//
+// Outputs:
+//
+//	[]string - Deduplicated list of detected languages (e.g., ["go", "python"]).
+//	           Returns ["go"] if no supported languages are detected or on error.
+//
+// Limitations:
+//
+//   - Max depth of 4 may miss deeply nested source files in unusual layouts.
+//   - Only detects languages with registered parsers (Go, Python, TypeScript, JavaScript).
+//
+// Thread Safety: Safe for concurrent use (read-only filesystem access).
+func detectProjectLanguages(projectRoot string) []string {
+	found := make(map[string]bool)
+
+	if walkErr := filepath.WalkDir(projectRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip unreadable entries
+		}
+
+		// Enforce max depth to keep scanning fast.
+		rel, relErr := filepath.Rel(projectRoot, path)
+		if relErr != nil {
+			return nil
+		}
+		depth := strings.Count(rel, string(filepath.Separator))
+		if depth > 4 {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		if d.IsDir() {
+			if skipDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		ext := strings.ToLower(filepath.Ext(d.Name()))
+		if lang, ok := extToLanguage[ext]; ok {
+			found[lang] = true
+		}
+		return nil
+	}); walkErr != nil {
+		slog.Warn("detectProjectLanguages: walk failed, falling back to [go]",
+			slog.String("project_root", projectRoot),
+			slog.String("error", walkErr.Error()))
+	}
+
+	if len(found) == 0 {
+		return []string{"go"}
+	}
+
+	langs := make([]string, 0, len(found))
+	for lang := range found {
+		langs = append(langs, lang)
+	}
+	sort.Strings(langs)
+	return langs
+}
+
 type initRequest struct {
 	// ProjectRoot is the absolute path to the project root directory.
 	ProjectRoot string `json:"project_root"`
@@ -1112,6 +1252,224 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	}
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		slog.Error("Failed to write error response", slog.String("error", err.Error()))
+	}
+}
+
+// uiMetaPatterns are substrings that identify OpenWebUI (and similar UI)
+// housekeeping requests. These requests embed full chat history into the query
+// for tasks like title generation or follow-up suggestions. They are not code
+// questions and should bypass the trace agent entirely.
+var uiMetaPatterns = []string{
+	"Generate a concise",
+	"generate a concise",
+	"Suggest 3-5 relevant follow-up",
+	"suggest 3-5 relevant follow-up",
+	"### Chat History:",
+	"<chat_history>",
+	"\"follow_ups\":",
+	"\"title\":",
+	"summarizing the chat history",
+	"follow-up questions or prompts",
+}
+
+// isUIMetaRequest detects whether a query is a UI meta-request (title
+// generation, follow-up suggestions, etc.) rather than a real user question.
+//
+// Description:
+//
+//	OpenWebUI and similar UIs send housekeeping requests as regular chat
+//	completions. These embed the full conversation in the query and ask for
+//	JSON output (title, follow-ups). These should not go through the trace
+//	agent pipeline — they are simple text generation tasks.
+//
+// Inputs:
+//
+//	query - the extracted last user message
+//
+// Outputs:
+//
+//	bool - true if this is a UI meta-request that should bypass the agent
+//
+// Thread Safety: Safe for concurrent use (reads only).
+func isUIMetaRequest(query string) bool {
+	// Quick length check: real code questions are rarely > 800 chars.
+	// Meta-requests are typically 1000-2000+ chars due to embedded history.
+	// But we check patterns regardless of length for accuracy.
+	matchCount := 0
+	for _, pattern := range uiMetaPatterns {
+		if strings.Contains(query, pattern) {
+			matchCount++
+		}
+		// Two matching patterns is strong enough signal.
+		if matchCount >= 2 {
+			return true
+		}
+	}
+	return false
+}
+
+// ollamaChatRequest is the Ollama /api/chat request format.
+type ollamaChatRequest struct {
+	Model    string              `json:"model"`
+	Messages []ollamaChatMessage `json:"messages"`
+	Stream   bool                `json:"stream"`
+}
+
+// ollamaChatMessage is a single message in Ollama's chat format.
+type ollamaChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// ollamaChatResponse is the Ollama /api/chat response format (non-streaming).
+type ollamaChatResponse struct {
+	Message ollamaChatMessage `json:"message"`
+}
+
+// forwardToOllama sends a chat request directly to Ollama, bypassing the
+// trace agent. Used for UI meta-requests (title generation, follow-ups).
+//
+// Description:
+//
+//	Translates the OpenAI chat completion request to Ollama's /api/chat
+//	format, forwards it, and translates the response back to OpenAI format.
+//	Uses the router model (granite4:micro-h) for fast, cheap inference.
+//
+// Inputs:
+//
+//	ctx    - request context
+//	w      - HTTP response writer
+//	req    - the original OpenAI chat completion request
+//	logger - structured logger
+//	span   - OTel span for tracing
+//
+// Thread Safety: Safe for concurrent use.
+func (p *ProxyServer) forwardToOllama(
+	ctx context.Context,
+	w http.ResponseWriter,
+	req ChatCompletionRequest,
+	logger *slog.Logger,
+	span trace.Span,
+) {
+	_, forwardSpan := proxyTracer.Start(ctx, "proxy.forwardToOllama")
+	defer forwardSpan.End()
+
+	// Use the requested model, or fall back to a small fast model.
+	model := req.Model
+	if model == "" {
+		model = "granite4:micro-h"
+	}
+
+	// Convert messages to Ollama format.
+	ollamaMessages := make([]ollamaChatMessage, 0, len(req.Messages))
+	for _, m := range req.Messages {
+		if m.Content != "" {
+			ollamaMessages = append(ollamaMessages, ollamaChatMessage{
+				Role:    m.Role,
+				Content: m.Content,
+			})
+		}
+	}
+
+	ollamaReq := ollamaChatRequest{
+		Model:    model,
+		Messages: ollamaMessages,
+		Stream:   false,
+	}
+
+	body, err := json.Marshal(ollamaReq)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "marshaling ollama request: "+err.Error())
+		return
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		p.config.OllamaURL+"/api/chat", bytes.NewReader(body))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "creating ollama request: "+err.Error())
+		return
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		logger.Warn("Ollama forward failed", slog.String("error", err.Error()))
+		writeError(w, http.StatusBadGateway, "ollama unavailable: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		logger.Warn("Ollama returned error",
+			slog.Int("status", resp.StatusCode),
+			slog.String("body", string(respBody)),
+		)
+		writeError(w, http.StatusBadGateway, fmt.Sprintf("ollama returned %d: %s", resp.StatusCode, string(respBody)))
+		return
+	}
+
+	var ollamaResp ollamaChatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&ollamaResp); err != nil {
+		writeError(w, http.StatusInternalServerError, "decoding ollama response: "+err.Error())
+		return
+	}
+
+	forwardSpan.SetAttributes(attribute.Int("response_length", len(ollamaResp.Message.Content)))
+
+	// Translate to OpenAI format.
+	openAIResp := ChatCompletionResponse{
+		ID:      fmt.Sprintf("chatcmpl-meta-%d", time.Now().UnixNano()),
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   model,
+		Choices: []Choice{{
+			Index: 0,
+			Message: ChatMessage{
+				Role:    "assistant",
+				Content: ollamaResp.Message.Content,
+			},
+			FinishReason: "stop",
+		}},
+	}
+
+	if req.Stream {
+		// SSE response for streaming clients.
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(openAIResp)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.WriteHeader(http.StatusOK)
+
+		finishReason := "stop"
+		chunk := ChatCompletionChunk{
+			ID:      openAIResp.ID,
+			Object:  "chat.completion.chunk",
+			Created: openAIResp.Created,
+			Model:   model,
+			Choices: []ChunkChoice{{
+				Index: 0,
+				Delta: ChatMessageDelta{
+					Role:    "assistant",
+					Content: ollamaResp.Message.Content,
+				},
+				FinishReason: &finishReason,
+			}},
+		}
+		writeSSEChunk(w, flusher, chunk)
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(openAIResp); err != nil {
+		logger.Error("Failed to encode ollama forward response", slog.String("error", err.Error()))
 	}
 }
 
@@ -1344,6 +1702,42 @@ func (p *ProxyServer) fetchIndexingStatus(ctx context.Context, client *http.Clie
 // Outputs:
 //
 //	string - The formatted number (e.g., "51,231").
+//
+// infrastructureModels are internal models that serve fixed roles (routing,
+// parameter extraction, embedding) and should not appear in the OpenWebUI
+// model dropdown. Users should only see models suitable for main LLM use.
+//
+// CB-62: Filtered in handleModels to prevent accidental selection.
+// Keys are exact "name:tag" matches. Ollama returns names with tags, so
+// "granite4:micro-h" and "nomic-embed-text-v2-moe" (no tag = ":latest" implied)
+// are both handled. The base name (without tag) is also checked for models
+// that Ollama may return as just "nomic-embed-text-v2-moe" without ":latest".
+var infrastructureModels = map[string]struct{}{
+	"granite4:micro-h":        {},
+	"ministral-3:3b":          {},
+	"nomic-embed-text-v2-moe": {},
+}
+
+// isInfrastructureModel returns true if the model name is an internal
+// infrastructure model that should be hidden from the user-facing model list.
+// Checks both exact match and base name (stripping :latest suffix).
+//
+// Thread Safety: Safe for concurrent use (read-only map).
+func isInfrastructureModel(name string) bool {
+	if _, ok := infrastructureModels[name]; ok {
+		return true
+	}
+	// Ollama may append ":latest" to models without explicit tags.
+	// Check the base name without the tag.
+	base := strings.TrimSuffix(name, ":latest")
+	if base != name {
+		if _, ok := infrastructureModels[base]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 func formatNumber(n int) string {
 	if n < 1000 {
 		return fmt.Sprintf("%d", n)

@@ -165,7 +165,12 @@ func main() {
 	// CRS-26l: Auto-init on startup so graph is built and symbols are indexed
 	// before any user query arrives. Brief delay allows the trace server to
 	// finish starting if launched concurrently via stack start.
-	if config.ProjectRoot != "" {
+	// CRS-26n: When running under stack manager, auto-init is disabled via
+	// TRACE_SKIP_AUTO_INIT to prevent racing with the stack manager's own
+	// init trigger. The stack manager handles init directly after health checks.
+	if os.Getenv("TRACE_SKIP_AUTO_INIT") == "true" {
+		slog.Info("CRS-26n: Auto-init disabled, stack manager handles init")
+	} else if config.ProjectRoot != "" {
 		go func() {
 			time.Sleep(2 * time.Second)
 			if err := proxy.AutoInit(config.ProjectRoot); err != nil {

@@ -361,6 +361,42 @@ type HealthResponse struct {
 
 	// Version is the service version.
 	Version string `json:"version"`
+
+	// LSP contains LSP enrichment status. Present only when LSP is enabled.
+	// GR-75: Reports per-language availability for container diagnostics.
+	LSP *LSPHealthStatus `json:"lsp,omitempty"`
+}
+
+// LSPHealthStatus reports language server availability in the health check.
+//
+// Description:
+//
+//	GR-75: Included in HealthResponse when LSP enrichment is enabled.
+//	Language servers are lazy-started (first graph build triggers them),
+//	so running=false at startup is expected and healthy.
+//
+// Thread Safety:
+//
+//	Immutable after construction.
+type LSPHealthStatus struct {
+	// Enabled is true when LSP enrichment is globally active.
+	Enabled bool `json:"enabled"`
+
+	// Python reports Pyright availability.
+	Python LSPLanguageStatus `json:"python"`
+
+	// TypeScript reports typescript-language-server availability.
+	TypeScript LSPLanguageStatus `json:"typescript"`
+
+	// JavaScript reports typescript-language-server availability for JS files.
+	// Uses the same server binary as TypeScript.
+	JavaScript LSPLanguageStatus `json:"javascript"`
+}
+
+// LSPLanguageStatus reports a single language server's status.
+type LSPLanguageStatus struct {
+	// Available is true if the binary was found in PATH at startup.
+	Available bool `json:"available"`
 }
 
 // ReadyResponse is the response for GET /v1/trace/ready.
@@ -414,6 +450,11 @@ type CachedGraph struct {
 
 	// ExpiresAtMilli is when the graph expires (0 = never).
 	ExpiresAtMilli int64
+
+	// EnrichmentStats contains LSP enrichment statistics from the build
+	// that produced this graph. Zero-valued if enrichment was not configured.
+	// GR-76: Used by CRS to emit a TraceStep on session start.
+	EnrichmentStats graph.EnrichmentStats
 }
 
 // SymbolInfoFromAST converts an ast.Symbol to SymbolInfo.

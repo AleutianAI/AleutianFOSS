@@ -15,6 +15,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -52,18 +55,26 @@ func TestBasicChatCompletion(t *testing.T) {
 				return
 			}
 
-			var req map[string]string
+			var req agentRunRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Errorf("failed to decode request: %v", err)
 				http.Error(w, "bad request", http.StatusBadRequest)
 				return
 			}
 
-			if req["project_root"] != "/test/project" {
-				t.Errorf("expected project_root=/test/project, got %s", req["project_root"])
+			if req.ProjectRoot != "/test/project" {
+				t.Errorf("expected project_root=/test/project, got %s", req.ProjectRoot)
 			}
-			if req["query"] != "What functions call parseConfig?" {
-				t.Errorf("unexpected query: %s", req["query"])
+			if req.Query != "What functions call parseConfig?" {
+				t.Errorf("unexpected query: %s", req.Query)
+			}
+			// CB-62: Verify model is forwarded as config.main_model
+			if req.Config == nil || req.Config.MainModel != "glm4:latest" {
+				mainModel := ""
+				if req.Config != nil {
+					mainModel = req.Config.MainModel
+				}
+				t.Errorf("expected config.main_model=glm4:latest, got %s", mainModel)
 			}
 
 			resp := agentRunResponse{
@@ -342,6 +353,76 @@ func TestModelsEndpoint(t *testing.T) {
 			t.Errorf("expected owned_by=ollama, got %s", resp.Data[0].OwnedBy)
 		}
 	})
+}
+
+func TestModelsEndpoint_FiltersInfrastructureModels(t *testing.T) {
+	t.Run("infrastructure models hidden from dropdown", func(t *testing.T) {
+		ollamaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(OllamaTagsResponse{
+				Models: []OllamaModel{
+					{Name: "gpt-oss:20b"},
+					{Name: "granite4:micro-h"},        // infra: tool router
+					{Name: "ministral-3:3b"},          // infra: param extractor
+					{Name: "nomic-embed-text-v2-moe"}, // infra: embedding
+					{Name: "qwen3:14b"},
+				},
+			})
+		}))
+		defer ollamaServer.Close()
+
+		proxy := newTestProxy("http://unused", ollamaServer.URL)
+		mux := http.NewServeMux()
+		proxy.RegisterRoutes(mux)
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		var resp ModelListResponse
+		json.NewDecoder(rec.Body).Decode(&resp)
+
+		// Should only have gpt-oss:20b and qwen3:14b (3 infra models filtered)
+		if len(resp.Data) != 2 {
+			names := make([]string, len(resp.Data))
+			for i, m := range resp.Data {
+				names[i] = m.ID
+			}
+			t.Fatalf("expected 2 models after filtering, got %d: %v", len(resp.Data), names)
+		}
+		if resp.Data[0].ID != "gpt-oss:20b" {
+			t.Errorf("expected first model=gpt-oss:20b, got %s", resp.Data[0].ID)
+		}
+		if resp.Data[1].ID != "qwen3:14b" {
+			t.Errorf("expected second model=qwen3:14b, got %s", resp.Data[1].ID)
+		}
+	})
+}
+
+func TestIsInfrastructureModel(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{"granite4:micro-h", true},
+		{"ministral-3:3b", true},
+		{"nomic-embed-text-v2-moe", true},
+		{"nomic-embed-text-v2-moe:latest", true}, // Ollama may append :latest
+		{"gpt-oss:20b", false},
+		{"qwen3:14b", false},
+		{"granite4:latest", false}, // different tag, not infra
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isInfrastructureModel(tt.name); got != tt.want {
+				t.Errorf("isInfrastructureModel(%q) = %v, want %v", tt.name, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestHealthEndpoint(t *testing.T) {
@@ -989,4 +1070,243 @@ func TestCleanupExpiredSessions(t *testing.T) {
 			t.Error("expired session should have been removed")
 		}
 	})
+}
+
+func TestDetectProjectLanguages(t *testing.T) {
+	t.Run("go project", func(t *testing.T) {
+		dir := t.TempDir()
+		touch(t, filepath.Join(dir, "main.go"))
+		touch(t, filepath.Join(dir, "handler.go"))
+
+		langs := detectProjectLanguages(dir)
+		if len(langs) != 1 || langs[0] != "go" {
+			t.Errorf("expected [go], got %v", langs)
+		}
+	})
+
+	t.Run("python project", func(t *testing.T) {
+		dir := t.TempDir()
+		touch(t, filepath.Join(dir, "app.py"))
+		touch(t, filepath.Join(dir, "utils.py"))
+
+		langs := detectProjectLanguages(dir)
+		if len(langs) != 1 || langs[0] != "python" {
+			t.Errorf("expected [python], got %v", langs)
+		}
+	})
+
+	t.Run("typescript project", func(t *testing.T) {
+		dir := t.TempDir()
+		touch(t, filepath.Join(dir, "index.ts"))
+		touch(t, filepath.Join(dir, "component.tsx"))
+
+		langs := detectProjectLanguages(dir)
+		if len(langs) != 1 || langs[0] != "typescript" {
+			t.Errorf("expected [typescript], got %v", langs)
+		}
+	})
+
+	t.Run("javascript project", func(t *testing.T) {
+		dir := t.TempDir()
+		touch(t, filepath.Join(dir, "index.js"))
+		touch(t, filepath.Join(dir, "utils.mjs"))
+
+		langs := detectProjectLanguages(dir)
+		if len(langs) != 1 || langs[0] != "javascript" {
+			t.Errorf("expected [javascript], got %v", langs)
+		}
+	})
+
+	t.Run("mixed go and python", func(t *testing.T) {
+		dir := t.TempDir()
+		touch(t, filepath.Join(dir, "main.go"))
+		touch(t, filepath.Join(dir, "script.py"))
+
+		langs := detectProjectLanguages(dir)
+		sort.Strings(langs)
+		if len(langs) != 2 || langs[0] != "go" || langs[1] != "python" {
+			t.Errorf("expected [go python], got %v", langs)
+		}
+	})
+
+	t.Run("empty directory returns go fallback", func(t *testing.T) {
+		dir := t.TempDir()
+
+		langs := detectProjectLanguages(dir)
+		if len(langs) != 1 || langs[0] != "go" {
+			t.Errorf("expected [go] fallback, got %v", langs)
+		}
+	})
+
+	t.Run("skips node_modules", func(t *testing.T) {
+		dir := t.TempDir()
+		touch(t, filepath.Join(dir, "main.go"))
+		nmDir := filepath.Join(dir, "node_modules", "dep")
+		if err := os.MkdirAll(nmDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		touch(t, filepath.Join(nmDir, "index.js"))
+
+		langs := detectProjectLanguages(dir)
+		if len(langs) != 1 || langs[0] != "go" {
+			t.Errorf("expected [go] (node_modules skipped), got %v", langs)
+		}
+	})
+
+	t.Run("skips vendor and venv", func(t *testing.T) {
+		dir := t.TempDir()
+		touch(t, filepath.Join(dir, "app.py"))
+		for _, skip := range []string{"vendor", ".venv"} {
+			d := filepath.Join(dir, skip)
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			touch(t, filepath.Join(d, "lib.go"))
+		}
+
+		langs := detectProjectLanguages(dir)
+		if len(langs) != 1 || langs[0] != "python" {
+			t.Errorf("expected [python] (vendor/.venv skipped), got %v", langs)
+		}
+	})
+
+	t.Run("respects max depth", func(t *testing.T) {
+		dir := t.TempDir()
+		touch(t, filepath.Join(dir, "main.go"))
+		deep := filepath.Join(dir, "a", "b", "c", "d", "e", "deep.py")
+		touch(t, deep)
+
+		langs := detectProjectLanguages(dir)
+		if len(langs) != 1 || langs[0] != "go" {
+			t.Errorf("expected [go] (deep .py skipped), got %v", langs)
+		}
+	})
+
+	t.Run("case insensitive extensions", func(t *testing.T) {
+		dir := t.TempDir()
+		touch(t, filepath.Join(dir, "Main.GO"))
+		touch(t, filepath.Join(dir, "App.PY"))
+
+		langs := detectProjectLanguages(dir)
+		sort.Strings(langs)
+		if len(langs) != 2 || langs[0] != "go" || langs[1] != "python" {
+			t.Errorf("expected [go python], got %v", langs)
+		}
+	})
+
+	t.Run("nonexistent directory returns go fallback", func(t *testing.T) {
+		langs := detectProjectLanguages("/nonexistent/path/abc123")
+		if len(langs) != 1 || langs[0] != "go" {
+			t.Errorf("expected [go] fallback, got %v", langs)
+		}
+	})
+}
+
+func TestIsUIMetaRequest(t *testing.T) {
+	t.Run("title generation", func(t *testing.T) {
+		query := `### Task:
+Generate a concise, 3-5 word title with an emoji summarizing the chat history.
+### Chat History:
+<chat_history>
+USER: Tell me about read_csv
+ASSISTANT: read_csv calls 6 functions...
+</chat_history>`
+		if !isUIMetaRequest(query) {
+			t.Error("expected title generation to be detected as UI meta-request")
+		}
+	})
+
+	t.Run("follow-up suggestions", func(t *testing.T) {
+		query := `### Task:
+Suggest 3-5 relevant follow-up questions or prompts that the user might naturally ask next.
+### Chat History:
+<chat_history>
+USER: What calls parseConfig?
+</chat_history>`
+		if !isUIMetaRequest(query) {
+			t.Error("expected follow-up suggestions to be detected as UI meta-request")
+		}
+	})
+
+	t.Run("real code question", func(t *testing.T) {
+		query := "What functions call read_csv in this project?"
+		if isUIMetaRequest(query) {
+			t.Error("real code question should not be detected as UI meta-request")
+		}
+	})
+
+	t.Run("long but real question", func(t *testing.T) {
+		query := "I have a function that processes data from a CSV file using pandas read_csv with parameters like encoding, sep, dtype, and na_values. The function seems to hang when the file is larger than 2GB. Can you find all callers of this function and check if any of them also handle large files?"
+		if isUIMetaRequest(query) {
+			t.Error("long real question should not be detected as UI meta-request")
+		}
+	})
+
+	t.Run("single pattern not enough", func(t *testing.T) {
+		// A query that mentions "title" in a code context should not trigger.
+		query := `How is the "title" field used in the page component?`
+		if isUIMetaRequest(query) {
+			t.Error("single pattern match should not trigger meta-request detection")
+		}
+	})
+}
+
+func TestForwardToOllama(t *testing.T) {
+	t.Run("forwards meta-request to ollama", func(t *testing.T) {
+		ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/api/chat" {
+				t.Errorf("expected /api/chat, got %s", r.URL.Path)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(ollamaChatResponse{
+				Message: ollamaChatMessage{
+					Role:    "assistant",
+					Content: `{ "title": "📊 CSV Analysis Functions" }`,
+				},
+			})
+		}))
+		defer ollamaSrv.Close()
+
+		// Trace server should NOT be called.
+		traceSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("trace server should not be called for meta-requests")
+		}))
+		defer traceSrv.Close()
+
+		proxy := newTestProxy(traceSrv.URL, ollamaSrv.URL)
+		proxy.config.ProjectRoot = "/projects"
+
+		body := `{"model":"gemma3n:latest","messages":[{"role":"user","content":"Tell me about read_csv"},{"role":"assistant","content":"read_csv calls..."},{"role":"user","content":"### Task:\nGenerate a concise, 3-5 word title summarizing the chat history.\n### Chat History:\n<chat_history>\nUSER: Tell me about read_csv\n</chat_history>"}]}`
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		proxy.handleChatCompletions(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		var resp ChatCompletionResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decoding response: %v", err)
+		}
+		if len(resp.Choices) == 0 {
+			t.Fatal("expected at least one choice")
+		}
+		if !strings.Contains(resp.Choices[0].Message.Content, "CSV") {
+			t.Errorf("expected ollama response content, got: %s", resp.Choices[0].Message.Content)
+		}
+	})
+}
+
+// touch creates an empty file, creating parent directories as needed.
+func touch(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
 }

@@ -972,6 +972,34 @@ func (idx *SymbolIndex) Stats() IndexStats {
 	}
 }
 
+// GetUniqueFilePaths returns a list of unique file paths that have symbols
+// in the index.
+//
+// Description:
+//
+//	CRS-26n: Used by computeGraphContentHash to include file identity in
+//	the content hash. This prevents hash collisions when two different
+//	projects have the same node+edge count.
+//
+// Outputs:
+//
+//	[]string - Unique file paths (unsorted). Caller should sort if deterministic
+//	           ordering is needed.
+//
+// Thread Safety:
+//
+//	This method is safe for concurrent use.
+func (idx *SymbolIndex) GetUniqueFilePaths() []string {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+
+	paths := make([]string, 0, len(idx.byFile))
+	for filePath := range idx.byFile {
+		paths = append(paths, filePath)
+	}
+	return paths
+}
+
 // Clone creates a deep copy of the symbol index.
 //
 // Description:

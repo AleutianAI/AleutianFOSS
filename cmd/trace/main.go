@@ -71,6 +71,7 @@ import (
 	"syscall"
 	"time"
 
+	aleutianconfig "github.com/AleutianAI/AleutianFOSS/cmd/aleutian/config"
 	"github.com/AleutianAI/AleutianFOSS/services/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	"github.com/AleutianAI/AleutianFOSS/services/policy_engine"
@@ -83,6 +84,7 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/routing"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/safety"
 	traceconfig "github.com/AleutianAI/AleutianFOSS/services/trace/config"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/rag"
 	badgerstore "github.com/AleutianAI/AleutianFOSS/services/trace/storage/badger"
 	natsStorage "github.com/AleutianAI/AleutianFOSS/services/trace/storage/nats"
@@ -185,6 +187,7 @@ func main() {
 	debug := flag.Bool("debug", false, "Enable debug mode")
 	withContext := flag.Bool("with-context", false, "Enable ContextManager for code context assembly")
 	withTools := flag.Bool("with-tools", false, "Enable tool registry for agentic exploration")
+	lspEnabled := flag.Bool("lsp-enabled", false, "Enable LSP-based graph enrichment (requires pyright/tsserver)")
 
 	// PORT env var override (matches orchestrator pattern for container deployments).
 	if envPort := os.Getenv("PORT"); envPort != "" {
@@ -230,6 +233,13 @@ func main() {
 	// Create service with default config
 	cfg := trace.DefaultServiceConfig()
 
+	// GR-77a: Wire bbolt graph persistence from environment.
+	if bboltDir := os.Getenv("TRACE_BBOLT_DIR"); bboltDir != "" {
+		cfg.BboltDir = bboltDir
+		slog.Info("GR-77a: bbolt graph persistence enabled",
+			slog.String("dir", bboltDir))
+	}
+
 	// Wire allowed roots from environment for container path security.
 	// TRACE_ALLOWED_ROOTS is a comma-separated list of path prefixes that the
 	// trace server is permitted to access. Set by podman-compose.yml to restrict
@@ -245,7 +255,76 @@ func main() {
 			slog.Any("roots", cfg.AllowedRoots))
 	}
 
+	// GR-75: Wire LSP configuration from env vars and --lsp-enabled flag.
+	// Flag OR env var enables LSP (either triggers activation).
+	lspCfg := aleutianconfig.LSPConfigFromEnv()
+	if *lspEnabled {
+		lspCfg.Enabled = true
+	}
+
+	if lspCfg.Enabled {
+		// Override service LSP timeouts from LSPConfig
+		cfg.LSPStartupTimeout = lspCfg.StartupTimeout
+		cfg.LSPRequestTimeout = lspCfg.RequestTimeout
+		cfg.LSPIdleTimeout = lspCfg.IdleTimeout
+
+		// Verify language server binaries are available
+		verifier := aleutianconfig.NewLSPServerVerifier(lspCfg)
+		verifyResult := verifier.Verify()
+
+		// Disable languages whose binaries are missing
+		if !verifyResult.PythonAvailable {
+			lspCfg.PythonEnabled = false
+		}
+		if !verifyResult.TypeScriptAvailable {
+			lspCfg.TypeScriptEnabled = false
+		}
+
+		slog.Info("GR-75: LSP enrichment enabled",
+			slog.Bool("python", lspCfg.PythonEnabled),
+			slog.Bool("typescript", lspCfg.TypeScriptEnabled),
+			slog.Bool("javascript", lspCfg.TypeScriptEnabled),
+		)
+	}
+
 	svc := trace.NewService(cfg)
+
+	// GR-65: Wire BadgerDB snapshot persistence from environment.
+	var snapshotDB *badgerstore.DB
+	if snapshotDir := os.Getenv("TRACE_SNAPSHOT_DIR"); snapshotDir != "" {
+		snapCfg := badgerstore.DefaultConfig()
+		snapCfg.Path = snapshotDir
+		snapDB, snapErr := badgerstore.OpenDB(snapCfg)
+		if snapErr != nil {
+			slog.Warn("Snapshot BadgerDB unavailable, graph snapshots disabled",
+				slog.String("path", snapshotDir),
+				slog.String("error", snapErr.Error()),
+			)
+		} else {
+			snapMgr, mgrErr := graph.NewSnapshotManager(snapDB.DB, slog.Default())
+			if mgrErr != nil {
+				slog.Warn("Failed to create snapshot manager",
+					slog.String("error", mgrErr.Error()))
+				snapDB.Close()
+			} else {
+				snapshotDB = snapDB
+				svc.SetSnapshotManager(snapMgr)
+				slog.Info("Graph snapshot persistence enabled",
+					slog.String("path", snapshotDir))
+			}
+		}
+	}
+
+	// GR-75: Store LSP availability on service for health endpoint.
+	// JavaScript uses the same typescript-language-server binary as TypeScript.
+	if lspCfg.Enabled {
+		lspLangs := map[string]bool{
+			"python":     lspCfg.PythonEnabled,
+			"typescript": lspCfg.TypeScriptEnabled,
+			"javascript": lspCfg.TypeScriptEnabled, // same binary as TypeScript
+		}
+		svc.SetLSPEnabled(true, lspLangs)
+	}
 
 	// Create handlers
 	handlers := trace.NewHandlers(svc)
@@ -388,6 +467,11 @@ func main() {
 		if routingDB != nil {
 			if err := routingDB.Close(); err != nil {
 				slog.Warn("Failed to close routing cache BadgerDB", slog.String("error", err.Error()))
+			}
+		}
+		if snapshotDB != nil {
+			if err := snapshotDB.Close(); err != nil {
+				slog.Warn("Failed to close snapshot BadgerDB", slog.String("error", err.Error()))
 			}
 		}
 		os.Exit(0)

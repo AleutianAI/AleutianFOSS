@@ -426,8 +426,8 @@ func (p *ReflectPhase) looksComplete(input *ReflectionInput) bool {
 
 		// Tool call indicators in LLM response
 		hasToolCall := strings.Contains(lastRespLower, "<tool_call>") ||
-					   strings.Contains(lastRespLower, "</tool_call>") ||
-					   strings.Contains(lastRespLower, "tool_calls")
+			strings.Contains(lastRespLower, "</tool_call>") ||
+			strings.Contains(lastRespLower, "tool_calls")
 
 		// Remove tool call XML to count actual narrative text
 		narrativeText := input.LastResponse
@@ -670,6 +670,11 @@ func (p *ReflectPhase) synthesizeResponse(ctx context.Context, deps *Dependencie
 
 		// Build and send LLM request (no tools - just get a text response)
 		request := llm.BuildRequest(attemptCtx, nil, 4096)
+
+		// CB-62: Apply per-session main model override.
+		if deps.Session != nil && deps.Session.Config.MainModel != "" {
+			request.ModelOverride = deps.Session.Config.MainModel
+		}
 
 		response, err := deps.LLMClient.Complete(ctx, request)
 		if err != nil {

@@ -318,6 +318,21 @@ type agentRunRequest struct {
 
 	// Query is the user's question or task description.
 	Query string `json:"query"`
+
+	// Config contains optional per-session configuration overrides.
+	// CB-62: Used to forward the user-selected model from OpenWebUI.
+	Config *agentSessionConfig `json:"config,omitempty"`
+}
+
+// agentSessionConfig mirrors the subset of agent.SessionConfig fields
+// that the proxy needs to forward. Defined here to avoid importing the
+// trace service package.
+//
+// Thread Safety: Not safe for concurrent use.
+type agentSessionConfig struct {
+	// MainModel overrides the main reasoning LLM for this session.
+	// When non-empty, overrides OLLAMA_MODEL / TRACE_MAIN_MODEL env vars.
+	MainModel string `json:"main_model,omitempty"`
 }
 
 // agentContinueRequest is the request body for POST /v1/trace/agent/continue.

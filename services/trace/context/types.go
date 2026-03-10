@@ -43,7 +43,11 @@ const (
 	DefaultTimeout = 500 * time.Millisecond
 
 	// MaxQueryLength is the maximum allowed query length in characters.
-	MaxQueryLength = 500
+	// Set to 2000 to accommodate queries with embedded code snippets,
+	// error messages, or function signatures while still rejecting
+	// absurdly large inputs (e.g., OpenWebUI meta-requests that embed
+	// full chat histories).
+	MaxQueryLength = 2000
 
 	// TokenSafetyBuffer is the percentage of budget reserved as safety margin.
 	TokenSafetyBuffer = 0.10

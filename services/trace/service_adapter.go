@@ -12,8 +12,11 @@ package trace
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 )
 
 // ServiceAdapter wraps Service to implement agent.GraphInitializer.
@@ -117,5 +120,62 @@ func (a *ServiceAdapter) InitGraph(ctx context.Context, projectRoot string) (str
 	return result.GraphID, nil
 }
 
+// EnrichmentTraceStep implements agent.EnrichmentStepProvider.
+//
+// Description:
+//
+//	GR-76: Returns a TraceStep describing the LSP enrichment quality of the
+//	cached graph. The CRS journal uses this to record whether graph edges are
+//	backed by LSP type-aware resolution or name heuristics only.
+//
+// Inputs:
+//
+//	graphID - The graph ID to query.
+//
+// Outputs:
+//
+//	*crs.TraceStep - The enrichment TraceStep, or nil if no graph is cached.
+//
+// Thread Safety: This method is safe for concurrent use.
+func (a *ServiceAdapter) EnrichmentTraceStep(graphID string) *crs.TraceStep {
+	a.service.mu.RLock()
+	cached, ok := a.service.graphs[graphID]
+	a.service.mu.RUnlock()
+
+	if !ok || cached == nil {
+		return nil
+	}
+
+	stats := cached.EnrichmentStats
+	meta := map[string]string{
+		"placeholders_queried":  fmt.Sprintf("%d", stats.PlaceholdersQueried),
+		"placeholders_resolved": fmt.Sprintf("%d", stats.PlaceholdersResolved),
+		"placeholders_failed":   fmt.Sprintf("%d", stats.PlaceholdersFailed),
+		"placeholders_skipped":  fmt.Sprintf("%d", stats.PlaceholdersSkipped),
+		"files_queried":         fmt.Sprintf("%d", stats.FilesQueried),
+		"orphans_removed":       fmt.Sprintf("%d", stats.OrphanedRemoved),
+		"lsp_errors":            fmt.Sprintf("%d", stats.LSPErrors),
+		"duration_us":           fmt.Sprintf("%d", stats.DurationMicro),
+	}
+
+	if stats.PlaceholdersQueried > 0 {
+		rate := float64(stats.PlaceholdersResolved) / float64(stats.PlaceholdersQueried) * 100
+		meta["resolution_rate"] = fmt.Sprintf("%.1f%%", rate)
+		meta["lsp_enabled"] = "true"
+	} else {
+		meta["lsp_enabled"] = "false"
+	}
+
+	return &crs.TraceStep{
+		Timestamp: time.Now().UnixMilli(),
+		Action:    "graph_enrichment",
+		Target:    cached.ProjectRoot,
+		Metadata:  meta,
+	}
+}
+
 // Ensure ServiceAdapter implements agent.GraphInitializer.
 var _ agent.GraphInitializer = (*ServiceAdapter)(nil)
+
+// Ensure ServiceAdapter implements agent.EnrichmentStepProvider.
+var _ agent.EnrichmentStepProvider = (*ServiceAdapter)(nil)

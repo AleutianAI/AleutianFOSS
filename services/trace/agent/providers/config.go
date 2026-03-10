@@ -141,23 +141,25 @@ func InferProvider(model string) string {
 	return ""
 }
 
-// MergeSessionOverrides returns a copy of base with Router and ParamExtractor
-// models overridden by per-session values when non-empty.
+// MergeSessionOverrides returns a copy of base with per-session model overrides applied.
 //
 // Description:
 //
-//	Creates a shallow copy of the base RoleConfig and overrides the Router.Model
-//	and ParamExtractor.Model fields when the override values are non-empty.
-//	The Main config is never overridden per-session.
+//	Creates a shallow copy of the base RoleConfig and overrides model fields
+//	when the override values are non-empty. CB-62: mainModel override allows
+//	the user's OpenWebUI model selection to control the main reasoning LLM.
 //
 // Inputs:
 //   - base: The base RoleConfig loaded at startup. Must not be nil.
+//   - mainModel: Override for Main.Model. Empty string means keep base.
 //   - routerModel: Override for Router.Model. Empty string means keep base.
 //   - paramModel: Override for ParamExtractor.Model. Empty string means keep base.
 //
 // Outputs:
 //   - *RoleConfig: A new RoleConfig with overrides applied.
-func MergeSessionOverrides(base *RoleConfig, routerModel, paramModel string) *RoleConfig {
+//
+// Thread Safety: Safe for concurrent use (returns a new copy).
+func MergeSessionOverrides(base *RoleConfig, mainModel, routerModel, paramModel string) *RoleConfig {
 	if base == nil {
 		return nil
 	}
@@ -190,6 +192,9 @@ func MergeSessionOverrides(base *RoleConfig, routerModel, paramModel string) *Ro
 		},
 	}
 
+	if mainModel != "" {
+		merged.Main.Model = mainModel
+	}
 	if routerModel != "" {
 		merged.Router.Model = routerModel
 	}

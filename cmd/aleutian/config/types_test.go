@@ -22,6 +22,7 @@ These tests verify:
 package config
 
 import (
+	"os/exec"
 	"testing"
 	"time"
 )
@@ -929,5 +930,243 @@ func TestHardwareProfileOrder(t *testing.T) {
 		if _, exists := BuiltInHardwareProfiles[name]; !exists {
 			t.Errorf("Profile %q in order but not in BuiltInHardwareProfiles", name)
 		}
+	}
+}
+
+// =============================================================================
+// GR-75: LSP Configuration Tests
+// =============================================================================
+
+// TestLSPConfig_Defaults verifies default LSP configuration values.
+func TestLSPConfig_Defaults(t *testing.T) {
+	cfg := DefaultLSPConfig()
+
+	t.Run("disabled_by_default", func(t *testing.T) {
+		if cfg.Enabled {
+			t.Error("LSP should be disabled by default")
+		}
+	})
+
+	t.Run("languages_enabled_by_default", func(t *testing.T) {
+		if !cfg.PythonEnabled {
+			t.Error("Python should be enabled by default")
+		}
+		if !cfg.TypeScriptEnabled {
+			t.Error("TypeScript should be enabled by default")
+		}
+	})
+
+	t.Run("timeout_defaults", func(t *testing.T) {
+		if cfg.StartupTimeout != 30*time.Second {
+			t.Errorf("StartupTimeout = %v, want 30s", cfg.StartupTimeout)
+		}
+		if cfg.RequestTimeout != 5*time.Second {
+			t.Errorf("RequestTimeout = %v, want 5s", cfg.RequestTimeout)
+		}
+		if cfg.IdleTimeout != 10*time.Minute {
+			t.Errorf("IdleTimeout = %v, want 10m", cfg.IdleTimeout)
+		}
+	})
+}
+
+// TestLSPConfig_FromEnv verifies environment variable parsing.
+func TestLSPConfig_FromEnv(t *testing.T) {
+	t.Run("all_enabled", func(t *testing.T) {
+		t.Setenv("LSP_ENABLED", "true")
+		t.Setenv("LSP_PYTHON_ENABLED", "true")
+		t.Setenv("LSP_TYPESCRIPT_ENABLED", "true")
+		t.Setenv("LSP_STARTUP_TIMEOUT_SECONDS", "60")
+		t.Setenv("LSP_REQUEST_TIMEOUT_SECONDS", "10")
+
+		cfg := LSPConfigFromEnv()
+
+		if !cfg.Enabled {
+			t.Error("LSP should be enabled")
+		}
+		if !cfg.PythonEnabled {
+			t.Error("Python should be enabled")
+		}
+		if !cfg.TypeScriptEnabled {
+			t.Error("TypeScript should be enabled")
+		}
+		if cfg.StartupTimeout != 60*time.Second {
+			t.Errorf("StartupTimeout = %v, want 60s", cfg.StartupTimeout)
+		}
+		if cfg.RequestTimeout != 10*time.Second {
+			t.Errorf("RequestTimeout = %v, want 10s", cfg.RequestTimeout)
+		}
+	})
+
+	t.Run("python_disabled", func(t *testing.T) {
+		t.Setenv("LSP_ENABLED", "true")
+		t.Setenv("LSP_PYTHON_ENABLED", "false")
+		t.Setenv("LSP_TYPESCRIPT_ENABLED", "true")
+
+		cfg := LSPConfigFromEnv()
+
+		if !cfg.Enabled {
+			t.Error("LSP should be enabled")
+		}
+		if cfg.PythonEnabled {
+			t.Error("Python should be disabled")
+		}
+		if !cfg.TypeScriptEnabled {
+			t.Error("TypeScript should be enabled")
+		}
+	})
+
+	t.Run("typescript_disabled", func(t *testing.T) {
+		t.Setenv("LSP_ENABLED", "true")
+		t.Setenv("LSP_PYTHON_ENABLED", "true")
+		t.Setenv("LSP_TYPESCRIPT_ENABLED", "false")
+
+		cfg := LSPConfigFromEnv()
+
+		if cfg.TypeScriptEnabled {
+			t.Error("TypeScript should be disabled")
+		}
+	})
+
+	t.Run("disabled_by_default", func(t *testing.T) {
+		// Clear all LSP env vars
+		t.Setenv("LSP_ENABLED", "")
+		t.Setenv("LSP_PYTHON_ENABLED", "")
+		t.Setenv("LSP_TYPESCRIPT_ENABLED", "")
+
+		cfg := LSPConfigFromEnv()
+
+		if cfg.Enabled {
+			t.Error("LSP should be disabled when LSP_ENABLED is empty")
+		}
+		// Languages should default to true even when LSP is disabled
+		if !cfg.PythonEnabled {
+			t.Error("Python should default to true")
+		}
+		if !cfg.TypeScriptEnabled {
+			t.Error("TypeScript should default to true")
+		}
+	})
+
+	t.Run("invalid_timeout_uses_default", func(t *testing.T) {
+		t.Setenv("LSP_ENABLED", "true")
+		t.Setenv("LSP_STARTUP_TIMEOUT_SECONDS", "not-a-number")
+		t.Setenv("LSP_REQUEST_TIMEOUT_SECONDS", "-5")
+
+		cfg := LSPConfigFromEnv()
+
+		if cfg.StartupTimeout != 30*time.Second {
+			t.Errorf("StartupTimeout = %v, want 30s (default on invalid)", cfg.StartupTimeout)
+		}
+		if cfg.RequestTimeout != 5*time.Second {
+			t.Errorf("RequestTimeout = %v, want 5s (default on negative)", cfg.RequestTimeout)
+		}
+	})
+}
+
+// TestLSPServerVerifier_AllAvailable verifies when all binaries are found.
+func TestLSPServerVerifier_AllAvailable(t *testing.T) {
+	cfg := LSPConfig{
+		Enabled:           true,
+		PythonEnabled:     true,
+		TypeScriptEnabled: true,
+	}
+	v := NewLSPServerVerifier(cfg)
+	v.lookPath = func(file string) (string, error) {
+		return "/usr/bin/" + file, nil
+	}
+
+	result := v.Verify()
+
+	if !result.PythonAvailable {
+		t.Error("Python should be available")
+	}
+	if !result.TypeScriptAvailable {
+		t.Error("TypeScript should be available")
+	}
+	if len(result.Warnings) != 0 {
+		t.Errorf("Expected 0 warnings, got %d: %v", len(result.Warnings), result.Warnings)
+	}
+}
+
+// TestLSPServerVerifier_PythonMissing verifies Python disabled but TypeScript still works.
+func TestLSPServerVerifier_PythonMissing(t *testing.T) {
+	cfg := LSPConfig{
+		Enabled:           true,
+		PythonEnabled:     true,
+		TypeScriptEnabled: true,
+	}
+	v := NewLSPServerVerifier(cfg)
+	v.lookPath = func(file string) (string, error) {
+		if file == "pyright-langserver" {
+			return "", &exec.Error{Name: file, Err: exec.ErrNotFound}
+		}
+		return "/usr/local/bin/" + file, nil
+	}
+
+	result := v.Verify()
+
+	if result.PythonAvailable {
+		t.Error("Python should not be available")
+	}
+	if !result.TypeScriptAvailable {
+		t.Error("TypeScript should still be available")
+	}
+	if len(result.Warnings) != 1 {
+		t.Errorf("Expected 1 warning, got %d", len(result.Warnings))
+	}
+}
+
+// TestLSPServerVerifier_AllMissing verifies graceful degradation.
+func TestLSPServerVerifier_AllMissing(t *testing.T) {
+	cfg := LSPConfig{
+		Enabled:           true,
+		PythonEnabled:     true,
+		TypeScriptEnabled: true,
+	}
+	v := NewLSPServerVerifier(cfg)
+	v.lookPath = func(file string) (string, error) {
+		return "", &exec.Error{Name: file, Err: exec.ErrNotFound}
+	}
+
+	result := v.Verify()
+
+	if result.PythonAvailable {
+		t.Error("Python should not be available")
+	}
+	if result.TypeScriptAvailable {
+		t.Error("TypeScript should not be available")
+	}
+	if len(result.Warnings) != 2 {
+		t.Errorf("Expected 2 warnings, got %d", len(result.Warnings))
+	}
+}
+
+// TestLSPServerVerifier_LanguageDisabled verifies disabled languages are not checked.
+func TestLSPServerVerifier_LanguageDisabled(t *testing.T) {
+	cfg := LSPConfig{
+		Enabled:           true,
+		PythonEnabled:     false,
+		TypeScriptEnabled: false,
+	}
+	v := NewLSPServerVerifier(cfg)
+	lookPathCalled := false
+	v.lookPath = func(file string) (string, error) {
+		lookPathCalled = true
+		return "", &exec.Error{Name: file, Err: exec.ErrNotFound}
+	}
+
+	result := v.Verify()
+
+	if lookPathCalled {
+		t.Error("lookPath should not be called for disabled languages")
+	}
+	if result.PythonAvailable {
+		t.Error("Python should not be available (disabled)")
+	}
+	if result.TypeScriptAvailable {
+		t.Error("TypeScript should not be available (disabled)")
+	}
+	if len(result.Warnings) != 0 {
+		t.Errorf("Expected 0 warnings for disabled languages, got %d", len(result.Warnings))
 	}
 }
