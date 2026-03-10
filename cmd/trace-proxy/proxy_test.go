@@ -1202,6 +1202,104 @@ func TestDetectProjectLanguages(t *testing.T) {
 	})
 }
 
+func TestIsUIMetaRequest(t *testing.T) {
+	t.Run("title generation", func(t *testing.T) {
+		query := `### Task:
+Generate a concise, 3-5 word title with an emoji summarizing the chat history.
+### Chat History:
+<chat_history>
+USER: Tell me about read_csv
+ASSISTANT: read_csv calls 6 functions...
+</chat_history>`
+		if !isUIMetaRequest(query) {
+			t.Error("expected title generation to be detected as UI meta-request")
+		}
+	})
+
+	t.Run("follow-up suggestions", func(t *testing.T) {
+		query := `### Task:
+Suggest 3-5 relevant follow-up questions or prompts that the user might naturally ask next.
+### Chat History:
+<chat_history>
+USER: What calls parseConfig?
+</chat_history>`
+		if !isUIMetaRequest(query) {
+			t.Error("expected follow-up suggestions to be detected as UI meta-request")
+		}
+	})
+
+	t.Run("real code question", func(t *testing.T) {
+		query := "What functions call read_csv in this project?"
+		if isUIMetaRequest(query) {
+			t.Error("real code question should not be detected as UI meta-request")
+		}
+	})
+
+	t.Run("long but real question", func(t *testing.T) {
+		query := "I have a function that processes data from a CSV file using pandas read_csv with parameters like encoding, sep, dtype, and na_values. The function seems to hang when the file is larger than 2GB. Can you find all callers of this function and check if any of them also handle large files?"
+		if isUIMetaRequest(query) {
+			t.Error("long real question should not be detected as UI meta-request")
+		}
+	})
+
+	t.Run("single pattern not enough", func(t *testing.T) {
+		// A query that mentions "title" in a code context should not trigger.
+		query := `How is the "title" field used in the page component?`
+		if isUIMetaRequest(query) {
+			t.Error("single pattern match should not trigger meta-request detection")
+		}
+	})
+}
+
+func TestForwardToOllama(t *testing.T) {
+	t.Run("forwards meta-request to ollama", func(t *testing.T) {
+		ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/api/chat" {
+				t.Errorf("expected /api/chat, got %s", r.URL.Path)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(ollamaChatResponse{
+				Message: ollamaChatMessage{
+					Role:    "assistant",
+					Content: `{ "title": "📊 CSV Analysis Functions" }`,
+				},
+			})
+		}))
+		defer ollamaSrv.Close()
+
+		// Trace server should NOT be called.
+		traceSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("trace server should not be called for meta-requests")
+		}))
+		defer traceSrv.Close()
+
+		proxy := newTestProxy(traceSrv.URL, ollamaSrv.URL)
+		proxy.config.ProjectRoot = "/projects"
+
+		body := `{"model":"gemma3n:latest","messages":[{"role":"user","content":"Tell me about read_csv"},{"role":"assistant","content":"read_csv calls..."},{"role":"user","content":"### Task:\nGenerate a concise, 3-5 word title summarizing the chat history.\n### Chat History:\n<chat_history>\nUSER: Tell me about read_csv\n</chat_history>"}]}`
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		proxy.handleChatCompletions(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		var resp ChatCompletionResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decoding response: %v", err)
+		}
+		if len(resp.Choices) == 0 {
+			t.Fatal("expected at least one choice")
+		}
+		if !strings.Contains(resp.Choices[0].Message.Content, "CSV") {
+			t.Errorf("expected ollama response content, got: %s", resp.Choices[0].Message.Content)
+		}
+	})
+}
+
 // touch creates an empty file, creating parent directories as needed.
 func touch(t *testing.T, path string) {
 	t.Helper()
