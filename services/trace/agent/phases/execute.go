@@ -843,6 +843,45 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 						})
 					}
 				}
+			// CB-63: Navigation & retrieval tools — conceptual resolution
+			case "read_symbol":
+				if rsParams, ok := params.(tools.ReadSymbolParams); ok && rsParams.Name != "" {
+					result := resolveConceptualName(ctx, rsParams.Name, deps.Query,
+						deps.SymbolIndex, deps.ParamExtractor, deps.Session,
+						conceptualResolutionOpts{Analytics: deps.GraphAnalytics, AcceptAnyKind: true})
+					if result.Resolved != rsParams.Name {
+						rsParams.Name = result.Resolved
+						params = rsParams
+					}
+					if result.Overridden {
+						p.learnFromFailure(ctx, deps, crs.FailureEvent{
+							SessionID:    deps.Session.ID,
+							FailureType:  crs.FailureTypeResolutionDemotion,
+							Tool:         hardForcing.Tool,
+							Source:       crs.SignalSourceHard,
+							ErrorMessage: fmt.Sprintf("LLM picked tier%d [%s], overrode to tier0", result.LLMPickTier, result.LLMPick),
+						})
+					}
+				}
+			case "get_signature":
+				if gsParams, ok := params.(tools.GetSignatureParams); ok && gsParams.Name != "" {
+					result := resolveConceptualName(ctx, gsParams.Name, deps.Query,
+						deps.SymbolIndex, deps.ParamExtractor, deps.Session,
+						conceptualResolutionOpts{Analytics: deps.GraphAnalytics, AcceptAnyKind: true})
+					if result.Resolved != gsParams.Name {
+						gsParams.Name = result.Resolved
+						params = gsParams
+					}
+					if result.Overridden {
+						p.learnFromFailure(ctx, deps, crs.FailureEvent{
+							SessionID:    deps.Session.ID,
+							FailureType:  crs.FailureTypeResolutionDemotion,
+							Tool:         hardForcing.Tool,
+							Source:       crs.SignalSourceHard,
+							ErrorMessage: fmt.Sprintf("LLM picked tier%d [%s], overrode to tier0", result.LLMPickTier, result.LLMPick),
+						})
+					}
+				}
 			case "find_path":
 				if fpParams, ok := params.(tools.FindPathParams); ok {
 					// D3c: Resolve from-side first, then use its ID for to-side reachability + context.
@@ -2988,6 +3027,17 @@ func (p *ExecutePhase) synthesizeFromGraphToolResults(deps *Dependencies, toolRe
 				slog.Int("content_len", len(content)),
 			)
 			continue
+
+		// CB-63: Navigation tools with structured output suitable for synthesis
+		case "get_signature":
+			sb.WriteString("**Signature:**\n")
+			sb.WriteString(content)
+			sb.WriteString("\n\n")
+
+		case "list_symbols_in_file":
+			sb.WriteString("**Symbols in file:**\n")
+			sb.WriteString(content)
+			sb.WriteString("\n\n")
 
 		case "find_entry_points":
 			sb.WriteString("**Entry points found:**\n")

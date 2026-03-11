@@ -2479,6 +2479,80 @@ func (p *ExecutePhase) extractToolParameters(
 		)
 		return callChainParams, nil
 
+	// CB-63: Navigation & retrieval tools
+	case "read_symbol":
+		// Extract symbol name from query
+		funcName := extractFunctionNameFromQuery(query)
+		if funcName == "" && ctx != nil {
+			funcName = extractFunctionNameFromContext(ctx)
+		}
+		if funcName == "" {
+			return nil, fmt.Errorf("could not extract symbol name from query for read_symbol")
+		}
+		kind := extractKindFromQuery(query)
+		pkgHint := extractPackageContextFromQuery(query)
+		slog.Debug("CB-63: extracted read_symbol params",
+			slog.String("tool", toolName),
+			slog.String("name", funcName),
+			slog.String("kind", kind),
+			slog.String("package_hint", pkgHint),
+		)
+		return tools.ReadSymbolParams{
+			Name:        funcName,
+			Kind:        kind,
+			PackageHint: pkgHint,
+		}, nil
+
+	case "read_file":
+		// Extract file path from query
+		filePath := extractFilePathFromQuery(query)
+		if filePath == "" {
+			return nil, fmt.Errorf("could not extract file path from query for read_file")
+		}
+		startLine, endLine := extractLineRangeFromQuery(query, 1, 200)
+		slog.Debug("CB-63: extracted read_file params",
+			slog.String("tool", toolName),
+			slog.String("path", filePath),
+			slog.Int("start_line", startLine),
+			slog.Int("end_line", endLine),
+		)
+		return tools.ReadFileParams{
+			Path:      filePath,
+			StartLine: startLine,
+			EndLine:   endLine,
+		}, nil
+
+	case "get_signature":
+		// Extract symbol name from query
+		funcName := extractFunctionNameFromQuery(query)
+		if funcName == "" && ctx != nil {
+			funcName = extractFunctionNameFromContext(ctx)
+		}
+		if funcName == "" {
+			return nil, fmt.Errorf("could not extract symbol name from query for get_signature")
+		}
+		slog.Debug("CB-63: extracted get_signature params",
+			slog.String("tool", toolName),
+			slog.String("name", funcName),
+		)
+		return tools.GetSignatureParams{
+			Name: funcName,
+		}, nil
+
+	case "list_symbols_in_file":
+		// Extract file path from query
+		filePath := extractFilePathFromQuery(query)
+		if filePath == "" {
+			return nil, fmt.Errorf("could not extract file path from query for list_symbols_in_file")
+		}
+		slog.Debug("CB-63: extracted list_symbols_in_file params",
+			slog.String("tool", toolName),
+			slog.String("path", filePath),
+		)
+		return tools.ListSymbolsInFileParams{
+			Path: filePath,
+		}, nil
+
 	default:
 		// For other tools, fallback to Main LLM
 		return nil, fmt.Errorf("parameter extraction not implemented for tool: %s", toolName)

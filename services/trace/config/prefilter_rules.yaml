@@ -231,6 +231,26 @@ confusion_pairs:
       - "cross-community"
     boost_amount: 3.0
 
+  # CB-63: find_cycles vs find_communities.
+  # "what cycles exist" / "circular dependencies" → find_cycles (Tarjan SCC).
+  # "communities" / "module boundaries" → find_communities (Leiden clustering).
+  # The bare word "cycles" was misrouting to find_communities during demo.
+  - tool_a: find_cycles
+    tool_b: find_communities
+    tool_a_patterns:
+      - "cycles"
+      - "circular"
+      - "cyclic"
+      - "what cycles"
+      - "any cycles"
+    tool_b_patterns:
+      - "communities"
+      - "community"
+      - "module boundaries"
+      - "natural modules"
+      - "code clusters"
+    boost_amount: 3.0
+
   # CB-62: Removed confusion pairs that embeddings handle naturally:
   # - find_callers/find_implementations (IT-16)
   # - find_callees/find_cycles (IT-16)

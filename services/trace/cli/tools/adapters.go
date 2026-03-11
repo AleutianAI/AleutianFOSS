@@ -77,6 +77,14 @@ func RegisterExploreTools(registry *Registry, g *graph.Graph, idx *index.SymbolI
 	registry.Register(NewGetCallChainTool(g, idx))
 	registry.Register(NewFindReferencesTool(g, idx))
 
+	// Level 4b: Navigation & retrieval tools (CB-63 Tier 1)
+	// These expose source code reading and navigation for answering
+	// questions like "explain X", "show me this file", "what's in this file?"
+	registry.Register(NewReadSymbolTool(g, idx))
+	registry.Register(NewReadFileTool(g))
+	registry.Register(NewGetSignatureTool(g, idx))
+	registry.Register(NewListSymbolsInFileTool(g, idx))
+
 	// Level 5: Graph analytics tools (GR-02 to GR-05, GR-12/GR-13, GR-15)
 	// These wrap GraphAnalytics for code quality insights.
 	// Requires wrapping Graph into HierarchicalGraph for analytics.
@@ -1793,6 +1801,144 @@ func StaticToolDefinitions() []ToolDefinition {
 					"similar purpose or behavior. Examples: 'find symbols similar to parseConfig'.",
 				AvoidWhen: "User wants callers or callees — use graph query tools. " +
 					"User wants implementations or subclasses — use find_implementations.",
+			},
+		},
+		// CB-63 Tier 1: Navigation & retrieval tools
+		{
+			Name: "read_symbol",
+			Description: "Read the source code of a named symbol (function, class, method, etc.). " +
+				"Uses the symbol index for instant lookup, then reads the exact line range from the project files. " +
+				"Use when asked 'explain X', 'show me X', 'what does X do?', or 'read the source of X'. " +
+				"Returns the full source code with file path and line numbers.",
+			Parameters: map[string]ParamDef{
+				"name": {
+					Type:        ParamTypeString,
+					Description: "Name of the symbol to read source code for (e.g., 'read_csv', 'parseConfig', 'DataFrame')",
+					Required:    true,
+				},
+				"kind": {
+					Type:        ParamTypeString,
+					Description: "Optional filter by symbol kind",
+					Required:    false,
+					Default:     "all",
+					Enum:        []any{"function", "method", "class", "struct", "interface", "type", "all"},
+				},
+				"package_hint": {
+					Type:        ParamTypeString,
+					Description: "Optional package/module hint for disambiguation",
+					Required:    false,
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    96,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     5 * time.Second,
+			WhenToUse: WhenToUse{
+				Keywords: []string{
+					"explain", "show me", "what does", "read source",
+					"source code", "show source", "read function",
+					"show function", "read code", "implementation of",
+				},
+				UseWhen: "User asks to explain, show, or read the source code of a specific function, " +
+					"class, or method. Questions like 'explain X', 'what does X do?', 'show me X'.",
+				AvoidWhen: "User asks about callers, callees, or graph structure — use graph query tools. " +
+					"User asks about file contents without a specific symbol — use read_file. " +
+					"User asks about just the signature — use get_signature.",
+			},
+		},
+		{
+			Name: "read_file",
+			Description: "Read a file or line range from the project. " +
+				"Supports path-based access for viewing source code. " +
+				"Default: first 200 lines. Max: 500 lines per request.",
+			Parameters: map[string]ParamDef{
+				"path": {
+					Type:        ParamTypeString,
+					Description: "File path relative to project root",
+					Required:    true,
+				},
+				"start_line": {
+					Type:        ParamTypeInt,
+					Description: "First line to read (1-indexed, default: 1)",
+					Required:    false,
+					Default:     1,
+				},
+				"end_line": {
+					Type:        ParamTypeInt,
+					Description: "Last line to read (1-indexed, default: 200)",
+					Required:    false,
+					Default:     200,
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    93,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     5 * time.Second,
+			WhenToUse: WhenToUse{
+				Keywords: []string{
+					"show file", "read file", "view file",
+					"show lines", "lines of", "file contents",
+				},
+				UseWhen: "User wants to see the contents of a specific file or line range. " +
+					"Use when the user provides a file path from graph results.",
+				AvoidWhen: "User asks about a specific named symbol — use read_symbol. " +
+					"User asks what symbols are in a file — use list_symbols_in_file.",
+			},
+		},
+		{
+			Name: "get_signature",
+			Description: "Get the type signature and documentation of a named symbol. " +
+				"Returns the function signature, doc comment, kind, file location, and export status. " +
+				"Fastest way to understand a function without reading the full source.",
+			Parameters: map[string]ParamDef{
+				"name": {
+					Type:        ParamTypeString,
+					Description: "Name of the symbol to get the signature for",
+					Required:    true,
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    91,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     5 * time.Second,
+			WhenToUse: WhenToUse{
+				Keywords: []string{
+					"signature", "type signature", "function signature",
+					"how to call", "parameters of", "arguments of",
+				},
+				UseWhen: "User asks about the signature, parameters, or documentation of a symbol.",
+				AvoidWhen: "User wants the full source code — use read_symbol. " +
+					"User asks about callers or callees — use graph query tools.",
+			},
+		},
+		{
+			Name: "list_symbols_in_file",
+			Description: "List all symbols (functions, classes, methods, types, etc.) defined in a given file. " +
+				"Returns symbols sorted by line number with their kind and export status.",
+			Parameters: map[string]ParamDef{
+				"path": {
+					Type:        ParamTypeString,
+					Description: "File path relative to project root",
+					Required:    true,
+				},
+			},
+			Category:    CategoryExploration,
+			Priority:    90,
+			Requires:    []string{"graph_initialized"},
+			SideEffects: false,
+			Timeout:     5 * time.Second,
+			WhenToUse: WhenToUse{
+				Keywords: []string{
+					"symbols in file", "functions in file", "what's in",
+					"list symbols", "list functions", "file outline",
+				},
+				UseWhen: "User asks what symbols are defined in a specific file. " +
+					"Questions like 'what's in X?', 'list functions in X'.",
+				AvoidWhen: "User wants to read actual source code — use read_file or read_symbol. " +
+					"User wants to find a symbol by name — use find_symbol.",
 			},
 		},
 	}

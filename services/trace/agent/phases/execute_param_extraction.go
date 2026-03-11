@@ -1855,3 +1855,127 @@ func reDeriveDestinationFromQuery(query, from string) string {
 
 	return phrase[0]
 }
+
+// extractFilePathFromQuery extracts a file path from a user query.
+//
+// Description:
+//
+//	Looks for patterns like quoted paths, paths with extensions, or
+//	paths following keywords like "file", "in", "of", "from".
+//	Returns the extracted path or empty string if none found.
+//
+// Inputs:
+//
+//   - query: The raw user query string.
+//
+// Outputs:
+//
+//   - string: The extracted file path, or "" if no path found.
+//
+// Limitations:
+//
+//   - Does not validate the path exists on disk.
+//   - May not handle all path formats (e.g., Windows backslashes).
+//
+// Assumptions:
+//
+//   - Paths use forward slashes and have file extensions.
+func extractFilePathFromQuery(query string) string {
+	// Pattern 1: Quoted path — "src/main.go" or 'src/main.go'
+	quotedPathRegex := regexp.MustCompile(`['"]([^'"]+\.[a-zA-Z]{1,10})['"]`)
+	if m := quotedPathRegex.FindStringSubmatch(query); len(m) > 1 {
+		return m[1]
+	}
+
+	// Pattern 2: Backtick-quoted path — `src/main.go`
+	backtickPathRegex := regexp.MustCompile("`([^`]+\\.[a-zA-Z]{1,10})`")
+	if m := backtickPathRegex.FindStringSubmatch(query); len(m) > 1 {
+		return m[1]
+	}
+
+	// Pattern 3: Path with directory separator and extension — src/main.go, pkg/config/config.go
+	slashPathRegex := regexp.MustCompile(`\b([\w./-]+/[\w.-]+\.[a-zA-Z]{1,10})\b`)
+	if m := slashPathRegex.FindStringSubmatch(query); len(m) > 1 {
+		return m[1]
+	}
+
+	// Pattern 4: Simple filename with extension after keywords — "file main.go", "in utils.py"
+	keywordFileRegex := regexp.MustCompile(`(?i)(?:file|in|of|from)\s+([\w.-]+\.[a-zA-Z]{1,10})\b`)
+	if m := keywordFileRegex.FindStringSubmatch(query); len(m) > 1 {
+		return m[1]
+	}
+
+	// Pattern 5: Bare filename with common extension at word boundary
+	bareFileRegex := regexp.MustCompile(`\b([\w.-]+\.(?:go|py|js|ts|tsx|jsx|rs|java|rb|c|h|cpp|cc|hpp|cs|yaml|yml|json|md|sh))\b`)
+	if m := bareFileRegex.FindStringSubmatch(query); len(m) > 1 {
+		return m[1]
+	}
+
+	return ""
+}
+
+// extractLineRangeFromQuery extracts start and end line numbers from a user query.
+//
+// Description:
+//
+//	Looks for patterns like "lines 100-200", "line 50 to 100", "lines 100 through 200",
+//	or "line 42". Returns defaults if no match found.
+//
+// Inputs:
+//
+//   - query: The raw user query string.
+//   - defaultStart: Default start line if none found (typically 1).
+//   - defaultEnd: Default end line if none found (typically 200).
+//
+// Outputs:
+//
+//   - start: The extracted or default start line.
+//   - end: The extracted or default end line.
+//
+// Limitations:
+//
+//   - Does not validate lines against actual file length.
+//
+// Assumptions:
+//
+//   - Line numbers are positive integers.
+func extractLineRangeFromQuery(query string, defaultStart, defaultEnd int) (start, end int) {
+	start = defaultStart
+	end = defaultEnd
+
+	// Pattern 1: "lines 100-200", "lines 100 to 200", "lines 100 through 200"
+	rangeRegex := regexp.MustCompile(`(?i)lines?\s+(\d+)\s*[-–—]\s*(\d+)`)
+	if m := rangeRegex.FindStringSubmatch(query); len(m) > 2 {
+		if s, err := strconv.Atoi(m[1]); err == nil && s > 0 {
+			start = s
+		}
+		if e, err := strconv.Atoi(m[2]); err == nil && e > 0 {
+			end = e
+		}
+		return
+	}
+
+	// Pattern 2: "lines 100 to 200"
+	rangeToRegex := regexp.MustCompile(`(?i)lines?\s+(\d+)\s+(?:to|through)\s+(\d+)`)
+	if m := rangeToRegex.FindStringSubmatch(query); len(m) > 2 {
+		if s, err := strconv.Atoi(m[1]); err == nil && s > 0 {
+			start = s
+		}
+		if e, err := strconv.Atoi(m[2]); err == nil && e > 0 {
+			end = e
+		}
+		return
+	}
+
+	// Pattern 3: "line 42" (single line → show context around it)
+	singleLineRegex := regexp.MustCompile(`(?i)line\s+(\d+)\b`)
+	if m := singleLineRegex.FindStringSubmatch(query); len(m) > 1 {
+		if s, err := strconv.Atoi(m[1]); err == nil && s > 0 {
+			start = s
+			end = s + 50 // Show 50 lines from the specified line
+		}
+		return
+	}
+
+	return
+}
