@@ -655,6 +655,7 @@ tools:
 
   - name: find_cycles
     keywords:
+      - cycles
       - call cycles
       - cyclic calls
       - function cycles
@@ -666,16 +667,22 @@ tools:
       - strongly connected
       - SCC
       - circular call chains
+      - what cycles
+      - any cycles
+      - exist cycles
     use_when: >
       User wants to find circular call dependencies between functions using Tarjan's
-      SCC algorithm. This is the correct tool for ANY query about circular dependencies,
-      dependency cycles, or circular call chains in the call graph. Examples: 'Find circular
-      call dependencies', 'Are there dependency cycles?', 'Find circular call chains',
-      'What are the shortest circular dependencies?'. This tool finds cycles between
-      DISTINCT functions — for recursion within a single function, use find_loops.
+      SCC algorithm. This is the correct tool for ANY query about cycles, circular
+      dependencies, dependency cycles, or circular call chains in the call graph.
+      Examples: 'What cycles exist?', 'Find circular call dependencies', 'Are there
+      dependency cycles?', 'Find circular call chains', 'What are the shortest circular
+      dependencies?'. The bare word "cycles" without other context ALWAYS means find_cycles.
+      This tool finds cycles between DISTINCT functions — for recursion within a single
+      function, use find_loops.
     avoid_when: >
       User asks about recursion within a single function (use find_loops).
       User asks about package-level import cycles (use find_circular_deps).
+      NEVER confuse with find_communities — cycles are circular call chains, NOT module clusters.
     requires:
       - graph_initialized
 
@@ -793,7 +800,13 @@ tools:
       - community boundaries
       - cross-community
     use_when: "User wants to find natural code communities or module boundaries. Also use when user asks what community a subsystem belongs to, whether specific classes form distinct communities, about community coupling, or about bridges/connections between communities. ANY query containing the word 'community' or 'communities' should use this tool."
-    avoid_when: "User wants to find callers or callees of specific functions"
+    avoid_when: >
+      User wants to find callers or callees of specific functions.
+      NEVER use find_communities when the query asks about cycles, circular dependencies,
+      circular calls, or dependency cycles — use find_cycles instead. The word "cycles"
+      means find_cycles, NOT find_communities.
+      NEVER use find_communities when the user asks to explain, read, or show source code
+      of a specific function — use read_symbol instead.
     instead_of:
       - tool: Grep
         when: "Searching for module structure or code organization patterns"
