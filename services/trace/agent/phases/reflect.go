@@ -1002,9 +1002,10 @@ func (p *ReflectPhase) prepareSynthesisContext(deps *Dependencies) *agent.Assemb
 			truncatedOutput = truncatedOutput[:maxResultLen] + "\n... [output truncated]"
 		}
 		reduced.ToolResults = append(reduced.ToolResults, agent.ToolResult{
-			InvocationID: result.InvocationID,
-			Output:       truncatedOutput,
-			Success:      result.Success,
+			InvocationID:     result.InvocationID,
+			Output:           truncatedOutput,
+			Success:          result.Success,
+			ThoughtSignature: result.ThoughtSignature,
 		})
 	}
 

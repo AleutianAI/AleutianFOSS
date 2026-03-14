@@ -23,7 +23,6 @@ RUN go mod download
 
 # Copy source code
 COPY services/ ./services/
-COPY pkg/ ./pkg/
 COPY cmd/ ./cmd/
 
 # Build the trace binary (CGO required for go-tree-sitter).

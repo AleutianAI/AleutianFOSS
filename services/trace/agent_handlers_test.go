@@ -19,8 +19,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AleutianAI/AleutianFOSS/services/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
+	agentllm "github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/providers"
 	"github.com/gin-gonic/gin"
 )
@@ -592,7 +592,7 @@ func TestAgentHandlers_HandleGetCRSExport_NoCRS(t *testing.T) {
 
 func TestNewAgentHandlers_WithOptions_SameMMM(t *testing.T) {
 	mockLoop := &MockAgentLoop{}
-	mgr := llm.NewMultiModelManager("http://localhost:11434")
+	mgr := agentllm.NewMultiModelManager("http://localhost:11434")
 	factory := providers.NewProviderFactory(mgr)
 	rc := &providers.RoleConfig{
 		Main:   providers.ProviderConfig{Provider: providers.ProviderOllama, Model: "test"},

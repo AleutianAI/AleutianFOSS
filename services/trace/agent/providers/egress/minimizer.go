@@ -453,9 +453,10 @@ func compressTurn(msg agentllm.Message) agentllm.Message {
 			for i, tc := range msg.ToolCalls {
 				toolNames[i] = tc.Name
 				stubs[i] = agentllm.ToolCall{
-					ID:        tc.ID,
-					Name:      tc.Name,
-					Arguments: "{}",
+					ID:               tc.ID,
+					Name:             tc.Name,
+					Arguments:        "{}",
+					ThoughtSignature: tc.ThoughtSignature,
 				}
 			}
 			compressed.Content = fmt.Sprintf("[Previous turn: assistant used tools: %s]", strings.Join(toolNames, ", "))

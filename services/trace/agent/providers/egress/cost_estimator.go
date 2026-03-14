@@ -32,6 +32,7 @@ type ModelPricing struct {
 var defaultPricing = map[string]ModelPricing{
 	// Anthropic
 	"claude-sonnet-4-20250514":  {InputCostPerMillion: 3.0, OutputCostPerMillion: 15.0},
+	"claude-sonnet-4-6":         {InputCostPerMillion: 3.0, OutputCostPerMillion: 15.0},
 	"claude-haiku-4-5-20251001": {InputCostPerMillion: 1.0, OutputCostPerMillion: 5.0},
 
 	// OpenAI
@@ -39,9 +40,13 @@ var defaultPricing = map[string]ModelPricing{
 	"gpt-4o-mini": {InputCostPerMillion: 0.15, OutputCostPerMillion: 0.60},
 
 	// Gemini
-	"gemini-1.5-flash": {InputCostPerMillion: 0.075, OutputCostPerMillion: 0.30},
-	"gemini-1.5-pro":   {InputCostPerMillion: 1.25, OutputCostPerMillion: 5.0},
-	"gemini-2.0-flash": {InputCostPerMillion: 0.10, OutputCostPerMillion: 0.40},
+	"gemini-3-flash-preview":        {InputCostPerMillion: 0.10, OutputCostPerMillion: 0.40},
+	"gemini-3.1-pro-preview":        {InputCostPerMillion: 1.25, OutputCostPerMillion: 5.0},
+	"gemini-3.1-flash-lite-preview": {InputCostPerMillion: 0.05, OutputCostPerMillion: 0.20},
+	"gemini-2.5-flash":              {InputCostPerMillion: 0.15, OutputCostPerMillion: 0.60},
+	"gemini-1.5-flash":              {InputCostPerMillion: 0.075, OutputCostPerMillion: 0.30},
+	"gemini-1.5-pro":                {InputCostPerMillion: 1.25, OutputCostPerMillion: 5.0},
+	"gemini-2.0-flash":              {InputCostPerMillion: 0.10, OutputCostPerMillion: 0.40},
 }
 
 // CostEstimator tracks cumulative cost and enforces a cost ceiling.

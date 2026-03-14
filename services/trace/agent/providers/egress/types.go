@@ -26,8 +26,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
+	agenttypes "github.com/AleutianAI/AleutianFOSS/services/trace/agent/types"
 )
+
+// Message is a type alias for agenttypes.Message, re-exported to avoid
+// import cycles between the egress and providers packages.
+type Message = agenttypes.Message
 
 // ChatClient mirrors providers.ChatClient to avoid an import cycle between
 // the egress and providers packages. Go's structural typing ensures that
@@ -35,7 +39,7 @@ import (
 //
 // Thread Safety: Implementations must be safe for concurrent use.
 type ChatClient interface {
-	Chat(ctx context.Context, messages []datatypes.Message, opts ChatOptions) (string, error)
+	Chat(ctx context.Context, messages []Message, opts ChatOptions) (string, error)
 }
 
 // ChatOptions mirrors providers.ChatOptions. Kept structurally identical so

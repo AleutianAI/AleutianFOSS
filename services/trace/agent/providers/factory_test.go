@@ -15,7 +15,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AleutianAI/AleutianFOSS/services/llm"
+	agentllm "github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
 )
 
 func TestLoadRoleConfig_Defaults(t *testing.T) {
@@ -197,7 +197,7 @@ func TestProviderFactory_CreateChatClient_InvalidProvider(t *testing.T) {
 }
 
 func TestProviderFactory_CreateChatClient_Ollama(t *testing.T) {
-	mgr := llm.NewMultiModelManager("http://localhost:11434")
+	mgr := agentllm.NewMultiModelManager("http://localhost:11434")
 	factory := NewProviderFactory(mgr)
 
 	client, err := factory.CreateChatClient(ProviderConfig{Provider: ProviderOllama, Model: "test-model"})
@@ -210,7 +210,7 @@ func TestProviderFactory_CreateChatClient_Ollama(t *testing.T) {
 }
 
 func TestProviderFactory_CreateLifecycleManager_Ollama(t *testing.T) {
-	mgr := llm.NewMultiModelManager("http://localhost:11434")
+	mgr := agentllm.NewMultiModelManager("http://localhost:11434")
 	factory := NewProviderFactory(mgr)
 
 	lm, err := factory.CreateLifecycleManager(ProviderConfig{Provider: ProviderOllama})
@@ -547,7 +547,7 @@ func TestProviderFactory_AllCloudConfig_NilModelManager(t *testing.T) {
 
 func TestProviderFactory_MixedConfig(t *testing.T) {
 	// Mixed config: Ollama for some roles, cloud for others.
-	mgr := llm.NewMultiModelManager("http://localhost:11434")
+	mgr := agentllm.NewMultiModelManager("http://localhost:11434")
 	factory := NewProviderFactory(mgr)
 
 	t.Run("ollama_chat_succeeds_with_manager", func(t *testing.T) {

@@ -13,10 +13,9 @@ package providers
 import (
 	"context"
 	"fmt"
+	agentllm "github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
 	"time"
 
-	"github.com/AleutianAI/AleutianFOSS/services/llm"
-	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -32,7 +31,7 @@ import (
 //
 // Thread Safety: AnthropicChatAdapter is safe for concurrent use.
 type AnthropicChatAdapter struct {
-	client *llm.AnthropicClient
+	client *agentllm.AnthropicClient
 }
 
 // NewAnthropicChatAdapter creates a new AnthropicChatAdapter.
@@ -42,12 +41,12 @@ type AnthropicChatAdapter struct {
 //
 // Outputs:
 //   - *AnthropicChatAdapter: The configured adapter.
-func NewAnthropicChatAdapter(client *llm.AnthropicClient) *AnthropicChatAdapter {
+func NewAnthropicChatAdapter(client *agentllm.AnthropicClient) *AnthropicChatAdapter {
 	return &AnthropicChatAdapter{client: client}
 }
 
 // Chat implements ChatClient by delegating to AnthropicClient.Chat.
-func (a *AnthropicChatAdapter) Chat(ctx context.Context, messages []datatypes.Message, opts ChatOptions) (string, error) {
+func (a *AnthropicChatAdapter) Chat(ctx context.Context, messages []Message, opts ChatOptions) (string, error) {
 	if a.client == nil {
 		return "", fmt.Errorf("Anthropic client is nil")
 	}
@@ -62,7 +61,10 @@ func (a *AnthropicChatAdapter) Chat(ctx context.Context, messages []datatypes.Me
 	)
 	defer span.End()
 
-	params := llm.GenerationParams{}
+	params := agentllm.GenerationParams{}
+	if opts.Model != "" {
+		params.ModelOverride = opts.Model
+	}
 	if opts.Temperature >= 0 {
 		temp := float32(opts.Temperature)
 		params.Temperature = &temp

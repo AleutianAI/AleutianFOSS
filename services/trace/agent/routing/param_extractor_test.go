@@ -17,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/providers"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/rag"
@@ -313,7 +312,7 @@ func TestParamExtractor_LowConfidenceEntity(t *testing.T) {
 
 func TestParamExtractor_MixedConfidenceEntities(t *testing.T) {
 	// Capture the messages sent to the mock to verify prompt content.
-	var capturedMessages []datatypes.Message
+	var capturedMessages []providers.Message
 	captureMock := &capturingChatClient{
 		response: `{"package": "pkg/materials"}`,
 		captured: &capturedMessages,
@@ -376,7 +375,7 @@ func TestParamExtractor_MixedConfidenceEntities(t *testing.T) {
 }
 
 func TestParamExtractor_AvailablePackagesConstraint(t *testing.T) {
-	var capturedMessages []datatypes.Message
+	var capturedMessages []providers.Message
 	captureMock := &capturingChatClient{
 		response: `{"package": "pkg/render"}`,
 		captured: &capturedMessages,
@@ -422,10 +421,10 @@ func TestParamExtractor_AvailablePackagesConstraint(t *testing.T) {
 // capturingChatClient captures messages sent to Chat for test verification.
 type capturingChatClient struct {
 	response string
-	captured *[]datatypes.Message
+	captured *[]providers.Message
 }
 
-func (c *capturingChatClient) Chat(ctx context.Context, messages []datatypes.Message, opts providers.ChatOptions) (string, error) {
+func (c *capturingChatClient) Chat(ctx context.Context, messages []providers.Message, opts providers.ChatOptions) (string, error) {
 	*c.captured = append(*c.captured, messages...)
 	return c.response, nil
 }
@@ -440,7 +439,7 @@ type mockChatClient struct {
 	err      error
 }
 
-func (m *mockChatClient) Chat(ctx context.Context, messages []datatypes.Message, opts providers.ChatOptions) (string, error) {
+func (m *mockChatClient) Chat(ctx context.Context, messages []providers.Message, opts providers.ChatOptions) (string, error) {
 	if m.err != nil {
 		return "", m.err
 	}

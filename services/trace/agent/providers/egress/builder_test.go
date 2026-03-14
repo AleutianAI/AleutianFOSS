@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	agentllm "github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
 )
 
@@ -107,7 +106,7 @@ func TestEgressGuardBuilder_WrapChatClient_CloudWrapped(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	resp, err := guard.Chat(ctx, []datatypes.Message{{Role: "user", Content: "test"}}, ChatOptions{})
+	resp, err := guard.Chat(ctx, []Message{{Role: "user", Content: "test"}}, ChatOptions{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

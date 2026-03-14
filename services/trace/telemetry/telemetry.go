@@ -68,7 +68,7 @@ type Config struct {
 
 	// AllowDegraded allows the service to start even if telemetry backends are unavailable.
 	// When true, Init() logs a warning but returns success with noop providers.
-	// Default: false (strict mode for catching configuration errors in development).
+	// Default: true (server starts cleanly without OTel backends).
 	AllowDegraded bool `json:"allow_degraded"`
 }
 
@@ -84,13 +84,13 @@ func DefaultConfig() Config {
 		ServiceName:    "aleutian",
 		ServiceVersion: "1.0.0",
 		Environment:    getEnvOr("ALEUTIAN_ENV", "development"),
-		TraceExporter:  getEnvOr("OTEL_TRACES_EXPORTER", "otlp"),
-		MetricExporter: getEnvOr("OTEL_METRICS_EXPORTER", "prometheus"),
+		TraceExporter:  getEnvOr("OTEL_TRACES_EXPORTER", "none"),
+		MetricExporter: getEnvOr("OTEL_METRICS_EXPORTER", "none"),
 		OTLPEndpoint:   getEnvOr("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317"),
 		OTLPInsecure:   true,
 		PrometheusPort: 9090,
 		SampleRate:     1.0, // 100% sampling for development
-		AllowDegraded:  false,
+		AllowDegraded:  true,
 	}
 }
 

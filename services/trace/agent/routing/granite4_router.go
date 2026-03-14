@@ -18,8 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AleutianAI/AleutianFOSS/services/llm"
-	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
+	agentllm "github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/providers"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -128,7 +127,7 @@ func NewGranite4RouterWithDefaults(ollamaEndpoint string) (*Granite4Router, erro
 	config := DefaultRouterConfig()
 	config.OllamaEndpoint = ollamaEndpoint
 
-	modelManager := llm.NewMultiModelManager(ollamaEndpoint)
+	modelManager := agentllm.NewMultiModelManager(ollamaEndpoint)
 	chatClient := providers.NewOllamaChatAdapter(modelManager, config.Model)
 
 	return NewGranite4Router(chatClient, config)
@@ -199,7 +198,7 @@ func (r *Granite4Router) SelectTool(ctx context.Context, query string, available
 	)
 
 	// Call the model
-	messages := []datatypes.Message{
+	messages := []providers.Message{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: userPrompt},
 	}
@@ -332,7 +331,7 @@ func (r *Granite4Router) FilterBatch(ctx context.Context, prompt string) (string
 
 	// Build messages for the model manager
 	systemPrompt := "You are a tool filter that decides which tool calls to KEEP or SKIP based on relevance and redundancy. Respond only with the format: 1:KEEP 2:SKIP 3:KEEP ..."
-	messages := []datatypes.Message{
+	messages := []providers.Message{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: prompt},
 	}

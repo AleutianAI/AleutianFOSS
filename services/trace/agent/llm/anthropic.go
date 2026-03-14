@@ -16,9 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AleutianAI/AleutianFOSS/services/llm"
-	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
+	agenttypes "github.com/AleutianAI/AleutianFOSS/services/trace/agent/types"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/telemetry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -34,11 +33,11 @@ import (
 //
 //	Wraps the existing AnthropicClient to provide LLM capabilities for the
 //	agent loop using Anthropic Claude models. Converts between agent message
-//	format and Anthropic's datatypes.Message format.
+//	format and Anthropic's agenttypes.Message format.
 //
 // Thread Safety: AnthropicAgentAdapter is safe for concurrent use.
 type AnthropicAgentAdapter struct {
-	client *llm.AnthropicClient
+	client *AnthropicClient
 	model  string
 }
 
@@ -50,7 +49,7 @@ type AnthropicAgentAdapter struct {
 //
 // Outputs:
 //   - *AnthropicAgentAdapter: The configured adapter.
-func NewAnthropicAgentAdapter(client *llm.AnthropicClient, model string) *AnthropicAgentAdapter {
+func NewAnthropicAgentAdapter(client *AnthropicClient, model string) *AnthropicAgentAdapter {
 	return &AnthropicAgentAdapter{
 		client: client,
 		model:  model,
@@ -166,11 +165,11 @@ func (a *AnthropicAgentAdapter) Model() string {
 }
 
 // convertMessages converts agent messages to Anthropic format.
-func (a *AnthropicAgentAdapter) convertMessages(request *Request) []datatypes.Message {
-	messages := make([]datatypes.Message, 0, len(request.Messages)+1)
+func (a *AnthropicAgentAdapter) convertMessages(request *Request) []agenttypes.Message {
+	messages := make([]agenttypes.Message, 0, len(request.Messages)+1)
 
 	if request.SystemPrompt != "" {
-		messages = append(messages, datatypes.Message{
+		messages = append(messages, agenttypes.Message{
 			Role:    "system",
 			Content: request.SystemPrompt,
 		})
@@ -196,7 +195,12 @@ func (a *AnthropicAgentAdapter) convertMessages(request *Request) []datatypes.Me
 			role = "user"
 		}
 
-		messages = append(messages, datatypes.Message{
+		// Anthropic requires non-empty content for user messages
+		if content == "" && role == "user" {
+			content = "(no output)"
+		}
+
+		messages = append(messages, agenttypes.Message{
 			Role:    role,
 			Content: content,
 		})
@@ -273,9 +277,10 @@ func (a *AnthropicAgentAdapter) completeWithTools(ctx context.Context, request *
 	var agentToolCalls []ToolCall
 	for _, tc := range result.ToolCalls {
 		agentToolCalls = append(agentToolCalls, ToolCall{
-			ID:        tc.ID,
-			Name:      tc.Name,
-			Arguments: tc.ArgumentsString(),
+			ID:               tc.ID,
+			Name:             tc.Name,
+			Arguments:        tc.ArgumentsString(),
+			ThoughtSignature: tc.ThoughtSignature,
 		})
 	}
 
@@ -317,8 +322,10 @@ func (a *AnthropicAgentAdapter) completeWithTools(ctx context.Context, request *
 }
 
 // buildParams converts agent request parameters to Anthropic format.
-func (a *AnthropicAgentAdapter) buildParams(request *Request) llm.GenerationParams {
-	params := llm.GenerationParams{}
+func (a *AnthropicAgentAdapter) buildParams(request *Request) GenerationParams {
+	params := GenerationParams{
+		ModelOverride: a.model,
+	}
 
 	if request.MaxTokens > 0 {
 		maxTokens := request.MaxTokens

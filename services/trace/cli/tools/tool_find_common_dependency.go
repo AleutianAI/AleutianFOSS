@@ -153,6 +153,7 @@ func (t *findCommonDependencyTool) Definition() ToolDefinition {
 				Type:        ParamTypeArray,
 				Description: "List of function names to find common dependency for (at least 2 required)",
 				Required:    true,
+				Items:       &ParamDef{Type: ParamTypeString},
 			},
 			"entry": {
 				Type:        ParamTypeString,

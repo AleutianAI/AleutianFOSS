@@ -17,9 +17,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AleutianAI/AleutianFOSS/services/llm"
-	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
+	agenttypes "github.com/AleutianAI/AleutianFOSS/services/trace/agent/types"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/telemetry"
 	"go.opentelemetry.io/otel"
@@ -28,7 +27,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// OllamaAdapter adapts services/llm.OllamaClient to the agent's Client interface.
+// OllamaAdapter adapts services/OllamaClient to the agent's Client interface.
 //
 // Description:
 //
@@ -40,7 +39,7 @@ import (
 //
 //	OllamaAdapter is safe for concurrent use.
 type OllamaAdapter struct {
-	client *llm.OllamaClient
+	client *OllamaClient
 	model  string
 }
 
@@ -63,7 +62,7 @@ type OllamaAdapter struct {
 //
 //	ollamaClient, _ := llm.NewOllamaClient()
 //	adapter := NewOllamaAdapter(ollamaClient, "gpt-oss:20b")
-func NewOllamaAdapter(client *llm.OllamaClient, model string) *OllamaAdapter {
+func NewOllamaAdapter(client *OllamaClient, model string) *OllamaAdapter {
 	return &OllamaAdapter{
 		client: client,
 		model:  model,
@@ -75,7 +74,7 @@ func NewOllamaAdapter(client *llm.OllamaClient, model string) *OllamaAdapter {
 // Description:
 //
 //	Sends a completion request to Ollama and returns the response.
-//	Converts between agent message format and Ollama's datatypes.Message format.
+//	Converts between agent message format and Ollama's agenttypes.Message format.
 //	If tools are provided in the request, uses ChatWithTools to enable function calling.
 //
 // Inputs:
@@ -98,7 +97,7 @@ func (a *OllamaAdapter) Complete(ctx context.Context, request *Request) (*Respon
 		}, nil
 	}
 
-	// Convert agent messages to datatypes.Message format
+	// Convert agent messages to agenttypes.Message format
 	messages := a.convertMessages(request)
 
 	// Build generation params
@@ -236,8 +235,8 @@ func (a *OllamaAdapter) Complete(ctx context.Context, request *Request) (*Respon
 //	error - Non-nil if the request failed.
 func (a *OllamaAdapter) completeWithTools(
 	ctx context.Context,
-	messages []datatypes.Message,
-	params llm.GenerationParams,
+	messages []agenttypes.Message,
+	params GenerationParams,
 	toolDefs []tools.ToolDefinition,
 ) (*Response, error) {
 	// Convert tool definitions to Ollama format
@@ -306,9 +305,10 @@ func (a *OllamaAdapter) completeWithTools(
 	var agentToolCalls []ToolCall
 	for _, tc := range result.ToolCalls {
 		agentToolCalls = append(agentToolCalls, ToolCall{
-			ID:        tc.ID,
-			Name:      tc.Name,
-			Arguments: tc.ArgumentsString(),
+			ID:               tc.ID,
+			Name:             tc.Name,
+			Arguments:        tc.ArgumentsString(),
+			ThoughtSignature: tc.ThoughtSignature,
 		})
 	}
 
@@ -353,7 +353,7 @@ func (a *OllamaAdapter) completeWithTools(
 //
 // Description:
 //
-//	Maps tools.ToolDefinition to llm.OllamaTool for the Ollama API.
+//	Maps tools.ToolDefinition to OllamaTool for the Ollama API.
 //	Preserves parameter types, descriptions, and required fields.
 //
 // Inputs:
@@ -362,20 +362,20 @@ func (a *OllamaAdapter) completeWithTools(
 //
 // Outputs:
 //
-//	[]llm.OllamaTool - Tools in Ollama API format.
-func convertToolDefinitions(defs []tools.ToolDefinition) []llm.OllamaTool {
+//	[]OllamaTool - Tools in Ollama API format.
+func convertToolDefinitions(defs []tools.ToolDefinition) []OllamaTool {
 	if len(defs) == 0 {
 		return nil
 	}
 
-	result := make([]llm.OllamaTool, 0, len(defs))
+	result := make([]OllamaTool, 0, len(defs))
 	for _, def := range defs {
 		// Convert parameters
-		properties := make(map[string]llm.OllamaParamDef)
+		properties := make(map[string]OllamaParamDef)
 		var required []string
 
 		for paramName, paramDef := range def.Parameters {
-			properties[paramName] = llm.OllamaParamDef{
+			properties[paramName] = OllamaParamDef{
 				Type:        string(paramDef.Type),
 				Description: paramDef.Description,
 				Enum:        paramDef.Enum,
@@ -386,12 +386,12 @@ func convertToolDefinitions(defs []tools.ToolDefinition) []llm.OllamaTool {
 			}
 		}
 
-		result = append(result, llm.OllamaTool{
+		result = append(result, OllamaTool{
 			Type: "function",
-			Function: llm.OllamaToolFunction{
+			Function: OllamaToolFunction{
 				Name:        def.Name,
 				Description: def.Description,
-				Parameters: llm.OllamaToolParameters{
+				Parameters: OllamaToolParameters{
 					Type:       "object",
 					Properties: properties,
 					Required:   required,
@@ -425,7 +425,7 @@ func (a *OllamaAdapter) Model() string {
 //
 // Description:
 //
-//	Converts llm.Message to datatypes.Message for Ollama API.
+//	Converts Message to agenttypes.Message for Ollama API.
 //	IMPORTANT: For "tool" role messages, the content is stored in ToolResults,
 //	not in the Content field. This method extracts the actual content.
 //
@@ -435,13 +435,13 @@ func (a *OllamaAdapter) Model() string {
 //
 // Outputs:
 //
-//	[]datatypes.Message - Messages in Ollama format.
-func (a *OllamaAdapter) convertMessages(request *Request) []datatypes.Message {
-	messages := make([]datatypes.Message, 0, len(request.Messages)+1)
+//	[]agenttypes.Message - Messages in Ollama format.
+func (a *OllamaAdapter) convertMessages(request *Request) []agenttypes.Message {
+	messages := make([]agenttypes.Message, 0, len(request.Messages)+1)
 
 	// Add system prompt as first message if present
 	if request.SystemPrompt != "" {
-		messages = append(messages, datatypes.Message{
+		messages = append(messages, agenttypes.Message{
 			Role:    "system",
 			Content: request.SystemPrompt,
 		})
@@ -466,7 +466,7 @@ func (a *OllamaAdapter) convertMessages(request *Request) []datatypes.Message {
 			}
 		}
 
-		messages = append(messages, datatypes.Message{
+		messages = append(messages, agenttypes.Message{
 			Role:    msg.Role,
 			Content: content,
 		})
@@ -483,9 +483,9 @@ func (a *OllamaAdapter) convertMessages(request *Request) []datatypes.Message {
 //
 // Outputs:
 //
-//	llm.GenerationParams - Parameters in Ollama format.
-func (a *OllamaAdapter) buildParams(request *Request) llm.GenerationParams {
-	params := llm.GenerationParams{}
+//	GenerationParams - Parameters in Ollama format.
+func (a *OllamaAdapter) buildParams(request *Request) GenerationParams {
+	params := GenerationParams{}
 
 	if request.MaxTokens > 0 {
 		maxTokens := request.MaxTokens
@@ -531,11 +531,11 @@ func (a *OllamaAdapter) buildParams(request *Request) llm.GenerationParams {
 	return params
 }
 
-// convertAgentToolChoice converts agent ToolChoice to shared llm.ToolChoice.
+// convertAgentToolChoice converts agent ToolChoice to shared ToolChoice.
 //
 // Description:
 //
-//	Maps the agent's ToolChoice type to the shared llm.ToolChoice format
+//	Maps the agent's ToolChoice type to the shared ToolChoice format
 //	so it can be passed through to the Ollama client.
 //
 // Inputs:
@@ -544,15 +544,15 @@ func (a *OllamaAdapter) buildParams(request *Request) llm.GenerationParams {
 //
 // Outputs:
 //
-//	*llm.ToolChoice - The converted format.
+//	*ToolChoice - The converted format.
 //
 // Thread Safety: This function is safe for concurrent use.
-func convertAgentToolChoice(tc *ToolChoice) *llm.ToolChoice {
+func convertAgentToolChoice(tc *ToolChoice) *ToolChoice {
 	if tc == nil {
 		return nil
 	}
 
-	return &llm.ToolChoice{
+	return &ToolChoice{
 		Type: tc.Type,
 		Name: tc.Name,
 	}
@@ -585,7 +585,7 @@ func estimateTokens(content string) int {
 // Outputs:
 //
 //	int - Estimated input token count.
-func estimateInputTokens(messages []datatypes.Message) int {
+func estimateInputTokens(messages []agenttypes.Message) int {
 	total := 0
 	for _, msg := range messages {
 		total += len(msg.Content)

@@ -1087,10 +1087,10 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 	// Without this, tool results become orphaned and the LLM keeps re-requesting the same tool.
 	p.addAssistantToolCallToHistory(deps, response, invocations)
 
-	toolResults, blocked := p.executeToolCalls(ctx, deps, invocations)
+	toolResults, executedInvocations, blocked := p.executeToolCalls(ctx, deps, invocations)
 
 	// Update context with results
-	p.updateContextWithResults(ctx, deps, toolResults)
+	p.updateContextWithResults(ctx, deps, toolResults, executedInvocations)
 
 	// Handle safety block
 	if blocked {

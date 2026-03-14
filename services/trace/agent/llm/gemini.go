@@ -17,9 +17,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AleutianAI/AleutianFOSS/services/llm"
-	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
+	agenttypes "github.com/AleutianAI/AleutianFOSS/services/trace/agent/types"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/telemetry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -33,11 +32,11 @@ import (
 //
 //	Wraps the existing GeminiClient to provide LLM capabilities for the
 //	agent loop using Google Gemini models. Converts between agent message
-//	format and Gemini's datatypes.Message format.
+//	format and Gemini's agenttypes.Message format.
 //
 // Thread Safety: GeminiAgentAdapter is safe for concurrent use.
 type GeminiAgentAdapter struct {
-	client *llm.GeminiClient
+	client *GeminiClient
 	model  string
 }
 
@@ -49,7 +48,7 @@ type GeminiAgentAdapter struct {
 //
 // Outputs:
 //   - *GeminiAgentAdapter: The configured adapter.
-func NewGeminiAgentAdapter(client *llm.GeminiClient, model string) *GeminiAgentAdapter {
+func NewGeminiAgentAdapter(client *GeminiClient, model string) *GeminiAgentAdapter {
 	return &GeminiAgentAdapter{
 		client: client,
 		model:  model,
@@ -163,11 +162,11 @@ func (a *GeminiAgentAdapter) Model() string {
 }
 
 // convertMessages converts agent messages to Gemini format.
-func (a *GeminiAgentAdapter) convertMessages(request *Request) []datatypes.Message {
-	messages := make([]datatypes.Message, 0, len(request.Messages)+1)
+func (a *GeminiAgentAdapter) convertMessages(request *Request) []agenttypes.Message {
+	messages := make([]agenttypes.Message, 0, len(request.Messages)+1)
 
 	if request.SystemPrompt != "" {
-		messages = append(messages, datatypes.Message{
+		messages = append(messages, agenttypes.Message{
 			Role:    "system",
 			Content: request.SystemPrompt,
 		})
@@ -193,7 +192,7 @@ func (a *GeminiAgentAdapter) convertMessages(request *Request) []datatypes.Messa
 			role = "user"
 		}
 
-		messages = append(messages, datatypes.Message{
+		messages = append(messages, agenttypes.Message{
 			Role:    role,
 			Content: content,
 		})
@@ -270,9 +269,10 @@ func (a *GeminiAgentAdapter) completeWithTools(ctx context.Context, request *Req
 	var agentToolCalls []ToolCall
 	for _, tc := range result.ToolCalls {
 		agentToolCalls = append(agentToolCalls, ToolCall{
-			ID:        tc.ID,
-			Name:      tc.Name,
-			Arguments: tc.ArgumentsString(),
+			ID:               tc.ID,
+			Name:             tc.Name,
+			Arguments:        tc.ArgumentsString(),
+			ThoughtSignature: tc.ThoughtSignature,
 		})
 	}
 
@@ -314,8 +314,10 @@ func (a *GeminiAgentAdapter) completeWithTools(ctx context.Context, request *Req
 }
 
 // buildParams converts agent request parameters to Gemini format.
-func (a *GeminiAgentAdapter) buildParams(request *Request) llm.GenerationParams {
-	params := llm.GenerationParams{}
+func (a *GeminiAgentAdapter) buildParams(request *Request) GenerationParams {
+	params := GenerationParams{
+		ModelOverride: a.model,
+	}
 
 	if request.MaxTokens > 0 {
 		maxTokens := request.MaxTokens

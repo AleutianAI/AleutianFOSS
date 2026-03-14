@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AleutianAI/AleutianFOSS/services/llm"
+	agentllm "github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/providers"
 )
 
@@ -50,7 +50,7 @@ func TestGranite4Router_SelectTool_Success(t *testing.T) {
 	config.OllamaEndpoint = server.URL
 	config.Timeout = 5 * time.Second
 
-	chatClient := providers.NewOllamaChatAdapter(llm.NewMultiModelManager(server.URL), "")
+	chatClient := providers.NewOllamaChatAdapter(agentllm.NewMultiModelManager(server.URL), "")
 	router, err := NewGranite4Router(chatClient, config)
 	if err != nil {
 		t.Fatalf("NewGranite4Router failed: %v", err)
@@ -95,7 +95,7 @@ func TestGranite4Router_SelectTool_LowConfidence(t *testing.T) {
 	config.OllamaEndpoint = server.URL
 	config.ConfidenceThreshold = 0.7
 
-	chatClient := providers.NewOllamaChatAdapter(llm.NewMultiModelManager(server.URL), "")
+	chatClient := providers.NewOllamaChatAdapter(agentllm.NewMultiModelManager(server.URL), "")
 	router, err := NewGranite4Router(chatClient, config)
 	if err != nil {
 		t.Fatalf("NewGranite4Router failed: %v", err)
@@ -147,7 +147,7 @@ func TestGranite4Router_SelectTool_ParseError(t *testing.T) {
 	config := DefaultRouterConfig()
 	config.OllamaEndpoint = server.URL
 
-	chatClient := providers.NewOllamaChatAdapter(llm.NewMultiModelManager(server.URL), "")
+	chatClient := providers.NewOllamaChatAdapter(agentllm.NewMultiModelManager(server.URL), "")
 	router, err := NewGranite4Router(chatClient, config)
 	if err != nil {
 		t.Fatalf("NewGranite4Router failed: %v", err)
@@ -174,7 +174,7 @@ func TestGranite4Router_SelectTool_ParseError(t *testing.T) {
 // TestGranite4Router_SelectTool_NoTools tests error when no tools provided.
 func TestGranite4Router_SelectTool_NoTools(t *testing.T) {
 	config := DefaultRouterConfig()
-	chatClient := providers.NewOllamaChatAdapter(llm.NewMultiModelManager("http://localhost:11434"), "")
+	chatClient := providers.NewOllamaChatAdapter(agentllm.NewMultiModelManager("http://localhost:11434"), "")
 	router, err := NewGranite4Router(chatClient, config)
 	if err != nil {
 		t.Fatalf("NewGranite4Router failed: %v", err)
@@ -215,7 +215,7 @@ func TestGranite4Router_SelectTool_Timeout(t *testing.T) {
 	config.OllamaEndpoint = server.URL
 	config.Timeout = 50 * time.Millisecond // Very short timeout
 
-	chatClient := providers.NewOllamaChatAdapter(llm.NewMultiModelManager(server.URL), "")
+	chatClient := providers.NewOllamaChatAdapter(agentllm.NewMultiModelManager(server.URL), "")
 	router, err := NewGranite4Router(chatClient, config)
 	if err != nil {
 		t.Fatalf("NewGranite4Router failed: %v", err)
@@ -266,7 +266,7 @@ func TestGranite4Router_SelectTool_WithCodeContext(t *testing.T) {
 	config := DefaultRouterConfig()
 	config.OllamaEndpoint = server.URL
 
-	chatClient := providers.NewOllamaChatAdapter(llm.NewMultiModelManager(server.URL), "")
+	chatClient := providers.NewOllamaChatAdapter(agentllm.NewMultiModelManager(server.URL), "")
 	router, err := NewGranite4Router(chatClient, config)
 	if err != nil {
 		t.Fatalf("NewGranite4Router failed: %v", err)
@@ -326,7 +326,7 @@ func TestGranite4Router_SelectTool_InvalidToolFallback(t *testing.T) {
 	config.OllamaEndpoint = server.URL
 	config.ConfidenceThreshold = 0.5 // Lower threshold since confidence gets reduced
 
-	chatClient := providers.NewOllamaChatAdapter(llm.NewMultiModelManager(server.URL), "")
+	chatClient := providers.NewOllamaChatAdapter(agentllm.NewMultiModelManager(server.URL), "")
 	router, err := NewGranite4Router(chatClient, config)
 	if err != nil {
 		t.Fatalf("NewGranite4Router failed: %v", err)
@@ -364,7 +364,7 @@ func TestGranite4Router_Model(t *testing.T) {
 	config := DefaultRouterConfig()
 	config.Model = "custom-model"
 
-	chatClient := providers.NewOllamaChatAdapter(llm.NewMultiModelManager("http://localhost:11434"), "")
+	chatClient := providers.NewOllamaChatAdapter(agentllm.NewMultiModelManager("http://localhost:11434"), "")
 	router, err := NewGranite4Router(chatClient, config)
 	if err != nil {
 		t.Fatalf("NewGranite4Router failed: %v", err)
@@ -378,7 +378,7 @@ func TestGranite4Router_Model(t *testing.T) {
 // TestGranite4Router_Close tests Close() method.
 func TestGranite4Router_Close(t *testing.T) {
 	config := DefaultRouterConfig()
-	chatClient := providers.NewOllamaChatAdapter(llm.NewMultiModelManager("http://localhost:11434"), "")
+	chatClient := providers.NewOllamaChatAdapter(agentllm.NewMultiModelManager("http://localhost:11434"), "")
 	router, err := NewGranite4Router(chatClient, config)
 	if err != nil {
 		t.Fatalf("NewGranite4Router failed: %v", err)
@@ -423,7 +423,7 @@ func TestNewGranite4Router_NilChatClient(t *testing.T) {
 // TestParseResponse_MarkdownCodeBlock tests parsing JSON from markdown code blocks.
 func TestParseResponse_MarkdownCodeBlock(t *testing.T) {
 	config := DefaultRouterConfig()
-	chatClient := providers.NewOllamaChatAdapter(llm.NewMultiModelManager("http://localhost:11434"), "")
+	chatClient := providers.NewOllamaChatAdapter(agentllm.NewMultiModelManager("http://localhost:11434"), "")
 	router, err := NewGranite4Router(chatClient, config)
 	if err != nil {
 		t.Fatalf("NewGranite4Router failed: %v", err)
@@ -449,7 +449,7 @@ func TestParseResponse_MarkdownCodeBlock(t *testing.T) {
 // TestParseResponse_ExtraText tests parsing JSON with surrounding text.
 func TestParseResponse_ExtraText(t *testing.T) {
 	config := DefaultRouterConfig()
-	chatClient := providers.NewOllamaChatAdapter(llm.NewMultiModelManager("http://localhost:11434"), "")
+	chatClient := providers.NewOllamaChatAdapter(agentllm.NewMultiModelManager("http://localhost:11434"), "")
 	router, err := NewGranite4Router(chatClient, config)
 	if err != nil {
 		t.Fatalf("NewGranite4Router failed: %v", err)
@@ -475,7 +475,7 @@ func TestParseResponse_ExtraText(t *testing.T) {
 // TestParseResponse_EmptyResponse tests GR-Phase1 empty response handling.
 func TestParseResponse_EmptyResponse(t *testing.T) {
 	config := DefaultRouterConfig()
-	chatClient := providers.NewOllamaChatAdapter(llm.NewMultiModelManager("http://localhost:11434"), "")
+	chatClient := providers.NewOllamaChatAdapter(agentllm.NewMultiModelManager("http://localhost:11434"), "")
 	router, err := NewGranite4Router(chatClient, config)
 	if err != nil {
 		t.Fatalf("NewGranite4Router failed: %v", err)
@@ -535,7 +535,7 @@ func TestGranite4Router_SelectTool_EmptyModelResponse(t *testing.T) {
 	config := DefaultRouterConfig()
 	config.OllamaEndpoint = server.URL
 
-	chatClient := providers.NewOllamaChatAdapter(llm.NewMultiModelManager(server.URL), "")
+	chatClient := providers.NewOllamaChatAdapter(agentllm.NewMultiModelManager(server.URL), "")
 	router, err := NewGranite4Router(chatClient, config)
 	if err != nil {
 		t.Fatalf("NewGranite4Router failed: %v", err)

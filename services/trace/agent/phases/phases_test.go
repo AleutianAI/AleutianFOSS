@@ -1007,6 +1007,59 @@ func TestReflectPhase_ContextTruncation(t *testing.T) {
 	}
 }
 
+// Test that prepareSynthesisContext preserves ThoughtSignature on ToolResults.
+func TestReflectPhase_PrepareSynthesisContext_ThoughtSignature(t *testing.T) {
+	phase := NewReflectPhase()
+	deps := createTestDependencies()
+
+	deps.Context = &agent.AssembledContext{
+		ConversationHistory: []agent.Message{
+			{Role: "user", Content: "Find hotspots"},
+		},
+		ToolResults: []agent.ToolResult{
+			{
+				InvocationID:     "call_1",
+				Success:          true,
+				Output:           "hotspot results",
+				ThoughtSignature: "gemini3-sig-AAA",
+			},
+			{
+				InvocationID:     "call_2",
+				Success:          true,
+				Output:           "more results",
+				ThoughtSignature: "gemini3-sig-BBB",
+			},
+			{
+				InvocationID: "call_3",
+				Success:      true,
+				Output:       "no sig result",
+			},
+		},
+	}
+
+	reduced := phase.prepareSynthesisContext(deps)
+
+	if len(reduced.ToolResults) == 0 {
+		t.Fatal("expected ToolResults in reduced context")
+	}
+
+	// Build a map of invocation ID -> ThoughtSignature for verification
+	sigByID := make(map[string]string)
+	for _, r := range reduced.ToolResults {
+		sigByID[r.InvocationID] = r.ThoughtSignature
+	}
+
+	if sig, ok := sigByID["call_1"]; ok && sig != "gemini3-sig-AAA" {
+		t.Errorf("call_1 ThoughtSignature = %q, want %q", sig, "gemini3-sig-AAA")
+	}
+	if sig, ok := sigByID["call_2"]; ok && sig != "gemini3-sig-BBB" {
+		t.Errorf("call_2 ThoughtSignature = %q, want %q", sig, "gemini3-sig-BBB")
+	}
+	if sig, ok := sigByID["call_3"]; ok && sig != "" {
+		t.Errorf("call_3 ThoughtSignature = %q, want empty", sig)
+	}
+}
+
 // helper function
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsHelper(s, substr))

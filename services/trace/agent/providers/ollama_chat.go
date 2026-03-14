@@ -13,10 +13,9 @@ package providers
 import (
 	"context"
 	"fmt"
+	agentllm "github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
 	"time"
 
-	"github.com/AleutianAI/AleutianFOSS/services/llm"
-	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -32,7 +31,7 @@ import (
 //
 // Thread Safety: OllamaChatAdapter is safe for concurrent use.
 type OllamaChatAdapter struct {
-	manager      *llm.MultiModelManager
+	manager      *agentllm.MultiModelManager
 	defaultModel string
 }
 
@@ -50,12 +49,12 @@ type OllamaChatAdapter struct {
 //
 // Outputs:
 //   - *OllamaChatAdapter: The configured adapter.
-func NewOllamaChatAdapter(manager *llm.MultiModelManager, defaultModel string) *OllamaChatAdapter {
+func NewOllamaChatAdapter(manager *agentllm.MultiModelManager, defaultModel string) *OllamaChatAdapter {
 	return &OllamaChatAdapter{manager: manager, defaultModel: defaultModel}
 }
 
 // Chat implements ChatClient by delegating to MultiModelManager.Chat.
-func (a *OllamaChatAdapter) Chat(ctx context.Context, messages []datatypes.Message, opts ChatOptions) (string, error) {
+func (a *OllamaChatAdapter) Chat(ctx context.Context, messages []Message, opts ChatOptions) (string, error) {
 	if a.manager == nil {
 		return "", fmt.Errorf("Ollama model manager is nil")
 	}
@@ -83,7 +82,7 @@ func (a *OllamaChatAdapter) Chat(ctx context.Context, messages []datatypes.Messa
 	maxTokens := opts.MaxTokens
 	numCtx := opts.NumCtx
 
-	params := llm.GenerationParams{
+	params := agentllm.GenerationParams{
 		Temperature:   &temp,
 		MaxTokens:     &maxTokens,
 		KeepAlive:     opts.KeepAlive,
@@ -112,7 +111,7 @@ func (a *OllamaChatAdapter) Chat(ctx context.Context, messages []datatypes.Messa
 //
 // Thread Safety: OllamaLifecycleAdapter is safe for concurrent use.
 type OllamaLifecycleAdapter struct {
-	manager *llm.MultiModelManager
+	manager *agentllm.MultiModelManager
 }
 
 // NewOllamaLifecycleAdapter creates a new OllamaLifecycleAdapter.
@@ -122,7 +121,7 @@ type OllamaLifecycleAdapter struct {
 //
 // Outputs:
 //   - *OllamaLifecycleAdapter: The configured adapter.
-func NewOllamaLifecycleAdapter(manager *llm.MultiModelManager) *OllamaLifecycleAdapter {
+func NewOllamaLifecycleAdapter(manager *agentllm.MultiModelManager) *OllamaLifecycleAdapter {
 	return &OllamaLifecycleAdapter{manager: manager}
 }
 

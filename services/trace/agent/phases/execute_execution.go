@@ -60,8 +60,9 @@ import (
 // Outputs:
 //
 //	[]*tools.Result - Results from tool execution.
+//	[]agent.ToolInvocation - The (possibly filtered) invocations that match results 1:1.
 //	bool - True if any tool was blocked by safety.
-func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies, invocations []agent.ToolInvocation) ([]*tools.Result, bool) {
+func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies, invocations []agent.ToolInvocation) ([]*tools.Result, []agent.ToolInvocation, bool) {
 	// GR-39a: Filter batch with router before execution to reduce redundant calls.
 	// Only applies to batches of 3+ tool calls from the main LLM.
 	// The filter uses the session's ToolRouter if it implements BatchFilterer.
@@ -289,7 +290,7 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 						slog.String("tool", inv.Tool),
 						slog.Int("consecutive_fires", consecutiveCBFires[inv.Tool]),
 					)
-					return results, true
+					return results, invocations, true
 				}
 
 				continue
@@ -534,7 +535,7 @@ func (p *ExecutePhase) executeToolCalls(ctx context.Context, deps *Dependencies,
 		blocked = true
 	}
 
-	return results, blocked
+	return results, invocations, blocked
 }
 
 // maxNotFoundBeforeSynthesize is the number of "not found" results before forcing synthesis.
@@ -1126,7 +1127,7 @@ func (p *ExecutePhase) addAssistantToolCallToHistory(deps *Dependencies, respons
 //	results - Tool execution results.
 //
 // Thread Safety: This method is safe for concurrent use.
-func (p *ExecutePhase) updateContextWithResults(ctx context.Context, deps *Dependencies, results []*tools.Result) {
+func (p *ExecutePhase) updateContextWithResults(ctx context.Context, deps *Dependencies, results []*tools.Result, invocations []agent.ToolInvocation) {
 	// Validate required dependencies
 	if deps.Context == nil {
 		sessionID := "unknown"
@@ -1147,7 +1148,7 @@ func (p *ExecutePhase) updateContextWithResults(ctx context.Context, deps *Depen
 		return
 	}
 
-	for _, result := range results {
+	for i, result := range results {
 		if result == nil {
 			continue
 		}
@@ -1163,6 +1164,22 @@ func (p *ExecutePhase) updateContextWithResults(ctx context.Context, deps *Depen
 				// Update deps.Context with the new context and persist to session
 				deps.Context = updated
 				deps.Session.SetCurrentContext(updated)
+
+				// Carry ThoughtSignature and Tool name from invocation to the
+				// just-appended ToolResult for Gemini 3 round-trip support.
+				// ContextManager sets Tool from TraceStep which may be empty;
+				// the invocation always has the correct tool name from the LLM.
+				if i < len(invocations) {
+					if n := len(updated.ToolResults); n > 0 {
+						lastResult := &updated.ToolResults[n-1]
+						if invocations[i].ThoughtSignature != "" {
+							lastResult.ThoughtSignature = invocations[i].ThoughtSignature
+						}
+						if lastResult.Tool == "" {
+							lastResult.Tool = invocations[i].Tool
+						}
+					}
+				}
 				continue
 			}
 		}
@@ -1192,17 +1209,28 @@ func (p *ExecutePhase) updateContextWithResults(ctx context.Context, deps *Depen
 			toolName = result.TraceStep.Tool
 		}
 
+		// Carry ThoughtSignature and Tool name from invocation for Gemini 3 round-trip.
+		var thoughtSig string
+		if i < len(invocations) {
+			thoughtSig = invocations[i].ThoughtSignature
+			// Fall back to invocation tool name when TraceStep doesn't provide one.
+			if toolName == "" {
+				toolName = invocations[i].Tool
+			}
+		}
+
 		agentResult := agent.ToolResult{
-			InvocationID: uuid.NewString(),
-			Success:      result.Success,
-			Output:       outputText,
-			Error:        result.Error,
-			Duration:     result.Duration,
-			TokensUsed:   tokensUsed,
-			Cached:       result.Cached,
-			Truncated:    truncated,
-			Tool:         toolName,          // IT_CRS_03 AC-3
-			ProofDelta:   result.ProofDelta, // IT_CRS_03 AC-8
+			InvocationID:     uuid.NewString(),
+			Success:          result.Success,
+			Output:           outputText,
+			Error:            result.Error,
+			Duration:         result.Duration,
+			TokensUsed:       tokensUsed,
+			Cached:           result.Cached,
+			Truncated:        truncated,
+			Tool:             toolName,          // IT_CRS_03 AC-3
+			ProofDelta:       result.ProofDelta, // IT_CRS_03 AC-8
+			ThoughtSignature: thoughtSig,
 		}
 
 		// Append to ToolResults - safe because session access is serialized

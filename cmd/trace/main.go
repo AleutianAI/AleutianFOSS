@@ -71,13 +71,10 @@ import (
 	"syscall"
 	"time"
 
-	aleutianconfig "github.com/AleutianAI/AleutianFOSS/cmd/aleutian/config"
-	"github.com/AleutianAI/AleutianFOSS/services/llm"
-	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
-	"github.com/AleutianAI/AleutianFOSS/services/policy_engine"
 	"github.com/AleutianAI/AleutianFOSS/services/trace"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/events"
+	agentllm "github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/phases"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/providers"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/providers/egress"
@@ -85,6 +82,8 @@ import (
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/safety"
 	traceconfig "github.com/AleutianAI/AleutianFOSS/services/trace/config"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/graph"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/lspconfig"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/policy"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/rag"
 	badgerstore "github.com/AleutianAI/AleutianFOSS/services/trace/storage/badger"
 	natsStorage "github.com/AleutianAI/AleutianFOSS/services/trace/storage/nats"
@@ -257,7 +256,7 @@ func main() {
 
 	// GR-75: Wire LSP configuration from env vars and --lsp-enabled flag.
 	// Flag OR env var enables LSP (either triggers activation).
-	lspCfg := aleutianconfig.LSPConfigFromEnv()
+	lspCfg := lspconfig.LSPConfigFromEnv()
 	if *lspEnabled {
 		lspCfg.Enabled = true
 	}
@@ -269,7 +268,7 @@ func main() {
 		cfg.LSPIdleTimeout = lspCfg.IdleTimeout
 
 		// Verify language server binaries are available
-		verifier := aleutianconfig.NewLSPServerVerifier(lspCfg)
+		verifier := lspconfig.NewLSPServerVerifier(lspCfg)
 		verifyResult := verifier.Verify()
 
 		// Disable languages whose binaries are missing
@@ -508,7 +507,10 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTo
 		mainModelFallback = "glm-4.7-flash"
 	}
 
-	roleConfig, err := providers.LoadRoleConfig(mainModelFallback, "", "")
+	// CB-72: Pass Ollama-specific defaults as fallbacks. These are only used when
+	// no TRACE_ROUTER_MODEL / TRACE_PARAM_MODEL env vars are set AND the provider
+	// is Ollama. For cloud providers, the model must be set via env var.
+	roleConfig, err := providers.LoadRoleConfig(mainModelFallback, "granite4:micro-h", "ministral-3:3b")
 	if err != nil {
 		slog.Error("Failed to load role config", slog.String("error", err.Error()))
 		markWarmupComplete()
@@ -520,13 +522,13 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTo
 
 	// CB-60b: Create provider factory. For Ollama roles, create the shared model manager.
 	// Uses ResolveOllamaURL for consistent URL resolution across all components.
-	var ollamaModelManager *llm.MultiModelManager
+	var ollamaModelManager *agentllm.MultiModelManager
 	if roleConfig.Main.Provider == providers.ProviderOllama ||
 		roleConfig.Router.Provider == providers.ProviderOllama ||
 		roleConfig.ParamExtractor.Provider == providers.ProviderOllama {
 
 		ollamaURL := providers.ResolveOllamaURL()
-		ollamaModelManager = llm.NewMultiModelManager(ollamaURL)
+		ollamaModelManager = agentllm.NewMultiModelManager(ollamaURL)
 	}
 
 	// CB-60d: Load egress config and create guard builder for data egress control.
@@ -534,13 +536,22 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTo
 	var egressBuilder *egress.EgressGuardBuilder
 	{
 		var classifier egress.DataClassifier
-		policyEngine, peErr := policy_engine.NewPolicyEngine()
-		if peErr != nil {
-			slog.Warn("PolicyEngine unavailable, egress classifier will use NoOp (all data treated as public)",
-				slog.String("error", peErr.Error()))
+		// CB-72: TRACE_CLASSIFY_DATA=false skips regex-based data classification.
+		// Use this when sending user's own code to cloud providers (not sensitive).
+		// Consent, audit, cost tracking, and rate limiting still apply.
+		classifyData := os.Getenv("TRACE_CLASSIFY_DATA")
+		if classifyData == "false" || classifyData == "0" {
+			slog.Info("Data classification disabled (TRACE_CLASSIFY_DATA=false), all data treated as public")
 			classifier = egress.NewNoOpClassifier()
 		} else {
-			classifier = egress.NewPolicyEngineClassifier(policyEngine)
+			policyEngine, peErr := policy.NewPolicyEngine()
+			if peErr != nil {
+				slog.Warn("PolicyEngine unavailable, egress classifier will use NoOp (all data treated as public)",
+					slog.String("error", peErr.Error()))
+				classifier = egress.NewNoOpClassifier()
+			} else {
+				classifier = egress.NewPolicyEngineClassifier(policyEngine)
+			}
 		}
 		egressBuilder = egress.NewEgressGuardBuilder(egressCfg, classifier)
 		slog.Info("Egress guard initialized",
@@ -606,7 +617,7 @@ func setupAgentLoop(v1 *gin.RouterGroup, svc *trace.Service, withContext, withTo
 
 			if mainLifecycle.IsLocal() {
 				// Ollama: warm model into VRAM with full warmup procedure
-				ollamaClient, ollamaErr := llm.NewOllamaClient()
+				ollamaClient, ollamaErr := agentllm.NewOllamaClient()
 				if ollamaErr != nil {
 					slog.Warn("Could not create Ollama client for warmup",
 						slog.String("error", ollamaErr.Error()))
@@ -899,7 +910,7 @@ func printBanner(port int, agentEnabled bool) {
 //   - No other processes are competing for VRAM during warmup.
 //
 // Thread Safety: This function is safe for concurrent use.
-func warmMainModel(ctx context.Context, client *llm.OllamaClient, model string) error {
+func warmMainModel(ctx context.Context, client *agentllm.OllamaClient, model string) error {
 	// R-5: Validate model parameter
 	if model == "" {
 		return fmt.Errorf("model must not be empty")
@@ -930,13 +941,13 @@ func warmMainModel(ctx context.Context, client *llm.OllamaClient, model string) 
 	// The context window MUST match what the main agent uses (64K tokens)
 	// to ensure the model is loaded with the correct configuration.
 	numCtx := 65536
-	params := llm.GenerationParams{
+	params := agentllm.GenerationParams{
 		KeepAlive: keepAlive,
 		NumCtx:    &numCtx,
 	}
 
 	// Send minimal message to trigger model loading
-	messages := []datatypes.Message{
+	messages := []providers.Message{
 		{Role: "user", Content: "ping"},
 	}
 

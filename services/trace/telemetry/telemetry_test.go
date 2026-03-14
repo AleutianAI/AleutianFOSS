@@ -30,11 +30,11 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.ServiceName != "aleutian" {
 		t.Errorf("ServiceName = %q, want %q", cfg.ServiceName, "aleutian")
 	}
-	if cfg.TraceExporter != "otlp" {
-		t.Errorf("TraceExporter = %q, want %q", cfg.TraceExporter, "otlp")
+	if cfg.TraceExporter != "none" {
+		t.Errorf("TraceExporter = %q, want %q", cfg.TraceExporter, "none")
 	}
-	if cfg.MetricExporter != "prometheus" {
-		t.Errorf("MetricExporter = %q, want %q", cfg.MetricExporter, "prometheus")
+	if cfg.MetricExporter != "none" {
+		t.Errorf("MetricExporter = %q, want %q", cfg.MetricExporter, "none")
 	}
 	if cfg.OTLPEndpoint != "localhost:4317" {
 		t.Errorf("OTLPEndpoint = %q, want %q", cfg.OTLPEndpoint, "localhost:4317")
@@ -365,8 +365,8 @@ func TestDefaultConfig_SampleRate(t *testing.T) {
 	if cfg.SampleRate != 1.0 {
 		t.Errorf("SampleRate = %v, want 1.0", cfg.SampleRate)
 	}
-	if cfg.AllowDegraded != false {
-		t.Errorf("AllowDegraded = %v, want false", cfg.AllowDegraded)
+	if cfg.AllowDegraded != true {
+		t.Errorf("AllowDegraded = %v, want true", cfg.AllowDegraded)
 	}
 }
 
@@ -515,10 +515,10 @@ func TestInit_AllowDegraded(t *testing.T) {
 		span.End()
 	})
 
-	t.Run("AllowDegraded=false is default", func(t *testing.T) {
+	t.Run("AllowDegraded=true is default", func(t *testing.T) {
 		cfg := DefaultConfig()
-		if cfg.AllowDegraded != false {
-			t.Errorf("AllowDegraded default = %v, want false", cfg.AllowDegraded)
+		if cfg.AllowDegraded != true {
+			t.Errorf("AllowDegraded default = %v, want true", cfg.AllowDegraded)
 		}
 	})
 }

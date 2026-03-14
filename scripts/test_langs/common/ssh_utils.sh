@@ -156,7 +156,7 @@ start_trace_server() {
     # Kill any existing trace server and wait for port 8080 to free.
     ssh_cmd "pkill -f 'bin/trace'" 2>/dev/null || true
     local port_wait=0
-    while ssh_cmd "ss -tlnp | grep -q ':8080 '" 2>/dev/null && [ $port_wait -lt 10 ]; do
+    while ssh_cmd "ss -tlnp | grep -q ':12217 '" 2>/dev/null && [ $port_wait -lt 10 ]; do
         sleep 1
         ((port_wait++))
     done
@@ -201,7 +201,7 @@ start_trace_server() {
     for i in {1..15}; do
         echo -n "."
         sleep 1
-        if ssh_cmd "curl -s http://localhost:8080/v1/trace/health" > /dev/null 2>&1; then
+        if ssh_cmd "curl -s http://localhost:12217/v1/trace/health" > /dev/null 2>&1; then
             responding=1
             break
         fi
@@ -220,7 +220,7 @@ start_trace_server() {
     local ready=0
     for i in {1..120}; do
         # Check /ready endpoint - returns 200 when warmup complete, 503 when still warming
-        local ready_status=$(ssh_cmd "curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/v1/trace/ready" 2>/dev/null)
+        local ready_status=$(ssh_cmd "curl -s -o /dev/null -w '%{http_code}' http://localhost:12217/v1/trace/ready" 2>/dev/null)
         if [ "$ready_status" = "200" ]; then
             ready=1
             break

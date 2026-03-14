@@ -13,10 +13,9 @@ package providers
 import (
 	"context"
 	"fmt"
+	agentllm "github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
 	"time"
 
-	"github.com/AleutianAI/AleutianFOSS/services/llm"
-	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -32,7 +31,7 @@ import (
 //
 // Thread Safety: GeminiChatAdapter is safe for concurrent use.
 type GeminiChatAdapter struct {
-	client *llm.GeminiClient
+	client *agentllm.GeminiClient
 }
 
 // NewGeminiChatAdapter creates a new GeminiChatAdapter.
@@ -42,12 +41,12 @@ type GeminiChatAdapter struct {
 //
 // Outputs:
 //   - *GeminiChatAdapter: The configured adapter.
-func NewGeminiChatAdapter(client *llm.GeminiClient) *GeminiChatAdapter {
+func NewGeminiChatAdapter(client *agentllm.GeminiClient) *GeminiChatAdapter {
 	return &GeminiChatAdapter{client: client}
 }
 
 // Chat implements ChatClient by delegating to GeminiClient.Chat.
-func (a *GeminiChatAdapter) Chat(ctx context.Context, messages []datatypes.Message, opts ChatOptions) (string, error) {
+func (a *GeminiChatAdapter) Chat(ctx context.Context, messages []Message, opts ChatOptions) (string, error) {
 	if a.client == nil {
 		return "", fmt.Errorf("Gemini client is nil")
 	}
@@ -62,7 +61,10 @@ func (a *GeminiChatAdapter) Chat(ctx context.Context, messages []datatypes.Messa
 	)
 	defer span.End()
 
-	params := llm.GenerationParams{}
+	params := agentllm.GenerationParams{}
+	if opts.Model != "" {
+		params.ModelOverride = opts.Model
+	}
 	if opts.Temperature >= 0 {
 		temp := float32(opts.Temperature)
 		params.Temperature = &temp
