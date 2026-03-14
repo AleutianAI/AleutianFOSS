@@ -1,4 +1,0 @@
-target: local
-services:
-  orchestrator:
-    port: 12210

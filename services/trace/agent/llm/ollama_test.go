@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/AleutianAI/AleutianFOSS/services/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
 )
 
@@ -244,14 +243,14 @@ func TestEstimateTokens(t *testing.T) {
 
 func TestOllamaToolTypes(t *testing.T) {
 	// Test that the Ollama tool types are correctly structured
-	tool := llm.OllamaTool{
+	tool := OllamaTool{
 		Type: "function",
-		Function: llm.OllamaToolFunction{
+		Function: OllamaToolFunction{
 			Name:        "test_tool",
 			Description: "A test tool",
-			Parameters: llm.OllamaToolParameters{
+			Parameters: OllamaToolParameters{
 				Type: "object",
-				Properties: map[string]llm.OllamaParamDef{
+				Properties: map[string]OllamaParamDef{
 					"arg1": {
 						Type:        "string",
 						Description: "First argument",
@@ -272,10 +271,10 @@ func TestOllamaToolTypes(t *testing.T) {
 
 func TestOllamaToolCall(t *testing.T) {
 	// Test that tool call type is correctly structured
-	tc := llm.OllamaToolCall{
+	tc := OllamaToolCall{
 		ID:   "call_123",
 		Type: "function",
-		Function: llm.OllamaFunctionCall{
+		Function: OllamaFunctionCall{
 			Name:      "read_file",
 			Arguments: json.RawMessage(`{"path": "/test.go"}`),
 		},
@@ -294,10 +293,10 @@ func TestOllamaToolCall(t *testing.T) {
 
 func TestChatWithToolsResult(t *testing.T) {
 	// Test the result type
-	result := llm.ChatWithToolsResult{
+	result := ChatWithToolsResult{
 		Content:    "I'll read the file for you.",
 		StopReason: "tool_use",
-		ToolCalls: []llm.ToolCallResponse{
+		ToolCalls: []ToolCallResponse{
 			{
 				ID:        "call_1",
 				Name:      "read_file",

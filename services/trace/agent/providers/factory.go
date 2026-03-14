@@ -15,8 +15,6 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/AleutianAI/AleutianFOSS/services/llm"
-	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	agentllm "github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/providers/egress"
 	"go.opentelemetry.io/otel"
@@ -36,7 +34,7 @@ import (
 type ProviderFactory struct {
 	// ollamaModelManager is the shared MultiModelManager for Ollama models.
 	// May be nil if Ollama is not used by any role.
-	ollamaModelManager *llm.MultiModelManager
+	ollamaModelManager *agentllm.MultiModelManager
 
 	// egressBuilder wraps created clients with egress guard decorators.
 	// When nil, clients are returned unwrapped (no egress control).
@@ -75,7 +73,7 @@ func WithEgressGuard(builder *egress.EgressGuardBuilder) FactoryOption {
 //
 // Outputs:
 //   - *ProviderFactory: Configured factory.
-func NewProviderFactory(ollamaModelManager *llm.MultiModelManager, opts ...FactoryOption) *ProviderFactory {
+func NewProviderFactory(ollamaModelManager *agentllm.MultiModelManager, opts ...FactoryOption) *ProviderFactory {
 	f := &ProviderFactory{
 		ollamaModelManager: ollamaModelManager,
 		logger:             slog.Default(),
@@ -127,7 +125,7 @@ func (f *ProviderFactory) CreateChatClient(cfg ProviderConfig) (ChatClient, erro
 		if cfg.APIKey == "" {
 			return nil, fmt.Errorf("ANTHROPIC_API_KEY required for Anthropic provider")
 		}
-		client, err := llm.NewAnthropicClient()
+		client, err := agentllm.NewAnthropicClient()
 		if err != nil {
 			return nil, fmt.Errorf("creating Anthropic client: %w", err)
 		}
@@ -137,7 +135,7 @@ func (f *ProviderFactory) CreateChatClient(cfg ProviderConfig) (ChatClient, erro
 		if cfg.APIKey == "" {
 			return nil, fmt.Errorf("OPENAI_API_KEY required for OpenAI provider")
 		}
-		client, err := llm.NewOpenAIClient()
+		client, err := agentllm.NewOpenAIClient()
 		if err != nil {
 			return nil, fmt.Errorf("creating OpenAI client: %w", err)
 		}
@@ -147,7 +145,7 @@ func (f *ProviderFactory) CreateChatClient(cfg ProviderConfig) (ChatClient, erro
 		if cfg.APIKey == "" {
 			return nil, fmt.Errorf("GEMINI_API_KEY required for Gemini provider")
 		}
-		client, err := llm.NewGeminiClient()
+		client, err := agentllm.NewGeminiClient()
 		if err != nil {
 			return nil, fmt.Errorf("creating Gemini client: %w", err)
 		}
@@ -195,7 +193,7 @@ func (f *ProviderFactory) CreateAgentClient(cfg ProviderConfig) (agentllm.Client
 		if f.ollamaModelManager == nil {
 			return nil, fmt.Errorf("Ollama model manager not available (all-cloud configuration?)")
 		}
-		ollamaClient, err := llm.NewOllamaClient()
+		ollamaClient, err := agentllm.NewOllamaClient()
 		if err != nil {
 			return nil, fmt.Errorf("creating Ollama client: %w", err)
 		}
@@ -205,7 +203,7 @@ func (f *ProviderFactory) CreateAgentClient(cfg ProviderConfig) (agentllm.Client
 		if cfg.APIKey == "" {
 			return nil, fmt.Errorf("ANTHROPIC_API_KEY required for Anthropic provider")
 		}
-		client, err := llm.NewAnthropicClient()
+		client, err := agentllm.NewAnthropicClient()
 		if err != nil {
 			return nil, fmt.Errorf("creating Anthropic client: %w", err)
 		}
@@ -215,7 +213,7 @@ func (f *ProviderFactory) CreateAgentClient(cfg ProviderConfig) (agentllm.Client
 		if cfg.APIKey == "" {
 			return nil, fmt.Errorf("OPENAI_API_KEY required for OpenAI provider")
 		}
-		client, err := llm.NewOpenAIClient()
+		client, err := agentllm.NewOpenAIClient()
 		if err != nil {
 			return nil, fmt.Errorf("creating OpenAI client: %w", err)
 		}
@@ -225,7 +223,7 @@ func (f *ProviderFactory) CreateAgentClient(cfg ProviderConfig) (agentllm.Client
 		if cfg.APIKey == "" {
 			return nil, fmt.Errorf("GEMINI_API_KEY required for Gemini provider")
 		}
-		client, err := llm.NewGeminiClient()
+		client, err := agentllm.NewGeminiClient()
 		if err != nil {
 			return nil, fmt.Errorf("creating Gemini client: %w", err)
 		}
@@ -298,7 +296,7 @@ type chatClientAdapter struct {
 	inner ChatClient
 }
 
-func (a *chatClientAdapter) Chat(ctx context.Context, messages []datatypes.Message, opts egress.ChatOptions) (string, error) {
+func (a *chatClientAdapter) Chat(ctx context.Context, messages []Message, opts egress.ChatOptions) (string, error) {
 	return a.inner.Chat(ctx, messages, ChatOptions{
 		Temperature: opts.Temperature,
 		MaxTokens:   opts.MaxTokens,
@@ -313,7 +311,7 @@ type egressChatClientAdapter struct {
 	inner egress.ChatClient
 }
 
-func (a *egressChatClientAdapter) Chat(ctx context.Context, messages []datatypes.Message, opts ChatOptions) (string, error) {
+func (a *egressChatClientAdapter) Chat(ctx context.Context, messages []Message, opts ChatOptions) (string, error) {
 	return a.inner.Chat(ctx, messages, egress.ChatOptions{
 		Temperature: opts.Temperature,
 		MaxTokens:   opts.MaxTokens,

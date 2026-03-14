@@ -1,8 +1,19 @@
+# Binaries
+/aleutian
+/trace
+/trace-mcp
+/trace-proxy
+*.test
+
+# Logs
+*.log
+
 secrets/
 models/
 models_cache/
 *.idea
 *.test.yml
+!**/podman-compose.test.yml
 
 # Code Buddy tickets (internal roadmap)
 tickets/**/cb_*.md

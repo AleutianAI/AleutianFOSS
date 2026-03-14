@@ -206,22 +206,6 @@ func (h *Handlers) HandleInit(c *gin.Context) {
 		"symbols_extracted", resp.SymbolsExtracted,
 		"parse_time_ms", resp.ParseTimeMs)
 
-	// CRS-26n: Cancel any in-progress indexing and reset state before
-	// re-triggering. This ensures project switches stop the old goroutine
-	// and clear stale hash state so the new project is always indexed.
-	// CRS-26l: Trigger eager symbol indexing immediately after graph init.
-	// This removes the 2-3 minute first-query penalty — symbols are indexed
-	// in the background before any user query arrives.
-	if h.indexingCoord != nil {
-		h.indexingCoord.CancelIndexing()
-		h.indexingCoord.ResetState()
-		if cached, err := h.svc.GetGraph(resp.GraphID); err == nil {
-			h.indexingCoord.TriggerIndexing(resp.GraphID, cached)
-			logger.Info("CRS-26l: Eager symbol indexing triggered",
-				"graph_id", resp.GraphID)
-		}
-	}
-
 	c.JSON(http.StatusOK, resp)
 }
 
@@ -556,8 +540,8 @@ func (h *Handlers) HandleReady(c *gin.Context) {
 	resp := ReadyResponse{
 		Ready:      warmupComplete,
 		GraphCount: h.svc.GraphCount(),
-		WeaviateOK: h.weaviate != nil,
-		NATSOK:     h.natsClient != nil && h.natsClient.IsConnected(),
+		WeaviateOK: false,
+		NATSOK:     false,
 	}
 
 	if !warmupComplete {
@@ -733,71 +717,6 @@ func (h *Handlers) HandleGetCacheStats(c *gin.Context) {
 	)
 
 	c.JSON(http.StatusOK, stats)
-}
-
-// HandleSeed handles POST /v1/trace/seed.
-//
-// Description:
-//
-//	Seeds library documentation from project dependencies into Weaviate.
-//	Parses go.mod, locates cached dependencies, extracts documentation,
-//	and indexes into Weaviate for context assembly.
-//
-// Request Body:
-//
-//	SeedRequest
-//
-// Response:
-//
-//	200 OK: SeedResponse
-//	400 Bad Request: Validation error
-//	503 Service Unavailable: Weaviate not configured
-func (h *Handlers) HandleSeed(c *gin.Context) {
-	requestID := getOrCreateRequestID(c)
-	logger := slog.With("request_id", requestID, "handler", "HandleSeed")
-
-	if h.seeder == nil {
-		logger.Warn("Seed requested but Weaviate not configured")
-		c.JSON(http.StatusServiceUnavailable, ErrorResponse{
-			Error: "Library seeding requires Weaviate",
-			Code:  "WEAVIATE_NOT_CONFIGURED",
-		})
-		return
-	}
-
-	var req SeedRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		logger.Warn("Invalid request body", "error", err)
-		c.JSON(http.StatusBadRequest, ErrorResponse{
-			Error: "Invalid request body",
-			Code:  "INVALID_REQUEST",
-		})
-		return
-	}
-
-	logger.Info("Starting library seeding",
-		"project_root", req.ProjectRoot,
-		"data_space", req.DataSpace)
-
-	result, err := h.seeder.Seed(c.Request.Context(), req.ProjectRoot, req.DataSpace)
-	if err != nil {
-		logger.Error("Seeding failed", "error", err)
-		c.JSON(http.StatusInternalServerError, ErrorResponse{
-			Error: err.Error(),
-			Code:  "SEED_FAILED",
-		})
-		return
-	}
-
-	logger.Info("Seeding complete",
-		"dependencies_found", result.DependenciesFound,
-		"docs_indexed", result.DocsIndexed)
-
-	c.JSON(http.StatusOK, SeedResponse{
-		DependenciesFound: result.DependenciesFound,
-		DocsIndexed:       result.DocsIndexed,
-		Errors:            result.Errors,
-	})
 }
 
 // getOrCreateRequestID gets or creates a request ID.

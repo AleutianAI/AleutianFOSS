@@ -19,8 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AleutianAI/AleutianFOSS/services/llm"
-	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
+	agentllm "github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -157,7 +156,7 @@ func TestChat_SpanCreated_AllProviders(t *testing.T) {
 		{
 			name: "anthropic",
 			createClient: func(url string) ChatClient {
-				return NewAnthropicChatAdapter(llm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", url))
+				return NewAnthropicChatAdapter(agentllm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", url))
 			},
 			mockResp: testAnthropicResp,
 			spanName: "providers.AnthropicChatAdapter.Chat",
@@ -165,7 +164,7 @@ func TestChat_SpanCreated_AllProviders(t *testing.T) {
 		{
 			name: "openai",
 			createClient: func(url string) ChatClient {
-				return NewOpenAIChatAdapter(llm.NewOpenAIClientWithConfig("test-key", "gpt-4o", url))
+				return NewOpenAIChatAdapter(agentllm.NewOpenAIClientWithConfig("test-key", "gpt-4o", url))
 			},
 			mockResp: testOpenAIResp,
 			spanName: "providers.OpenAIChatAdapter.Chat",
@@ -173,7 +172,7 @@ func TestChat_SpanCreated_AllProviders(t *testing.T) {
 		{
 			name: "gemini",
 			createClient: func(url string) ChatClient {
-				return NewGeminiChatAdapter(llm.NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", url))
+				return NewGeminiChatAdapter(agentllm.NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", url))
 			},
 			mockResp: testGeminiResp,
 			spanName: "providers.GeminiChatAdapter.Chat",
@@ -192,7 +191,7 @@ func TestChat_SpanCreated_AllProviders(t *testing.T) {
 			defer server.Close()
 
 			client := p.createClient(server.URL)
-			messages := []datatypes.Message{{Role: "user", Content: "Hello"}}
+			messages := []Message{{Role: "user", Content: "Hello"}}
 
 			result, err := client.Chat(context.Background(), messages, ChatOptions{Temperature: 0.7})
 			if err != nil {
@@ -232,8 +231,8 @@ func TestChat_SpanRecordsError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewAnthropicChatAdapter(llm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", server.URL))
-	messages := []datatypes.Message{{Role: "user", Content: "Hello"}}
+	client := NewAnthropicChatAdapter(agentllm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", server.URL))
+	messages := []Message{{Role: "user", Content: "Hello"}}
 
 	_, err := client.Chat(context.Background(), messages, ChatOptions{Temperature: 0.7})
 	if err == nil {
@@ -264,8 +263,8 @@ func TestChat_MetricsRecorded(t *testing.T) {
 	server, _ := chatMockServer(t, http.StatusOK, testAnthropicResp)
 	defer server.Close()
 
-	client := NewAnthropicChatAdapter(llm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", server.URL))
-	messages := []datatypes.Message{{Role: "user", Content: "Hello"}}
+	client := NewAnthropicChatAdapter(agentllm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", server.URL))
+	messages := []Message{{Role: "user", Content: "Hello"}}
 
 	// Success path
 	_, err := client.Chat(context.Background(), messages, ChatOptions{Temperature: 0.7})
@@ -277,6 +276,6 @@ func TestChat_MetricsRecorded(t *testing.T) {
 	errorServer, _ := chatMockServer(t, http.StatusInternalServerError, `{"error":"fail"}`)
 	defer errorServer.Close()
 
-	errorClient := NewAnthropicChatAdapter(llm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", errorServer.URL))
+	errorClient := NewAnthropicChatAdapter(agentllm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", errorServer.URL))
 	_, _ = errorClient.Chat(context.Background(), messages, ChatOptions{Temperature: 0.7})
 }

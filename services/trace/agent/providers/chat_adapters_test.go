@@ -22,8 +22,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AleutianAI/AleutianFOSS/services/llm"
-	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
+	agentllm "github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
 )
 
 // =============================================================================
@@ -243,7 +242,7 @@ func TestAllChatAdapters_Chat_Success(t *testing.T) {
 		{
 			"anthropic",
 			func(url string) ChatClient {
-				client := llm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", url)
+				client := agentllm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", url)
 				return NewAnthropicChatAdapter(client)
 			},
 			chatAnthropicMockResponse,
@@ -251,7 +250,7 @@ func TestAllChatAdapters_Chat_Success(t *testing.T) {
 		{
 			"openai",
 			func(url string) ChatClient {
-				client := llm.NewOpenAIClientWithConfig("test-key", "gpt-4o", url)
+				client := agentllm.NewOpenAIClientWithConfig("test-key", "gpt-4o", url)
 				return NewOpenAIChatAdapter(client)
 			},
 			chatOpenAIMockResponse,
@@ -259,7 +258,7 @@ func TestAllChatAdapters_Chat_Success(t *testing.T) {
 		{
 			"gemini",
 			func(url string) ChatClient {
-				client := llm.NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", url)
+				client := agentllm.NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", url)
 				return NewGeminiChatAdapter(client)
 			},
 			chatGeminiMockResponse,
@@ -273,7 +272,7 @@ func TestAllChatAdapters_Chat_Success(t *testing.T) {
 
 			adapter := p.createAdapter(server.URL)
 
-			messages := []datatypes.Message{
+			messages := []Message{
 				{Role: "user", Content: "Hello"},
 			}
 
@@ -298,7 +297,7 @@ func TestAllChatAdapters_Chat_TemperatureZeroSent(t *testing.T) {
 		{
 			"anthropic",
 			func(url string) ChatClient {
-				client := llm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", url)
+				client := agentllm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", url)
 				return NewAnthropicChatAdapter(client)
 			},
 			chatAnthropicMockResponse,
@@ -307,7 +306,7 @@ func TestAllChatAdapters_Chat_TemperatureZeroSent(t *testing.T) {
 		{
 			"openai",
 			func(url string) ChatClient {
-				client := llm.NewOpenAIClientWithConfig("test-key", "gpt-4o", url)
+				client := agentllm.NewOpenAIClientWithConfig("test-key", "gpt-4o", url)
 				return NewOpenAIChatAdapter(client)
 			},
 			chatOpenAIMockResponse,
@@ -316,7 +315,7 @@ func TestAllChatAdapters_Chat_TemperatureZeroSent(t *testing.T) {
 		{
 			"gemini",
 			func(url string) ChatClient {
-				client := llm.NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", url)
+				client := agentllm.NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", url)
 				return NewGeminiChatAdapter(client)
 			},
 			chatGeminiMockResponse,
@@ -331,7 +330,7 @@ func TestAllChatAdapters_Chat_TemperatureZeroSent(t *testing.T) {
 
 			adapter := p.createAdapter(server.URL)
 
-			messages := []datatypes.Message{
+			messages := []Message{
 				{Role: "user", Content: "Hello"},
 			}
 
@@ -387,7 +386,7 @@ func TestAllChatAdapters_Chat_TemperaturePointSeven(t *testing.T) {
 		{
 			"anthropic",
 			func(url string) ChatClient {
-				client := llm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", url)
+				client := agentllm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", url)
 				return NewAnthropicChatAdapter(client)
 			},
 			chatAnthropicMockResponse,
@@ -396,7 +395,7 @@ func TestAllChatAdapters_Chat_TemperaturePointSeven(t *testing.T) {
 		{
 			"openai",
 			func(url string) ChatClient {
-				client := llm.NewOpenAIClientWithConfig("test-key", "gpt-4o", url)
+				client := agentllm.NewOpenAIClientWithConfig("test-key", "gpt-4o", url)
 				return NewOpenAIChatAdapter(client)
 			},
 			chatOpenAIMockResponse,
@@ -405,7 +404,7 @@ func TestAllChatAdapters_Chat_TemperaturePointSeven(t *testing.T) {
 		{
 			"gemini",
 			func(url string) ChatClient {
-				client := llm.NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", url)
+				client := agentllm.NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", url)
 				return NewGeminiChatAdapter(client)
 			},
 			chatGeminiMockResponse,
@@ -420,7 +419,7 @@ func TestAllChatAdapters_Chat_TemperaturePointSeven(t *testing.T) {
 
 			adapter := p.createAdapter(server.URL)
 
-			messages := []datatypes.Message{
+			messages := []Message{
 				{Role: "user", Content: "Hello"},
 			}
 
@@ -463,7 +462,7 @@ func TestAllChatAdapters_Chat_MaxTokensOmittedWhenZero(t *testing.T) {
 		{
 			"anthropic",
 			func(url string) ChatClient {
-				client := llm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", url)
+				client := agentllm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", url)
 				return NewAnthropicChatAdapter(client)
 			},
 			chatAnthropicMockResponse,
@@ -472,7 +471,7 @@ func TestAllChatAdapters_Chat_MaxTokensOmittedWhenZero(t *testing.T) {
 		{
 			"openai",
 			func(url string) ChatClient {
-				client := llm.NewOpenAIClientWithConfig("test-key", "gpt-4o", url)
+				client := agentllm.NewOpenAIClientWithConfig("test-key", "gpt-4o", url)
 				return NewOpenAIChatAdapter(client)
 			},
 			chatOpenAIMockResponse,
@@ -487,7 +486,7 @@ func TestAllChatAdapters_Chat_MaxTokensOmittedWhenZero(t *testing.T) {
 
 			adapter := p.createAdapter(server.URL)
 
-			messages := []datatypes.Message{
+			messages := []Message{
 				{Role: "user", Content: "Hello"},
 			}
 
@@ -523,21 +522,21 @@ func TestAllChatAdapters_Chat_ErrorHandling(t *testing.T) {
 		{
 			"anthropic",
 			func(url string) ChatClient {
-				client := llm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", url)
+				client := agentllm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", url)
 				return NewAnthropicChatAdapter(client)
 			},
 		},
 		{
 			"openai",
 			func(url string) ChatClient {
-				client := llm.NewOpenAIClientWithConfig("test-key", "gpt-4o", url)
+				client := agentllm.NewOpenAIClientWithConfig("test-key", "gpt-4o", url)
 				return NewOpenAIChatAdapter(client)
 			},
 		},
 		{
 			"gemini",
 			func(url string) ChatClient {
-				client := llm.NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", url)
+				client := agentllm.NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", url)
 				return NewGeminiChatAdapter(client)
 			},
 		},
@@ -551,7 +550,7 @@ func TestAllChatAdapters_Chat_ErrorHandling(t *testing.T) {
 			defer server.Close()
 
 			adapter := p.createAdapter(server.URL)
-			messages := []datatypes.Message{{Role: "user", Content: "Hello"}}
+			messages := []Message{{Role: "user", Content: "Hello"}}
 
 			_, err := adapter.Chat(context.Background(), messages, ChatOptions{Temperature: 0.7})
 			if err == nil {
@@ -577,7 +576,7 @@ func TestAllChatAdapters_Chat_ContextCancellation(t *testing.T) {
 		{
 			"anthropic",
 			func(url string) ChatClient {
-				client := llm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", url)
+				client := agentllm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", url)
 				return NewAnthropicChatAdapter(client)
 			},
 			chatAnthropicMockResponse,
@@ -585,7 +584,7 @@ func TestAllChatAdapters_Chat_ContextCancellation(t *testing.T) {
 		{
 			"openai",
 			func(url string) ChatClient {
-				client := llm.NewOpenAIClientWithConfig("test-key", "gpt-4o", url)
+				client := agentllm.NewOpenAIClientWithConfig("test-key", "gpt-4o", url)
 				return NewOpenAIChatAdapter(client)
 			},
 			chatOpenAIMockResponse,
@@ -593,7 +592,7 @@ func TestAllChatAdapters_Chat_ContextCancellation(t *testing.T) {
 		{
 			"gemini",
 			func(url string) ChatClient {
-				client := llm.NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", url)
+				client := agentllm.NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", url)
 				return NewGeminiChatAdapter(client)
 			},
 			chatGeminiMockResponse,
@@ -610,7 +609,7 @@ func TestAllChatAdapters_Chat_ContextCancellation(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 			defer cancel()
 
-			messages := []datatypes.Message{{Role: "user", Content: "Hello"}}
+			messages := []Message{{Role: "user", Content: "Hello"}}
 
 			start := time.Now()
 			_, err := adapter.Chat(ctx, messages, ChatOptions{Temperature: 0.7})
@@ -643,7 +642,7 @@ func TestAllChatAdapters_Chat_ConcurrentSafety(t *testing.T) {
 		{
 			"anthropic",
 			func(url string) ChatClient {
-				client := llm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", url)
+				client := agentllm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", url)
 				return NewAnthropicChatAdapter(client)
 			},
 			chatAnthropicMockResponse,
@@ -651,7 +650,7 @@ func TestAllChatAdapters_Chat_ConcurrentSafety(t *testing.T) {
 		{
 			"openai",
 			func(url string) ChatClient {
-				client := llm.NewOpenAIClientWithConfig("test-key", "gpt-4o", url)
+				client := agentllm.NewOpenAIClientWithConfig("test-key", "gpt-4o", url)
 				return NewOpenAIChatAdapter(client)
 			},
 			chatOpenAIMockResponse,
@@ -659,7 +658,7 @@ func TestAllChatAdapters_Chat_ConcurrentSafety(t *testing.T) {
 		{
 			"gemini",
 			func(url string) ChatClient {
-				client := llm.NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", url)
+				client := agentllm.NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", url)
 				return NewGeminiChatAdapter(client)
 			},
 			chatGeminiMockResponse,
@@ -683,7 +682,7 @@ func TestAllChatAdapters_Chat_ConcurrentSafety(t *testing.T) {
 			for i := 0; i < concurrency; i++ {
 				go func(idx int) {
 					defer wg.Done()
-					messages := []datatypes.Message{
+					messages := []Message{
 						{Role: "user", Content: fmt.Sprintf("Hello %d", idx)},
 					}
 					result, err := adapter.Chat(context.Background(), messages, ChatOptions{Temperature: 0.7})

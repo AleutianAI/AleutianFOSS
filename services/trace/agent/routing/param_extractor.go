@@ -18,7 +18,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/providers"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/rag"
@@ -266,7 +265,7 @@ func (e *ParamExtractor) ExtractParams(
 		)
 	}
 
-	messages := []datatypes.Message{
+	messages := []providers.Message{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: userPrompt},
 	}
@@ -674,7 +673,7 @@ Rules:
 		slog.String("top_15", candidatePreview.String()),
 	)
 
-	messages := []datatypes.Message{
+	messages := []providers.Message{
 		{Role: "system", Content: sb.String()},
 		{Role: "user", Content: fmt.Sprintf("Query: %s\n\nBest starting symbol:", query)},
 	}

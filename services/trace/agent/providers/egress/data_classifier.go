@@ -13,7 +13,7 @@ package egress
 import (
 	"context"
 
-	"github.com/AleutianAI/AleutianFOSS/services/policy_engine"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/policy"
 )
 
 // DataClassifier classifies data sensitivity for egress control (P-3).
@@ -46,7 +46,7 @@ type DataClassifier interface {
 //
 // Thread Safety: Safe for concurrent use (PolicyEngine is read-only after init).
 type PolicyEngineClassifier struct {
-	engine *policy_engine.PolicyEngine
+	engine *policy.PolicyEngine
 }
 
 // NewPolicyEngineClassifier creates a DataClassifier backed by the PolicyEngine.
@@ -56,7 +56,7 @@ type PolicyEngineClassifier struct {
 //
 // Outputs:
 //   - *PolicyEngineClassifier: The adapter.
-func NewPolicyEngineClassifier(engine *policy_engine.PolicyEngine) *PolicyEngineClassifier {
+func NewPolicyEngineClassifier(engine *policy.PolicyEngine) *PolicyEngineClassifier {
 	return &PolicyEngineClassifier{engine: engine}
 }
 

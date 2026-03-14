@@ -13,7 +13,6 @@ package llm
 import (
 	"encoding/json"
 
-	"github.com/AleutianAI/AleutianFOSS/services/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
 )
 
@@ -21,7 +20,7 @@ import (
 //
 // Description:
 //
-//	Maps tools.ToolDefinition to llm.ToolDef for use with provider
+//	Maps tools.ToolDefinition to ToolDef for use with provider
 //	ChatWithTools methods. Preserves parameter types, descriptions,
 //	and required fields.
 //
@@ -29,37 +28,44 @@ import (
 //   - defs: Tool definitions in agent format.
 //
 // Outputs:
-//   - []llm.ToolDef: Tools in generic LLM format.
+//   - []ToolDef: Tools in generic LLM format.
 //
 // Thread Safety: This function is safe for concurrent use.
-func convertToolDefs(defs []tools.ToolDefinition) []llm.ToolDef {
+func convertToolDefs(defs []tools.ToolDefinition) []ToolDef {
 	if len(defs) == 0 {
 		return nil
 	}
 
-	result := make([]llm.ToolDef, 0, len(defs))
+	result := make([]ToolDef, 0, len(defs))
 	for _, def := range defs {
-		properties := make(map[string]llm.ToolParamDef)
+		properties := make(map[string]ToolParamDef)
 		var required []string
 
 		for paramName, paramDef := range def.Parameters {
-			properties[paramName] = llm.ToolParamDef{
+			pd := ToolParamDef{
 				Type:        string(paramDef.Type),
 				Description: paramDef.Description,
 				Enum:        paramDef.Enum,
 				Default:     paramDef.Default,
 			}
+			if paramDef.Items != nil {
+				pd.Items = &ToolParamDef{
+					Type:        string(paramDef.Items.Type),
+					Description: paramDef.Items.Description,
+				}
+			}
+			properties[paramName] = pd
 			if paramDef.Required {
 				required = append(required, paramName)
 			}
 		}
 
-		result = append(result, llm.ToolDef{
+		result = append(result, ToolDef{
 			Type: "function",
-			Function: llm.ToolFunction{
+			Function: ToolFunction{
 				Name:        def.Name,
 				Description: def.Description,
-				Parameters: llm.ToolParameters{
+				Parameters: ToolParameters{
 					Type:       "object",
 					Properties: properties,
 					Required:   required,
@@ -71,7 +77,7 @@ func convertToolDefs(defs []tools.ToolDefinition) []llm.ToolDef {
 	return result
 }
 
-// convertToChat converts agent Messages to llm.ChatMessage, preserving tool IDs.
+// convertToChat converts agent Messages to ChatMessage, preserving tool IDs.
 //
 // Description:
 //
@@ -86,25 +92,25 @@ func convertToolDefs(defs []tools.ToolDefinition) []llm.ToolDef {
 //   - request: The agent request containing messages and system prompt.
 //
 // Outputs:
-//   - []llm.ChatMessage: Messages in generic LLM format with tool metadata.
+//   - []ChatMessage: Messages in generic LLM format with tool metadata.
 //
 // Thread Safety: This function is safe for concurrent use.
-func convertToChat(request *Request) []llm.ChatMessage {
+func convertToChat(request *Request) []ChatMessage {
 	if request == nil {
 		return nil
 	}
 
-	messages := make([]llm.ChatMessage, 0, len(request.Messages)+1)
+	messages := make([]ChatMessage, 0, len(request.Messages)+1)
 
 	if request.SystemPrompt != "" {
-		messages = append(messages, llm.ChatMessage{
+		messages = append(messages, ChatMessage{
 			Role:    "system",
 			Content: request.SystemPrompt,
 		})
 	}
 
 	for _, msg := range request.Messages {
-		chatMsg := llm.ChatMessage{
+		chatMsg := ChatMessage{
 			Role:    msg.Role,
 			Content: msg.Content,
 		}
@@ -112,10 +118,11 @@ func convertToChat(request *Request) []llm.ChatMessage {
 		// Handle assistant messages with tool calls
 		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
 			for _, tc := range msg.ToolCalls {
-				chatMsg.ToolCalls = append(chatMsg.ToolCalls, llm.ToolCallResponse{
-					ID:        tc.ID,
-					Name:      tc.Name,
-					Arguments: json.RawMessage(tc.Arguments),
+				chatMsg.ToolCalls = append(chatMsg.ToolCalls, ToolCallResponse{
+					ID:               tc.ID,
+					Name:             tc.Name,
+					Arguments:        json.RawMessage(tc.Arguments),
+					ThoughtSignature: tc.ThoughtSignature,
 				})
 			}
 		}
@@ -128,9 +135,20 @@ func convertToChat(request *Request) []llm.ChatMessage {
 			if tr.Content != "" {
 				chatMsg.Content = tr.Content
 			}
-			// Set ToolName from the tool call ID or use a generic name
-			// Gemini requires ToolName for functionResponse
-			chatMsg.ToolName = chatMsg.ToolCallID
+			// Look up tool name from the preceding assistant message's ToolCalls.
+			// Gemini requires ToolName for functionResponse.
+			chatMsg.ToolName = tr.ToolCallID // fallback
+			for j := len(messages) - 1; j >= 0; j-- {
+				for _, tc := range messages[j].ToolCalls {
+					if tc.ID == tr.ToolCallID {
+						chatMsg.ToolName = tc.Name
+						break
+					}
+				}
+				if chatMsg.ToolName != tr.ToolCallID {
+					break
+				}
+			}
 		}
 
 		messages = append(messages, chatMsg)
@@ -153,7 +171,7 @@ func convertToChat(request *Request) []llm.ChatMessage {
 //   - int: Estimated input token count.
 //
 // Thread Safety: This function is safe for concurrent use.
-func estimateInputTokensChat(messages []llm.ChatMessage) int {
+func estimateInputTokensChat(messages []ChatMessage) int {
 	total := 0
 	for _, msg := range messages {
 		total += len(msg.Content)

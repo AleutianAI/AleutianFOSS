@@ -13,7 +13,7 @@ package llm
 import (
 	"testing"
 
-	basellm "github.com/AleutianAI/AleutianFOSS/services/llm"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
 )
 
@@ -311,11 +311,125 @@ func TestConvertToChat_FullConversation(t *testing.T) {
 }
 
 // =============================================================================
+// ThoughtSignature Propagation Tests
+// =============================================================================
+
+func TestConvertToChat_ThoughtSignaturePreserved(t *testing.T) {
+	request := &Request{
+		Messages: []Message{
+			{
+				Role:    "assistant",
+				Content: "Calling tool.",
+				ToolCalls: []ToolCall{
+					{
+						ID:               "call-1",
+						Name:             "find_hotspots",
+						Arguments:        `{"depth": 3}`,
+						ThoughtSignature: "gemini3-sig-abc123",
+					},
+					{
+						ID:               "call-2",
+						Name:             "find_dead_code",
+						Arguments:        `{}`,
+						ThoughtSignature: "",
+					},
+				},
+			},
+		},
+	}
+
+	result := convertToChat(request)
+	if len(result) != 1 {
+		t.Fatalf("len(result) = %d, want 1", len(result))
+	}
+
+	msg := result[0]
+	if len(msg.ToolCalls) != 2 {
+		t.Fatalf("len(ToolCalls) = %d, want 2", len(msg.ToolCalls))
+	}
+	if msg.ToolCalls[0].ThoughtSignature != "gemini3-sig-abc123" {
+		t.Errorf("ToolCalls[0].ThoughtSignature = %q, want %q",
+			msg.ToolCalls[0].ThoughtSignature, "gemini3-sig-abc123")
+	}
+	if msg.ToolCalls[1].ThoughtSignature != "" {
+		t.Errorf("ToolCalls[1].ThoughtSignature = %q, want empty",
+			msg.ToolCalls[1].ThoughtSignature)
+	}
+}
+
+func TestBuildRequest_ThoughtSignatureFromToolResult(t *testing.T) {
+	ctx := &agent.AssembledContext{
+		SystemPrompt: "test",
+		ToolResults: []agent.ToolResult{
+			{
+				InvocationID:     "inv-1",
+				Tool:             "find_hotspots",
+				Success:          true,
+				Output:           "result data",
+				ThoughtSignature: "gemini3-sig-xyz789",
+			},
+		},
+	}
+
+	request := BuildRequest(ctx, nil, 1024)
+
+	// ToolResults produce 2 messages: synthetic assistant + tool result
+	// The synthetic assistant message should carry ThoughtSignature on its ToolCall
+	found := false
+	for _, msg := range request.Messages {
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			tc := msg.ToolCalls[0]
+			if tc.ThoughtSignature != "gemini3-sig-xyz789" {
+				t.Errorf("synthetic ToolCall.ThoughtSignature = %q, want %q",
+					tc.ThoughtSignature, "gemini3-sig-xyz789")
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Error("no synthetic assistant message with ToolCalls found")
+	}
+}
+
+func TestParseToolCalls_ThoughtSignaturePreserved(t *testing.T) {
+	response := &Response{
+		Content: "",
+		ToolCalls: []ToolCall{
+			{
+				ID:               "call-1",
+				Name:             "find_hotspots",
+				Arguments:        `{"depth": 3}`,
+				ThoughtSignature: "gemini3-sig-abc",
+			},
+			{
+				ID:        "call-2",
+				Name:      "find_dead_code",
+				Arguments: `{}`,
+			},
+		},
+	}
+
+	invocations := ParseToolCalls(response)
+
+	if len(invocations) != 2 {
+		t.Fatalf("len(invocations) = %d, want 2", len(invocations))
+	}
+	if invocations[0].ThoughtSignature != "gemini3-sig-abc" {
+		t.Errorf("invocations[0].ThoughtSignature = %q, want %q",
+			invocations[0].ThoughtSignature, "gemini3-sig-abc")
+	}
+	if invocations[1].ThoughtSignature != "" {
+		t.Errorf("invocations[1].ThoughtSignature = %q, want empty",
+			invocations[1].ThoughtSignature)
+	}
+}
+
+// =============================================================================
 // estimateInputTokensChat Tests
 // =============================================================================
 
 func TestEstimateInputTokensChat(t *testing.T) {
-	messages := []basellm.ChatMessage{
+	messages := []ChatMessage{
 		{Role: "system", Content: "1234567890123456"}, // 16 chars = 4 tokens
 		{Role: "user", Content: "12345678"},           // 8 chars = 2 tokens
 	}

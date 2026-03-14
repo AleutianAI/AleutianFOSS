@@ -14,11 +14,11 @@ import (
 	"context"
 	"testing"
 
-	"github.com/AleutianAI/AleutianFOSS/services/policy_engine"
+	"github.com/AleutianAI/AleutianFOSS/services/trace/policy"
 )
 
 func TestPolicyEngineClassifier_PublicData(t *testing.T) {
-	engine, err := policy_engine.NewPolicyEngine()
+	engine, err := policy.NewPolicyEngine()
 	if err != nil {
 		t.Fatalf("failed to create policy engine: %v", err)
 	}
@@ -35,7 +35,7 @@ func TestPolicyEngineClassifier_PublicData(t *testing.T) {
 }
 
 func TestPolicyEngineClassifier_EmptyData(t *testing.T) {
-	engine, err := policy_engine.NewPolicyEngine()
+	engine, err := policy.NewPolicyEngine()
 	if err != nil {
 		t.Fatalf("failed to create policy engine: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestPolicyEngineClassifier_EmptyData(t *testing.T) {
 }
 
 func TestPolicyEngineClassifier_SensitiveData(t *testing.T) {
-	engine, err := policy_engine.NewPolicyEngine()
+	engine, err := policy.NewPolicyEngine()
 	if err != nil {
 		t.Fatalf("failed to create policy engine: %v", err)
 	}

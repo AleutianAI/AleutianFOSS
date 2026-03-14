@@ -1,0 +1,161 @@
+# Container-Based Integration Test Stack
+# Spins up 9 trace containers (one per FOSS test project) against a shared
+# Ollama instance, then runs YAML-defined test suites via a sidecar container.
+#
+# Usage:
+#   podman-compose -f test/integration/podman-compose.test.yml up --abort-on-container-exit
+#
+# Prerequisites:
+#   - Ollama running on host (port 11434)
+#   - 9 FOSS projects cloned at ~/projects/crs_test_codebases/
+
+x-trace-common: &trace-common
+  image: aleutian-trace:latest
+  networks:
+    - test-net
+  environment: &trace-env
+    OLLAMA_BASE_URL: http://host.containers.internal:11434
+    OLLAMA_MODEL: ${OLLAMA_MODEL:-gpt-oss:20b}
+    TRACE_ROUTER_MODEL: ${ROUTER_MODEL:-granite4:micro-h}
+    TRACE_PARAM_MODEL: ${PARAM_EXTRACTOR_MODEL:-ministral-3:3b}
+    LSP_ENABLED: "true"
+    LSP_PYTHON_ENABLED: "true"
+    LSP_TYPESCRIPT_ENABLED: "true"
+  healthcheck:
+    test: ["CMD", "curl", "-sf", "http://localhost:12217/v1/trace/ready"]
+    interval: 10s
+    timeout: 5s
+    retries: 30
+    start_period: 120s
+  restart: "no"
+
+services:
+  # ── Go Projects ──
+
+  trace-hugo:
+    <<: *trace-common
+    container_name: trace-hugo
+    ports:
+      - "12301:12217"
+    volumes:
+      - ${CRS_TEST_CODEBASES:-~/projects/crs_test_codebases}/go/hugo:/projects:ro
+
+  trace-badger:
+    <<: *trace-common
+    container_name: trace-badger
+    ports:
+      - "12302:12217"
+    volumes:
+      - ${CRS_TEST_CODEBASES:-~/projects/crs_test_codebases}/go/badger:/projects:ro
+
+  trace-gin:
+    <<: *trace-common
+    container_name: trace-gin
+    ports:
+      - "12303:12217"
+    volumes:
+      - ${CRS_TEST_CODEBASES:-~/projects/crs_test_codebases}/go/gin:/projects:ro
+
+  # ── Python Projects ──
+
+  trace-flask:
+    <<: *trace-common
+    container_name: trace-flask
+    ports:
+      - "12304:12217"
+    volumes:
+      - ${CRS_TEST_CODEBASES:-~/projects/crs_test_codebases}/python/flask:/projects:ro
+
+  trace-pandas:
+    <<: *trace-common
+    container_name: trace-pandas
+    ports:
+      - "12305:12217"
+    volumes:
+      - ${CRS_TEST_CODEBASES:-~/projects/crs_test_codebases}/python/pandas:/projects:ro
+
+  # ── JavaScript Projects ──
+
+  trace-express:
+    <<: *trace-common
+    container_name: trace-express
+    ports:
+      - "12306:12217"
+    volumes:
+      - ${CRS_TEST_CODEBASES:-~/projects/crs_test_codebases}/javascript/express:/projects:ro
+
+  trace-babylonjs:
+    <<: *trace-common
+    container_name: trace-babylonjs
+    ports:
+      - "12307:12217"
+    volumes:
+      - ${CRS_TEST_CODEBASES:-~/projects/crs_test_codebases}/javascript/babylonjs:/projects:ro
+
+  # ── TypeScript Projects ──
+
+  trace-nestjs:
+    <<: *trace-common
+    container_name: trace-nestjs
+    ports:
+      - "12308:12217"
+    volumes:
+      - ${CRS_TEST_CODEBASES:-~/projects/crs_test_codebases}/typescript/nestjs:/projects:ro
+
+  trace-plottable:
+    <<: *trace-common
+    container_name: trace-plottable
+    ports:
+      - "12309:12217"
+    volumes:
+      - ${CRS_TEST_CODEBASES:-~/projects/crs_test_codebases}/typescript/plottable:/projects:ro
+
+  # ── Test Runner Sidecar ──
+
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.test-runner
+    container_name: test-runner
+    networks:
+      - test-net
+    depends_on:
+      trace-hugo:
+        condition: service_healthy
+      trace-badger:
+        condition: service_healthy
+      trace-gin:
+        condition: service_healthy
+      trace-flask:
+        condition: service_healthy
+      trace-pandas:
+        condition: service_healthy
+      trace-express:
+        condition: service_healthy
+      trace-babylonjs:
+        condition: service_healthy
+      trace-nestjs:
+        condition: service_healthy
+      trace-plottable:
+        condition: service_healthy
+    environment:
+      # Container URLs (service names resolve via test-net DNS)
+      TRACE_HUGO_URL: http://trace-hugo:12217
+      TRACE_BADGER_URL: http://trace-badger:12217
+      TRACE_GIN_URL: http://trace-gin:12217
+      TRACE_FLASK_URL: http://trace-flask:12217
+      TRACE_PANDAS_URL: http://trace-pandas:12217
+      TRACE_EXPRESS_URL: http://trace-express:12217
+      TRACE_BABYLONJS_URL: http://trace-babylonjs:12217
+      TRACE_NESTJS_URL: http://trace-nestjs:12217
+      TRACE_PLOTTABLE_URL: http://trace-plottable:12217
+      # Optional: filter which projects/features to test
+      PROJECT_FILTER: ${PROJECT_FILTER:-}
+      FEATURE_FILTER: ${FEATURE_FILTER:-}
+    volumes:
+      - ../../scripts/test_langs:/tests:ro
+    restart: "no"
+
+networks:
+  test-net:
+    driver: bridge

@@ -10,6 +10,8 @@ metadata:
   language: javascript
   project: babylonjs
   project_root: ~/projects/Babylon.js
+  container: trace-babylonjs
+  container_project_root: /projects
   ticket: tickets/in_progress/integration_testing_outcomes_results_1a.md
   description: >
     Validates every registered graph tool against Babylon.js 3D engine.

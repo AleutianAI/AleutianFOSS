@@ -22,7 +22,6 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	oteltrace "go.opentelemetry.io/otel/trace"
 
-	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	agentllm "github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
 )
 
@@ -200,7 +199,7 @@ type EgressGuardChatClient struct {
 // Outputs:
 //   - string: The assistant's response text.
 //   - error: Non-nil if a pre-flight check fails or the inner call errors.
-func (g *EgressGuardChatClient) Chat(ctx context.Context, messages []datatypes.Message, opts ChatOptions) (string, error) {
+func (g *EgressGuardChatClient) Chat(ctx context.Context, messages []Message, opts ChatOptions) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -415,7 +414,7 @@ func serializeAgentRequest(req *agentllm.Request) []byte {
 // serializeChatMessages serializes chat messages for classification.
 // Returns an empty (non-nil) byte slice for empty message lists, ensuring
 // downstream classification and hashing always receive valid input.
-func serializeChatMessages(messages []datatypes.Message) []byte {
+func serializeChatMessages(messages []Message) []byte {
 	if len(messages) == 0 {
 		return []byte{}
 	}

@@ -24,9 +24,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/AleutianAI/AleutianFOSS/services/llm"
-	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent"
+	agentllm "github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/providers"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/routing"
@@ -43,7 +42,7 @@ import (
 type AgentHandlers struct {
 	loop            agent.AgentLoop
 	svc             *Service
-	modelManager    *llm.MultiModelManager
+	modelManager    *agentllm.MultiModelManager
 	providerFactory *providers.ProviderFactory
 	roleConfig      *providers.RoleConfig
 	// natsClient provides NATS access for CRS SSE streaming.
@@ -108,7 +107,7 @@ func WithProviderFactory(f *providers.ProviderFactory) AgentHandlersOption {
 //	When provided, NewAgentHandlers uses this manager instead of creating
 //	its own. This prevents the double-MMM bug where two independent managers
 //	track VRAM state independently.
-func WithModelManager(m *llm.MultiModelManager) AgentHandlersOption {
+func WithModelManager(m *agentllm.MultiModelManager) AgentHandlersOption {
 	return func(h *AgentHandlers) {
 		h.modelManager = m
 	}
@@ -174,7 +173,7 @@ func NewAgentHandlers(loop agent.AgentLoop, svc *Service, opts ...AgentHandlersO
 	// Backward compatibility: create own MMM and factory if not injected
 	if h.modelManager == nil {
 		ollamaURL := providers.ResolveOllamaURL()
-		h.modelManager = llm.NewMultiModelManager(ollamaURL)
+		h.modelManager = agentllm.NewMultiModelManager(ollamaURL)
 	}
 	if h.providerFactory == nil {
 		h.providerFactory = providers.NewProviderFactory(h.modelManager)
@@ -1100,8 +1099,8 @@ func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent
 		OllamaEndpoint:      h.getOllamaEndpoint(),
 		Timeout:             session.Config.ToolRouterTimeout,
 		ConfidenceThreshold: session.Config.ToolRouterConfidence,
-		Temperature:         0.1, // Low temperature for consistent routing
-		MaxTokens:           256,
+		Temperature:         0.1,   // Low temperature for consistent routing
+		MaxTokens:           2048,  // Needs headroom for thinking models (e.g., Gemini 2.5 Flash)
 		KeepAlive:           "24h", // Keep model loaded (24 hours)
 		NumCtx:              16384, // 16K context window (router doesn't need huge context)
 	}
@@ -1112,15 +1111,28 @@ func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent
 		"timeout", routerConfig.Timeout)
 
 	// CB-60b: Use startup-loaded roleConfig if available (avoids double-LoadRoleConfig).
-	// Merge per-session overrides for Main, Router, and ParamExtractor models.
+	// CB-72: Only pass session model overrides that differ from DefaultSessionConfig().
+	// The session defaults ("granite4:micro-h", "ministral-3:3b") are Ollama-specific
+	// and must NOT clobber env-var-based cloud provider models (e.g., TRACE_ROUTER_MODEL=gemini-2.5-flash).
 	// CB-62: MainModel override allows user's OpenWebUI selection to control the main LLM.
+	defaults := agent.DefaultSessionConfig()
 	var roleConfig *providers.RoleConfig
 	if h.roleConfig != nil {
+		// CB-72: Only treat session model as override if user explicitly changed it
+		// from the default. Otherwise the env-var roleConfig is the source of truth.
+		routerModelOverride := ""
+		if session.Config.ToolRouterModel != defaults.ToolRouterModel {
+			routerModelOverride = session.Config.ToolRouterModel
+		}
+		paramModelOverride := ""
+		if session.Config.ParamExtractorModel != defaults.ParamExtractorModel {
+			paramModelOverride = session.Config.ParamExtractorModel
+		}
 		roleConfig = providers.MergeSessionOverrides(
 			h.roleConfig,
 			session.Config.MainModel,
-			session.Config.ToolRouterModel,
-			session.Config.ParamExtractorModel,
+			routerModelOverride,
+			paramModelOverride,
 		)
 	} else {
 		// Backward compatibility: load config when not injected via options.
@@ -1142,6 +1154,11 @@ func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent
 			return fmt.Errorf("loading role config: %w", roleErr)
 		}
 	}
+
+	// CB-72: Use roleConfig.Router.Model as the canonical model for the router config.
+	// This ensures env-var-based models (e.g., TRACE_ROUTER_MODEL=gemini-2.5-flash)
+	// are used instead of the session default ("granite4:micro-h").
+	routerConfig.Model = roleConfig.Router.Model
 
 	// CB-60: Create ChatClient for the router via ProviderFactory.
 	routerChatClient, err := h.providerFactory.CreateChatClient(roleConfig.Router)
@@ -1332,10 +1349,11 @@ func (h *AgentHandlers) initializeToolRouter(ctx context.Context, session *agent
 	// CB-60: Uses ProviderFactory to create the ChatClient, enabling any provider.
 	paramConfig := routing.DefaultParamExtractorConfig()
 
-	// Use session config model if set, otherwise use default (ministral-3:3b)
-	paramModel := session.Config.ParamExtractorModel
-	if paramModel != "" {
-		paramConfig.Model = paramModel
+	// CB-72: Use roleConfig.ParamExtractor.Model as the canonical model.
+	// This ensures env-var-based models (e.g., TRACE_PARAM_MODEL=gpt-4o-mini)
+	// are used instead of the session default ("ministral-3:3b").
+	if roleConfig.ParamExtractor.Model != "" {
+		paramConfig.Model = roleConfig.ParamExtractor.Model
 	}
 	paramConfig.KeepAlive = routerConfig.KeepAlive
 
@@ -1470,7 +1488,7 @@ func (h *AgentHandlers) verifyRouterModelAvailable(ctx context.Context, routerMo
 	}
 
 	// Create test messages
-	messages := []datatypes.Message{
+	messages := []providers.Message{
 		{Role: "user", Content: "test"},
 	}
 
@@ -1481,7 +1499,7 @@ func (h *AgentHandlers) verifyRouterModelAvailable(ctx context.Context, routerMo
 	temp := float32(0.1)
 	maxTokens := 10
 	numCtx := 16384
-	params := llm.GenerationParams{
+	params := agentllm.GenerationParams{
 		Temperature:   &temp,
 		MaxTokens:     &maxTokens,
 		NumCtx:        &numCtx,

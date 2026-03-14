@@ -17,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	agentllm "github.com/AleutianAI/AleutianFOSS/services/trace/agent/llm"
 )
 
@@ -44,7 +43,7 @@ type mockChatClient struct {
 	err      error
 }
 
-func (m *mockChatClient) Chat(_ context.Context, _ []datatypes.Message, _ ChatOptions) (string, error) {
+func (m *mockChatClient) Chat(_ context.Context, _ []Message, _ ChatOptions) (string, error) {
 	return m.response, m.err
 }
 
@@ -267,7 +266,7 @@ func TestEgressGuardChatClient_Chat_Success(t *testing.T) {
 	guard := buildTestGuardChatClient(inner)
 	ctx := context.Background()
 
-	resp, err := guard.Chat(ctx, []datatypes.Message{{Role: "user", Content: "route this"}}, ChatOptions{})
+	resp, err := guard.Chat(ctx, []Message{{Role: "user", Content: "route this"}}, ChatOptions{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -284,7 +283,7 @@ func TestEgressGuardChatClient_Chat_Blocked(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	_, err := guard.Chat(ctx, []datatypes.Message{{Role: "user", Content: "test"}}, ChatOptions{})
+	_, err := guard.Chat(ctx, []Message{{Role: "user", Content: "test"}}, ChatOptions{})
 	if err == nil {
 		t.Fatal("expected error from kill switch")
 	}
@@ -351,7 +350,7 @@ func TestSerializeChatMessages(t *testing.T) {
 	})
 
 	t.Run("with messages", func(t *testing.T) {
-		msgs := []datatypes.Message{
+		msgs := []Message{
 			{Role: "user", Content: "Hello"},
 		}
 		data := serializeChatMessages(msgs)

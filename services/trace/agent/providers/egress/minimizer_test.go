@@ -850,6 +850,29 @@ func TestCompressTurn(t *testing.T) {
 		}
 	})
 
+	t.Run("assistant with tool calls preserves ThoughtSignature", func(t *testing.T) {
+		msg := agentllm.Message{
+			Role:    "assistant",
+			Content: "Calling tools",
+			ToolCalls: []agentllm.ToolCall{
+				{ID: "tc_1", Name: "Grep", Arguments: `{"pattern":"foo"}`, ThoughtSignature: "gemini3-sig-1"},
+				{ID: "tc_2", Name: "find_callers", Arguments: `{"name":"bar"}`, ThoughtSignature: "gemini3-sig-2"},
+			},
+		}
+		compressed := compressTurn(msg)
+		if len(compressed.ToolCalls) != 2 {
+			t.Fatalf("expected 2 ToolCalls stubs, got %d", len(compressed.ToolCalls))
+		}
+		if compressed.ToolCalls[0].ThoughtSignature != "gemini3-sig-1" {
+			t.Errorf("ToolCalls[0].ThoughtSignature = %q, want %q",
+				compressed.ToolCalls[0].ThoughtSignature, "gemini3-sig-1")
+		}
+		if compressed.ToolCalls[1].ThoughtSignature != "gemini3-sig-2" {
+			t.Errorf("ToolCalls[1].ThoughtSignature = %q, want %q",
+				compressed.ToolCalls[1].ThoughtSignature, "gemini3-sig-2")
+		}
+	})
+
 	t.Run("tool result", func(t *testing.T) {
 		msg := agentllm.Message{
 			Role: "tool",

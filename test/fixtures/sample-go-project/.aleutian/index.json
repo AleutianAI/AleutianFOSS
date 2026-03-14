@@ -1,0 +1,260 @@
+{
+  "symbols": [
+    {
+      "id": "1ca54cd7baefd6610d934eb8666b34b1",
+      "name": "auth.go",
+      "kind": "file",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/auth/auth.go",
+      "start_line": 1,
+      "end_line": 43,
+      "start_col": 0,
+      "end_col": 0
+    },
+    {
+      "id": "3e76c12e0894b1731cd73b1e48900f2b",
+      "name": "Init",
+      "kind": "function",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/auth/auth.go",
+      "start_line": 9,
+      "end_line": 9,
+      "start_col": 0,
+      "end_col": 4
+    },
+    {
+      "id": "9967a578425537d78d849d8b1f01acba",
+      "name": "ValidateToken",
+      "kind": "function",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/auth/auth.go",
+      "start_line": 19,
+      "end_line": 19,
+      "start_col": 0,
+      "end_col": 13
+    },
+    {
+      "id": "a7b037f82cb67000e7c601df54443440",
+      "name": "Login",
+      "kind": "function",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/auth/auth.go",
+      "start_line": 28,
+      "end_line": 28,
+      "start_col": 0,
+      "end_col": 5
+    },
+    {
+      "id": "e90def3f91166de306edd047c0f36481",
+      "name": "Logout",
+      "kind": "function",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/auth/auth.go",
+      "start_line": 36,
+      "end_line": 36,
+      "start_col": 0,
+      "end_col": 6
+    },
+    {
+      "id": "0ddada4e2a76b7cec8541debd08ec8ca",
+      "name": "main.go",
+      "kind": "file",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/main.go",
+      "start_line": 1,
+      "end_line": 37,
+      "start_col": 0,
+      "end_col": 0
+    },
+    {
+      "id": "6fe681b279915e1edbe9c92c15eda76c",
+      "name": "main",
+      "kind": "function",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/main.go",
+      "start_line": 13,
+      "end_line": 13,
+      "start_col": 0,
+      "end_col": 4
+    },
+    {
+      "id": "e3d5914b246718e9bc6768826bc4c512",
+      "name": "HandleRequest",
+      "kind": "function",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/main.go",
+      "start_line": 30,
+      "end_line": 30,
+      "start_col": 0,
+      "end_col": 13
+    },
+    {
+      "id": "742d4a810ee29994ab79fd2e45e1bda8",
+      "name": "db.go",
+      "kind": "file",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/db/db.go",
+      "start_line": 1,
+      "end_line": 38,
+      "start_col": 0,
+      "end_col": 0
+    },
+    {
+      "id": "228227ec076d370848badbdba62d7843",
+      "name": "Connect",
+      "kind": "function",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/db/db.go",
+      "start_line": 14,
+      "end_line": 14,
+      "start_col": 0,
+      "end_col": 7
+    },
+    {
+      "id": "f97b1ee2475cb84f959eb087d6035beb",
+      "name": "Close",
+      "kind": "function",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/db/db.go",
+      "start_line": 20,
+      "end_line": 20,
+      "start_col": 0,
+      "end_col": 5
+    },
+    {
+      "id": "f703a9026836e08a82bbec2053c29382",
+      "name": "Query",
+      "kind": "function",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/db/db.go",
+      "start_line": 29,
+      "end_line": 29,
+      "start_col": 0,
+      "end_col": 5
+    },
+    {
+      "id": "7c1d07189a616c947c78fbd0400c66ac",
+      "name": "config.go",
+      "kind": "file",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/config/config.go",
+      "start_line": 1,
+      "end_line": 24,
+      "start_col": 0,
+      "end_col": 0
+    },
+    {
+      "id": "2a6c84aa43391da0483c702155079388",
+      "name": "Load",
+      "kind": "function",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/config/config.go",
+      "start_line": 15,
+      "end_line": 15,
+      "start_col": 0,
+      "end_col": 4
+    },
+    {
+      "id": "7793131b963b30f1987890f2db63a287",
+      "name": "handler.go",
+      "kind": "file",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/handler/handler.go",
+      "start_line": 1,
+      "end_line": 35,
+      "start_col": 0,
+      "end_col": 0
+    },
+    {
+      "id": "b5b63c31c71b4de86a95b2843cb5d1a0",
+      "name": "StartServer",
+      "kind": "function",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/handler/handler.go",
+      "start_line": 15,
+      "end_line": 15,
+      "start_col": 0,
+      "end_col": 11
+    },
+    {
+      "id": "d846dc90747713cb72ed9e8d2e43c2ae",
+      "name": "HandleRequest",
+      "kind": "function",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/handler/handler.go",
+      "start_line": 22,
+      "end_line": 22,
+      "start_col": 0,
+      "end_col": 13
+    }
+  ],
+  "edges": [
+    {
+      "from_id": "1ca54cd7baefd6610d934eb8666b34b1",
+      "to_id": "3e76c12e0894b1731cd73b1e48900f2b",
+      "kind": "defines",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/auth/auth.go",
+      "line": 9
+    },
+    {
+      "from_id": "1ca54cd7baefd6610d934eb8666b34b1",
+      "to_id": "9967a578425537d78d849d8b1f01acba",
+      "kind": "defines",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/auth/auth.go",
+      "line": 19
+    },
+    {
+      "from_id": "1ca54cd7baefd6610d934eb8666b34b1",
+      "to_id": "a7b037f82cb67000e7c601df54443440",
+      "kind": "defines",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/auth/auth.go",
+      "line": 28
+    },
+    {
+      "from_id": "1ca54cd7baefd6610d934eb8666b34b1",
+      "to_id": "e90def3f91166de306edd047c0f36481",
+      "kind": "defines",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/auth/auth.go",
+      "line": 36
+    },
+    {
+      "from_id": "0ddada4e2a76b7cec8541debd08ec8ca",
+      "to_id": "6fe681b279915e1edbe9c92c15eda76c",
+      "kind": "defines",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/main.go",
+      "line": 13
+    },
+    {
+      "from_id": "0ddada4e2a76b7cec8541debd08ec8ca",
+      "to_id": "e3d5914b246718e9bc6768826bc4c512",
+      "kind": "defines",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/main.go",
+      "line": 30
+    },
+    {
+      "from_id": "742d4a810ee29994ab79fd2e45e1bda8",
+      "to_id": "228227ec076d370848badbdba62d7843",
+      "kind": "defines",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/db/db.go",
+      "line": 14
+    },
+    {
+      "from_id": "742d4a810ee29994ab79fd2e45e1bda8",
+      "to_id": "f97b1ee2475cb84f959eb087d6035beb",
+      "kind": "defines",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/db/db.go",
+      "line": 20
+    },
+    {
+      "from_id": "742d4a810ee29994ab79fd2e45e1bda8",
+      "to_id": "f703a9026836e08a82bbec2053c29382",
+      "kind": "defines",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/db/db.go",
+      "line": 29
+    },
+    {
+      "from_id": "7c1d07189a616c947c78fbd0400c66ac",
+      "to_id": "2a6c84aa43391da0483c702155079388",
+      "kind": "defines",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/config/config.go",
+      "line": 15
+    },
+    {
+      "from_id": "7793131b963b30f1987890f2db63a287",
+      "to_id": "b5b63c31c71b4de86a95b2843cb5d1a0",
+      "kind": "defines",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/handler/handler.go",
+      "line": 15
+    },
+    {
+      "from_id": "7793131b963b30f1987890f2db63a287",
+      "to_id": "d846dc90747713cb72ed9e8d2e43c2ae",
+      "kind": "defines",
+      "file_path": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project/handler/handler.go",
+      "line": 22
+    }
+  ]
+}

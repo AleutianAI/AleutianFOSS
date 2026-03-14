@@ -19,7 +19,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AleutianAI/AleutianFOSS/services/llm"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/cli/tools"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -199,7 +198,7 @@ func TestComplete_SpanCreated_Anthropic(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := llm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", server.URL)
+	client := NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", server.URL)
 	adapter := NewAnthropicAgentAdapter(client, "claude-sonnet-4-20250514")
 
 	request := &Request{
@@ -269,7 +268,7 @@ func TestComplete_SpanCreated_OpenAI(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := llm.NewOpenAIClientWithConfig("test-key", "gpt-4o", server.URL)
+	client := NewOpenAIClientWithConfig("test-key", "gpt-4o", server.URL)
 	adapter := NewOpenAIAgentAdapter(client, "gpt-4o")
 
 	request := &Request{
@@ -313,7 +312,7 @@ func TestComplete_SpanCreated_Gemini(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := llm.NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", server.URL)
+	client := NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", server.URL)
 	adapter := NewGeminiAgentAdapter(client, "gemini-1.5-flash")
 
 	request := &Request{
@@ -358,7 +357,7 @@ func TestCompleteWithTools_SpanCreated_Anthropic(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := llm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", server.URL)
+	client := NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", server.URL)
 	adapter := NewAnthropicAgentAdapter(client, "claude-sonnet-4-20250514")
 
 	request := &Request{
@@ -402,7 +401,7 @@ func TestComplete_CRSTraceStep_Error(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := llm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", server.URL)
+	client := NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", server.URL)
 	adapter := NewAnthropicAgentAdapter(client, "claude-sonnet-4-20250514")
 
 	request := &Request{

@@ -1,9 +1,9 @@
 <!-- Copyright (C) 2025 Aleutian AI (jinterlante@aleutian.ai)
 AGPL v3 - See LICENSE.txt and NOTICE.txt -->
 
-# Aleutian: Code Intelligence for Local LLMs
+# Aleutian Trace: Code Intelligence for Local LLMs
 
-Aleutian gives your local LLM deep understanding of any codebase. It parses source code into a call graph, indexes symbols into a vector database, and exposes 24+ agent tools through an OpenAI-compatible API. Any tool that speaks the OpenAI protocol — Open WebUI, Continue.dev, Aider, Cline, curl — gets structural code intelligence without plugins or custom integrations.
+Aleutian Trace gives your local LLM deep understanding of any codebase. It parses source code into a call graph, indexes symbols into a vector database, and exposes 24+ agent tools through an OpenAI-compatible API. Any tool that speaks the OpenAI protocol — Open WebUI, Continue.dev, Aider, Cline, curl — gets structural code intelligence without plugins or custom integrations.
 
 Ask "what are the callees of the main function?" and get an accurate, sourced answer from the actual code graph — not an LLM hallucination.
 
@@ -23,6 +23,24 @@ Open WebUI / Continue / Aider → [Trace Proxy :12218] → [Agent Loop] → [24+
 4. **Agent** — A multi-step reasoning loop selects the right tools (graph queries, semantic search, analytics) and synthesizes answers using your local LLM
 5. **Proxy** — Translates OpenAI `/v1/chat/completions` requests into agent loop calls, so any compatible client works out of the box
 
+## Repository Structure
+
+This repo contains the core trace service. Related repos:
+
+- [**RagStack**](https://github.com/AleutianAI/RagStack) — Orchestrator, RAG engine, LLM adapters, embeddings, and the `aleutian` CLI. Provides document processing, embedding coordination, and retrieval pipelines that Trace relies on for semantic search.
+- [**Observability**](https://github.com/AleutianAI/Observability) — Grafana dashboards, Prometheus configs, and OpenTelemetry Collector setup for monitoring the full Aleutian stack.
+
+```
+AleutianFOSS (this repo)          RagStack                    Observability
+├── cmd/trace/                    ├── cmd/aleutian/            ├── compose/
+├── cmd/trace-mcp/                ├── cmd/orchestrator/        ├── grafana/
+├── cmd/trace-proxy/              ├── services/orchestrator/   ├── prometheus/
+├── services/trace/               ├── services/rag_engine/     └── otel/
+└── test/                         ├── services/llm/
+                                  ├── services/embeddings/
+                                  └── pkg/
+```
+
 ## Quick Start
 
 ### Prerequisites
@@ -31,20 +49,22 @@ Open WebUI / Continue / Aider → [Trace Proxy :12218] → [Agent Loop] → [24+
 - [Ollama](https://ollama.com/) running on the host with at least one model pulled (e.g., `ollama pull gemma3n`)
 - Go 1.25+ (to build from source)
 
-### 1. Build the CLI
+### 1. Build
 
 ```bash
 git clone https://github.com/AleutianAI/AleutianFOSS.git
 cd AleutianFOSS
-go build -o aleutian ./cmd/aleutian
+go build ./cmd/trace
+go build ./cmd/trace-mcp
+go build ./cmd/trace-proxy
 ```
 
 ### 2. Start the stack
 
-Point `TRACE_PROJECTS_DIR` at the codebase you want to analyze:
+The full stack requires both this repo and [RagStack](https://github.com/AleutianAI/RagStack). Point `TRACE_PROJECTS_DIR` at the codebase you want to analyze:
 
 ```bash
-TRACE_PROJECTS_DIR=/path/to/your/project ./aleutian stack start --build
+TRACE_PROJECTS_DIR=/path/to/your/project aleutian stack start --build
 ```
 
 This starts all services: trace server, trace proxy, orchestrator, Weaviate, NATS, and Jaeger. The proxy automatically parses your code, builds the call graph, and indexes all symbols on startup.
@@ -110,6 +130,120 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
+### 5. Cloud Providers (optional)
+
+Trace defaults to Ollama for local inference, but can use cloud LLM providers instead. Set the provider and model for each role (main, router, param extractor) via environment variables.
+
+Create a `.env` file with your API keys:
+
+```bash
+# .env (do NOT commit this file)
+OPENAI_API_KEY=your-key-here
+GEMINI_API_KEY=your-key-here
+ANTHROPIC_API_KEY=your-key-here
+```
+
+**Gemini** (supports 2.5 and 3.x series, including `gemini-2.5-flash`, `gemini-3-flash-preview`, `gemini-3.1-pro-preview`, `gemini-3.1-flash-lite-preview`):
+
+```bash
+podman run -d --name aleutian-trace \
+  --env-file .env \
+  -e TRACE_MAIN_PROVIDER=gemini \
+  -e TRACE_MAIN_MODEL=gemini-2.5-flash \
+  -e TRACE_ROUTER_PROVIDER=gemini \
+  -e TRACE_ROUTER_MODEL=gemini-2.5-flash \
+  -e TRACE_PARAM_PROVIDER=gemini \
+  -e TRACE_PARAM_MODEL=gemini-2.5-flash \
+  -e TRACE_CONSENT_GEMINI=true \
+  -e TRACE_CLASSIFY_DATA=false \
+  -p 12217:12217 \
+  aleutian-trace:latest
+```
+
+**OpenAI:**
+
+```bash
+podman run -d --name aleutian-trace \
+  --env-file .env \
+  -e TRACE_MAIN_PROVIDER=openai \
+  -e TRACE_MAIN_MODEL=gpt-4o-mini \
+  -e TRACE_ROUTER_PROVIDER=openai \
+  -e TRACE_ROUTER_MODEL=gpt-4o-mini \
+  -e TRACE_PARAM_PROVIDER=openai \
+  -e TRACE_PARAM_MODEL=gpt-4o-mini \
+  -e TRACE_CONSENT_OPENAI=true \
+  -e TRACE_CLASSIFY_DATA=false \
+  -p 12217:12217 \
+  aleutian-trace:latest
+```
+
+**Anthropic (Claude):**
+
+```bash
+podman run -d --name aleutian-trace \
+  --env-file .env \
+  -e TRACE_MAIN_PROVIDER=anthropic \
+  -e TRACE_MAIN_MODEL=claude-sonnet-4-6 \
+  -e TRACE_ROUTER_PROVIDER=anthropic \
+  -e TRACE_ROUTER_MODEL=claude-sonnet-4-6 \
+  -e TRACE_PARAM_PROVIDER=anthropic \
+  -e TRACE_PARAM_MODEL=claude-sonnet-4-6 \
+  -e TRACE_CONSENT_ANTHROPIC=true \
+  -e TRACE_CLASSIFY_DATA=false \
+  -p 12217:12217 \
+  aleutian-trace:latest
+```
+
+**OpenAI-Compatible Providers (Groq, DeepSeek, Mistral, vLLM, etc.):**
+
+Any provider that implements the OpenAI chat completions API works via `OPENAI_BASE_URL`:
+
+```bash
+# Example: Groq (fast inference on open-weights models)
+OPENAI_API_KEY=your-groq-key
+OPENAI_BASE_URL=https://api.groq.com/openai/v1/chat/completions
+
+# Example: DeepSeek
+OPENAI_API_KEY=your-deepseek-key
+OPENAI_BASE_URL=https://api.deepseek.com/v1/chat/completions
+
+# Example: local vLLM server
+OPENAI_API_KEY=not-needed
+OPENAI_BASE_URL=http://host.containers.internal:8000/v1/chat/completions
+```
+
+```bash
+podman run -d --name aleutian-trace \
+  -e OPENAI_API_KEY=your-groq-key \
+  -e OPENAI_BASE_URL=https://api.groq.com/openai/v1/chat/completions \
+  -e TRACE_MAIN_PROVIDER=openai \
+  -e TRACE_MAIN_MODEL=llama-3.3-70b-versatile \
+  -e TRACE_ROUTER_PROVIDER=openai \
+  -e TRACE_ROUTER_MODEL=llama-3.3-70b-versatile \
+  -e TRACE_PARAM_PROVIDER=openai \
+  -e TRACE_PARAM_MODEL=llama-3.3-70b-versatile \
+  -e TRACE_CONSENT_OPENAI=true \
+  -e TRACE_CLASSIFY_DATA=false \
+  -p 12217:12217 \
+  aleutian-trace:latest
+```
+
+**Environment variables:**
+
+| Variable | Description |
+|----------|-------------|
+| `TRACE_MAIN_PROVIDER` | LLM provider for synthesis: `ollama`, `gemini`, `openai`, `anthropic` |
+| `TRACE_MAIN_MODEL` | Model name for the main LLM |
+| `TRACE_ROUTER_PROVIDER` | LLM provider for tool routing (can differ from main) |
+| `TRACE_ROUTER_MODEL` | Model name for the router |
+| `TRACE_PARAM_PROVIDER` | LLM provider for parameter extraction |
+| `TRACE_PARAM_MODEL` | Model name for parameter extraction |
+| `TRACE_CONSENT_<PROVIDER>` | Required consent flag (`true`) to send data to a cloud provider |
+| `TRACE_CLASSIFY_DATA` | Set to `false` to skip data classification (required for cloud providers analyzing your own code) |
+| `OPENAI_BASE_URL` | Override the OpenAI endpoint for compatible providers (Groq, DeepSeek, Mistral, vLLM, etc.) |
+
+You can mix providers — for example, use Gemini for routing (fast, cheap) and Anthropic for synthesis (higher quality).
+
 ## MCP Server (Claude Code / Cursor / Windsurf)
 
 For AI coding assistants that support MCP, a dedicated `trace-mcp` binary exposes all trace tools over the Model Context Protocol:
@@ -151,13 +285,12 @@ See [services/trace/README.md](services/trace/README.md) for the full MCP tool l
               └──┬─────┬────┬───┘
                  │     │    │
         ┌────────▼┐ ┌──▼──┐ ┌▼──────────┐
-        │Weaviate │ │NATS │ │Orchestrator│
-        │(vectors)│ │(CRS)│ │(embeddings)│
-        │  :12212 │ │:4222│ │   :12210   │
-        └─────────┘ └─────┘ └──────┬─────┘
-                                   │
+        │Weaviate │ │NATS │ │Orchestrator│  ← from RagStack repo
+        │(vectors)│ │(CRS)│ │   :12210   │
+        │  :12212 │ │:4222│ └──────┬─────┘
+        └─────────┘ └─────┘        │
                             ┌──────▼──────┐
-                            │  RAG Engine  │
+                            │  RAG Engine  │  ← from RagStack repo
                             │  (Python)    │
                             │    :12211    │
                             └─────────────┘
@@ -172,16 +305,16 @@ See [services/trace/README.md](services/trace/README.md) for the full MCP tool l
 
 ### Services
 
-| Service | Port | Description |
-|---------|------|-------------|
-| Trace Proxy | 12218 | OpenAI-compatible API gateway |
-| Trace Server | 12217 | Code graph, agent loop, 24+ tools |
-| Orchestrator | 12210 | Embedding coordination, document processing |
-| RAG Engine | 12211 | Python retrieval and generation pipelines |
-| Weaviate | 12212 | Vector database for symbol embeddings |
-| NATS | 4222 | CRS delta streaming and state persistence |
-| Jaeger | 12214 | Distributed tracing UI |
-| Ollama | 11434 | Local LLM inference (runs on host) |
+| Service | Port | Repo | Description |
+|---------|------|------|-------------|
+| Trace Proxy | 12218 | AleutianFOSS | OpenAI-compatible API gateway |
+| Trace Server | 12217 | AleutianFOSS | Code graph, agent loop, 24+ tools |
+| Orchestrator | 12210 | RagStack | Embedding coordination, document processing |
+| RAG Engine | 12211 | RagStack | Python retrieval and generation pipelines |
+| Weaviate | 12212 | — | Vector database for symbol embeddings |
+| NATS | 4222 | — | CRS delta streaming and state persistence |
+| Jaeger | 12214 | Observability | Distributed tracing UI |
+| Ollama | 11434 | — | Local LLM inference (runs on host) |
 
 ### Agent Tools
 
@@ -199,7 +332,7 @@ The trace agent has access to 24+ tools organized by category:
 
 ## Observability
 
-All services export OpenTelemetry traces. View them in Jaeger at `http://localhost:12214`.
+All services export OpenTelemetry traces. The [Observability](https://github.com/AleutianAI/Observability) repo provides pre-configured Grafana dashboards and Prometheus alerting rules for the full stack. View traces in Jaeger at `http://localhost:12214`.
 
 Analyze trace performance from the command line:
 
@@ -210,18 +343,6 @@ Analyze trace performance from the command line:
 # Analyze a specific trace
 ./scripts/trace_breakdown.sh <trace_id>
 ```
-
-## CLI Commands
-
-| Command | Description |
-|---------|-------------|
-| `aleutian stack start` | Start all services |
-| `aleutian stack start --build` | Rebuild images and start |
-| `aleutian stack stop` | Stop all services |
-| `aleutian stack status` | Show health and resource usage |
-| `aleutian stack logs [service]` | Stream container logs |
-| `aleutian stack destroy` | Remove all containers and data |
-| `aleutian health` | Check service health |
 
 ## System Requirements
 

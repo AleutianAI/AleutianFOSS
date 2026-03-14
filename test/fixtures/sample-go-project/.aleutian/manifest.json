@@ -1,0 +1,40 @@
+{
+  "format_version": "1.0",
+  "project_root": "/Users/jin/GolandProjects/AleutianFOSS/test/fixtures/sample-go-project",
+  "files": {
+    "auth/auth.go": {
+      "path": "auth/auth.go",
+      "hash": "737122a5817601b4b6f091ff850e43e09b288b27a73be042afd55f172d27e39f",
+      "mtime": 1771880125523274975,
+      "size": 1039
+    },
+    "config/config.go": {
+      "path": "config/config.go",
+      "hash": "95d1d77a34c1b8dcdbc107e44d28a6fe8e1a091fcbb7047c4f6101b48156da9e",
+      "mtime": 1771880141075065005,
+      "size": 707
+    },
+    "db/db.go": {
+      "path": "db/db.go",
+      "hash": "1d67cfc647e558fc057bc8d6c0133a15fcbb741e2ff9ce106a0530eee9de6b69",
+      "mtime": 1771880135577809203,
+      "size": 843
+    },
+    "handler/handler.go": {
+      "path": "handler/handler.go",
+      "hash": "ee1918b3c9b1c200585ec40f3bb431b95812ff04b50843840fc7b1057aaf9d56",
+      "mtime": 1771880131224707523,
+      "size": 787
+    },
+    "main.go": {
+      "path": "main.go",
+      "hash": "72893e16b4e74373e411a515661ff995e1b388ebcd15002b3594511c23f8a043",
+      "mtime": 1771880120160436948,
+      "size": 782
+    }
+  },
+  "index_checksum": "c9d7b769c9d99c74fe02b545b377422c477632f7497b23f80e7310690e0e5829",
+  "graph_checksum": "",
+  "created_at_milli": 1771883871598,
+  "updated_at_milli": 1771883871599
+}

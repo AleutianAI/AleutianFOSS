@@ -21,8 +21,12 @@ package providers
 import (
 	"context"
 
-	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
+	agenttypes "github.com/AleutianAI/AleutianFOSS/services/trace/agent/types"
 )
+
+// Message is a type alias for agenttypes.Message, re-exported here for
+// convenience so consumers of the providers package can use providers.Message.
+type Message = agenttypes.Message
 
 // ChatClient is the minimal interface used by Router and ParamExtractor.
 //
@@ -43,7 +47,7 @@ type ChatClient interface {
 	// Outputs:
 	//   - string: The assistant's response text.
 	//   - error: Non-nil on failure.
-	Chat(ctx context.Context, messages []datatypes.Message, opts ChatOptions) (string, error)
+	Chat(ctx context.Context, messages []Message, opts ChatOptions) (string, error)
 }
 
 // ChatOptions holds provider-agnostic options for a chat request.

@@ -1,5 +1,5 @@
 # Project metadata
-project_name: aleutian
+project_name: aleutian-trace
 env:
   - CGO_ENABLED=0
 
@@ -9,10 +9,33 @@ before:
     - go mod tidy
 
 builds:
-  -
-    id: aleutian-cli
-    main: ./cmd/aleutian
-    binary: aleutian
+  - id: trace
+    main: ./cmd/trace
+    binary: trace
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+  - id: trace-mcp
+    main: ./cmd/trace-mcp
+    binary: trace-mcp
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+  - id: trace-proxy
+    main: ./cmd/trace-proxy
+    binary: trace-proxy
     goos:
       - linux
       - darwin
@@ -27,16 +50,18 @@ archives:
   - format: tar.gz
     files:
       - LICENSE.txt
-      - README.txt
+      - README.md
       - NOTICE.txt
     name_template: >-
       {{ .ProjectName }}_
-      {{- title. Os }}_
+      {{- title .Os }}_
       {{- if eq .Arch "amd64" }}x86_64
       {{- else if eq .Arch "386" }}i386
       {{- else }}{{ .Arch }}{{ end }}
     builds:
-      - aleutian-cli
+      - trace
+      - trace-mcp
+      - trace-proxy
 
 # Generate a checksum file
 checksum:
@@ -53,20 +78,3 @@ release:
         - 'merge conflict'
         - 'Merge pull request'
         - 'Merge branch'
-
-## update homebrew tap automatically
-#brews:
-#  - name: aleutian
-#    tap:
-#      owner: jinterlante1206
-#      name: homebrew-aleutian
-#      download_strategy: CurlDownloadStrategy
-#      commit_msg_template: "Brew formula update for aleutian version {{ .Tag }}"
-#      folder: Formula
-#      homepage: "https://github.com/jinterlante1206/AleutianLocal"
-#      description: "Aleutian Local: MLOps Control Plane for LLM Apps"
-#      dependencies:
-#        - name: podman
-#        - name: podman-compose
-#      install: |
-#        bin.install "aleutian"

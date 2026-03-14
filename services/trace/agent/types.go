@@ -422,6 +422,11 @@ type ToolInvocation struct {
 
 	// Result contains the tool execution result.
 	Result *ToolResult `json:"result,omitempty"`
+
+	// ThoughtSignature is an opaque token from Gemini 3 models that must be
+	// echoed back in subsequent requests to preserve reasoning context.
+	// Empty for non-Gemini providers and older Gemini models.
+	ThoughtSignature string `json:"thought_signature,omitempty"`
 }
 
 // ToolResult contains the outcome of a tool execution.
@@ -461,6 +466,11 @@ type ToolResult struct {
 	// ProofDelta overrides the default CRS proof delta when non-zero.
 	// IT_CRS_03 AC-8: Higher values = stronger signal (exact match = 2, fuzzy = 1).
 	ProofDelta int `json:"proof_delta,omitempty"`
+
+	// ThoughtSignature is an opaque token from Gemini 3 models that must be
+	// echoed back in subsequent requests to preserve reasoning context.
+	// Empty for non-Gemini providers and older Gemini models.
+	ThoughtSignature string `json:"thought_signature,omitempty"`
 }
 
 // DurationMs returns the duration in milliseconds.

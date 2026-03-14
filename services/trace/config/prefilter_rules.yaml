@@ -148,6 +148,9 @@ confusion_pairs:
       - "what does .* call"
       - "what functions does"
       - "dependencies of"
+      - "callees"
+      - "callees of"
+      - "callee"
     boost_amount: 3.0
 
   - tool_a: find_callers
@@ -387,6 +390,28 @@ routing_encyclopedia:
       - "production criticality"
     conflict_with: find_weighted_criticality
     reason: "Explicit importance/PageRank query — always find_important"
+
+  # GR-prod-1: Bare "callees" queries were excluded by prefilter because no
+  # pattern matched. The confusion pair boost only fires when BOTH tools are
+  # already candidates. This encyclopedia entry ensures find_callees makes it
+  # into the candidate set for any query mentioning callees.
+  - tool: find_callees
+    tier: boost
+    boost_amount: 0.20
+    intents:
+      - pattern: "callees of"
+      - pattern: "callees"
+      - pattern: "callee"
+      - pattern: "what does .* call"
+      - pattern: "what functions does .* call"
+      - pattern: "functions called by"
+      - pattern: "methods called by"
+      - pattern: "dependencies of"
+    anti_signals:
+      - "no callers"
+      - "dead code"
+      - "unused"
+    reason: "Callee/dependency query — what does X call"
 
   - tool: find_dead_code
     tier: force

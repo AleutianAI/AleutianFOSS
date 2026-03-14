@@ -17,9 +17,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AleutianAI/AleutianFOSS/services/llm"
-	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/agent/mcts/crs"
+	agenttypes "github.com/AleutianAI/AleutianFOSS/services/trace/agent/types"
 	"github.com/AleutianAI/AleutianFOSS/services/trace/telemetry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -33,11 +32,11 @@ import (
 //
 //	Wraps the existing OpenAIClient to provide LLM capabilities for the
 //	agent loop using OpenAI models. Converts between agent message format
-//	and OpenAI's datatypes.Message format.
+//	and OpenAI's agenttypes.Message format.
 //
 // Thread Safety: OpenAIAgentAdapter is safe for concurrent use.
 type OpenAIAgentAdapter struct {
-	client *llm.OpenAIClient
+	client *OpenAIClient
 	model  string
 }
 
@@ -49,7 +48,7 @@ type OpenAIAgentAdapter struct {
 //
 // Outputs:
 //   - *OpenAIAgentAdapter: The configured adapter.
-func NewOpenAIAgentAdapter(client *llm.OpenAIClient, model string) *OpenAIAgentAdapter {
+func NewOpenAIAgentAdapter(client *OpenAIClient, model string) *OpenAIAgentAdapter {
 	return &OpenAIAgentAdapter{
 		client: client,
 		model:  model,
@@ -163,11 +162,11 @@ func (a *OpenAIAgentAdapter) Model() string {
 }
 
 // convertMessages converts agent messages to OpenAI format.
-func (a *OpenAIAgentAdapter) convertMessages(request *Request) []datatypes.Message {
-	messages := make([]datatypes.Message, 0, len(request.Messages)+1)
+func (a *OpenAIAgentAdapter) convertMessages(request *Request) []agenttypes.Message {
+	messages := make([]agenttypes.Message, 0, len(request.Messages)+1)
 
 	if request.SystemPrompt != "" {
-		messages = append(messages, datatypes.Message{
+		messages = append(messages, agenttypes.Message{
 			Role:    "system",
 			Content: request.SystemPrompt,
 		})
@@ -193,7 +192,12 @@ func (a *OpenAIAgentAdapter) convertMessages(request *Request) []datatypes.Messa
 			role = "user"
 		}
 
-		messages = append(messages, datatypes.Message{
+		// Cloud providers require non-empty content for user messages
+		if content == "" && role == "user" {
+			content = "(no output)"
+		}
+
+		messages = append(messages, agenttypes.Message{
 			Role:    role,
 			Content: content,
 		})
@@ -270,9 +274,10 @@ func (a *OpenAIAgentAdapter) completeWithTools(ctx context.Context, request *Req
 	var agentToolCalls []ToolCall
 	for _, tc := range result.ToolCalls {
 		agentToolCalls = append(agentToolCalls, ToolCall{
-			ID:        tc.ID,
-			Name:      tc.Name,
-			Arguments: tc.ArgumentsString(),
+			ID:               tc.ID,
+			Name:             tc.Name,
+			Arguments:        tc.ArgumentsString(),
+			ThoughtSignature: tc.ThoughtSignature,
 		})
 	}
 
@@ -314,8 +319,10 @@ func (a *OpenAIAgentAdapter) completeWithTools(ctx context.Context, request *Req
 }
 
 // buildParams converts agent request parameters to OpenAI format.
-func (a *OpenAIAgentAdapter) buildParams(request *Request) llm.GenerationParams {
-	params := llm.GenerationParams{}
+func (a *OpenAIAgentAdapter) buildParams(request *Request) GenerationParams {
+	params := GenerationParams{
+		ModelOverride: a.model,
+	}
 
 	if request.MaxTokens > 0 {
 		maxTokens := request.MaxTokens

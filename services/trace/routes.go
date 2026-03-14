@@ -44,7 +44,6 @@ import (
 //	POST /v1/trace/analytics/important - Find most important nodes (PageRank)
 //	POST /v1/trace/analytics/communities - Detect code communities
 //	POST /v1/trace/analytics/path - Find shortest path between functions
-//	POST /v1/trace/seed - Seed library documentation
 //
 // Memory Endpoints:
 //
@@ -141,9 +140,6 @@ func RegisterRoutes(rg *gin.RouterGroup, handlers *Handlers) {
 			analyticsGroup.POST("/communities", handlers.HandleFindCommunities)
 			analyticsGroup.POST("/path", handlers.HandleFindPath)
 		}
-
-		// Library documentation seeding
-		trace.POST("/seed", handlers.HandleSeed)
 
 		// Memory management
 		trace.GET("/memories", handlers.HandleListMemories)

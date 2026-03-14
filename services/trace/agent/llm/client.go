@@ -151,6 +151,11 @@ type ToolCall struct {
 
 	// Arguments are the tool arguments as JSON.
 	Arguments string `json:"arguments"`
+
+	// ThoughtSignature is an opaque token from Gemini 3 models that must be
+	// echoed back in subsequent requests to preserve reasoning context.
+	// Empty for non-Gemini providers and older Gemini models.
+	ThoughtSignature string `json:"thought_signature,omitempty"`
 }
 
 // ToolCallResult contains the result of a tool call.
@@ -273,8 +278,28 @@ func BuildRequest(
 		})
 	}
 
-	// Add recent tool results as tool messages
+	// Add recent tool results as tool messages.
+	// OpenAI/Anthropic require each "tool" message to be preceded by an "assistant"
+	// message with a matching tool_calls entry. We generate synthetic assistant
+	// messages to satisfy this constraint.
 	for _, result := range ctx.ToolResults {
+		toolName := result.Tool
+		if toolName == "" {
+			toolName = "unknown_tool"
+		}
+		// Synthetic assistant message with tool_call.
+		// Content is set for non-tool-calling paths that strip ToolCalls metadata.
+		messages = append(messages, Message{
+			Role:    "assistant",
+			Content: fmt.Sprintf("I'll use the %s tool to help answer this.", toolName),
+			ToolCalls: []ToolCall{{
+				ID:               result.InvocationID,
+				Name:             toolName,
+				Arguments:        "{}",
+				ThoughtSignature: result.ThoughtSignature,
+			}},
+		})
+		// Tool result message
 		messages = append(messages, Message{
 			Role: "tool",
 			ToolResults: []ToolCallResult{{
@@ -347,9 +372,10 @@ func ParseToolCalls(response *Response) []agent.ToolInvocation {
 		params := parseArguments(call.Arguments)
 
 		invocations = append(invocations, agent.ToolInvocation{
-			ID:         call.ID,
-			Tool:       call.Name,
-			Parameters: params,
+			ID:               call.ID,
+			Tool:             call.Name,
+			Parameters:       params,
+			ThoughtSignature: call.ThoughtSignature,
 		})
 	}
 

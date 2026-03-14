@@ -17,13 +17,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/AleutianAI/AleutianFOSS/services/llm"
-	"github.com/AleutianAI/AleutianFOSS/services/orchestrator/datatypes"
+	agenttypes "github.com/AleutianAI/AleutianFOSS/services/trace/agent/types"
 )
 
 // recordedRequest captures an HTTP request sent to a mock server.
@@ -167,6 +167,49 @@ func TestAnthropicAgentAdapter_convertMessages_ToolRole(t *testing.T) {
 // =============================================================================
 // OpenAIAgentAdapter Tests
 // =============================================================================
+
+func TestNewOpenAIClient_BaseURLOverride(t *testing.T) {
+	// Save and restore env vars
+	origKey := os.Getenv("OPENAI_API_KEY")
+	origModel := os.Getenv("OPENAI_MODEL")
+	origBaseURL := os.Getenv("OPENAI_BASE_URL")
+	defer func() {
+		os.Setenv("OPENAI_API_KEY", origKey)
+		os.Setenv("OPENAI_MODEL", origModel)
+		os.Setenv("OPENAI_BASE_URL", origBaseURL)
+	}()
+
+	t.Run("default_base_url", func(t *testing.T) {
+		os.Setenv("OPENAI_API_KEY", "test-key")
+		os.Setenv("OPENAI_MODEL", "gpt-4o")
+		os.Unsetenv("OPENAI_BASE_URL")
+
+		client, err := NewOpenAIClient()
+		if err != nil {
+			t.Fatalf("NewOpenAIClient() error: %v", err)
+		}
+		if client.baseURL != defaultOpenAIBaseURL {
+			t.Errorf("baseURL = %q, want %q", client.baseURL, defaultOpenAIBaseURL)
+		}
+	})
+
+	t.Run("custom_base_url", func(t *testing.T) {
+		os.Setenv("OPENAI_API_KEY", "test-key")
+		os.Setenv("OPENAI_MODEL", "llama-3.3-70b-versatile")
+		os.Setenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1/chat/completions")
+
+		client, err := NewOpenAIClient()
+		if err != nil {
+			t.Fatalf("NewOpenAIClient() error: %v", err)
+		}
+		if client.baseURL != "https://api.groq.com/openai/v1/chat/completions" {
+			t.Errorf("baseURL = %q, want Groq URL", client.baseURL)
+		}
+		if client.model != "llama-3.3-70b-versatile" {
+			t.Errorf("model = %q, want %q", client.model, "llama-3.3-70b-versatile")
+		}
+	})
+}
 
 func TestOpenAIAgentAdapter_Name(t *testing.T) {
 	adapter := NewOpenAIAgentAdapter(nil, "gpt-4o")
@@ -363,7 +406,7 @@ func TestAllAdapters_ToolRoleMapsToUser(t *testing.T) {
 
 	adapters := []struct {
 		name    string
-		convert func(*Request) []datatypes.Message
+		convert func(*Request) []agenttypes.Message
 	}{
 		{"anthropic", NewAnthropicAgentAdapter(nil, "claude").convertMessages},
 		{"openai", NewOpenAIAgentAdapter(nil, "gpt-4o").convertMessages},
@@ -391,7 +434,7 @@ func TestAllAdapters_buildParams_TemperatureZero(t *testing.T) {
 	// Temperature 0.0 means "most deterministic" and MUST be passed through.
 	adapters := []struct {
 		name       string
-		buildParam func(*Request) llm.GenerationParams
+		buildParam func(*Request) GenerationParams
 	}{
 		{"anthropic", NewAnthropicAgentAdapter(nil, "claude").buildParams},
 		{"openai", NewOpenAIAgentAdapter(nil, "gpt-4o").buildParams},
@@ -416,7 +459,7 @@ func TestAllAdapters_buildParams_NegativeTemperature(t *testing.T) {
 	// Negative temperature means "use provider default" — should NOT be included.
 	adapters := []struct {
 		name       string
-		buildParam func(*Request) llm.GenerationParams
+		buildParam func(*Request) GenerationParams
 	}{
 		{"anthropic", NewAnthropicAgentAdapter(nil, "claude").buildParams},
 		{"openai", NewOpenAIAgentAdapter(nil, "gpt-4o").buildParams},
@@ -453,7 +496,7 @@ func TestAllAdapters_Complete_Success(t *testing.T) {
 		{
 			"anthropic",
 			func(url string) Client {
-				client := llm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", url)
+				client := NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", url)
 				return NewAnthropicAgentAdapter(client, "claude-sonnet-4-20250514")
 			},
 			anthropicMockResponse,
@@ -461,7 +504,7 @@ func TestAllAdapters_Complete_Success(t *testing.T) {
 		{
 			"openai",
 			func(url string) Client {
-				client := llm.NewOpenAIClientWithConfig("test-key", "gpt-4o", url)
+				client := NewOpenAIClientWithConfig("test-key", "gpt-4o", url)
 				return NewOpenAIAgentAdapter(client, "gpt-4o")
 			},
 			openaiMockResponse,
@@ -471,7 +514,7 @@ func TestAllAdapters_Complete_Success(t *testing.T) {
 			func(url string) Client {
 				// Gemini URL needs the /models/model:generateContent path appended by the client.
 				// The baseURL for GeminiClient is just the prefix before /models/.
-				client := llm.NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", url)
+				client := NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", url)
 				return NewGeminiAgentAdapter(client, "gemini-1.5-flash")
 			},
 			geminiMockResponse,
@@ -543,7 +586,7 @@ func TestAnthropicAdapter_Complete_ErrorResponses(t *testing.T) {
 			server, _ := mockAnthropicServer(t, tt.statusCode, tt.body)
 			defer server.Close()
 
-			client := llm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", server.URL)
+			client := NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", server.URL)
 			adapter := NewAnthropicAgentAdapter(client, "claude-sonnet-4-20250514")
 
 			request := &Request{
@@ -579,7 +622,7 @@ func TestOpenAIAdapter_Complete_ErrorResponses(t *testing.T) {
 			server, _ := mockOpenAIServer(t, tt.statusCode, tt.body)
 			defer server.Close()
 
-			client := llm.NewOpenAIClientWithConfig("test-key", "gpt-4o", server.URL)
+			client := NewOpenAIClientWithConfig("test-key", "gpt-4o", server.URL)
 			adapter := NewOpenAIAgentAdapter(client, "gpt-4o")
 
 			request := &Request{
@@ -615,7 +658,7 @@ func TestGeminiAdapter_Complete_ErrorResponses(t *testing.T) {
 			server, _ := mockGeminiServer(t, tt.statusCode, tt.body)
 			defer server.Close()
 
-			client := llm.NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", server.URL)
+			client := NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", server.URL)
 			adapter := NewGeminiAgentAdapter(client, "gemini-1.5-flash")
 
 			request := &Request{
@@ -641,7 +684,7 @@ func TestAnthropicAdapter_Complete_EmptyResponse(t *testing.T) {
 	server, _ := mockAnthropicServer(t, http.StatusOK, emptyResp)
 	defer server.Close()
 
-	client := llm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", server.URL)
+	client := NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", server.URL)
 	adapter := NewAnthropicAgentAdapter(client, "claude-sonnet-4-20250514")
 
 	request := &Request{
@@ -664,7 +707,7 @@ func TestOpenAIAdapter_Complete_EmptyResponse(t *testing.T) {
 	server, _ := mockOpenAIServer(t, http.StatusOK, emptyResp)
 	defer server.Close()
 
-	client := llm.NewOpenAIClientWithConfig("test-key", "gpt-4o", server.URL)
+	client := NewOpenAIClientWithConfig("test-key", "gpt-4o", server.URL)
 	adapter := NewOpenAIAgentAdapter(client, "gpt-4o")
 
 	request := &Request{
@@ -686,7 +729,7 @@ func TestGeminiAdapter_Complete_EmptyResponse(t *testing.T) {
 	server, _ := mockGeminiServer(t, http.StatusOK, emptyResp)
 	defer server.Close()
 
-	client := llm.NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", server.URL)
+	client := NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", server.URL)
 	adapter := NewGeminiAgentAdapter(client, "gemini-1.5-flash")
 
 	request := &Request{
@@ -717,7 +760,7 @@ func TestAnthropicAdapter_Complete_RequestBodyVerification(t *testing.T) {
 	server, recorded := mockAnthropicServer(t, http.StatusOK, anthropicMockResponse)
 	defer server.Close()
 
-	client := llm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", server.URL)
+	client := NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", server.URL)
 	adapter := NewAnthropicAgentAdapter(client, "claude-sonnet-4-20250514")
 
 	t.Run("temperature_zero_present", func(t *testing.T) {
@@ -789,7 +832,7 @@ func TestOpenAIAdapter_Complete_RequestBodyVerification(t *testing.T) {
 	server, recorded := mockOpenAIServer(t, http.StatusOK, openaiMockResponse)
 	defer server.Close()
 
-	client := llm.NewOpenAIClientWithConfig("test-key", "gpt-4o", server.URL)
+	client := NewOpenAIClientWithConfig("test-key", "gpt-4o", server.URL)
 	adapter := NewOpenAIAgentAdapter(client, "gpt-4o")
 
 	request := &Request{
@@ -822,7 +865,7 @@ func TestGeminiAdapter_Complete_RequestBodyVerification(t *testing.T) {
 	server, recorded := mockGeminiServer(t, http.StatusOK, geminiMockResponse)
 	defer server.Close()
 
-	client := llm.NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", server.URL)
+	client := NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", server.URL)
 	adapter := NewGeminiAgentAdapter(client, "gemini-1.5-flash")
 
 	request := &Request{
@@ -863,7 +906,7 @@ func TestAllAdapters_Complete_ContextCancellation(t *testing.T) {
 		{
 			"anthropic",
 			func(url string) Client {
-				client := llm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", url)
+				client := NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", url)
 				return NewAnthropicAgentAdapter(client, "claude-sonnet-4-20250514")
 			},
 			anthropicMockResponse,
@@ -871,7 +914,7 @@ func TestAllAdapters_Complete_ContextCancellation(t *testing.T) {
 		{
 			"openai",
 			func(url string) Client {
-				client := llm.NewOpenAIClientWithConfig("test-key", "gpt-4o", url)
+				client := NewOpenAIClientWithConfig("test-key", "gpt-4o", url)
 				return NewOpenAIAgentAdapter(client, "gpt-4o")
 			},
 			openaiMockResponse,
@@ -879,7 +922,7 @@ func TestAllAdapters_Complete_ContextCancellation(t *testing.T) {
 		{
 			"gemini",
 			func(url string) Client {
-				client := llm.NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", url)
+				client := NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", url)
 				return NewGeminiAgentAdapter(client, "gemini-1.5-flash")
 			},
 			geminiMockResponse,
@@ -935,7 +978,7 @@ func TestAllAdapters_Complete_ConcurrentSafety(t *testing.T) {
 		{
 			"anthropic",
 			func(url string) Client {
-				client := llm.NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", url)
+				client := NewAnthropicClientWithConfig("test-key", "claude-sonnet-4-20250514", url)
 				return NewAnthropicAgentAdapter(client, "claude-sonnet-4-20250514")
 			},
 			anthropicMockResponse,
@@ -943,7 +986,7 @@ func TestAllAdapters_Complete_ConcurrentSafety(t *testing.T) {
 		{
 			"openai",
 			func(url string) Client {
-				client := llm.NewOpenAIClientWithConfig("test-key", "gpt-4o", url)
+				client := NewOpenAIClientWithConfig("test-key", "gpt-4o", url)
 				return NewOpenAIAgentAdapter(client, "gpt-4o")
 			},
 			openaiMockResponse,
@@ -951,7 +994,7 @@ func TestAllAdapters_Complete_ConcurrentSafety(t *testing.T) {
 		{
 			"gemini",
 			func(url string) Client {
-				client := llm.NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", url)
+				client := NewGeminiClientWithConfig("test-key", "gemini-1.5-flash", url)
 				return NewGeminiAgentAdapter(client, "gemini-1.5-flash")
 			},
 			geminiMockResponse,
