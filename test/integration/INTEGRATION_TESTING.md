@@ -15,9 +15,9 @@ The container stack solves these by running 9 isolated trace containers in paral
 ## Architecture
 
 ```
-Remote GPU Server (10.0.0.250)
+Remote GPU Server (10.0.0.250) — host network mode
 +------------------------------------------------------------+
-|  Ollama (port 11434)  <- shared across all containers       |
+|  Ollama (port 11434)  <- shared, reachable at localhost      |
 |                                                              |
 |  +----------+ +----------+ +----------+       +-----------+ |
 |  | trace-1  | | trace-2  | | trace-3  |  ...  | trace-9   | |
@@ -25,11 +25,10 @@ Remote GPU Server (10.0.0.250)
 |  | :12301   | | :12302   | | :12303   |       | :12309    | |
 |  | /projects| | /projects| | /projects|       | /projects | |
 |  +----------+ +----------+ +----------+       +-----------+ |
-|       |             |            |                   |       |
-|       +-------------+------------+-------------------+       |
-|                         test-net                             |
+|       All containers share host network (network_mode: host) |
+|       Test-runner reaches them at localhost:<port>            |
 |       +------------------------------------------------+     |
-|       | test-runner (sidecar)                          |     |
+|       | test-runner (sidecar, also host network)       |     |
 |       | Reads YAML -> curl -> validate -> TAP output   |     |
 |       +------------------------------------------------+     |
 +------------------------------------------------------------+
@@ -38,8 +37,9 @@ Remote GPU Server (10.0.0.250)
 Each trace container:
 - Mounts one FOSS project read-only at `/projects`
 - Runs the standard trace image (`/app/trace -with-context -with-tools -lsp-enabled`)
-- Connects to the host's Ollama via `host.containers.internal:11434`
-- Gets a unique external port (12301-12309) for debugging, but the test-runner reaches them by service name on the internal `test-net` network
+- Uses `network_mode: host` so it shares the host's network stack
+- Binds to a unique port (12301-12309) via the `PORT` env var
+- Reaches Ollama at `localhost:11434` (no bridge networking needed)
 - Starts with a clean filesystem (no stale graph cache, no CRS state)
 
 The test-runner container:
@@ -62,7 +62,7 @@ The test-runner container:
 | trace-nestjs | nestjs | TypeScript | 12308 |
 | trace-plottable | plottable | TypeScript | 12309 |
 
-External ports are for debugging (e.g., `curl http://10.0.0.250:12301/v1/trace/health`). The test-runner uses internal DNS names (`http://trace-hugo:12217`).
+All containers use host networking, so both external debugging and the test-runner use the same ports (e.g., `curl http://localhost:12301/v1/trace/health`).
 
 ## File Inventory
 
@@ -266,14 +266,14 @@ podman logs trace-hugo
 
 ### Test-runner cannot reach containers
 
-The test-runner resolves container names via the `test-net` bridge network. If DNS resolution fails:
+All containers use host networking. The test-runner reaches trace containers at `localhost:<port>`:
 
 ```bash
-# From inside test-runner
-curl -v http://trace-hugo:12217/v1/trace/health
+# Check from host
+curl -v http://localhost:12301/v1/trace/health
 
-# Check network
-podman network inspect test-net
+# Verify ports are listening
+ss -tlnp | grep '1230[1-9]'
 ```
 
 ### Debugging a single test
