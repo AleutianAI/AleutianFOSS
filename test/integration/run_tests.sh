@@ -100,8 +100,13 @@ run_validation() {
         graph_tool_used)
             local trace
             trace=$(fetch_reasoning_trace "$base_url" "$session_id")
+            # Graph tools override action from "tool_call" to "tool_find_callers" etc.
+            # Match on action prefix OR tool field name.
             local graph_tools
-            graph_tools=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool | test("find_callers|find_callees|find_implementations|find_symbol|get_call_chain|find_references"))] | length' 2>/dev/null || echo "0")
+            graph_tools=$(echo "$trace" | jq '[.trace[] | select(
+                (.action | test("tool_find_callers|tool_find_callees|tool_find_implementations|tool_find_symbol|tool_get_call_chain|tool_find_references"))
+                or ((.action == "tool_call") and (.tool != null) and (.tool | test("find_callers|find_callees|find_implementations|find_symbol|get_call_chain|find_references")))
+            )] | length' 2>/dev/null || echo "0")
             if [ "$graph_tools" -gt 0 ]; then
                 log_info "  graph_tool_used: $graph_tools invocations"
                 return 0
@@ -115,7 +120,10 @@ run_validation() {
             local trace
             trace=$(fetch_reasoning_trace "$base_url" "$session_id")
             local pr_tools
-            pr_tools=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool | test("find_important"))] | length' 2>/dev/null || echo "0")
+            pr_tools=$(echo "$trace" | jq '[.trace[] | select(
+                (.action | test("find_important|analytics_pagerank"))
+                or ((.action == "tool_call") and (.tool != null) and (.tool | test("find_important")))
+            )] | length' 2>/dev/null || echo "0")
             if [ "$pr_tools" -gt 0 ]; then
                 log_info "  pagerank_used: $pr_tools invocations"
                 return 0
@@ -129,7 +137,10 @@ run_validation() {
             local trace
             trace=$(fetch_reasoning_trace "$base_url" "$session_id")
             local impl_used
-            impl_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "find_implementations")] | length' 2>/dev/null || echo "0")
+            impl_used=$(echo "$trace" | jq '[.trace[] | select(
+                (.action == "tool_find_implementations")
+                or ((.action == "tool_call") and (.tool != null) and (.tool == "find_implementations"))
+            )] | length' 2>/dev/null || echo "0")
             local agent_resp
             agent_resp=$(echo "$response" | jq -r '.response // ""')
             local no_impls
@@ -147,7 +158,10 @@ run_validation() {
             local trace
             trace=$(fetch_reasoning_trace "$base_url" "$session_id")
             local grep_used
-            grep_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool == "Grep")] | length' 2>/dev/null || echo "0")
+            grep_used=$(echo "$trace" | jq '[.trace[] | select(
+                (.action | test("grep"; "i"))
+                or ((.action == "tool_call") and (.tool != null) and (.tool | test("grep"; "i")))
+            )] | length' 2>/dev/null || echo "0")
             if [ "$grep_used" -eq 0 ]; then
                 log_info "  no_grep_used: confirmed no Grep fallback"
                 return 0
@@ -207,7 +221,7 @@ run_validation() {
             local trace
             trace=$(fetch_reasoning_trace "$base_url" "$session_id")
             local has_analytics
-            has_analytics=$(echo "$trace" | jq '[.trace[] | select(.action == "analytics_query" or .action == "tool_call")] | length' 2>/dev/null || echo "0")
+            has_analytics=$(echo "$trace" | jq '[.trace[] | select(.action | test("analytics_|tool_call|tool_find_|tool_get_"))] | length' 2>/dev/null || echo "0")
             if [ "$has_analytics" -gt 0 ]; then
                 log_info "  analytics_recorded: $has_analytics steps"
                 return 0
@@ -221,7 +235,7 @@ run_validation() {
             local trace
             trace=$(fetch_reasoning_trace "$base_url" "$session_id")
             local tool_used
-            tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool | test("find_communities"))] | length' 2>/dev/null || echo "0")
+            tool_used=$(echo "$trace" | jq '[.trace[] | select(.action | test("find_communities|analytics_communities"))] | length' 2>/dev/null || echo "0")
             if [ "$tool_used" -gt 0 ]; then
                 log_info "  $check: $tool_used invocations"
                 return 0
@@ -235,7 +249,7 @@ run_validation() {
             local trace
             trace=$(fetch_reasoning_trace "$base_url" "$session_id")
             local tool_used
-            tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool | test("find_loops"))] | length' 2>/dev/null || echo "0")
+            tool_used=$(echo "$trace" | jq '[.trace[] | select(.action | test("find_loops"))] | length' 2>/dev/null || echo "0")
             if [ "$tool_used" -gt 0 ]; then
                 log_info "  find_loops_tool_used: $tool_used invocations"
                 return 0
@@ -249,7 +263,7 @@ run_validation() {
             local trace
             trace=$(fetch_reasoning_trace "$base_url" "$session_id")
             local tool_used
-            tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool | test("find_extractable"))] | length' 2>/dev/null || echo "0")
+            tool_used=$(echo "$trace" | jq '[.trace[] | select(.action | test("find_extractable"))] | length' 2>/dev/null || echo "0")
             if [ "$tool_used" -gt 0 ]; then
                 log_info "  find_extractable_tool_used: $tool_used invocations"
                 return 0
@@ -263,7 +277,7 @@ run_validation() {
             local trace
             trace=$(fetch_reasoning_trace "$base_url" "$session_id")
             local tool_used
-            tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool | test("find_control_deps"))] | length' 2>/dev/null || echo "0")
+            tool_used=$(echo "$trace" | jq '[.trace[] | select(.action | test("find_control_dep|control_flow"))] | length' 2>/dev/null || echo "0")
             if [ "$tool_used" -gt 0 ]; then
                 log_info "  find_control_deps_tool_used: $tool_used invocations"
                 return 0
@@ -277,7 +291,7 @@ run_validation() {
             local trace
             trace=$(fetch_reasoning_trace "$base_url" "$session_id")
             local tool_used
-            tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool | test("check_reducibility"))] | length' 2>/dev/null || echo "0")
+            tool_used=$(echo "$trace" | jq '[.trace[] | select(.action | test("check_reducibility|reducibility"))] | length' 2>/dev/null || echo "0")
             if [ "$tool_used" -gt 0 ]; then
                 log_info "  check_reducibility_tool_used: $tool_used invocations"
                 return 0
@@ -291,7 +305,7 @@ run_validation() {
             local trace
             trace=$(fetch_reasoning_trace "$base_url" "$session_id")
             local tool_used
-            tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool | test("find_critical_path"))] | length' 2>/dev/null || echo "0")
+            tool_used=$(echo "$trace" | jq '[.trace[] | select(.action | test("find_critical_path|critical_path"))] | length' 2>/dev/null || echo "0")
             if [ "$tool_used" -gt 0 ]; then
                 log_info "  find_critical_path_tool_used: $tool_used invocations"
                 return 0
@@ -305,7 +319,7 @@ run_validation() {
             local trace
             trace=$(fetch_reasoning_trace "$base_url" "$session_id")
             local tool_used
-            tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool | test("find_dominators"))] | length' 2>/dev/null || echo "0")
+            tool_used=$(echo "$trace" | jq '[.trace[] | select(.action | test("find_dominators|dominators"))] | length' 2>/dev/null || echo "0")
             if [ "$tool_used" -gt 0 ]; then
                 log_info "  find_dominators_tool_used: $tool_used invocations"
                 return 0
@@ -319,7 +333,7 @@ run_validation() {
             local trace
             trace=$(fetch_reasoning_trace "$base_url" "$session_id")
             local tool_used
-            tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool | test("find_articulation"))] | length' 2>/dev/null || echo "0")
+            tool_used=$(echo "$trace" | jq '[.trace[] | select(.action | test("find_articulation|articulation_points"))] | length' 2>/dev/null || echo "0")
             if [ "$tool_used" -gt 0 ]; then
                 log_info "  find_articulation_points_tool_used: $tool_used invocations"
                 return 0
@@ -333,7 +347,7 @@ run_validation() {
             local trace
             trace=$(fetch_reasoning_trace "$base_url" "$session_id")
             local tool_used
-            tool_used=$(echo "$trace" | jq '[.trace[] | select(.action == "tool_call") | select(.tool | test("find_merge"))] | length' 2>/dev/null || echo "0")
+            tool_used=$(echo "$trace" | jq '[.trace[] | select(.action | test("find_merge|merge_points"))] | length' 2>/dev/null || echo "0")
             if [ "$tool_used" -gt 0 ]; then
                 log_info "  find_merge_points_tool_used: $tool_used invocations"
                 return 0
@@ -518,6 +532,13 @@ run_project_tests() {
     # Parse and run each test
     local num_tests
     num_tests=$(yq eval '.tests | length' "$yaml_file")
+
+    # Cap tests if MAX_TESTS is set
+    local max_tests="${MAX_TESTS:-0}"
+    if [ "$max_tests" -gt 0 ] 2>/dev/null && [ "$num_tests" -gt "$max_tests" ]; then
+        log_info "Capping to $max_tests tests (of $num_tests)"
+        num_tests="$max_tests"
+    fi
 
     for ((i=0; i<num_tests; i++)); do
         local test_id category name query expected_state
