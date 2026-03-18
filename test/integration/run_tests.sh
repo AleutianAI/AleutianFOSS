@@ -100,10 +100,17 @@ run_validation() {
         graph_tool_used)
             local trace
             trace=$(fetch_reasoning_trace "$base_url" "$session_id")
+            # Debug: dump all action values from trace
+            local all_actions
+            all_actions=$(echo "$trace" | jq -r '[.trace[]? | .action] | join(", ")' 2>/dev/null || echo "(parse error)")
+            log_debug "  trace actions: $all_actions"
+            local trace_len
+            trace_len=$(echo "$trace" | jq '.trace | length' 2>/dev/null || echo "0")
+            log_debug "  trace length: $trace_len steps"
             # Graph tools override action from "tool_call" to "tool_find_callers" etc.
             # Match on action prefix OR tool field name.
             local graph_tools
-            graph_tools=$(echo "$trace" | jq '[.trace[] | select(
+            graph_tools=$(echo "$trace" | jq '[.trace[]? | select(
                 (.action | test("tool_find_callers|tool_find_callees|tool_find_implementations|tool_find_symbol|tool_get_call_chain|tool_find_references"))
                 or ((.action == "tool_call") and (.tool != null) and (.tool | test("find_callers|find_callees|find_implementations|find_symbol|get_call_chain|find_references")))
             )] | length' 2>/dev/null || echo "0")
@@ -111,7 +118,7 @@ run_validation() {
                 log_info "  graph_tool_used: $graph_tools invocations"
                 return 0
             else
-                log_warn "  graph_tool_used: no graph tools in trace"
+                log_warn "  graph_tool_used: no graph tools in trace (found: $all_actions)"
                 return 1
             fi
             ;;

@@ -304,7 +304,7 @@ run_remote() {
 
     echo -e "${YELLOW}Building test-runner image on remote...${NC}"
     ssh_cmd "cd $REMOTE_WORK_DIR/AleutianFOSS && \
-        podman build -t test-runner:latest -f test/integration/Dockerfile.test-runner test/integration/"
+        podman build --no-cache -t test-runner:latest -f test/integration/Dockerfile.test-runner test/integration/"
 
     # Clean up any stale containers from previous runs
     echo -e "${YELLOW}Cleaning up stale containers...${NC}"
@@ -338,12 +338,12 @@ run_remote() {
         podman-compose -f test/integration/podman-compose.test.yml up \
             --abort-on-container-exit \
             --exit-code-from test-runner" \
-        2>&1 | tee "$RAW_LOG" | grep -E '^\[test-runner\]|^(ok |not ok |TAP |1\.\.|# )' | sed 's/^\[test-runner\]  *| *//'
+        2>&1 | tee "$RAW_LOG" | grep -E '^\[?(test-runner|INFO|WARN|ERROR|DEBUG)\]?|^(ok |not ok |TAP |1\.\.|# )' | grep -v -E '^[0-9]{4}/'
 
     local exit_code=${PIPESTATUS[0]}
 
-    # Extract clean TAP output from raw log
-    grep -E '^\[test-runner\]' "$RAW_LOG" | sed 's/^\[test-runner\]  *| *//' > "$RESULTS_FILE" 2>/dev/null || true
+    # Extract clean TAP output from raw log (ok/not ok lines are the TAP results)
+    grep -E '^(ok |not ok |TAP |1\.\.|# )' "$RAW_LOG" > "$RESULTS_FILE" 2>/dev/null || true
 
     # Cleanup remote containers
     echo -e "${YELLOW}Cleaning up remote containers...${NC}"
