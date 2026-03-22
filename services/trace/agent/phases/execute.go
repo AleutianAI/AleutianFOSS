@@ -551,7 +551,10 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 					slog.Int("previous_step", similarCall.StepNumber),
 				)
 			}
-			// Cancel hard forcing - fall through to normal LLM flow
+			// Cancel hard forcing - fall through to synthesis.
+			// CB-80: Strip tools so main model doesn't need tool support.
+			request.Tools = nil
+			request.ToolChoice = llm.ToolChoiceNone()
 			hardForcing = nil
 		} else if status == "penalized" {
 			// Log but allow - the UCB1 scorer will apply a penalty if this continues
@@ -965,15 +968,23 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 			// GR-Phase1 Fix: When hard forcing fails, check if we already have tool results.
 			// If so, don't require new tool calls - the LLM should synthesize from existing results.
 			// If not, use ToolChoiceAny to encourage tool use without forcing a specific tool.
+			//
+			// CB-80: Strip tools from request before falling through to main model.
+			// The router (granite4) already selected the tool; if param extraction failed,
+			// the main model should synthesize, not attempt its own tool selection.
+			// Models like gemma3n that don't support tools would get a 400 error otherwise.
+			request.Tools = nil
 			if deps.Context != nil && len(deps.Context.ToolResults) > 0 {
-				// Already have tool results - let LLM decide (may synthesize)
-				request.ToolChoice = nil
+				// Already have tool results - force synthesis (no tools needed)
+				request.ToolChoice = llm.ToolChoiceNone()
 				slog.Info("GR-Phase1: Skipping tool forcing, already have tool results",
 					slog.String("session_id", deps.Session.ID),
 					slog.Int("tool_results", len(deps.Context.ToolResults)),
 				)
 			} else {
-				request.ToolChoice = llm.ToolChoiceAny()
+				// No tool results yet - let main model generate a text response
+				// explaining it couldn't extract parameters.
+				request.ToolChoice = llm.ToolChoiceNone()
 			}
 		} else {
 			execResult, execErr := p.executeToolDirectlyWithFallback(ctx, deps, hardForcing.Tool, params, toolDefs)
@@ -984,15 +995,17 @@ func (p *ExecutePhase) Execute(ctx context.Context, deps *Dependencies) (agent.A
 					slog.String("error", execErr.Error()),
 				)
 				grounding.RecordRouterFallback(hardForcing.Tool, "execution_failed")
-				// GR-Phase1 Fix: Same as above - check for existing tool results
+				// GR-Phase1 Fix: Same as above - check for existing tool results.
+				// CB-80: Strip tools so main model doesn't need tool support.
+				request.Tools = nil
 				if deps.Context != nil && len(deps.Context.ToolResults) > 0 {
-					request.ToolChoice = nil
+					request.ToolChoice = llm.ToolChoiceNone()
 					slog.Info("GR-Phase1: Skipping tool forcing, already have tool results",
 						slog.String("session_id", deps.Session.ID),
 						slog.Int("tool_results", len(deps.Context.ToolResults)),
 					)
 				} else {
-					request.ToolChoice = llm.ToolChoiceAny()
+					request.ToolChoice = llm.ToolChoiceNone()
 				}
 			} else {
 				// Success! Tool executed directly - return early

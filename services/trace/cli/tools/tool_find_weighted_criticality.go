@@ -549,6 +549,11 @@ func (t *findWeightedCriticalityTool) parseParams(params map[string]any) (FindWe
 }
 
 // detectEntry attempts to find a reasonable entry point for the graph.
+//
+// When multiple symbols share the same name (e.g., multiple "main" functions
+// in different packages), selects the one in the shallowest package path.
+// This prefers "cmd/hugo/main.go:main" over "internal/warpc/genjs/main.go:main"
+// since the top-level entry point typically has the largest reachable subgraph.
 func (t *findWeightedCriticalityTool) detectEntry() string {
 	// Try common entry point names
 	candidates := []string{
@@ -560,17 +565,60 @@ func (t *findWeightedCriticalityTool) detectEntry() string {
 	}
 
 	for _, name := range candidates {
-		// Use index to find candidates
-		if t.index != nil {
-			symbols := t.index.GetByName(name)
-			if len(symbols) > 0 {
-				return symbols[0].ID
+		if t.index == nil {
+			continue
+		}
+		symbols := t.index.GetByName(name)
+		if len(symbols) == 0 {
+			continue
+		}
+		if len(symbols) == 1 {
+			return symbols[0].ID
+		}
+		// Multiple matches: pick the one with the most outgoing CALL edges.
+		// The real application entry point (e.g. cmd/hugo/main.go:main) will call
+		// many functions, while build helpers (e.g. magefile.go:main) or codegen
+		// mains (e.g. internal/tools/codegen/main.go:main) will have few.
+		// We count only EdgeTypeCalls, not imports — magefile.go imports 14 packages
+		// but calls very few functions.
+		best := symbols[0]
+		bestCallCount := countCallEdges(t.analytics, best.ID)
+		for _, sym := range symbols[1:] {
+			callCount := countCallEdges(t.analytics, sym.ID)
+			if callCount > bestCallCount {
+				best = sym
+				bestCallCount = callCount
 			}
 		}
+		t.logger.Info("detectEntry: selected entry from multiple candidates",
+			slog.String("name", name),
+			slog.Int("candidates", len(symbols)),
+			slog.String("selected", best.ID),
+			slog.String("file", best.FilePath),
+			slog.Int("call_edges", bestCallCount),
+		)
+		return best.ID
 	}
 
 	// Fallback: return empty (will error in Dominators)
 	return ""
+}
+
+// countCallEdges counts outgoing edges of type EdgeTypeCalls for a node.
+// This filters out import/type edges that inflate out-degree for files like
+// magefile.go that import many packages but call few functions.
+func countCallEdges(analytics *graph.GraphAnalytics, nodeID string) int {
+	node, ok := analytics.GetNode(nodeID)
+	if !ok {
+		return 0
+	}
+	count := 0
+	for _, edge := range node.Outgoing {
+		if edge.Type == graph.EdgeTypeCalls {
+			count++
+		}
+	}
+	return count
 }
 
 // computeDominatorScores computes dominator scores for all nodes.

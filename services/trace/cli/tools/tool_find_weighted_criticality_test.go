@@ -12,6 +12,7 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -821,4 +822,150 @@ func TestFindWeightedCriticalityTool_OutputFormat(t *testing.T) {
 			t.Error("Summary has zero total analyzed")
 		}
 	})
+}
+
+// =============================================================================
+// Entry Point Detection Tests
+// =============================================================================
+
+// TestFindWeightedCriticalityTool_DetectEntryMultipleMains tests that when
+// multiple "main" functions exist (common in Go monorepos), detectEntry selects
+// the one with the most outgoing edges — the entry point that calls the most code.
+//
+// This prevents two bugs:
+//  1. Hugo's internal/warpc/genjs/main.go:main was selected over cmd/hugo/main.go:main
+//     (only 7 of 23,721 nodes analyzed — wrong entry had few callees).
+//  2. Hugo's magefile.go:main (at repo root, shallowest path) was selected over
+//     cmd/hugo/main.go:main (magefile is a build helper with few callees).
+func TestFindWeightedCriticalityTool_DetectEntryMultipleMains(t *testing.T) {
+	g := graph.NewGraph("/test")
+	idx := index.NewSymbolIndex()
+
+	// Create three "main" functions simulating Hugo's layout:
+	// - magefile.go:main (shallowest path, but build helper — few callees)
+	// - cmd/hugo/main.go:main (the real entry point — many callees)
+	// - internal/tools/codegen/main.go:main (deep helper — one callee)
+	mageMain := &ast.Symbol{
+		ID: "magefile.go:10:main", Name: "main", Kind: ast.SymbolKindFunction,
+		FilePath: "magefile.go", StartLine: 10, EndLine: 30,
+		Package: "main", Exported: false, Language: "go",
+	}
+	realMain := &ast.Symbol{
+		ID: "cmd/hugo/main.go:10:main", Name: "main", Kind: ast.SymbolKindFunction,
+		FilePath: "cmd/hugo/main.go", StartLine: 10, EndLine: 50,
+		Package: "main", Exported: false, Language: "go",
+	}
+	deepMain := &ast.Symbol{
+		ID: "internal/tools/codegen/main.go:10:main", Name: "main", Kind: ast.SymbolKindFunction,
+		FilePath: "internal/tools/codegen/main.go", StartLine: 10, EndLine: 30,
+		Package: "main", Exported: false, Language: "go",
+	}
+
+	// Add many nodes reachable from realMain to simulate a real codebase
+	allSymbols := []*ast.Symbol{mageMain, realMain, deepMain}
+	for i := 0; i < 20; i++ {
+		sym := &ast.Symbol{
+			ID: fmt.Sprintf("pkg/mod%d.go:10:Func%d", i, i), Name: fmt.Sprintf("Func%d", i),
+			Kind: ast.SymbolKindFunction, FilePath: fmt.Sprintf("pkg/mod%d.go", i),
+			StartLine: 10, EndLine: 20, Package: "pkg", Exported: true, Language: "go",
+		}
+		allSymbols = append(allSymbols, sym)
+	}
+
+	// Nodes reachable from mageMain and deepMain only
+	mageBuildTarget := &ast.Symbol{
+		ID: "magefile.go:50:build", Name: "build",
+		Kind: ast.SymbolKindFunction, FilePath: "magefile.go",
+		StartLine: 50, EndLine: 60, Package: "main", Exported: false, Language: "go",
+	}
+	deepOnly := &ast.Symbol{
+		ID: "internal/tools/codegen/gen.go:10:generate", Name: "generate",
+		Kind: ast.SymbolKindFunction, FilePath: "internal/tools/codegen/gen.go",
+		StartLine: 10, EndLine: 20, Package: "codegen", Exported: false, Language: "go",
+	}
+	allSymbols = append(allSymbols, mageBuildTarget, deepOnly)
+
+	for _, sym := range allSymbols {
+		g.AddNode(sym)
+		if err := idx.Add(sym); err != nil {
+			t.Fatalf("Failed to add symbol %s: %v", sym.Name, err)
+		}
+	}
+
+	// Real main calls many functions (20 direct call edges).
+	for i := 3; i < 23; i++ { // allSymbols[3..22] are Func0..Func19
+		g.AddEdge(realMain.ID, allSymbols[i].ID, graph.EdgeTypeCalls,
+			ast.Location{FilePath: "cmd/hugo/main.go", StartLine: 15 + i})
+	}
+
+	// Mage main has ONE call edge but MANY import edges (simulates magefile.go
+	// importing 14 packages). The out-degree heuristic must count only call edges,
+	// not imports, otherwise magefile.go wins despite being a build helper.
+	g.AddEdge(mageMain.ID, mageBuildTarget.ID, graph.EdgeTypeCalls,
+		ast.Location{FilePath: "magefile.go", StartLine: 15})
+	for i := 3; i < 18; i++ { // 15 import edges
+		g.AddEdge(mageMain.ID, allSymbols[i].ID, graph.EdgeTypeImports,
+			ast.Location{FilePath: "magefile.go", StartLine: 3})
+	}
+
+	// Deep main calls only one function
+	g.AddEdge(deepMain.ID, deepOnly.ID, graph.EdgeTypeCalls,
+		ast.Location{FilePath: "internal/tools/codegen/main.go", StartLine: 15})
+
+	g.Freeze()
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindWeightedCriticalityTool(analytics, idx).(*findWeightedCriticalityTool)
+
+	t.Run("selects real main over magefile and deep main by out-degree", func(t *testing.T) {
+		entry := tool.detectEntry()
+		if entry != realMain.ID {
+			t.Errorf("detectEntry() = %s, want %s (highest out-degree)", entry, realMain.ID)
+		}
+	})
+
+	t.Run("full execution analyzes most of the graph", func(t *testing.T) {
+		ctx := context.Background()
+		result, err := tool.Execute(ctx, MapParams{Tool: "find_weighted_criticality", Params: map[string]any{"top": 10}})
+		if err != nil {
+			t.Fatalf("Execute failed: %v", err)
+		}
+		if !result.Success {
+			t.Fatalf("Execute returned error: %s", result.Error)
+		}
+
+		output, ok := result.Output.(WeightedCriticalityOutput)
+		if !ok {
+			t.Fatalf("Output is not WeightedCriticalityOutput: %T", result.Output)
+		}
+
+		// With the real main selected, we should analyze 21+ nodes (main + 20 funcs),
+		// not just 2 (magefile main + build) or 2 (deep main + generate).
+		if output.Summary.TotalAnalyzed < 10 {
+			t.Errorf("TotalAnalyzed = %d, want >= 10 (real main should reach most of the graph)",
+				output.Summary.TotalAnalyzed)
+		}
+	})
+}
+
+// TestFindWeightedCriticalityTool_DetectEntrySingleMain verifies that when
+// there is only one "main" function, it is selected without ambiguity.
+func TestFindWeightedCriticalityTool_DetectEntrySingleMain(t *testing.T) {
+	g, idx := createTestGraphForWeightedCriticality(t)
+
+	hg, err := graph.WrapGraph(g)
+	if err != nil {
+		t.Fatalf("WrapGraph failed: %v", err)
+	}
+	analytics := graph.NewGraphAnalytics(hg)
+	tool := NewFindWeightedCriticalityTool(analytics, idx).(*findWeightedCriticalityTool)
+
+	entry := tool.detectEntry()
+	if entry != "cmd/main.go:10:main" {
+		t.Errorf("detectEntry() = %s, want cmd/main.go:10:main", entry)
+	}
 }
