@@ -9,7 +9,7 @@ Any client that speaks the OpenAI protocol — Open WebUI, Continue.dev, Aider, 
 
 Ask "what are the callees of the main function?" and get an accurate, sourced answer from the actual code graph — not an LLM hallucination.
 
-![gemma3n tracing the call chain from main() to template rendering in Hugo, with file:line citations](docs/demos/screenshots/call_chain_hugo_gemma3n.png)
+![gemma3n tracing the call chain from main() to template rendering in Hugo, with file:line citations](assets/call_chain_hugo_gemma3n.png)
 
 *gemma3n:latest answering "What's the call chain from main() to template rendering?" against the Hugo codebase via Open WebUI. Every step is cited to the actual file and line — no hallucination.*
 
