@@ -1,11 +1,34 @@
 <!-- Copyright (C) 2025 Aleutian AI (jinterlante@aleutian.ai)
 AGPL v3 - See LICENSE.txt and NOTICE.txt -->
 
-# Aleutian Trace: Code Intelligence for Local LLMs
+# Aleutian Trace: Code Intelligence for Any LLM
 
-Aleutian Trace gives your local LLM deep understanding of any codebase. It parses source code into a call graph, indexes symbols into a vector database, and exposes 24+ agent tools through an OpenAI-compatible API. Any tool that speaks the OpenAI protocol — Open WebUI, Continue.dev, Aider, Cline, curl — gets structural code intelligence without plugins or custom integrations.
+Aleutian Trace gives any LLM deep understanding of a codebase. It parses source code into a call graph, indexes symbols, and exposes 24+ agent tools through an OpenAI-compatible API. Works with Ollama (local), Claude, Gemini, ChatGPT, or any OpenAI-compatible provider — no plugins or custom integrations required.
+
+Any client that speaks the OpenAI protocol — Open WebUI, Continue.dev, Aider, Cline, curl — routes through Trace and gets structural code intelligence on top of whichever model you choose.
 
 Ask "what are the callees of the main function?" and get an accurate, sourced answer from the actual code graph — not an LLM hallucination.
+
+![gemma3n tracing the call chain from main() to template rendering in Hugo, with file:line citations](docs/demos/screenshots/call_chain_hugo_gemma3n.png)
+
+*gemma3n:latest answering "What's the call chain from main() to template rendering?" against the Hugo codebase via Open WebUI. Every step is cited to the actual file and line — no hallucination.*
+
+To try this yourself, run the demo script and Open WebUI starts automatically:
+
+```bash
+./docs/demos/run_demo.sh --phase trace --project ~/projects/hugo --model gemma3n
+```
+
+Or spin up Open WebUI manually pointed at the proxy:
+
+```bash
+podman run -d --name open-webui-baseline -p 3001:8080 \
+  -e OPENAI_API_BASE_URL=http://host.containers.internal:12218/v1 \
+  -e OPENAI_API_KEY=not-needed \
+  ghcr.io/open-webui/open-webui:main
+```
+
+Once Open WebUI loads, go to **Admin Settings → Connections** and turn off the Ollama connection — otherwise Open WebUI will route some requests directly to Ollama and bypass Trace.
 
 ## How It Works
 
@@ -20,7 +43,7 @@ Open WebUI / Continue / Aider → [Trace Proxy :12218] → [Agent Loop] → [24+
 1. **Parse** — Tree-sitter extracts every function, method, type, and interface from your source code (Go, Python, JS/TS, Java, Rust, C/C++)
 2. **Graph** — Builds a call graph with edges for calls, implementations, and references
 3. **Index** — Embeds all symbols into Weaviate for semantic search ("find code related to authentication")
-4. **Agent** — A multi-step reasoning loop selects the right tools (graph queries, semantic search, analytics) and synthesizes answers using your local LLM
+4. **Agent** — A multi-step reasoning loop selects the right tools (graph queries, semantic search, analytics) and synthesizes answers using whichever LLM you configure — Ollama, Claude, Gemini, ChatGPT, or any OpenAI-compatible provider
 5. **Proxy** — Translates OpenAI `/v1/chat/completions` requests into agent loop calls, so any compatible client works out of the box
 
 ## Repository Structure
@@ -45,34 +68,52 @@ AleutianFOSS (this repo)          RagStack                    Observability
 
 ### Prerequisites
 
-- [Podman](https://podman.io/) and [podman-compose](https://github.com/containers/podman-compose)
+- [Podman](https://podman.io/)
 - [Ollama](https://ollama.com/) running on the host with at least one model pulled (e.g., `ollama pull gemma3n`)
 - Go 1.25+ (to build from source)
 
-### 1. Build
+### 1. Clone and build
 
 ```bash
 git clone https://github.com/AleutianAI/AleutianFOSS.git
 cd AleutianFOSS
-go build ./cmd/trace
-go build ./cmd/trace-mcp
-go build ./cmd/trace-proxy
+go build -o trace ./cmd/trace
+go build -o trace-proxy ./cmd/trace-proxy
+go build -o trace-mcp ./cmd/trace-mcp
 ```
 
-### 2. Start the stack
+### 2. Run
 
-The full stack requires both this repo and [RagStack](https://github.com/AleutianAI/RagStack). Point `TRACE_PROJECTS_DIR` at the codebase you want to analyze:
+Point the demo script at a local codebase and a model:
 
 ```bash
-TRACE_PROJECTS_DIR=/path/to/your/project aleutian stack start --build
+./docs/demos/run_demo.sh --phase trace --project ~/projects/hugo --model gemma3n
 ```
 
-This starts all services: trace server, trace proxy, orchestrator, Weaviate, NATS, and Jaeger. The proxy automatically parses your code, builds the call graph, and indexes all symbols on startup.
+The script builds the binaries if needed, starts the trace server and proxy natively, then launches Open WebUI via `podman run` pointed at the proxy. The proxy parses your project, builds the call graph, and indexes all symbols on first run.
+
+To use the bundled sample project instead:
+
+```bash
+./docs/demos/run_demo.sh --phase trace
+```
+
+To run the full before/after comparison demo (Open WebUI direct vs. through Trace):
+
+```bash
+./docs/demos/run_demo.sh --phase both --project ~/projects/hugo --model gemma3n
+```
+
+To tear everything down:
+
+```bash
+./docs/demos/run_demo.sh --cleanup
+```
 
 ### 3. Verify
 
 ```bash
-# Check all services are healthy
+# Check proxy is healthy
 curl http://localhost:12218/health
 
 # Ask a question via curl
@@ -84,9 +125,22 @@ curl -s http://localhost:12218/v1/chat/completions \
   }'
 ```
 
-### 4. Connect a UI (optional)
+### Manual startup (without the demo script)
 
-**Open WebUI:**
+Run the binaries directly if you want to manage the processes yourself:
+
+```bash
+# Terminal 1: start the trace server (port 12217)
+./trace -with-context -with-tools
+
+# Terminal 2: start the proxy (port 12218)
+./trace-proxy \
+  --project-root /path/to/your/project \
+  --trace-url http://localhost:12217 \
+  --ollama-url http://localhost:11434
+```
+
+Then start Open WebUI pointed at the proxy:
 
 ```bash
 podman run -d --name open-webui -p 3001:8080 \
@@ -96,6 +150,10 @@ podman run -d --name open-webui -p 3001:8080 \
 ```
 
 Open `http://localhost:3001`, create an account, then go to Admin Settings > Connections and disable the Ollama API (so all traffic routes through Aleutian). Models appear automatically.
+
+### 4. Connect other clients (optional)
+
+The proxy is a drop-in OpenAI endpoint at `http://localhost:12218/v1`. Any tool with a configurable OpenAI base URL works without further setup.
 
 **Continue.dev (VS Code / JetBrains):**
 
@@ -111,6 +169,10 @@ In `~/.continue/config.json`:
   }]
 }
 ```
+
+**Cline (VS Code):**
+
+In Cline settings, set **API Provider** to `OpenAI Compatible` and **Base URL** to `http://localhost:12218/v1`. Set the API key to any non-empty string.
 
 **Aider:**
 
@@ -130,7 +192,7 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
-### 5. Cloud Providers (optional)
+### 5. Cloud providers (optional)
 
 Trace defaults to Ollama for local inference, but can use cloud LLM providers instead. Set the provider and model for each role (main, router, param extractor) via environment variables.
 

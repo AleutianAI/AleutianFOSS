@@ -108,6 +108,18 @@ func (a *OllamaAdapter) Complete(ctx context.Context, request *Request) (*Respon
 		return a.completeWithTools(ctx, messages, params, request.Tools)
 	}
 
+	// CB-80: Sanitize "tool" role messages for the non-tools path.
+	// Models that don't support tools (e.g. gemma3n) reject conversations
+	// containing "role": "tool" messages with HTTP 400. The conversation
+	// history includes tool results from prior steps, so we rewrite them
+	// as "user" messages with a [Tool Result] prefix.
+	for i := range messages {
+		if messages[i].Role == "tool" {
+			messages[i].Role = "user"
+			messages[i].Content = "[Tool Result]\n" + messages[i].Content
+		}
+	}
+
 	// Create OTel span for non-tools path
 	ctx, span := otel.Tracer(llmTracerName).Start(ctx, "agent.llm.OllamaAdapter.Complete",
 		trace.WithAttributes(
